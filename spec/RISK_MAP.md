@@ -30,7 +30,7 @@ Every module of the repository with its tier and the reason. Maintained with the
 | crates/ori-engine, ori-cli | 1 | Composition |
 | apps/desktop/src-tauri (commands) | 1 | Thin wrappers |
 | apps/desktop/ui | 0 for styling and layout, 1 for anything that sends an RPC | |
-| spec/ | 1 (2 for SECURITY_NOTES, PERMISSIONS, RISK_MAP, ADRs) | Specification changes are PRs |
+| spec/ | 1 (2 for SECURITY_NOTES, ENV_SETUP, RISK_MAP, ADRs) | Specification changes are PRs |
 | templates/, profiles/ | 1 | Shipped methodology defaults |
 | .github/workflows, scripts/release* | 2 | Supply chain |
 | docs, README, copy | 0 | |

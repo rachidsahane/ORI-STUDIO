@@ -53,14 +53,14 @@ The engine is a library crate. The desktop app links it and calls it in-process.
 | **orchestrator** | Ticket lifecycle, categories, tiers, budgets, blocked reports, escalation triggers, lock table, merge queue, closing rules | 11, 12, 13 |
 | **flows** | Guided procedures: new product (G0 to G7), migration (M0 to M5), document generation and approval, readiness computation, phase start and close | 23, 24 |
 | **gates** | Gate definitions, runners, planted-defect proving, coverage matrix, modified-test detection, significance labeling, liveness | 14, 15 |
-| **watch** | Working tree and repository watcher; attribution of every change to an agent session or a human; unattributed-change incidents; merge block | Lessons (39), PRD F-30 |
+| **watch** | Working tree and repository watcher; attribution of every change to an agent session or a human; unattributed-change incidents; merge block | Lessons (39), PRD Z-01 |
 | **store** | SQLite, event log (append-only), projections, schema migrations, per-product database file | 8 (layer 3) |
 | **memory** | The four layers, repository indexer, code map, operational log, sanitization barrier, scope enforcer, retrieval API, freshness | 8, 25 |
-| **broker** | Agent identities, credential issuance and injection, keychain access, the forbidden-action test, audit of every issuance | 17, 27 |
-| **runtime** | Agent sessions: spawn in worktree or container, ACP client, headless adapters, model routing per role, budgets enforcement, session transcripts | 7, 12 |
-| **mcp** | MCP host toward the user's servers; MCP server toward agents exposing memory retrieval, ticket operations and evidence access under scopes | 25, 55 |
-| **integrations** | Adapter traits and reference adapters for the five slots; webhook receiver; polling | 16, brief principle 8 |
-| **notify** | Routing rules (interrupt versus review window), desktop notifications, notification slot, digest | 28, PRD F-53 |
+| **broker** | Agent identities, credential issuance, keychain access, the forbidden-action test, audit of every issuance | 17, 27 |
+| **runtime** | Agent sessions: spawn in worktree or container, credential injection at spawn, ACP client, headless adapters, model routing per role, budgets enforcement, session transcripts | 7, 12 |
+| **mcp** | MCP host toward the user's servers; MCP server toward agents exposing memory retrieval, ticket operations and evidence access under scopes | 25 |
+| **integrations** | Adapter traits and reference adapters for the five slots; webhook receiver; polling | 16, brief principle 12 |
+| **notify** | Routing rules (interrupt versus review window), desktop notifications, notification slot, digest | 28, PRD N-01 |
 | **calibration** | Calibration sets, measurements, thresholds as multiples, re-run prompts | 21, 30 |
 
 ## 3. Instances, windows and configuration scopes
@@ -124,7 +124,7 @@ The engine reads and writes a product repository with the layout the methodology
 ## 9. Boundaries that are architectural rules
 
 - The UI has no capability the CLI lacks; both go through rpc.
-- Only the broker touches credentials; no other component reads the keychain.
+- Only the broker issues credentials and reads the keychain; only the runtime injects an issued credential at spawn and holds it no longer than the session; nothing else touches a credential.
 - Only the runtime spawns processes; only the watch component reads the working tree outside a session.
 - Only the merge queue merges; no adapter exposes a merge operation directly.
 - Only the memory component writes to operational memory; agents write through the MCP server, never to files directly.

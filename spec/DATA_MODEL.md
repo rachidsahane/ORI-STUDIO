@@ -45,7 +45,7 @@ Identifiers are ULIDs unless stated. Timestamps are UTC. "Immutable" means the r
 | **Phase** | id, product_id, kind (roadmap, migration), key (P1.., M0..M5, G0..G7), title, state, exit_criteria (json), started_at, closed_at | Migration phases and roadmap phases share the entity |
 | **Criterion** | id (human-readable, e.g. ORI-P1-014), product_id, phase_id, type (functional, security, performance, resilience, simulation), precondition, action, expected, tier, state (proposed, accepted, rejected, superseded), proposed_by (human or identity), accepted_by | Proposed criteria never enter the coverage matrix (methodology 15) |
 | **TestMapping** | criterion_id, test_ref (path and name), source (ci parse) | Coverage matrix rows |
-| **Ticket** | id, product_id, title, category, tier, state, spec_anchor, declared_scope (modules), budget (attempts, wall_clock_s, tokens), filed_by, phase_id, significance (bool, set at merge), incident_id (nullable) | State machine below |
+| **Ticket** | id, product_id, title, category, kind (defect, feature, chore), tier, state, spec_anchor, declared_scope (modules), budget (attempts, wall_clock_s, tokens), filed_by, phase_id, significance (bool, set at merge), incident_id (nullable) | State machine below |
 | **Plan** | id, ticket_id, session_id, content, declared_scope, approved_by, approved_at | Immutable; a new plan supersedes |
 | **PullRequest** | id, ticket_id, remote_ref, branch, tier, state (open, ready, changes_requested, approved, merged, closed), approvals (json: identity or human, time), rollback_plan | |
 | **Escalation** | id, ticket_id, trigger (enum from methodology 12), question, recommendation, context_package_ref, state (open, answered), answered_by, answer, answered_at | Answers are audited decisions |
@@ -53,7 +53,7 @@ Identifiers are ULIDs unless stated. Timestamps are UTC. "Immutable" means the r
 | **AgentIdentity** | id, product_id, role (coder, lead, qa, operations, documentation, product_signal, assistant), model, runtime (acp, headless), scopes (memory), permissions (json), state (active, suspended) | |
 | **AgentSession** | id, identity_id, ticket_id (nullable for unattended), worktree, container_id, started_at, ended_at, budget_used (attempts, seconds, tokens), outcome (completed, blocked, escalated, killed) | Transcript stored as a file, referenced |
 | **CredentialIssuance** | id, identity_id, session_id, scope, issued_at, expires_at, revoked_at | Never stores the secret |
-| **Gate** | id, product_id, kind (lint, types, tests, coverage_matrix, mutation, dependency_audit, secret_scan, build, modified_tests, significance, liveness, citation), definition (json), state (defined, proven, installed, inert) | `installed` requires a GateProof |
+| **Gate** | id, product_id, kind (lint, types, tests, coverage_matrix, mutation, dependency_audit, secret_scan, build, modified_tests, significance, liveness, citation, commit_trailers, diagram, forbidden_action), definition (json), state (defined, proven, installed, inert) | `installed` requires a GateProof |
 | **GateProof** | gate_id, planted_defect_ref, passed_clean_at, failed_dirty_at, evidence_ref | Methodology 14 rule |
 | **GateRun** | id, gate_id, pr_id (nullable), status (pass, fail, error, missing), output_ref, started_at, finished_at | `missing` is the inert case and is a failure |
 | **MemoryRecord** | id, product_id, layer (operational), kind (closing_report, blocked_report, escalation_decision, incident, post_mortem, finding), structured (json, sanitized), provenance (source, identity, ticket, time), untrusted (bool) | Only typed records; free text length-capped |
@@ -91,7 +91,7 @@ stateDiagram-v2
   Deployed --> Closed: spec update recorded + (defect) criteria accepted
   Closed --> [*]
 ```
-Invariants: category may be raised by an agent, lowered only by a human; a ticket cannot enter `Closed` without a `spec_update` event (or `no_change_needed`) and, if it is a defect, an accepted criterion referencing it; a ticket whose PR modified an existing test has an open `Escalation` before `InReview` can proceed.
+Invariants: category may be raised by an agent, lowered only by a human; a ticket cannot enter `Closed` without a `spec_update` event (or `no_change_needed`) and, if `kind` is `defect`, an accepted criterion referencing it; a ticket whose PR modified an existing test has an open `Escalation` before `InReview` can proceed.
 
 ### Document
 ```mermaid

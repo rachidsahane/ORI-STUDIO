@@ -18,12 +18,14 @@ Gates, all required, each proven on a planted defect before it is cited anywhere
 10. UI: type check, lint, unit tests, build
 11. Build of all three platform binaries (cross-compilation or matrix)
 12. Significance labeler (runs on merge; sets `significant`)
+13. Commit-trailer gate (every commit on the PR: Conventional Commits, `Ticket: <id>` and `Spec: <document>#<section>` trailers, per CONVENTIONS; PRD G-02)
+14. Diagram gate (every diagram under `spec/` is Mermaid source; an ASCII diagram or an image of a diagram fails it; ORI-P1-041)
 
 A pipeline that does not run is a failure: the liveness gate (scheduled) fails loudly if any required workflow has not executed inside its window.
 
 ## 2. Merge
 
-Only the merge queue merges. It rebases, re-runs gates 1 to 10 on the rebased head, checks tier approvals, and merges. Tier 0 auto-merge requires the lead's approval and green gates; tier 1 one human; tier 2 two humans or the single-operator profile substitutes, recorded.
+Only the merge queue merges. It rebases, re-runs gates 1 to 10, plus 13 and 14, on the rebased head, checks tier approvals, and merges. Tier 0 auto-merge requires the lead's approval and green gates; tier 1 one human; tier 2 two humans or the single-operator profile substitutes, recorded.
 
 ## 3. Staging
 
@@ -34,7 +36,7 @@ On merge to `main` with `significant`: build, deploy the headless engine and the
 On tag `v*`:
 1. Build approved binaries for macOS (universal), Windows, Linux; generate the updater manifest and sign it.
 2. Run the forbidden-action test and the full end-to-end suite against the release binaries.
-3. Publish: GitHub Release with assets and generated changelog; Homebrew tap; winget manifest; AppImage, deb, rpm, Flatpak; updater manifest.
+3. Publish: GitHub Release with assets and generated changelog; Homebrew tap; winget manifest; AppImage, deb, rpm, Flatpak; updater manifest; Client API JSON Schema bundle.
 4. Operations agent verifies each channel installs and starts (smoke), records the result.
 5. A human approves the final publish step (GitHub Environment with required reviewer).
 

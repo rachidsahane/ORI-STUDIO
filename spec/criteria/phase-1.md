@@ -17,7 +17,7 @@ Format per AICD appendix A.1. Identifier `ORI-P1-nnn`. Types: functional (F), se
 | ORI-P1-011 | F | 1 | Criterion with no test named after it | Coverage matrix gate | Gate fails and lists the criterion; a test naming no criterion is listed as unmapped |
 | ORI-P1-012 | F | 2 | Gate defined, no proof | Any document or PR cites it as protection | Citation gate flags the gate as unproven; `gates.list` shows Defined, not Installed |
 | ORI-P1-013 | F | 2 | Gate installed; its planted defect present | `gates.prove` | Passes clean, fails dirty, proof stored with evidence refs; gate state Installed |
-| ORI-P1-014 | F | 2 | Product launched; operator edits a source file outside `spec/` on disk with no active session | Watcher tick | Within two seconds: `change.unattributed` event, incident ticket with the diff, notification routed as interrupt, merges from the branch blocked |
+| ORI-P1-014 | F | 2 | Product launched; operator edits a source file outside `spec/` on disk with no active session | Watcher tick | Within two seconds: `change.unattributed` event, incident ticket with the diff, merges from the branch blocked |
 | ORI-P1-015 | F | 2 | Same as 014 but the change is inside an active coder session's worktree | Watcher tick | Attributed to the session; no incident |
 | ORI-P1-016 | F | 1 | Operator edits a document under `spec/` through the engine | `spec.write` | A specification PR opened; citation check run; document state Draft; no unattributed change |
 | ORI-P1-017 | S | 2 | Any agent identity | Attempt `git push origin main` from its session | Refused by the vcs token scope; refusal event recorded with the identity |

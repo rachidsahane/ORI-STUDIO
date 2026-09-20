@@ -29,7 +29,7 @@ Application-level secrets (host connection, provider keys) are held once in the 
 
 ## Authorization model
 
-Permissions are a function of (actor, role, resource, action) evaluated in `ori-core` and enforced by the component that owns the resource (broker for credentials, orchestrator for tickets and merges, memory for retrieval, watch for the tree). No permission is expressed only in an instruction file. The permission matrix of AICD §17 is the source; `PERMISSIONS.md` records the manifest per identity.
+Permissions are a function of (actor, role, resource, action) evaluated in `ori-core` and enforced by the component that owns the resource (broker for credentials, orchestrator for tickets and merges, memory for retrieval, watch for the tree). No permission is expressed only in an instruction file. The permission matrix of AICD §17 is the source; `ENV_SETUP.md` section 5 records the manifest per identity.
 
 ## Input validation
 
@@ -55,9 +55,11 @@ Permissions are a function of (actor, role, resource, action) evaluated in `ori-
 
 | Module | Why |
 |---|---|
+| `ori-core` (state machines, the permission function) | Control structure and the authorization decision itself |
 | `ori-broker` (all) | Credentials and identities |
 | `ori-orchestrator::merge_queue` | The only merge path |
 | `ori-orchestrator::lifecycle` (tier and category rules) | Control structure |
+| `ori-mcp::tool_scopes` (server tool scopes) | What agents can do |
 | `ori-memory::barrier`, `ori-memory::scope` | Injection and scope boundaries |
 | `ori-runtime::container`, `ori-runtime::injector` | Isolation and credential injection |
 | `ori-watch::attribution` | Detection of unattributed changes |
