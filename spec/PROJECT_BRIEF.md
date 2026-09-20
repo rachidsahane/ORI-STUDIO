@@ -66,8 +66,8 @@ Ori Studio succeeds when a product can be brought under AICD, and operated under
 
 - The engine: orchestrator (ticket lifecycle, four categories, three risk tiers, budgets, blocked reports, escalation triggers, lock table, merge queue), gates runner, calibration records, event log.
 - The memory service: canonical and organizational layers from git, operational memory as an append-only store, working memory per task, the code map, the sanitization barrier, scoped retrieval per agent identity, the citation checker, the drift audit.
-- The credential broker: per-agent identities, short-lived scoped credentials, injection at process spawn, the forbidden-action test.
-- The agent runtime: spawning coder, lead, QA, operations, documentation and assistant agents in isolated worktrees or containers, through ACP and headless adapters, on the user's chosen runtimes and models, with cross-model review enforced.
+- The credential broker: per-agent identities, the issuing of short-lived scoped credentials, the forbidden-action test.
+- The agent runtime: spawning coder, lead, QA, operations, documentation and assistant agents in isolated worktrees or containers, injecting the broker's credentials at spawn, through ACP and headless adapters, on the user's chosen runtimes and models, with cross-model review enforced.
 - The guided flows: new product (gates G0 to G7) and migration (phases M0 to M5), producing the specification set and the as-built documents.
 - Ori Studio UI: dashboard by seat, review queue with coverage matrix and evidence, specification editor, escalation inbox, fleet view, file tree with file content and diffs, terminal, assistant chat, notification routing.
 - Integration slots with one reference adapter each: version control host, error tracking, analytics, notifications, CI.

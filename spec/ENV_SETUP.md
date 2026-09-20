@@ -57,7 +57,7 @@ All identities run in auto mode: no interactive prompts; the row is what they re
 | Identity | Repository | CI | Staging | Production (users' machines) | Tickets | Specification | Memory scope | Credentials received |
 |---|---|---|---|---|---|---|---|---|
 | coder | Read; write own worktree and branch | Trigger and read for own branch | Deploy own branch to the fixture environment | None | Read own; plan and report | Read | Canonical, organizational, operational filtered to declared scope, code map | Installation token scoped to own branch; provider key for its model, per session |
-| lead | Read all; merge tier 0 through the merge queue only | Read | Read | None | Read, assign, upgrade category, escalate | Read | All layers for the product plus organizational | Installation token scoped to review and tier 0 merge; provider key for its model |
+| lead | Read all; approve tier 0 merges for the merge queue to perform | Read | Read | None | Read, assign, upgrade category, escalate | Read | All layers for the product plus organizational | Installation token scoped to review; provider key for its model; no merge credential |
 | qa | None | Read; trigger QA runs | Read, write | None | Create, read | Read; propose criteria | Canonical, criteria, operational defects, code map (migration only: code read) | Staging credentials; error tracking read; analytics read; provider key |
 | operations | None | Read | Read, write | Release pipeline trigger from tags (phase 4) | Create incident, read | Read runbooks | Runbooks, incidents, infrastructure ADRs | Staging credentials; CI trigger; provider key |
 | documentation | Read; write `spec/` branches | None | None | None | Read | Propose through PR | Canonical, organizational, merged diffs, code map | Installation token scoped to spec branches; provider key |
@@ -73,7 +73,7 @@ One per identity, attempted at launch, on every permission change, and in the re
 | Identity | Forbidden action attempted |
 |---|---|
 | coder | Push to `main` |
-| lead | Merge a tier 1 pull request |
+| lead | Merge any pull request |
 | qa | Write a file in the repository |
 | operations | Modify a source file |
 | documentation | Write outside `spec/` |

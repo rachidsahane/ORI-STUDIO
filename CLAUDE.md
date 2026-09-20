@@ -4,7 +4,7 @@ This file is read by every agent working in this repository, whatever its role. 
 
 ## What this repository is
 
-The Ori Studio: an open-source, local-first desktop workspace and engine that runs software products under the AICD methodology. Read `spec/PROJECT_BRIEF.md` first, then the document your ticket's spec anchor names. The specification under `spec/` is the source of truth; the code is its build artifact. The methodology itself is `methodology/AICD_Methodology.html` with its section index `methodology/sections.json`; references are written `AICD §n` and are checked by a gate.
+The Ori Studio: an open-source, local-first desktop workspace and engine that runs software products under the AICD methodology. Read `spec/PROJECT_BRIEF.md` first, then the document your ticket's spec anchor names. The specification under `spec/` is the source of truth; the code is its build artifact. The methodology itself is `methodology/AICD_Methodology_v0.3.html`; its section index `methodology/sections.json` is generated in batch 1 of phase 1; references are written `AICD §n` and are checked by a gate.
 
 ## Auto mode
 
@@ -27,9 +27,9 @@ You run without permission prompts. Everything you can reach, you may use; every
 
 - The event log in `ori-store` is append-only and hash-chained. No code path updates or deletes an event. Projections are derived; if a projection looks wrong, the fix is in the projector, never in the log.
 - `ori-core` has no IO and depends on nothing in the workspace. If you need IO in core, you are in the wrong crate.
-- Only `ori-broker` touches credentials. Only `ori-orchestrator::merge_queue` calls `VcsHost::merge`. Only `ori-runtime` spawns processes. Only `ori-watch` reads the working tree outside a session. Only `ori-memory` writes operational memory.
+- Only `ori-broker` issues credentials and reads the keychain; only `ori-runtime` injects an issued credential at spawn and holds none beyond the session. Only `ori-orchestrator::merge_queue` calls `VcsHost::merge`. Only `ori-runtime` spawns processes. Only `ori-watch` reads the working tree outside a session. Only `ori-memory` writes operational memory.
 - Tier 2 modules are listed in `spec/RISK_MAP.md`. A change to any of them is tier 2 whatever the ticket says.
-- The three fixtures under `fixtures/` are AICD products used by the end-to-end suite. They are load-bearing test inputs, not examples to clean up.
+- The four fixtures under `fixtures/` are AICD products used by the end-to-end suite. They are load-bearing test inputs, not examples to clean up.
 
 ## Escalation triggers (AICD §12), each with the tool call
 

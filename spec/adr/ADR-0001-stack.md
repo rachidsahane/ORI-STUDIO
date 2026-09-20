@@ -42,6 +42,11 @@ Ori Studio is an open-source, local-first desktop application with an engine tha
 ### Agent protocol
 - ACP (Agent Client Protocol) as the primary interface; headless CLI adapters as fallback; a bundled runtime (rejected by PROJECT_BRIEF principle 5).
 
+### Model family
+- **Exact model id.** Precise, but a version bump or a renamed snapshot of the same model reads as a different model, and the separation is lost without anyone noticing.
+- **Family identifier.** The provider's own grouping of models sharing a lineage; stable across version changes, and the coarsest unit at which two reviewers are genuinely different. Chosen, because AICD §7 separates a lead from its coders at exactly this level.
+- **Provider.** Wrong in both directions: one provider serves several families, and two providers can serve the same family.
+
 ### Inter-process interface
 - JSON-RPC 2.0 over a local socket; gRPC; a REST server. JSON-RPC is the simplest to expose to both the desktop UI and the CLI, and the same shape ACP and MCP use.
 
@@ -59,6 +64,7 @@ Ori Studio is an open-source, local-first desktop application with an engine tha
 | Event log | Append-only table in SQLite; every state change is an event; state is a projection |
 | Agent isolation | git worktrees always; containers by default for coder agents (Docker or Podman, user's choice); worktree-only as a documented downgrade |
 | Agent protocol | ACP client; headless CLI adapter trait for runtimes without ACP |
+| Model family | The unit of cross-model separation: the provider's model family identifier, declared by each runtime adapter through its `RuntimeCaps` and recorded on the `ProviderBinding`; `broker.identity.create` refuses a lead identity whose family equals that of the coders it reviews |
 | Credentials | OS keychain through a Rust keyring library; per-agent short-lived tokens; version control host through app installation tokens |
 | Inter-process interface | JSON-RPC 2.0 over Unix domain socket or Windows named pipe; WebSocket transport for headless remote (phase 4) |
 | MCP | Official MCP semantics: the engine is an MCP host for the user's servers and an MCP server toward agents |
@@ -71,7 +77,7 @@ Easier: one language for everything behind the UI; small, fast binaries; every c
 
 Harder: Rust compile times and a stricter learning curve for contributors; webview differences across platforms require a test matrix; containers require Docker or Podman installed, so the worktree-only downgrade must be robust; JavaScript remains present for Monaco and xterm.
 
-What the agents must respect: no new runtime dependency (no Node in the engine, no Python), no database server, no network call from the engine except to user-configured providers and integrations, no bundled model or agent, and any new crate that touches credentials, processes or the merge path is tier 2.
+What the agents must respect: no new runtime dependency (no Node in the engine, no Python), no database server, no network call from the engine except to user-configured providers and integrations, no bundled model or agent, and any new crate that touches credentials, processes or the merge path is tier 2. A lead identity and the coders it reviews never share a model family, and the check is enforced at identity creation, not at review time.
 
 ## Revisit conditions
 
