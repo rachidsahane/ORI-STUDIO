@@ -1,5 +1,3 @@
-> Generated file. Do not edit. Source: `spec/agents/CLAUDE.md`. Everything below this header is that file, byte for byte. To change these instructions, change the source and regenerate this file; `spec/README.md` records the procedure and who may perform each half of it.
-
 # CLAUDE.md: Ori Studio (product base instructions)
 
 This file is read by every agent working in this repository, whatever its role. Role files under `spec/agents/` add to it and may narrow it; nothing narrows this file. It implements AICD §32 (three layers of instruction). The organizational base is inherited from the AICD organizational repository; where this file and it differ, the organizational base wins.

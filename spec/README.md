@@ -7,7 +7,7 @@ Canonical knowledge of the product (AICD §9, §23). Every document has an owner
 | PROJECT_BRIEF.md | Foundation | Product owner, architect | Draft (generated with AI, awaiting approval) |
 | methodology/ (AICD HTML + `sections.json`) | Foundation | Architect | HTML present as `AICD_Methodology_v0.3.html`; `sections.json` Missing: generated in batch 1 of phase 1 |
 | adr/ADR-0001-stack.md | Foundation | Architect | Draft |
-| adr/ADR-0002-single-operator.md | Foundation | Architect, reliability and governance | Missing: due in batch 1 of phase 1; records the AICD §38 exception, status accepted, expiring the day a second seat is filled |
+| adr/ADR-0002-single-operator.md | Foundation | Architect, reliability and governance | Missing when this row was written. ORI-T-0011 writes it in batch 1 of phase 1, ahead of the tier 2 gate tickets of that batch whose exception it records (`ops/phase-1-backlog.md`, batch 1 order). It records the AICD §38 exception, status accepted, expiring the day a second seat is filled |
 | ARCHITECTURE.md | Foundation | Architect | Draft |
 | DATA_MODEL.md | Foundation (entity level) and Phase 1 (detail) | Architect | Draft |
 | SECURITY_NOTES.md | Foundation | Architect, reliability and governance | Draft |
@@ -17,8 +17,8 @@ Canonical knowledge of the product (AICD §9, §23). Every document has an owner
 | OBSERVABILITY.md | Foundation | Reliability and governance | Draft |
 | CI_CD.md, runbooks/ | Foundation | Reliability and governance | Draft; in `runbooks/` only `recover-engine.md` and `prove-gate.md` are written (phase 1), `release.md`, `rollback.md` and `rotate-credentials.md` are phase 4 |
 | ROADMAP.md | Foundation | Product owner, architect | Draft |
-| agents/ (CLAUDE.md and role files) | Foundation | Architect | Role files Draft; `agents/CLAUDE.md` Missing: it is the canonical product base instruction file and is created in batch 1 of phase 1 from the copy at the repository root |
-| templates/ (plan, closing report, blocked report, escalation, PR report, ticket, ADR, acceptance criterion, post-mortem, Change Proposal) | Foundation | Architect | Missing: no file exists; seeded from AICD appendix A and written in batch 1 of phase 1 |
+| agents/ (CLAUDE.md and role files) | Foundation | Architect | Role files Draft. `agents/CLAUDE.md` Draft: ORI-T-0007 writes it in batch 1 of phase 1 from the copy at the repository root. It is the canonical product base instruction file; the `CLAUDE.md` at the repository root is generated from it |
+| templates/ (plan, closing report, blocked report, escalation, PR report, ticket, ADR, acceptance criterion, post-mortem, Change Proposal), at the repository root beside `spec/`, not under it (LLD section 1) | Foundation | Architect | Missing when this row was written. ORI-T-0009 writes the ten templates in batch 1 of phase 1, seeded from AICD appendix A |
 | PRD.md (complete function catalog) | Foundation (catalog) and Phase 1 (phase 1 items) | Product owner | Draft |
 | API_SPEC.md | Phase 1 | Architect | Draft |
 | LLD.md | Phase 1 | Architect | Draft |
@@ -31,4 +31,10 @@ Canonical knowledge of the product (AICD §9, §23). Every document has an owner
 
 Not yet present, by design: the phase sets for phases 2 to 5, written when each phase approaches. The gate G2 artifacts under `design/` are present: `design/DESIGN.md` is this product's Vibe Engineer style DESIGN document, it binds the visual reference and elaborates the screen inventory in PRD section 6; the screens and flows it lists as still to design become design tickets in phase 3.
 
-How to use this folder in Claude Code: read PROJECT_BRIEF.md, then the document your ticket anchors. `agents/CLAUDE.md` is the canonical product base instruction file and the `CLAUDE.md` at the repository root is a copy of it; today only the root copy exists, and batch 1 writes `agents/CLAUDE.md` from that copy and copies it back to the root. `agents/*.md` are the subagent definitions copied to `.claude/agents/` in the same batch.
+How to use this folder in Claude Code: read PROJECT_BRIEF.md, then the document your ticket anchors. `agents/CLAUDE.md` is the canonical product base instruction file. The `CLAUDE.md` at the repository root is generated from it: the same bytes, with a header naming the source and marking the file generated. The repository root is where Claude Code looks for the product base instruction file, which is why the generated copy exists at all.
+
+Six role files, `agents/assistant.md`, `agents/coder.md`, `agents/documentation.md`, `agents/lead.md`, `agents/operations.md` and `agents/qa.md`, are the subagent definitions copied to `.claude/agents/` by ORI-T-0008 in the same batch. `agents/CLAUDE.md` is not copied there. It carries no YAML frontmatter and none of the `name`, `description`, `model` and `tools` keys that each role file carries, so loading it as a subagent definition would produce a broken agent. The product base and the role file are different layers of instruction (AICD §32).
+
+Changing the product base instructions. `agents/CLAUDE.md` is under `spec/`, so it changes through the documentation role, on a `spec/<ticket>` branch, through `aicd_spec_propose`. The root `CLAUDE.md` is not under `spec/`, and the documentation role's writes are refused outside `spec/`, so regenerating it is a paired ticket worked by a role that may write at the repository root, which is the coder role. The two tickets are ordered together so the files do not diverge across a merge. Changing an instruction file is a parameter or extension change, never a silent edit (AICD §32, AICD §29). ORI-T-0007 declares both files and creates the pair; this procedure governs every change after it.
+
+PRD D-11 schedules instruction files generated from templates for phase 1. No phase 1 backlog ticket builds that generator, so until one does, the regeneration is done by hand in the paired ticket. Nothing compares the two files today: the fourteen gates in CI_CD section 1 contain no instruction-copy check, and the weekly drift audit named in AICD §22 compares canonical documents against the code they describe, not these two files against each other. A gate that compares them would have to be ticketed and proven on a planted defect before anything cites it, which is what CI_CD section 1 requires of every gate. This is a recorded gap, not a control in force.
