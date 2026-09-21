@@ -1,0 +1,39 @@
+# .gitattributes: the checkout may not rewrite the bytes this repository stores.
+#
+# Ticket: ORI-T-0082. Spec: spec/CI_CD.md section 1 (gate 9, the citation gate).
+#
+# GitHub's Windows runners check out with core.autocrlf=true. Without this file
+# every text file arrives there with \r\n where the committed bytes have \n,
+# and this repository holds three kinds of file for which that is not a
+# cosmetic difference:
+#
+#   methodology/sections.json
+#       A generated artifact. The staleness test in
+#       crates/ori-gates/src/sections.rs compares it byte for byte against a
+#       fresh parse, and the generator writes \n. A checkout that rewrites it
+#       makes the file differ from its own generator on Windows alone.
+#
+#   methodology/AICD_Methodology_v0.3.html
+#       The index records the document's length in bytes so that `wc -c` is a
+#       staleness check a human can run. That only holds while the checkout
+#       does not add a carriage return to each of its 1519 lines.
+#
+#   scripts/*.sh
+#       A shell script whose shebang line ends \r\n is not executable, and a
+#       `[ "$x" = passed ]` compared against a value read from a \r\n file is
+#       never equal.
+#
+# This file is not the fix for the parser, and must not be read as one. The
+# parser folds CRLF to LF itself (Index::parse, via lf_line_endings), so a
+# document handed to it from anywhere at all produces one index. That is proved
+# by a_crlf_document_indexes_identically_to_the_same_document_with_lf, which
+# builds its CRLF document in memory and never consults git. What this file
+# fixes is the part no parser can reach: a generated file compared byte for
+# byte, and a script handed to a shell.
+#
+# One rule rather than a list of paths. A list says nothing about the next file
+# someone adds, and the invariant wanted here is not "these three files" but
+# "the working tree is the bytes the repository stores, on every platform".
+# text=auto leaves anything git detects as binary alone; eol=lf checks text out
+# with \n everywhere, Windows included.
+* text=auto eol=lf
