@@ -5,16 +5,16 @@
 | Gate | CI_CD section 1, item 1 |
 | Commands | `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | Ticket | ORI-T-0013 |
-| **State** | **Proven, not Installed** |
+| **State** | **Installed** |
 | Written by | The lead, from the coder's verified evidence (ruling R25) |
 
-`spec/DATA_MODEL.md` gives a gate the states `Defined -> Proven (GateProof present) -> Installed`. This records the middle transition. What is still owed for Installed is in the last section, and no document may call gate 1 installed until it is met.
+`spec/DATA_MODEL.md` gives a gate the states `Defined -> Proven (GateProof present) -> Installed`. All three of AICD §14's conditions are now met, on observed CI runs, and they are recorded below. Gate 1 may be cited as protection.
 
 ## What AICD §14 asks for, and which parts this establishes
 
 The rule: a gate enters service only after a demonstration on a planted defect, in which it passes on a clean tree, fails on the planted defect, and **the failure is visible where a human would look**.
 
-The first two are established here. The third is not, and cannot be by any local run.
+All three are established. The first two by the demonstration below; the third by an observed run, because no local run can watch the pull request check it writes to.
 
 ## The planted defects
 
@@ -71,9 +71,27 @@ Verified by the lead against the shipped harness, exit captured without a pipeli
 | `continue-on-error: true` on job `gate-1-proof` | **2** |
 | job `gate-1-proof` renamed | **2** |
 
-## What this proof does not establish
+## The failure is visible where a human would look
 
-1. **That the failure is visible where a human would look.** §14's third condition. No local run can watch the pull request check it writes to. This is what stands between Proven and Installed, and it is established by the run of the pull request that lands this ticket, recorded in a follow-up commit on the same branch.
+§14's third condition, established by observation rather than argument.
+
+**Run 35598542173**, the `pull_request` trigger on this ticket's own pull request: twelve jobs, all green, `gate-1-proof` among them. Gate 1 passes on a clean tree and the proof job reports its verdict in the check log.
+
+**Run 35598700908**, on a throwaway branch carrying one deliberate formatting violation in `crates/ori-core`, opened as a pull request and then closed without merging:
+
+| Job | Result |
+|---|---|
+| `fmt` | **failure** |
+| `ci` (aggregate) | **failure** |
+| everything else, including `gate-1-proof` | success |
+
+What a human sees on the pull request is `fmt fail` and `ci fail`, each linking to the job log naming the file and the line. `gate-1-proof` stayed green, correctly: its planted fixtures were untouched, and its job is to verify the gate catches those, not to catch this one.
+
+The branch was deleted and the pull request closed. The runs persist as the evidence.
+
+## What this proof still does not establish
+
+1. **That a red `ci` blocks anything.** See below. Visibility and blocking are different claims and only the first is §14's.
 
 2. **That a failing `ci` blocks a merge.** It does not, today. `main` has no required status checks at all: `ops/gates/branch-protection.md` records that as deliberate, because a required check the branch cannot produce leaves every pull request pending forever, and each name is added on the day its proof lands. Until `ci` is required, a red run colours the pull request and stops nothing. **Adding `ci` to the required checks is the operator's action and is owed now that this proof exists.**
 
