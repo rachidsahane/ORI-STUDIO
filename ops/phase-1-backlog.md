@@ -14,7 +14,7 @@ Operational record. Produced by the lead from `ROADMAP.md` "Phase 1 detail" afte
 
 **Budget.** Every ticket: 3 attempts, 45 minutes wall clock per attempt. Token budget is deliberately absent: AICD §21 requires budgets to be performance-relative to a measured baseline, and no calibration exists until batch 15. Until then the attempt and wall-clock limits are the only budget, and the first coder to exhaust one writes a blocked report rather than continuing.
 
-**Tier.** Taken from `RISK_MAP.md`, never from the ticket's own opinion. Where a ticket creates a file under a path `RISK_MAP` tiers 2, the ticket is tier 2 whatever its size. A crate skeleton that contains no tier 2 module content is tier 1; the first ticket that puts content into a tier 2 path is tier 2 and is marked as such below.
+**Tier.** Taken from `RISK_MAP.md`, never from the ticket's own opinion. Where a ticket's declared scope touches a path `RISK_MAP` tiers 2, the ticket is tier 2 whatever its size and whatever its content. CLAUDE.md states it without qualification: "A change to any of them is tier 2 whatever the ticket says." An earlier version of this line carved out crate skeletons as tier 1; that carve-out was wrong and is removed (ruling R11). Agents may raise a tier and only a human may lower one.
 
 **Declared scope.** The modules the ticket claims in the lock table. Two tickets may run in parallel only when their declared scopes are disjoint. The scope lock map below proves that for every parallel group.
 
@@ -53,7 +53,7 @@ Nothing else starts until this merges: every later PR depends on these gates bei
 
 | Ticket | Title | Tier | Declared scope | Spec anchor | Criteria |
 |---|---|---|---|---|---|
-| ORI-T-0001 | Cargo workspace and the sixteen crate skeletons | 1 | `Cargo.toml`, `crates/*/Cargo.toml`, `crates/*/src/lib.rs` | LLD §1, §2 | none (infrastructure) |
+| ORI-T-0001 | **Cargo workspace and the sixteen crate skeletons** | **2** | `Cargo.toml`, `crates/*/Cargo.toml`, `crates/*/src/lib.rs` | LLD §1, §2 | none (infrastructure) |
 | ORI-T-0002 | `apps/desktop` scaffold, not built | 1 | `apps/desktop/**` | LLD §1, §3 | none |
 | ORI-T-0003 | `rust-toolchain.toml`, `.gitignore`, `scripts/setup-dev.sh` | 1 | `rust-toolchain.toml`, `.gitignore`, `scripts/setup-dev.sh` | ENV_SETUP §1 | none |
 | ORI-T-0004 | `scripts/gates.sh`: the local gate set a coder runs before opening a PR | 1 | `scripts/gates.sh` | CONVENTIONS "Rust", CI_CD §1 | none |

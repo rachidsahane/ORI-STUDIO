@@ -1,0 +1,9 @@
+[package]
+name = "ori-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent identities, credential issuance, keychain access and the forbidden-action test."
+
+[dependencies]
+ori-store = { workspace = true }

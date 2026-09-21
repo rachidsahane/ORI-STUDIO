@@ -1,0 +1,9 @@
+[package]
+name = "ori-watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Working tree and git watcher, attribution of changes and unattributed-change incidents."
+
+[dependencies]
+ori-store = { workspace = true }

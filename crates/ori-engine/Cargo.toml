@@ -1,0 +1,15 @@
+[package]
+name = "ori-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Composition root: wires the Ori Studio crates and exposes the Engine."
+
+[dependencies]
+ori-calibration = { workspace = true }
+ori-flows = { workspace = true }
+ori-integrations = { workspace = true }
+ori-mcp = { workspace = true }
+ori-notify = { workspace = true }
+ori-rpc = { workspace = true }
+ori-watch = { workspace = true }

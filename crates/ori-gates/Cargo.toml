@@ -1,0 +1,9 @@
+[package]
+name = "ori-gates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Gate definitions, runners, planted-defect proving, coverage matrix, significance and liveness."
+
+[dependencies]
+ori-store = { workspace = true }

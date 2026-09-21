@@ -1,0 +1,10 @@
+[package]
+name = "ori-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent sessions: worktrees, containers, ACP client, headless adapters, budgets and transcripts."
+
+[dependencies]
+ori-broker = { workspace = true }
+ori-store = { workspace = true }

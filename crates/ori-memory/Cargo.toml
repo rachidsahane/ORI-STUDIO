@@ -1,0 +1,9 @@
+[package]
+name = "ori-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The four memory layers, repository indexer, code map, sanitization barrier, scopes and retrieval."
+
+[dependencies]
+ori-store = { workspace = true }

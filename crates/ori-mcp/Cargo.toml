@@ -1,0 +1,10 @@
+[package]
+name = "ori-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP host toward the user's servers and MCP server toward agents, under scopes."
+
+[dependencies]
+ori-memory = { workspace = true }
+ori-store = { workspace = true }

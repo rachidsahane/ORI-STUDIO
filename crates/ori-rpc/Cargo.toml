@@ -1,0 +1,9 @@
+[package]
+name = "ori-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSON-RPC server, method registry, transports and event subscriptions."
+
+[dependencies]
+ori-store = { workspace = true }
