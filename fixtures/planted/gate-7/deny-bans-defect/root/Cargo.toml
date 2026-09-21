@@ -1,0 +1,14 @@
+# THE PLANTED DEFECT: a wildcard version requirement. The build is then not
+# reproducible from this repository, because cargo resolves "*" to whatever is
+# available on the day it runs. deny.toml sets `wildcards = "deny"` and
+# `allow-wildcard-paths = false`, so a path dependency is held to the same rule
+# as a registry one, which matters here because this workspace is path crates.
+[package]
+name = "gate-7-deny-bans-root"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+gate-7-deny-bans-dep = { path = "../dep", version = "*" }

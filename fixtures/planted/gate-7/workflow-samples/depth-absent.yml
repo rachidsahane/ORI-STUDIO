@@ -1,0 +1,26 @@
+# No `with:` at all, which is the shape every other job in
+# `.github/workflows/ci.yml` has and the shape the gate-7 job must not have.
+# The default is 1, so this is the same shallow clone as depth-shallow.yml
+# arrived at by saying nothing. It is a separate sample because it is a
+# separate way to be wrong: the line was never written, rather than written and
+# changed, and a check that read an absent key as "fine" would let the value
+# that matters be removed by deleting two lines.
+#
+# This file is owed the answer `absent`.
+name: sample-depth-absent
+on:
+  pull_request:
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: cargo audit --deny warnings
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

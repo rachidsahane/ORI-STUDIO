@@ -1,0 +1,19 @@
+# DEAD: the same, one level down. The job runs and reports success; the step
+# carrying the gate command is skipped.
+name: sample-dead-step-if
+on:
+  pull_request:
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo audit --deny warnings
+        if: false
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

@@ -1,0 +1,18 @@
+# DEAD: gate 7's command is not in the file at all. The first thing the check
+# must be able to say, and the only one of these a whole-file grep also caught.
+name: sample-dead-command-absent
+on:
+  pull_request:
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - name: something else
+        run: echo not the gate
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

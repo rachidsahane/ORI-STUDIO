@@ -1,0 +1,18 @@
+# The planted input for gate 7's cargo-deny half: deny-clean.
+#
+# Ticket: ORI-T-0016.  Spec: spec/CI_CD.md section 1 gate 7.
+# Proof: ops/gates/gate-7.md.  Rule: AICD section 14.
+#
+# Its own workspace root, with no path back to the repository's workspace, so
+# `cargo build --workspace` and `cargo test --workspace` at the repository root
+# never resolve it and the real build stays green with the defect present. The
+# same layout gate 1 and gate 2 use, and for the same reason.
+#
+# Two path crates and no registry dependency at all, which is what makes this
+# fixture usable: cargo-deny builds its graph from `cargo metadata`, and a
+# graph of path crates resolves with no network and no download. A planted
+# third-party dependency would need one, and adding a dependency to this
+# repository is an escalation trigger (spec/CONVENTIONS.md, AICD section 12).
+[workspace]
+resolver = "3"
+members = ["root", "dep"]

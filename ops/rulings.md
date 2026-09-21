@@ -28,6 +28,10 @@ Decisions the lead made under the operator's standing rule 5: anything the speci
 | R22 | 1 | The UI tree is `ui/src/` |
 | R23 | 1 | LLD governs directory layout; DESIGN governs the phase 3 screen set |
 | R24 | 1 | AICD section 28 is internally inconsistent; upstream, not ours |
+| R25 | 1 | Operational records under `ops/` are the lead's to write until `aicd_report` exists |
+| R26 | 1 | How CI obtains `cargo-audit` and `cargo-deny` is an implementation choice, not a new dependency |
+| R27 | 1 | "Unreadable" is a parser verdict, not a YAML validity claim. The lead was wrong |
+| R28 | 1 | A gate's implementation does not live in a fixture directory |
 
 ## R1. `sections.json` granularity, and what gate 9 accepts
 
@@ -160,3 +164,41 @@ Three documents name different screen sets: LLD section 3 lists twelve, PRD sect
 ## R24. AICD section 28 is internally inconsistent
 
 Its prose says "the four human functions" while its own table has five rows, the fifth being Reliability and governance, which AICD §18 lists as a seat rather than one of the four functions. This is a defect in the methodology, not in this repository. It joins the anchor defects in the report the operator carries upstream.
+
+
+## R25. Operational records under `ops/` are the lead's to write until the engine exists
+
+The ORI-T-0013 coder raised a real conflict the lead created. CLAUDE.md absolute rule 5 says "You never write to `spec/` or `ops/` directly. Specification changes go through the documentation role's PR; operational records go through the `aicd_report` tool." The ticket's declared scope, granted by the lead as lock claim 11, included `ops/gates/gate-1.md`. So the ticket instructed a coder to break an absolute rule.
+
+`aicd_report` does not exist: it is an MCP tool of an engine that is sixteen empty crates. Until it does, the lead writes operational records, which is already what has happened for the rulings, the lock table, the calibration records and the incidents.
+
+The division for a gate proof: **the coder produces and verifies the evidence, the lead records it.** The coder builds the planted defect, runs the gate against it, and returns the real output. The lead writes `ops/gates/<gate>.md` from that output and owns it in the commit. This keeps the producing agent separate from the agent that records what was produced, which is the point of AICD §7, and it stops a coder writing its own proof of its own work.
+
+`spec/runbooks/prove-gate.md` step 4 says "Store the GateProof with both run references" without naming who stores it, and `spec/TESTING.md` section 4 says a proof is "recorded in `ops/gates/`" without naming an author. Neither contradicts this. When `ori-gates::Prover` (ORI-T-0045) and `aicd_report` exist, the engine stores the proof and this ruling expires.
+
+
+## R26. How CI obtains `cargo-audit` and `cargo-deny` is not a new dependency
+
+ORI-T-0016 escalated that its gate 7 jobs fetch two release artifacts from github.com at run time, pinned by SHA-256, and asked whether that is a `new_dependency` under CLAUDE.md rule 6.
+
+It is not. `spec/ENV_SETUP.md` section 1 already lists `cargo-mutants`, `cargo-audit` and `cargo-deny` as required development tooling, and `spec/CI_CD.md` section 1 makes gate 7 `cargo-audit` and `cargo-deny` by name. Using them implements the specification rather than extending it. CLAUDE.md rule 6 governs runtime dependencies of the engine and network calls from the engine; a CI runner fetching a tool is neither.
+
+What the escalation was right about is that this is a supply-chain surface inside the supply-chain gate, so the manner matters. Pinning each artifact by SHA-256 is required and is what the ticket did. It is strictly better than `cargo install` from crates.io, which resolves a version range at run time and builds arbitrary build scripts. The operator is told, because the decision is theirs to overturn, but the ticket is not blocked on it.
+
+## R27. "Unreadable" is a parser verdict, not a claim about YAML validity. The lead was wrong
+
+ORI-T-0084's ticket told the coder that "a sample owed `unreadable` that parses cleanly is the same defect in the other direction". The coder refused that framing and was right.
+
+`unreadable` is the answer gate 1's awk parser gives when it cannot determine a workflow's structure. It is a verdict about the parser, not about YAML. A file can be perfectly valid YAML and still be unreadable to a line-oriented parser, which is exactly what `unreadable-quoted-job-name.yml` is: valid YAML whose job name is quoted in a form the parser will not guess at. That sample is owed `unreadable` and is correct as it stands.
+
+The real defect, which the ticket did name correctly, is the opposite: a sample owed `dead` that a real YAML parser rejects, because it tests the parser against an input GitHub would never accept.
+
+Second lead error of this kind. The first was asserting three copyright spellings as established without re-deriving them. Both were caught by a coder applying a standard the lead had given it.
+
+## R28. A gate's implementation does not live in a fixture directory
+
+ORI-T-0016 put `deny.toml`, the repository's dependency policy, and `secret-scan.sh`, the implementation of gate 7's third check, under `fixtures/planted/gate-7/`. It escalated this itself rather than leaving it silent.
+
+It is wrong, and the cause is the lead's declared scope, which granted only `ci.yml` and `fixtures/planted/gate-7/**`. A fixture directory holds planted defects: inputs a gate is run against. A policy the whole repository is judged by, and a scanner the gate invokes, are neither.
+
+`deny.toml` belongs at the repository root, which is where `cargo-deny` looks by default and where a reader expects a dependency policy. The scanner belongs with the other scripts a gate runs, beside `scripts/gates.sh`. The scope is extended to `deny.toml` and `scripts/secret-scan.sh`; neither is claimed by another in-flight ticket.

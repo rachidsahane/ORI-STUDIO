@@ -1,0 +1,90 @@
+# deny.toml: the dependency policy gate 7 enforces, for cargo-deny 0.20.2.
+#
+# Ticket: ORI-T-0016.  Spec: spec/CI_CD.md section 1 gate 7
+# ("cargo-audit, cargo-deny (advisories, licenses), secret scan"),
+# spec/CONVENTIONS.md "Dependencies", spec/PROJECT_BRIEF.md (Apache 2.0).
+# Proof: ops/gates/gate-7.md.  Rule: AICD section 14.
+#
+# WHERE THIS FILE SITS. At the repository root, which is where cargo-deny reads
+# `deny.toml` from by default and where a reader looks for a dependency policy.
+# ORI-T-0016 first put it under `fixtures/planted/gate-7/` because that was the
+# declared scope, and escalated; ruling R28 answered that a fixture directory
+# holds planted defects, which are inputs a gate is run against, and a policy
+# the whole repository is judged by is not one. `.github/workflows/ci.yml` and
+# `scripts/gates.sh` still pass `--config deny.toml` explicitly rather than
+# leaning on the default, so both say which policy they enforced.
+#
+# WHAT IT STATES, AND WHERE EACH LINE COMES FROM.
+#
+#   licenses  spec/PROJECT_BRIEF.md licenses the software Apache 2.0, and
+#             spec/CONVENTIONS.md requires that "every dependency has a license
+#             compatible with Apache 2.0". The allow list below is the set of
+#             permissive licenses that may be distributed inside an Apache 2.0
+#             work without adding an obligation the product does not already
+#             carry. A copyleft license is not on it: not because copyleft is
+#             wrong, but because shipping it inside this binary would change the
+#             license of the product, and that is a decision for a human in a
+#             ticket, not for a dependency resolver. An unlisted license is a
+#             refusal, so a new license arrives as a failed gate and an
+#             escalation rather than as a silent change of the product's terms.
+#
+#   bans      a wildcard version requirement ("*") means the build is not
+#             reproducible from this repository: cargo picks whatever the
+#             registry serves that day. spec/CONVENTIONS.md pins versions by
+#             Cargo.lock for exactly that reason. `allow-wildcard-paths = false`
+#             keeps the rule true for path dependencies as well, which is what
+#             this workspace is made of. `multiple-versions = "deny"` keeps one
+#             copy of a crate in the graph, so an advisory against it has one
+#             answer rather than several.
+#
+#   sources   a crate may come from crates.io and from nowhere else. A git
+#             dependency is a dependency on a branch somebody can move, and an
+#             unknown registry is a supply chain this repository has not
+#             chosen. Both are escalations (AICD section 12, new_dependency),
+#             not defaults.
+#
+# WHAT IT DELIBERATELY DOES NOT STATE. There is no `[advisories]` section and
+# `cargo deny check advisories` is not run, because gate 7's advisory half is
+# `cargo-audit`, which reads the same RustSec database. Running both would
+# fetch that database twice for one answer and would leave two places to
+# configure one policy. ops/gates/gate-7.md records the choice; if cargo-audit
+# is ever dropped, the advisories check belongs here and this comment is the
+# note that says so.
+
+[graph]
+all-features = true
+
+[licenses]
+# Permissive licenses only. Every one of these may be distributed inside an
+# Apache 2.0 work by satisfying an attribution requirement, which NOTICE and
+# LICENSE at the repository root already carry.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+# The workspace has no third-party dependency today, so every entry above is
+# unmatched, and an unmatched allowance is not a defect. Leaving this at its
+# default would print nine warnings on every clean run, and a check that is
+# noisy when it is clean is a check people stop reading.
+unused-allowed-license = "allow"
+# cargo-deny's confidence in a license it inferred from a LICENSE file rather
+# than from a manifest field. The default is 0.8; this is stricter, so a text
+# cargo-deny is unsure about is reported rather than assumed.
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+allow-wildcard-paths = false
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

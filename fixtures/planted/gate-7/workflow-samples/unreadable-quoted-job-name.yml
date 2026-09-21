@@ -1,0 +1,26 @@
+# UNREADABLE: a job name in quotes. Valid YAML, and a shape
+# `workflow-facts.awk` does not read. The parser reports ERROR and prove.sh
+# proves nothing rather than reporting on a file it only partly understood: a
+# job it failed to see is a job it would have said nothing about. The same
+# evasion defeats the `ci` aggregate's own job-list parse, which is why that
+# one fails closed too.
+#
+# It serves both tables: a file that cannot be read is unreadable whatever is
+# asked of it, so the self-identification table is owed `unreadable` here as
+# well.
+name: sample-unreadable-quoted-job-name
+on:
+  pull_request:
+jobs:
+  "gate-7":
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo audit --deny warnings
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

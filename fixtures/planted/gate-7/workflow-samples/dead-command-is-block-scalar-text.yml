@@ -1,0 +1,42 @@
+# DEAD: the gate-7 job runs `echo`, and the byte-identical
+# `run: cargo audit --deny warnings` line survives only as text inside
+# another job's shell script. An anchored whole-file grep matches it and
+# reports the gate proved; the gate is switched off and every check is green.
+# This is the construction that broke the first version of gate 1's harness,
+# and it is the one that matters most here: gate 7 is the supply chain gate,
+# and a supply chain gate that is text rather than a command is the whole of
+# AICD section 39's "present but reporting nothing".
+#
+# The `echo` below carries no colon. A plain YAML scalar may not contain one
+# followed by a space, so `run: echo 'gate 7: disabled'` is a parse error and
+# GitHub would reject the whole file: a workflow nobody can run is not the
+# construction this sample is about. `workflow-facts.awk` does not enforce
+# YAML, so the sample would still have been classified `dead`, for a reason
+# that could never arise. ORI-T-0014 found it by parsing every sample with a
+# real YAML parser; `fixtures/planted/gate-1/workflow-samples/` has the same
+# defect in its copy and it is outside this ticket's scope too.
+name: sample-dead-command-is-block-scalar-text
+on:
+  pull_request:
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - name: gate 7, disabled
+        run: echo 'gate 7 is disabled'
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a shell script that mentions the gate command
+        run: |
+          cat <<'INNER' >/dev/null
+          run: cargo audit --deny warnings
+          INNER
+          echo done
+  ci:
+    needs: [gate-7, other]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

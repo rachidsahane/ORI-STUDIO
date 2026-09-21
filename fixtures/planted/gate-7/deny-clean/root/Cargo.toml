@@ -1,0 +1,9 @@
+[package]
+name = "gate-7-deny-clean-root"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+gate-7-deny-clean-dep = { path = "../dep", version = "0.1.0" }

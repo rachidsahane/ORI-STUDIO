@@ -637,6 +637,295 @@ jobs:
         # look".
         run: bash fixtures/planted/gate-2/prove.sh
 
+  gate-7:
+    # spec/CI_CD.md section 1, gate 7: "cargo-audit, cargo-deny (advisories,
+    # licenses), secret scan (tree and history)".
+    #
+    # THIS JOB IS TWO THIRDS OF GATE 7. IT IS NOT GATE 7.
+    #
+    #   advisories (cargo-audit)        INSTALLED and proven
+    #   licences and bans (cargo-deny)  INSTALLED and proven
+    #   secret scan                     NOT INSTALLED. Escalation E-0003.
+    #
+    # The third step below still runs an advisory scanner, and its name says in
+    # the GitHub UI that it is not a gate, because the place somebody would
+    # cite it is the line that went red. Nothing in this file, in a report or
+    # in a specification may cite gate 7's secret scan as installed.
+    #
+    # WHY IT IS NOT INSTALLED. `scripts/secret-scan.sh` matches byte patterns
+    # over printable-ASCII runs. Attempt 1 of ORI-T-0016 missed every file
+    # holding a NUL byte; attempt 2 repaired that and misses UTF-16. The lead
+    # planted an AWS key encoded UTF-16, committed it, and the repaired scanner
+    # exited 0 with the key in the file. base64, gzip, UTF-32 and a key split
+    # across a chunk boundary are the same hole. A pattern matcher over bytes
+    # loses this race by construction, so the answer is not a third attempt at
+    # the scanner: E-0003 asks the operator what implements this check.
+    #
+    # WHAT ALREADY RUNS HERE, which two attempts were spent not knowing. This
+    # repository has had the GitGuardian app installed since before gate 7 was
+    # written; every pull request carries the check "GitGuardian Security
+    # Checks", from PR 1 onward. It is advisory, not required. Whether it is
+    # the answer to E-0003 is the operator's call and not this file's.
+    #
+    # Until ORI-T-0016 nothing in this file ran any of the three,
+    # `scripts/gates.sh` reported gate 7 unavailable, and the gate existed only
+    # as a line in the specification. Tier 2 by spec/RISK_MAP.md, row
+    # `.github/workflows`, reason "Supply chain", which is what this gate is
+    # about.
+    #
+    # THREE CHECKS, THREE STEPS, ON PURPOSE. A reader of a red run has to be
+    # able to say which of the three failed without opening the log, and a
+    # single step running all three would lose that the moment one of them
+    # exits first. They are steps of one job rather than three jobs because the
+    # two tools are installed once, below, and installing them three times
+    # would cost three times as much to answer the same three questions.
+    #
+    # WHY THE CHECKOUT ASKS FOR THE WHOLE HISTORY. `fetch-depth: 0`, and it is
+    # load-bearing rather than tidy. `actions/checkout` defaults to
+    # `fetch-depth: 1`, which produces a shallow clone holding exactly one
+    # commit. In that clone every object reachable from a ref belongs to the
+    # tree, so a scan of "the history" reads the tree and reports the history
+    # clean having looked at no history at all. spec/ENV_SETUP.md section 4
+    # says the gate covers tree and history, and a secret committed and then
+    # deleted is precisely the case the history half exists for.
+    # `scripts/secret-scan.sh` refuses to scan a shallow repository rather
+    # than reporting it clean, so removing this line turns the job red instead
+    # of turning the gate off quietly, and `fixtures/planted/gate-7/prove.sh`
+    # reads the value out of this file on every run and names it.
+    #
+    # WHY THE TOOLS ARE FETCHED BY DIGEST AND NOT BUILT. `cargo install
+    # cargo-deny` compiles several hundred crates from crates.io on every run
+    # of the gate whose subject is which crates this project trusts. The
+    # published release binary is one artifact with one SHA-256, pinned below
+    # and verified before it is put on PATH, so what gate 7 runs is the file
+    # ORI-T-0016 hashed and not whatever the registry resolves that morning.
+    # The cost is stated in ops/gates/gate-7.md: the URLs are two more
+    # publishers to trust, the pins are for one platform, and a pinned tool
+    # goes stale unless somebody bumps it.
+    #
+    # WHAT THIS JOB CANNOT ESTABLISH, and it is the same limit gates 1 and 2
+    # carry: `ci` is not a required status check on `main` yet
+    # (ops/gates/branch-protection.md), so a red run here colours the pull
+    # request and blocks nothing until the operator adds it.
+    name: gate-7
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Least privilege, stated on the job rather than inherited, because this
+      # is the one job in the file that fetches from the network.
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Not a default. See the comment above: the history half of this gate
+          # reads nothing without it, and reads nothing silently.
+          fetch-depth: 0
+      - name: Install the pinned gate 7 tools and verify each against its digest
+        run: |
+          set -euo pipefail
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin"
+
+          # $1 url, $2 expected sha256, $3 path of the binary inside the
+          # archive, $4 where it goes. The digest is checked before anything is
+          # unpacked, so a file that is not the pinned one is never executed.
+          fetch_pinned() {
+            local url="$1" want="$2" member="$3" out="$4" tmp got
+            tmp="$(mktemp -d)"
+            curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$tmp/archive" "$url"
+            got="$(sha256sum "$tmp/archive" | cut -d' ' -f1)"
+            if [ "$got" != "$want" ]; then
+              echo "::error file=.github/workflows/ci.yml::$url hashed $got and this file pins $want. A gate tool that is not the artifact this repository pinned is not the gate tool, and this run will not put it on PATH. Either the release was replaced, or the pin is wrong; both are decisions for a human in a ticket."
+              exit 1
+            fi
+            tar -xzf "$tmp/archive" -C "$tmp"
+            install -m 0755 "$tmp/$member" "$out"
+            rm -rf "$tmp"
+          }
+
+          fetch_pinned \
+            'https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz' \
+            '7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428' \
+            'cargo-audit-x86_64-unknown-linux-musl-v0.22.2/cargo-audit' \
+            "$bin/cargo-audit"
+          fetch_pinned \
+            'https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz' \
+            '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f' \
+            'cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny' \
+            "$bin/cargo-deny"
+
+          echo "$bin" >> "$GITHUB_PATH"
+
+          # The digest says the bytes are the pinned ones. This says the bytes
+          # are the version this repository thinks it pinned, which is a
+          # different claim and the one a reader of the log cares about.
+          audit_v="$("$bin/cargo-audit" audit --version)"
+          deny_v="$("$bin/cargo-deny" --version)"
+          echo "cargo-audit : $audit_v"
+          echo "cargo-deny  : $deny_v"
+          if [ "$audit_v" != 'cargo-audit-audit 0.22.2' ]; then
+            echo "::error file=.github/workflows/ci.yml::the pinned cargo-audit archive unpacked to '$audit_v', not 'cargo-audit-audit 0.22.2'"
+            exit 1
+          fi
+          if [ "$deny_v" != 'cargo-deny 0.20.2' ]; then
+            echo "::error file=.github/workflows/ci.yml::the pinned cargo-deny archive unpacked to '$deny_v', not 'cargo-deny 0.20.2'"
+            exit 1
+          fi
+      - name: Gate 7, advisories, against the RustSec database
+        # Reads Cargo.lock and compares every (name, version) in it against the
+        # RustSec advisory database. `--deny warnings` makes an unmaintained,
+        # unsound or yanked crate an error too, so the three states that are
+        # not "vulnerable" but are still somebody's problem fail here rather
+        # than scrolling past. The workspace has no third-party dependency
+        # today, so this passes on an empty set: what the gate is worth is
+        # established by `gate-7-proof` below, which presents the same command
+        # with a lockfile naming a real published advisory.
+        run: cargo audit --deny warnings
+      - name: Gate 7, licenses and bans, against deny.toml
+        # spec/CONVENTIONS.md: "every dependency has a license compatible with
+        # Apache 2.0". The policy is `deny.toml` at the repository root, which
+        # is where cargo-deny looks by default and where a reader expects a
+        # dependency policy (ruling R28). `--config` is still written out, so
+        # that this line says which policy was enforced rather than relying on
+        # a default that a future working directory could change.
+        # `advisories` is deliberately not in this list: cargo-audit above
+        # reads the same database, and one answer wants one place to configure.
+        run: cargo deny --manifest-path Cargo.toml --config deny.toml check licenses bans sources
+      - name: 'NOT A GATE: advisory secret scan (gate 7 secret scan NOT installed, see E-0003)'
+        # THE NAME OF THIS STEP IS THE DISCLAIMER, and it is in the name rather
+        # than only in this comment because the GitHub UI prints the name and
+        # not the comment. The place somebody cites a check is the line that
+        # went red or green, so that is the line that has to say what it is.
+        #
+        # WHAT IT IS. An advisory scanner. It matches six byte patterns against
+        # the printable-ASCII runs of every tracked file and every blob any ref
+        # reaches. Within that, it is thorough and the counts it prints are
+        # true: it reads every byte, it names anything it could not read, and
+        # it refuses (exit 3) rather than reporting a shallow clone clean.
+        #
+        # WHAT IT IS NOT. Gate 7's secret scan. The following all sit in a file
+        # and produce exit 0 from it, measured rather than assumed, with the
+        # real output in ops/gates/gate-7.md: an AWS key written UTF-16, a
+        # PKCS#12, a Java keystore, base64, gzip. A pattern matcher over bytes
+        # loses that race by construction. E-0003 asks the operator what
+        # implements this check; nothing may cite this step as the answer.
+        #
+        # WHY IT STILL RUNS, AND STILL FAILS THE JOB. Two choices were open and
+        # this is the argument for the one taken.
+        #
+        #   Delete it. It cannot be gate 7, so shipping it invites exactly the
+        #   citation this ticket exists to remove, and a check that catches the
+        #   easy half can make people feel covered for the hard half.
+        #
+        #   Keep it, blocking. It catches the common case, and catching some is
+        #   better than catching none: a key pasted into a config file in ASCII
+        #   is the overwhelmingly likely way one gets committed here, and this
+        #   step stops that pull request. Its exit 3 is also the only thing
+        #   checking that the runner has a history to scan at all.
+        #
+        # Kept, blocking. `continue-on-error: true` was considered and refused:
+        # it would make this a step that runs and cannot fail, which is the
+        # exact shape gate 1's and gate 2's harnesses in this same file exist to
+        # catch, and shipping one deliberately next to them would teach the next
+        # reader that the shape is acceptable. The citation risk is answered
+        # where citations happen, in the step name, not by disarming the step.
+        #
+        # A fixture's declared fake is told from a secret by the value carrying
+        # a marker, not by where it lives; the reasoning and what it costs are
+        # at the top of the script.
+        run: bash scripts/secret-scan.sh
+
+  gate-7-proof:
+    # spec/CI_CD.md section 1, gate 7, the demonstration AICD §14 asks for.
+    # The third job in this file whose success condition is the opposite of
+    # everything around it: it passes when gate 7's commands fail on the inputs
+    # planted for them under `fixtures/planted/gate-7/`.
+    #
+    # WHAT IT PROVES AND WHAT IT REFUSES TO PROVE. It proves gate 7's two
+    # installed checks, the advisory check and the licences-and-bans check,
+    # each on a planted input and each half attributable. It does NOT prove the
+    # secret scan is installed, and it says so in its own verdict: it runs the
+    # advisory scanner against planted repositories and records what it caught
+    # as evidence of what that scanner does, never as evidence that gate 7's
+    # third check exists. E-0003 is open on what does.
+    #
+    # WHY IT IS SEPARATE FROM `gate-7` ABOVE. `gate-7` answers "is this
+    # repository clean". This job answers "would gate 7 say so if it were
+    # not", and the second question is the one AICD §14 is about. Both are
+    # needed and neither substitutes for the other: gate 7 passed on this
+    # workspace from the first commit, because the workspace has no third-party
+    # dependency and no secret, and a gate that has only ever been seen passing
+    # is not installed.
+    #
+    # WHAT THE HARNESS ASKS, beyond running the commands. It parses this file
+    # rather than grepping it, and requires of each of the three commands the
+    # `gate-7` job runs, two of them gate commands and one advisory,
+    # and of THIS job, that the command is the `run:` of a step of a named job,
+    # that neither job nor step carries `if:` or `continue-on-error:`, that the
+    # job is in `ci`'s `needs:`, that `ci` carries no `continue-on-error:`, and
+    # that an unfiltered `pull_request` fires the workflow. It also reads
+    # `fetch-depth` out of the `gate-7` job's checkout, because that one value
+    # is what makes "the scan covers history" true on a runner. Every one of
+    # those checks is exercised against planted workflows before it is believed.
+    #
+    # It installs the two tools the same way `gate-7` does, by digest, because
+    # a harness that proved the gate with a different build of the tool would
+    # be proving a different gate.
+    name: gate-7-proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned gate 7 tools and verify each against its digest
+        run: |
+          set -euo pipefail
+          bin="$HOME/.local/bin"
+          mkdir -p "$bin"
+
+          fetch_pinned() {
+            local url="$1" want="$2" member="$3" out="$4" tmp got
+            tmp="$(mktemp -d)"
+            curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$tmp/archive" "$url"
+            got="$(sha256sum "$tmp/archive" | cut -d' ' -f1)"
+            if [ "$got" != "$want" ]; then
+              echo "::error file=.github/workflows/ci.yml::$url hashed $got and this file pins $want. The proof of gate 7 will not be run with a tool that is not the pinned one."
+              exit 1
+            fi
+            tar -xzf "$tmp/archive" -C "$tmp"
+            install -m 0755 "$tmp/$member" "$out"
+            rm -rf "$tmp"
+          }
+
+          fetch_pinned \
+            'https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz' \
+            '7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428' \
+            'cargo-audit-x86_64-unknown-linux-musl-v0.22.2/cargo-audit' \
+            "$bin/cargo-audit"
+          fetch_pinned \
+            'https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz' \
+            '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f' \
+            'cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny' \
+            "$bin/cargo-deny"
+
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: Gate 7 must fail on every planted defect and pass on every clean input
+        # The harness exits 0 only from its final verdict. It exits 1 when gate
+        # 7 stopped catching something still planted in the tree; 2 when it
+        # could not prove what it claims, which covers a comparator that cannot
+        # tell agreement from disagreement, a gate command this file no longer
+        # runs where a failure would fail this run, a `gate-7-proof` job that is
+        # itself not one whose failure fails this run or that the harness can no
+        # longer find in this file, a planted input that no longer contains what
+        # it was planted to contain, and an answer given for a reason other than
+        # the planted one; and 3 when a tool or the advisory database was not
+        # usable here, so nothing was checked. It writes `::error::`
+        # annotations, so the reason lands on the pull request check rather than
+        # only in a log somebody has to open: spec/runbooks/prove-gate.md step
+        # 3, "visible where a human would look".
+        run: bash fixtures/planted/gate-7/prove.sh
+
   ci:
     # THE ONE REQUIRED CHECK. Branch protection and the merge queue should
     # require `ci` and nothing else: the matrix job names above carry the
@@ -665,7 +954,7 @@ jobs:
     # AICD §39 and spec/PRD.md Z-02 name all three as one defect class:
     # "present but reporting nothing".
     name: ci
-    needs: [build, fmt, clippy, test, gate-1-proof, gate-2-proof]
+    needs: [build, fmt, clippy, test, gate-1-proof, gate-2-proof, gate-7, gate-7-proof]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
