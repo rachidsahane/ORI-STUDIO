@@ -28,6 +28,13 @@ name = "ori-core"
 version = "0.1.0"
 
 [[package]]
+name = "ori-desktop"
+version = "0.1.0"
+dependencies = [
+ "ori-engine",
+]
+
+[[package]]
 name = "ori-engine"
 version = "0.1.0"
 dependencies = [

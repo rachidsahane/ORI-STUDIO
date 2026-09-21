@@ -17,6 +17,7 @@ members = [
     "crates/ori-rpc",
     "crates/ori-engine",
     "crates/ori-cli",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]
