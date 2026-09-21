@@ -1,0 +1,12 @@
+[package]
+name = "ori-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ticket lifecycle, lock table, merge queue, escalation, budgets and closing rules."
+
+[dependencies]
+ori-gates = { workspace = true }
+ori-memory = { workspace = true }
+ori-runtime = { workspace = true }
+ori-store = { workspace = true }

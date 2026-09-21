@@ -1,0 +1,9 @@
+[package]
+name = "ori-calibration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Calibration sets, measurements and performance-relative thresholds."
+
+[dependencies]
+ori-store = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "ori-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Domain types, state machines, invariants and errors for the Ori Studio engine. No IO."
+
+[dependencies]

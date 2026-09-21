@@ -1,0 +1,9 @@
+[package]
+name = "ori-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Notification routing, desktop notifications and the digest."
+
+[dependencies]
+ori-store = { workspace = true }

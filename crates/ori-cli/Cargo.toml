@@ -1,0 +1,13 @@
+[package]
+name = "ori-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The `ori` command-line client."
+
+[[bin]]
+name = "ori"
+path = "src/main.rs"
+
+[dependencies]
+ori-engine = { workspace = true }

@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ori-core",
+    "crates/ori-store",
+    "crates/ori-memory",
+    "crates/ori-broker",
+    "crates/ori-runtime",
+    "crates/ori-gates",
+    "crates/ori-orchestrator",
+    "crates/ori-flows",
+    "crates/ori-watch",
+    "crates/ori-mcp",
+    "crates/ori-integrations",
+    "crates/ori-notify",
+    "crates/ori-calibration",
+    "crates/ori-rpc",
+    "crates/ori-engine",
+    "crates/ori-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+ori-broker = { path = "crates/ori-broker", version = "0.1.0" }
+ori-calibration = { path = "crates/ori-calibration", version = "0.1.0" }
+ori-core = { path = "crates/ori-core", version = "0.1.0" }
+ori-engine = { path = "crates/ori-engine", version = "0.1.0" }
+ori-flows = { path = "crates/ori-flows", version = "0.1.0" }
+ori-gates = { path = "crates/ori-gates", version = "0.1.0" }
+ori-integrations = { path = "crates/ori-integrations", version = "0.1.0" }
+ori-mcp = { path = "crates/ori-mcp", version = "0.1.0" }
+ori-memory = { path = "crates/ori-memory", version = "0.1.0" }
+ori-notify = { path = "crates/ori-notify", version = "0.1.0" }
+ori-orchestrator = { path = "crates/ori-orchestrator", version = "0.1.0" }
+ori-rpc = { path = "crates/ori-rpc", version = "0.1.0" }
+ori-runtime = { path = "crates/ori-runtime", version = "0.1.0" }
+ori-store = { path = "crates/ori-store", version = "0.1.0" }
+ori-watch = { path = "crates/ori-watch", version = "0.1.0" }
