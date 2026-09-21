@@ -1,0 +1,8 @@
+feat(gates): the last paragraph mixes prose with the trailers
+
+This is the near miss, and it is the one a careful author produces. The
+last paragraph is the trailer block and it opens with a sentence.
+
+and this line is prose rather than a trailer
+Ticket: ORI-T-0017
+Spec: CI_CD.md#1-pipeline-on-every-pull-request

@@ -1,0 +1,20 @@
+# DEAD: the gate job is healthy and the aggregate is not. The required check is
+# the aggregate, and an aggregate that cannot report failure gates nothing, so
+# the gate job's failure blocks no merge.
+name: sample-dead-aggregate-continue-on-error
+on:
+  pull_request:
+jobs:
+  gate-13:
+    runs-on: ubuntu-latest
+    steps:
+      - name: bash scripts/gates.sh --commit-trailers
+        run: bash scripts/gates.sh --commit-trailers
+  ci:
+    needs: [gate-13]
+    if: always()
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

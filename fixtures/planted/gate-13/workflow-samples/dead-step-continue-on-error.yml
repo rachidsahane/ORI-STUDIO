@@ -1,0 +1,19 @@
+# DEAD: the same on the step. The step's outcome is failure, its conclusion is
+# success, the job succeeds.
+name: sample-dead-step-continue-on-error
+on:
+  pull_request:
+jobs:
+  gate-13:
+    runs-on: ubuntu-latest
+    steps:
+      - name: bash scripts/gates.sh --commit-trailers
+        continue-on-error: true
+        run: bash scripts/gates.sh --commit-trailers
+  ci:
+    needs: [gate-13]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

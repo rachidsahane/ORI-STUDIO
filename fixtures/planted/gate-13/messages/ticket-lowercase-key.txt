@@ -1,0 +1,8 @@
+feat(gates): a lowercase trailer key
+
+Git's own trailer lookup is case-insensitive, so this one IS consumed. It
+is refused anyway, because CONVENTIONS writes `Ticket:` and the trailer is
+also read by humans and by tools that are not git.
+
+ticket: ORI-T-0017
+Spec: CI_CD.md#1-pipeline-on-every-pull-request

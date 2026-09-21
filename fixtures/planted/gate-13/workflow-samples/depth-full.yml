@@ -1,0 +1,31 @@
+# fetch-depth 0: the checkout hands the runner the whole history, which is the
+# only state in which gate 13 can name the commits a pull request carries.
+#
+# `actions/checkout` clones with `fetch-depth: 1` by default. In that clone the
+# runner holds one commit, and the base and head SHAs the event payload names
+# are simply not objects the repository has. Gate 13 refuses on that rather
+# than enumerating whatever happens to be present, so the wrong value here is
+# a red job and not a silent pass; this check exists so that the reason is
+# named in the prover's output instead of being discovered from a refusal on a
+# pull request.
+#
+# This file is owed the answer `0`.
+name: sample-depth-full
+on:
+  pull_request:
+jobs:
+  gate-13:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: bash scripts/gates.sh --commit-trailers
+        run: bash scripts/gates.sh --commit-trailers
+  ci:
+    needs: [gate-13]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

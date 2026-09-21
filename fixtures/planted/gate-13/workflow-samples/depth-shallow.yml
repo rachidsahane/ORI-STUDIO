@@ -1,0 +1,25 @@
+# fetch-depth 1: written out rather than left to the default, and just as
+# shallow. The value is read and reported, not compared against "is it
+# present": a check that only asked whether `fetch-depth` appears would pass
+# on this file.
+#
+# This file is owed the answer `1`.
+name: sample-depth-shallow
+on:
+  pull_request:
+jobs:
+  gate-13:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+      - name: bash scripts/gates.sh --commit-trailers
+        run: bash scripts/gates.sh --commit-trailers
+  ci:
+    needs: [gate-13]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

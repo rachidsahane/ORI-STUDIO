@@ -1,0 +1,9 @@
+feat(gates): a Ticket trailer with a folded continuation line
+
+Git folds an indented continuation into the value. A consumer reading the
+trailer receives the identifier with the continuation attached, so the
+value it resolves is not a ticket.
+
+Ticket: ORI-T-0017
+  and a continuation line that becomes part of the value
+Spec: CI_CD.md#1-pipeline-on-every-pull-request

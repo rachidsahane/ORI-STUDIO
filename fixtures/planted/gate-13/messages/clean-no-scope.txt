@@ -1,0 +1,7 @@
+docs: a conventional subject with no scope at all
+
+Conventional Commits makes the scope optional and eight of this
+repository's commits leave it out.
+
+Ticket: ORI-T-0017
+Spec: PRD.md#48-git-and-release-aicd-13

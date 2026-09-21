@@ -1,0 +1,34 @@
+# AMBIGUOUS. Two jobs run the harness, one of them live and one of them not.
+#
+# "The job that runs this script" names no single job here, so there is no
+# liveness answer to give about it. A prover that took the first match would
+# report `live` while a second copy of itself ran under `continue-on-error:`;
+# one that took the last would report `dead` while the live copy gated exactly
+# what it was meant to gate. Both are guesses about which of two jobs the
+# reader meant, and a proof that has to guess is not a proof.
+#
+# prove.sh refuses and says how many it found. Splitting the proof across two
+# jobs is a deliberate change to how gate 13 is demonstrated, so it gets a
+# deliberate re-proof.
+name: sample-self-two-jobs
+on:
+  pull_request:
+jobs:
+  gate-13-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove gate 13
+        run: bash fixtures/planted/gate-13/prove.sh
+  gate-13-proof-again:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove gate 13 once more
+        run: bash fixtures/planted/gate-13/prove.sh
+  ci:
+    needs: [gate-13-proof, gate-13-proof-again]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

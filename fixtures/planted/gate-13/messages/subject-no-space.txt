@@ -1,0 +1,7 @@
+feat(gates):no space after the colon
+
+Conventional Commits v1.0.0: "A description MUST immediately follow the
+colon and space after the type/scope prefix."
+
+Ticket: ORI-T-0017
+Spec: CONVENTIONS.md#git

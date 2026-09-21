@@ -1,0 +1,6 @@
+feat(gates):  two spaces after the colon
+
+Exactly one space, says the specification this gate cites.
+
+Ticket: ORI-T-0017
+Spec: CONVENTIONS.md#git

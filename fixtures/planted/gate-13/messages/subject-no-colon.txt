@@ -1,0 +1,4 @@
+feat gates a subject with no colon at all
+
+Ticket: ORI-T-0017
+Spec: CONVENTIONS.md#git
