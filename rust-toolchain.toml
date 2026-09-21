@@ -1,0 +1,67 @@
+# Toolchain pin for Ori Studio.
+#
+# Ticket ORI-T-0003. Spec anchor: ENV_SETUP §1 ("Rust stable (pinned in
+# `rust-toolchain.toml`)"), CONVENTIONS "Rust" ("Stable toolchain pinned in
+# `rust-toolchain.toml`. `cargo fmt` and `cargo clippy -D warnings` are gates").
+#
+# ---------------------------------------------------------------------------
+# Why an exact version and not the `stable` channel
+# ---------------------------------------------------------------------------
+#
+# Exact version (chosen). Every worktree, every agent and every CI runner
+# compiles with the same rustc and, more importantly, the same clippy lint set.
+# CI_CD gate 1 is `clippy -D warnings`, which makes the lint set part of the
+# build's pass/fail contract. Under a channel pin, an upstream stable release
+# adds a lint and turns a green build red with no commit anywhere in this
+# repository: every agent fails at once, and the history contains nothing to
+# point at. A control whose verdict changes without a traceable cause is the
+# failure class this project keeps finding (AICD §39). The toolchain is
+# an input to the gates, so it is version-controlled like any other input.
+#
+# Channel pin (rejected). It tracks upstream for free and never goes stale,
+# but it buys that by leaving the toolchain an untracked input.
+#
+# The cost of the exact pin is real and accepted: this line goes out of date,
+# and only a deliberate commit moves it. That cost is visible, has an owner,
+# and the diff to this file is the record of every toolchain change.
+#
+# 1.98.1 is the version installed on the operator's machine today
+# (rustc 1.98.1, cargo 1.98.1). The workspace is edition 2024, which needs
+# 1.85 or later, so this pin satisfies it with room to spare.
+
+[toolchain]
+channel = "1.98.1"
+
+# `minimal` plus exactly what the gates need. rustfmt and clippy are required
+# by CI_CD gate 1; without them listed here a fresh clone installs a toolchain
+# that cannot run gate 1 at all, and `scripts/setup-dev.sh` would have to paper
+# over the gap. Adding a component is cheap; a missing one is a broken gate.
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+
+# ---------------------------------------------------------------------------
+# Why `targets` is deliberately absent
+# ---------------------------------------------------------------------------
+#
+# The batch 1 exit criterion is `cargo build --workspace` green on macOS,
+# Windows and Linux in CI, and CI_CD gate 11 allows either cross-compilation or
+# a matrix. A matrix builds each platform natively on its own runner, and each
+# runner already has its own host target. Three reasons not to list targets:
+#
+#   1. Cost with no buyer. A `targets` list here makes every rustup invocation,
+#      in every worktree on every machine, download a standard library for all
+#      of them, including the ones that machine will never build.
+#   2. It would be a claim this file cannot honour. Cross-compiling to
+#      `x86_64-pc-windows-msvc` from macOS or Linux also needs the MSVC linker
+#      and Windows SDK, which a rustup target does not supply. Listing the
+#      target would advertise a capability that is not there: present, and
+#      reporting nothing.
+#   3. The list would be wrong for the job that actually cross-compiles. The
+#      release build (CI_CD §4 step 1) needs a macOS *universal*
+#      binary, which needs both `aarch64-apple-darwin` and `x86_64-apple-darwin`,
+#      a fourth target that "the three platforms" does not name.
+#
+# So the job that cross-compiles adds the target it needs with `rustup target
+# add`, next to the linker configuration it also needs. `scripts/setup-dev.sh`
+# reports which targets are installed locally, so the state is visible rather
+# than assumed.

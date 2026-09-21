@@ -69,6 +69,8 @@ AICD §39 records that the failures found on the first application were not agen
 | 1 | A directory was described in a ticket as a dead legacy backend, to be deleted | It owned the live database's migration history and built two of five production images | A belief stated as a conclusion (AICD §39) |
 | 2 | A rollback point was named in a backlog as existing | It did not exist | A precondition stated as fact (AICD §39) |
 | 3 | Four preconditions for phase 1 were reported as met: toolchain, remote, initial commit, branch protection | Two were met. The Rust toolchain was absent, and `main` had neither branch protection nor a ruleset | A precondition stated as fact |
+| 4 | On three further occasions: that the Rust toolchain was installed, that six pull requests had been merged, and that branch protection was on | The toolchain was absent on the first, and was installed by the fleet. The pull requests were open on all three occasions. Protection was absent on all three and was applied by the fleet | A precondition stated as fact, repeated |
+| 5 | A control was verified and the verification reported the opposite of the truth | Branch protection refused a direct push to `main`, exactly as required. The lead's test harness piped `git push` into `tee` and `tail`, so it read the pipeline's last exit status and reported the refusal as a success | Present but reporting nothing (AICD §39), produced while proving a control |
 
 **Defect 3, in detail.** On 2026-09-20 the operator reported four preconditions met and instructed the fleet to proceed without further confirmation. The lead verified each against its own evidence before starting: `cargo`, `rustc` and `rustup` absent from every standard path with no `~/.cargo` or `~/.rustup`; `branches/main/protection` returning 404, `rulesets` returning an empty list, and the effective rules for `main` empty. Two of four were absent. No work started.
 
@@ -77,3 +79,37 @@ AICD §39 records that the failures found on the first application were not agen
 **The rule the operator set after it.** Verification is not conditional on who states the precondition. When a precondition is absent, stop the ticket that depends on it and continue everything that does not, rather than stopping the session. This is a strictly better failure mode than the original instruction, which stopped all work on any absence: it keeps the cost of a wrong precondition proportional to what actually depended on it.
 
 **Measurement to carry forward.** Preconditions stated as fact is now the highest-frequency human-origin defect class in the record, at two of three. It is also the cheapest to check. Any ticket template that names a precondition should carry the command that verifies it, so the check is mechanical rather than remembered.
+
+
+## CR-003: the defect that keeps recurring, and what it costs
+
+Five human-origin defects are now recorded and **three of the five are the same class**: a precondition stated as fact. It is the cheapest class to check and the most frequent to occur.
+
+| | |
+|---|---|
+| Occurrences | 4 of 5 recorded defects involve a precondition stated as fact |
+| Cost of checking | Two API calls and a path search, under ten seconds |
+| Cost when unchecked | A workspace built with no compiler; gate tickets landing against an unprotected branch, proving the gates exist and nothing about whether they are enforced |
+| Detection | Every occurrence was caught by the fleet verifying rather than accepting |
+
+The rule the operator set after occurrence 3, that verification does not depend on who states the precondition, has now caught three more. It is the highest-yield control in this project so far, measured in defects caught per unit of effort, and it costs less than any gate.
+
+**The mechanical fix, recommended for the methodology.** A ticket that names a precondition should carry the command that verifies it, so the check is executed rather than remembered. `scripts/gates.sh` (ORI-T-0004) is the natural home for the local ones. This is proposed as a calibration note to AICD §30 alongside the lens-split note of CR-001.
+
+## CR-004: a gate can report the opposite of the truth, and did
+
+Defect 5 above is worth separating, because it is not a human-origin defect and not an agent-origin one. It is a defect in a **check**, and it appeared the first time this project verified a control.
+
+Branch protection was applied and then tested by attempting the forbidden action, a direct push to `main`. The push was refused correctly. The test harness reported that it had succeeded, because:
+
+```
+if git push origin main 2>&1 | tee /tmp/push.log | tail -6; then
+```
+
+returns the exit status of `tail`, not of `git push`. The control was sound; the instrument was inverted.
+
+**Measurement.** One of one controls verified so far produced a false reading on first attempt, from the harness rather than the control. The sample is one, so the rate means nothing yet; the failure mode means a great deal.
+
+**What it changes.** Every gate this project writes must capture the exit status of the command it gates before piping that command's output anywhere: a separate capture, `PIPESTATUS`, or `set -o pipefail`. A gate whose command is piped into a formatter has no exit status of its own and passes on every input, which is indistinguishable from working until a planted defect is put in front of it.
+
+This is the strongest evidence yet for AICD §14's planted-defect requirement. Without a deliberately failing input, the inverted harness above would have been recorded as a successful proof, and branch protection would have been cited as installed on the strength of a check that could not fail.
