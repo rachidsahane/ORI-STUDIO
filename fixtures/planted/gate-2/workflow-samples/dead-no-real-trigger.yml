@@ -1,0 +1,20 @@
+# DEAD: the only trigger is `workflow_dispatch`, so nothing fires on a pull
+# request and the job never runs. AICD §39 names this one: "Two CI workflows
+# sat intact behind a manual trigger ... while every document cited them as
+# gates."
+name: sample-dead-no-real-trigger
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+  ci:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

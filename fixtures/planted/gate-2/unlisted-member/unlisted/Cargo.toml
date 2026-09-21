@@ -1,0 +1,11 @@
+# NOT a member of ../Cargo.toml's workspace, and not excluded from it either.
+# `cargo test --workspace --locked` run in the parent directory never reaches
+# this package, so the failing test below never runs and never fails anything.
+[package]
+name = "gate-2-unlisted"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
