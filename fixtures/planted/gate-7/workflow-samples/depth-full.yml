@@ -1,0 +1,30 @@
+# fetch-depth 0: the checkout hands the runner the whole history, which is the
+# only state in which gate 7's secret scan can scan a history at all.
+#
+# `actions/checkout` clones with `fetch-depth: 1` by default. In that clone the
+# repository is shallow, every ref reaches exactly one commit, and "scan the
+# history" reads the tree and nothing else. The scanner refuses on a shallow
+# repository rather than reporting it clean, so the wrong value here is a red
+# job and not a silent pass; this check exists so that the reason is named in
+# the prover's output instead of being discovered from a refusal.
+#
+# This file is owed the answer `0`.
+name: sample-depth-full
+on:
+  pull_request:
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: cargo audit --deny warnings
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

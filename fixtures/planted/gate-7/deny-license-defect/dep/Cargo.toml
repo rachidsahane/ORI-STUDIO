@@ -1,0 +1,10 @@
+# THE PLANTED DEFECT: a dependency under a copyleft license that deny.toml's
+# allow list does not carry. spec/CONVENTIONS.md: "every dependency has a
+# license compatible with Apache 2.0". GPL-3.0-only is not; shipping it inside
+# this binary would change the license of the product.
+[package]
+name = "gate-7-deny-license-dep"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false

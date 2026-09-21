@@ -1,0 +1,19 @@
+# DEAD: the same on the step. The step's outcome is failure, its conclusion is
+# success, the job succeeds.
+name: sample-dead-step-continue-on-error
+on:
+  pull_request:
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo audit --deny warnings
+        continue-on-error: true
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

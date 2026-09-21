@@ -93,12 +93,30 @@
 #                    An ignored exit code is a gate that has stopped gating.
 #                    These gates are still printed every run, each with a reason
 #                    produced by a live probe rather than a hard-coded sentence:
-#                    when cargo-audit appears on PATH the reason for gate 7
-#                    changes by itself. The list cannot quietly go stale.
+#                    when cargo-mutants appears on PATH the reason for gate 6
+#                    changes by itself. The list cannot quietly go stale. It can
+#                    still be wrong about the wiring, and was: gate 7 sat here
+#                    with three hard-coded reasons until ORI-T-0016, and two of
+#                    the three had been falsified by the ticket that wired it.
+#                    The third, that the secret scan had no local runner, turned
+#                    out to be right; gate 7 now reports it blocked rather than
+#                    unavailable, because gates.sh does run something for it and
+#                    hiding that behind 'not available' is the state this table
+#                    exists to forbid.
 #
-#   blocked          gates.sh has a runner and this machine could not run it.
-#                    The coder usually fixes it in one command, and until they
-#                    do, their code has been checked by nobody. Exit 3.
+#   blocked          gates.sh has a runner and no verdict came out of it. Two
+#                    different things land here and the note tells them apart:
+#                    (a) this machine could not run it, which the coder usually
+#                    fixes in one command; (b) the gate is not installed in this
+#                    project yet and an escalation is open on it, which the
+#                    coder cannot fix at all. Gate 7's secret scan is (b),
+#                    escalation E-0003, so this script exits 3 on every run
+#                    until that is answered. That is the cost of not painting a
+#                    two-thirds-installed gate green, and it is the right cost:
+#                    an INCOMPLETE that stays until somebody decides something
+#                    is a standing question, where a green gate 7 would be a
+#                    standing lie. Either way the code that gate covers has been
+#                    checked by nobody. Exit 3.
 #
 # And the floor: if no gate at all reached passed or failed, the run proved
 # nothing, whatever the reasons were, so it exits 3 even when every unavailable
@@ -389,7 +407,7 @@ GATE_NAME[3]='contract tests'
 GATE_NAME[4]='coverage matrix, criteria to tests'
 GATE_NAME[5]='modified-test detector'
 GATE_NAME[6]='mutation score threshold'
-GATE_NAME[7]='cargo-audit, cargo-deny, secret scan'
+GATE_NAME[7]='cargo-audit, cargo-deny, secret scan (secret scan NOT installed, E-0003)'
 GATE_NAME[8]='forbidden-action test, fixtures/new-product'
 GATE_NAME[9]='citation gate, every AICD section reference resolves'
 GATE_NAME[10]='UI type check, lint, unit tests, build'
@@ -408,6 +426,7 @@ done
 
 GATE_RUNNER[1]='local'
 GATE_RUNNER[2]='local'
+GATE_RUNNER[7]='local'
 
 set_state() { GATE_STATE[$1]="$2"; GATE_NOTE[$1]="$3"; }
 
@@ -775,9 +794,214 @@ gate_2() {
 }
 
 # ---------------------------------------------------------------------------
-# Gates 3 to 14: gates.sh has no runner for any of them. Each one is probed
-# rather than assumed, so the reason printed is a fact about this machine and
-# this tree at this moment.
+# Gate 7: cargo-audit, cargo-deny, secret scan. CI_CD 1.7, ENV_SETUP section 4,
+# CONVENTIONS "Dependencies".
+#
+# GATE 7 IS PARTIALLY INSTALLED. TWO CHECKS OF THREE. Read this before reading
+# a green line below as gate 7 being met.
+#
+#   advisories (cargo-audit)          INSTALLED, seen to fail on a planted
+#                                     lockfile naming time 0.1.44
+#   licences and bans (cargo-deny)    INSTALLED, each half seen to fail
+#                                     separately and attributably
+#   secret scan                       NOT INSTALLED. Escalation E-0003.
+#
+# WHY THE THIRD IS NOT INSTALLED. Two attempts built a pattern scanner, and a
+# pattern matcher over bytes loses this race by construction: attempt 1 missed
+# every file holding a NUL byte, attempt 2 fixed that and misses UTF-16, and
+# base64, gzip, UTF-32 and a key split across a chunk boundary are the same
+# hole. The lead planted an AWS key encoded UTF-16, committed it, and the
+# repaired scanner exited 0 and reported no finding with the key in the file.
+# Separately, this repository already runs GitGuardian on every pull request
+# and has since before gate 7 was written. E-0003 asks the operator what
+# implements gate 7's secret scan; until it is answered this script reports
+# that sub-check blocked, and gate 7 with it.
+#
+# THE CONSEQUENCE, STATED SO THAT NOBODY IS SURPRISED BY IT. A blocked gate
+# makes this whole script exit 3, INCOMPLETE, on every run, until E-0003 is
+# answered. That is deliberate and it is the point: the alternative is exit 0
+# with gate 7 marked passed on the strength of a check that reports exit 0 for
+# a credential sitting in the tree, and this script's own header calls that its
+# defect class. Exit 3 is not exit 1: nothing has failed. What it says is that
+# gate 7 has not been fully checked by anybody, which is true.
+#
+# UNTIL ORI-T-0016 THIS GATE WAS A PROBE AND THREE SENTENCES, and the sentences
+# were wrong by the time anyone read them. It reported "not available" for a
+# missing `deny.toml`, said Cargo.lock's empty third-party list meant an
+# advisory check "could not be seen to fail on a planted defect", and said the
+# secret scan "has no local runner either". The first two are repaired: the
+# policy is at the repository root and both cargo checks have been seen to fail
+# on planted inputs (`fixtures/planted/gate-7/prove.sh`). The third sentence
+# was right for the wrong reason and is still right: the secret scan has no
+# gate runner, here or in CI. CLAUDE.md step 4 makes this script the gate set a
+# coder runs before opening a pull request, which is the one place a coder
+# would believe a sentence like that, so it says the true one.
+#
+# ONE GATE, THREE CHECKS, IN THREE TOOLS, reported one at a time for the reason
+# gate 1 reports fmt and clippy apart: a reader of a red run has to be able to
+# say which of the three failed without opening a log, and two thirds of a gate
+# passing is not the gate passing. Two thirds is exactly where gate 7 stands,
+# and the line below says "blocked" rather than "passed" for that reason.
+#
+# WHAT IS A BLOCK HERE AND WHAT IS A FAILURE. cargo-audit exits non-zero when
+# it cannot reach the advisory database, cargo-deny exits non-zero when it
+# cannot read a manifest, and the scanner exits 3 when it could not scan. None
+# of those is the gate catching anything, and recording one as a failure would
+# send a coder to look for a vulnerability that is not there. Each check below
+# reads what the tool printed before deciding which it was, and the advisory
+# check refuses a pass that loaded no advisories, because a clean report
+# against an empty database is the vacuous pass AICD §14 exists to forbid.
+# ---------------------------------------------------------------------------
+
+gate_7() {
+    local adv_state='not evaluated' adv_note=''
+    local lic_state='not evaluated' lic_note=''
+    local sec_state='not evaluated' sec_note=''
+
+    # Third-party packages carry a source line in Cargo.lock; the workspace's
+    # own path crates do not. This is a fact about what the two cargo checks
+    # have to judge here, and it is read on this run rather than asserted.
+    local third_party=0
+    if [ -f "$REPO_ROOT/Cargo.lock" ]; then
+        third_party=$(grep -c '^source = ' "$REPO_ROOT/Cargo.lock" 2>/dev/null || true)
+    fi
+
+    # --- advisories ------------------------------------------------------
+    say "  cargo audit --deny warnings"
+    run_cmd gate-07-probe-audit cargo audit --version
+    if [ "$RUN_STATUS" -ne 0 ]; then
+        adv_state='blocked'
+        adv_note="blocked, 'cargo audit --version' exited $RUN_STATUS here, so nothing compared Cargo.lock against the RustSec database (spec/ENV_SETUP.md section 1 lists cargo-audit; scripts/setup-dev.sh installs it)"
+        say "    ${C_RED}blocked${C_RESET}: 'cargo audit --version' exited $RUN_STATUS (spec/ENV_SETUP.md section 1; scripts/setup-dev.sh installs it)"
+    else
+        run_cmd gate-07-audit cargo audit --deny warnings
+        local audit_status=$RUN_STATUS loaded=''
+        loaded=$(sed -n 's/.*Loaded \([0-9][0-9]*\) security advisor.*/\1/p' "$RUN_LOG" 2>/dev/null | head -1)
+        if [ -z "$loaded" ]; then
+            adv_state='blocked'
+            adv_note="blocked, cargo-audit printed no 'Loaded N security advisories' line and exited $audit_status, so the advisory database was not loaded on this machine and any verdict from it would be a verdict against an empty database"
+            say "    ${C_RED}blocked${C_RESET}: no advisory database was loaded (exit $audit_status), so nothing was compared against anything"
+            show_output "$RUN_LOG" 20
+        elif [ "$audit_status" -eq 0 ]; then
+            adv_state='passed'
+            adv_note="cargo audit --deny warnings clean against $loaded loaded advisories; Cargo.lock names $third_party third-party package(s), so this pass is about the workspace's own path crates and the check's teeth are shown by fixtures/planted/gate-7/prove.sh instead"
+            say "    ${C_GREEN}ok${C_RESET}, against $loaded loaded advisories; Cargo.lock names $third_party third-party package(s)"
+        else
+            adv_state='failed'
+            adv_note="cargo audit --deny warnings exited $audit_status against $loaded loaded advisories"
+            say "    ${C_RED}failed, status $audit_status${C_RESET}"
+            show_output "$RUN_LOG" 40
+        fi
+    fi
+
+    # --- licenses, bans and sources --------------------------------------
+    say "  cargo deny --manifest-path Cargo.toml --config deny.toml check licenses bans sources"
+    run_cmd gate-07-probe-deny cargo deny --version
+    if [ "$RUN_STATUS" -ne 0 ]; then
+        lic_state='blocked'
+        lic_note="blocked, 'cargo deny --version' exited $RUN_STATUS here, so no license, ban or source policy was enforced (spec/ENV_SETUP.md section 1 lists cargo-deny; scripts/setup-dev.sh installs it)"
+        say "    ${C_RED}blocked${C_RESET}: 'cargo deny --version' exited $RUN_STATUS (spec/ENV_SETUP.md section 1; scripts/setup-dev.sh installs it)"
+    elif [ ! -f "$REPO_ROOT/deny.toml" ]; then
+        lic_state='blocked'
+        lic_note='blocked, deny.toml is not at the repository root, so cargo-deny would fall back to its own defaults and a clean verdict would be about those rather than about this repository policy'
+        say "    ${C_RED}blocked${C_RESET}: deny.toml is missing from the repository root"
+    else
+        run_cmd gate-07-deny cargo deny --manifest-path Cargo.toml --config deny.toml check licenses bans sources
+        local deny_status=$RUN_STATUS deny_summary=''
+        deny_summary=$(grep -E 'bans (ok|FAILED), licenses (ok|FAILED), sources (ok|FAILED)' "$RUN_LOG" 2>/dev/null | tail -1)
+        if [ -z "$deny_summary" ]; then
+            lic_state='blocked'
+            lic_note="blocked, cargo-deny exited $deny_status without printing a per-check verdict, so it did not get as far as judging this workspace against deny.toml"
+            say "    ${C_RED}blocked${C_RESET}: cargo-deny exited $deny_status without reaching a verdict on any check"
+            show_output "$RUN_LOG" 20
+        elif [ "$deny_status" -eq 0 ]; then
+            lic_state='passed'
+            lic_note="cargo-deny clean against deny.toml: $deny_summary; Cargo.lock names $third_party third-party package(s), so the license and ban checks pass on an empty set here and are shown to fail by fixtures/planted/gate-7/prove.sh"
+            say "    ${C_GREEN}ok${C_RESET}, $deny_summary"
+        else
+            lic_state='failed'
+            lic_note="cargo-deny exited $deny_status against deny.toml: $deny_summary"
+            say "    ${C_RED}failed, status $deny_status${C_RESET}: $deny_summary"
+            show_output "$RUN_LOG" 40
+        fi
+    fi
+
+    # --- the secret scan: BLOCKED, and blocked whatever the scanner says ---
+    #
+    # THIS SUB-CHECK CANNOT REACH 'passed' OR 'failed', BY CONSTRUCTION. The
+    # reason is above, at the head of gate_7: what implements gate 7's secret
+    # scan is escalation E-0003, open with the operator, and until it is
+    # answered there is nothing here whose verdict would mean gate 7's third
+    # check was met. `scripts/secret-scan.sh` still runs, because its findings
+    # are worth having and a coder should see them, but its exit status is
+    # reported as INFORMATION and never promoted to a gate verdict.
+    #
+    # Not even exit 1. A finding from an advisory scanner is a thing to go and
+    # look at, and the line below says so in the loudest terms this script has.
+    # But calling it 'failed' would make the complementary case -- exit 0 --
+    # readable as 'passed', and exit 0 from this scanner is the line an AWS key
+    # written UTF-16 produces with the key sitting in the tree. One verdict for
+    # a check that cannot be trusted in either direction is the honest number.
+    say "  bash scripts/secret-scan.sh (advisory; not a gate verdict)"
+    if [ ! -f "$REPO_ROOT/scripts/secret-scan.sh" ]; then
+        sec_state='blocked'
+        sec_note='blocked, gate 7 secret scan NOT INSTALLED (escalation E-0003: what implements it is an open question with the operator). The advisory scanner scripts/secret-scan.sh is also missing, so nothing read this tree or its history for credentials at all'
+        say "    ${C_RED}blocked${C_RESET}: gate 7's secret scan is not installed (E-0003), and the advisory scanner is missing too"
+    else
+        run_cmd gate-07-secrets bash "$REPO_ROOT/scripts/secret-scan.sh"
+        local scan_status=$RUN_STATUS scanned='' advisory=''
+        scanned=$(sed -n 's/^no finding: no secret-shaped printable-ASCII string outside a declared fake, //p' "$RUN_LOG" 2>/dev/null | head -1)
+        sec_state='blocked'
+        case "$scan_status" in
+            0)
+                advisory="the advisory scanner found nothing, ${scanned:-no counts printed} -- which is also what it reports for a credential that is not printable ASCII, so it is not evidence of absence"
+                say "    ${C_RED}blocked${C_RESET}: gate 7's secret scan is NOT INSTALLED (E-0003)"
+                say "      the advisory scanner found nothing: ${scanned:-no counts printed}"
+                say "      that is not a clean bill. A UTF-16 key, a .p12 or a keystore exits 0 here too."
+                ;;
+            1)
+                advisory='THE ADVISORY SCANNER FOUND A SECRET-SHAPED STRING that is not a declared fake, in the tree or in the history. Go and look at it now. Rotate first (spec/runbooks/rotate-credentials.md), because deleting the file leaves the blob reachable. It is recorded as advisory rather than as a gate failure only because the gate itself is not installed; the finding is real'
+                say "    ${C_RED}blocked${C_RESET}: gate 7's secret scan is NOT INSTALLED (E-0003), and"
+                say "    ${C_RED}the advisory scanner FOUND a secret-shaped string. Go and look.${C_RESET}"
+                say "      rotate before repairing (spec/runbooks/rotate-credentials.md)"
+                show_output "$RUN_LOG" 40
+                ;;
+            3)
+                advisory='the advisory scanner reported that it could not scan, which is its answer for a shallow clone, a missing tool, or a tracked entry or blob it could not read; the log names what was not scanned'
+                say "    ${C_RED}blocked${C_RESET}: gate 7's secret scan is NOT INSTALLED (E-0003)"
+                say "      the advisory scanner could not scan either; it names what it could not read"
+                show_output "$RUN_LOG" 30
+                ;;
+            *)
+                advisory="the advisory scanner exited $scan_status, which is not one of its three verdicts, so nothing it printed is a statement about this repository"
+                say "    ${C_RED}blocked${C_RESET}: gate 7's secret scan is NOT INSTALLED (E-0003)"
+                say "      the advisory scanner exited $scan_status, which is not one of its verdicts"
+                show_output "$RUN_LOG" 30
+                ;;
+        esac
+        sec_note="blocked, gate 7 secret scan NOT INSTALLED (escalation E-0003: what implements gate 7's secret scan is an open question with the operator, and this repository already runs GitGuardian on every pull request as an advisory check). scripts/secret-scan.sh is advisory and matches printable-ASCII patterns only, so neither of its verdicts is a gate verdict: $advisory. See ops/gates/gate-7.md, which records gate 7 as partially installed"
+    fi
+
+    # --- the gate ---------------------------------------------------------
+    local note="advisories: $adv_note; licenses and bans: $lic_note; secret scan: $sec_note"
+    if [ "$adv_state" = 'failed' ] || [ "$lic_state" = 'failed' ] || [ "$sec_state" = 'failed' ]; then
+        set_state 7 'failed' "$note"
+    elif [ "$adv_state" = 'blocked' ] || [ "$lic_state" = 'blocked' ] || [ "$sec_state" = 'blocked' ]; then
+        set_state 7 'blocked' "$note"
+    elif [ "$adv_state" = 'passed' ] && [ "$lic_state" = 'passed' ] && [ "$sec_state" = 'passed' ]; then
+        set_state 7 'passed' "$note"
+    else
+        # Unreachable by construction: every branch above assigns one of the
+        # three. Saying so rather than defaulting to a benign state is the rule
+        # this whole script is built on.
+        set_state 7 'not evaluated' "gate 7 left a sub-check unevaluated (advisories $adv_state, licenses $lic_state, secrets $sec_state), which is a bug in gates.sh"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Gates 3 to 6 and 8 to 14: gates.sh has no runner for any of them. Each one is
+# probed rather than assumed, so the reason printed is a fact about this machine
+# and this tree at this moment.
 # ---------------------------------------------------------------------------
 
 gate_3() {
@@ -818,23 +1042,6 @@ gate_6() {
     else
         append_note 6 "gate 2 counted $TESTS_RAN test(s), so a mutation threshold now has tests to measure and can be seen to fail on a planted defect"
     fi
-}
-
-gate_7() {
-    probe_unavailable 7 'tooling or configuration' cmd:cargo-audit cmd:cargo-deny path:deny.toml
-    # Third-party packages carry a source line in Cargo.lock; the workspace's
-    # own path crates do not. This is what cargo-audit and cargo-deny would
-    # have to judge.
-    local third_party=0
-    if [ -f "$REPO_ROOT/Cargo.lock" ]; then
-        third_party=$(grep -c '^source = ' "$REPO_ROOT/Cargo.lock" 2>/dev/null || true)
-    fi
-    if [ "$third_party" -eq 0 ]; then
-        append_note 7 'Cargo.lock names 0 third-party packages today, so an advisory or license check here could not be seen to fail on a planted defect (AICD §14)'
-    else
-        append_note 7 "Cargo.lock names $third_party third-party package(s), so an advisory and license check has something to judge; wire it here"
-    fi
-    append_note 7 'the secret scan covers tree and history and has no local runner either'
 }
 
 gate_8() {
@@ -1044,9 +1251,13 @@ main() {
     head1 "Gate 2: ${GATE_NAME[2]}"
     gate_2
 
-    STAGE='gates 3 to 14, availability probes'
-    head1 "Gates 3 to 14: probing availability"
-    gate_3; gate_4; gate_5; gate_6; gate_7; gate_8
+    STAGE='gate 7, the supply chain'
+    head1 "Gate 7: ${GATE_NAME[7]}"
+    gate_7
+
+    STAGE='gates 3 to 6 and 8 to 14, availability probes'
+    head1 "Gates 3 to 6 and 8 to 14: probing availability"
+    gate_3; gate_4; gate_5; gate_6; gate_8
     gate_9; gate_10; gate_11; gate_12; gate_13; gate_14
 
     local probed=0 i
@@ -1102,8 +1313,13 @@ main() {
                 say "  ${C_RED}NOTHING WAS CHECKED.${C_RESET} No gate reached a verdict on this run."
                 say "  This is not a pass. Do not read it as one, and do not open the pull request on it."
             else
-                say "  ${C_RED}INCOMPLETE.${C_RESET} $blocked gate(s) that gates.sh can run did not run on this machine."
-                say "  What they cover has been checked by nobody. The summary names each one and what to install."
+                say "  ${C_RED}INCOMPLETE.${C_RESET} $blocked gate(s) that gates.sh can run did not reach a verdict on this run."
+                say "  What they cover has been checked by nobody. The summary names each one and why."
+                say "  A gate can land here for two different reasons and the summary tells them apart:"
+                say "  something is missing from this machine and you can install it, or the gate itself"
+                say "  is not installed in this project yet and an escalation is open on it. Gate 7's"
+                say "  secret scan is the second kind (E-0003), so this run will say INCOMPLETE until"
+                say "  that is answered. INCOMPLETE is not FAILED; nothing here failed."
             fi
             say "  $unavailable gate(s) have no local runner at all; those are a fact about the project,"
             say "  they are listed above, and they are not what this exit code is about."

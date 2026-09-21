@@ -1,0 +1,24 @@
+# DEAD: `pull_request` is present and carries a `paths:` filter, so the
+# workflow does not run on a pull request that does not touch those paths, and
+# a pull request that changes only Cargo.lock gets no gate 7 at all. A filter
+# key on the trigger is a deliberate narrowing of when the gate fires and it
+# invalidates a proof written against the unnarrowed form, so prove.sh refuses
+# rather than deciding which paths are enough.
+name: sample-dead-narrowed-trigger
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo audit --deny warnings
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

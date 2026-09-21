@@ -1,0 +1,32 @@
+# Two checkouts in one job, disagreeing. The second overwrites the first on a
+# real runner, so the effective depth is 1, but reading it that way means this
+# prover modelling `actions/checkout`'s behaviour, which it does not do and
+# should not start doing for one key.
+#
+# It refuses instead. Two answers to "how deep is this job's checkout" is a
+# shape nobody wrote on purpose, and a prover that picked one of them would be
+# guessing at the one place gate 7's history half is decided.
+#
+# This file is owed the answer `ambiguous`.
+name: sample-depth-two-values
+on:
+  pull_request:
+jobs:
+  gate-7:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+      - name: cargo audit --deny warnings
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

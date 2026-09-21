@@ -1,0 +1,22 @@
+# DEAD: `continue-on-error: true` on the job. cargo-audit still runs and still
+# reports the advisory; GitHub records the job's conclusion as success, the
+# aggregate reads `success`, and the pull request is green with a known
+# vulnerability named in the log. The command string is untouched, which is
+# what makes this the cheapest weakening of all.
+name: sample-dead-job-continue-on-error
+on:
+  pull_request:
+jobs:
+  gate-7:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo audit --deny warnings
+        run: cargo audit --deny warnings
+  ci:
+    needs: [gate-7]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate
