@@ -24,13 +24,53 @@
 //! (`spec/LLD.md` section 2, and CLAUDE.md's load-bearing facts), so it cannot
 //! consult that index. [`SECTION_COUNT`] and [`NUMBERED_SUBSECTIONS`] therefore
 //! restate what the index holds, and the restatement is what the tests here
-//! check refusals against. The mechanical comparison of the two lives where the
-//! index does: `ori-gates` reads every file in the repository and resolves every
-//! `AICD §<n>` citation in it, which includes the citations in this file.
+//! check refusals against. A restatement that drifted would leave every test in
+//! this module green while the criterion they serve was false, so the
+//! restatement is itself checked, and necessarily not from here.
 //!
-//! What has no mechanical check today is the pair of constants below against the
-//! index itself, because no code may read both. That gap is reported rather than
-//! papered over.
+//! # What checks the restatement, and where
+//!
+//! The comparison lives in the one place allowed to read both sides:
+//! `ori_p1_033_every_restatement_of_the_index_agrees_with_the_index`, in
+//! `crates/ori-gates/src/sections.rs`. That crate parses
+//! `methodology/AICD_Methodology_v0.3.html` and reads the two constants below
+//! out of this file's Rust source as text, which is how it compares them
+//! without either side importing the other. The generated
+//! `methodology/sections.json` is tied to the same parse by
+//! `committed_sections_json_matches_a_fresh_parse_of_the_methodology` in that
+//! same file, so agreeing with the parse is agreeing with the index.
+//!
+//! When the two disagree that test fails and names every disagreement it found,
+//! not the first: a [`SECTION_COUNT`] above what the document carries as the
+//! references it would admit that resolve against no heading, one below it as
+//! the headings no refusal could then cite, and a [`NUMBERED_SUBSECTIONS`]
+//! entry as a heading this file omits or a pair the document has no heading
+//! for. Renaming, removing, duplicating or reshaping either constant fails it
+//! too, rather than reading as agreement: a reader that finds nothing and
+//! reports a pass is the "present but reporting nothing" defect of AICD §39.
+//! A second restatement elsewhere in the repository fails it until registered
+//! there. All of it runs with the workspace test suite, gate 2 of
+//! `spec/CI_CD.md` section 1.
+//!
+//! # What that check does not cover
+//!
+//! The appendix subsections `A.1` to `A.5` sit outside the comparison by
+//! design: `spec/LLD.md` section 4 types `MethodologyRef::section` as `u8`, so
+//! no appendix reference can be built, and the comparison drops index entries
+//! whose section is a letter. Nothing mechanically confirms that exclusion is
+//! still the right one; the doc comment on [`NUMBERED_SUBSECTIONS`] carries the
+//! ruling it rests on, and a later methodology that numbered subsections
+//! outside section 24 and appendix A would need that ruling revisited.
+//!
+//! This prose is not checked either, beyond its `AICD §<n>` citations resolving
+//! against the index, which
+//! `citations_resolve_everywhere_but_the_recorded_design_artifact` does for
+//! every file in the repository. That scan reads citations and never reads the
+//! constants, so it cannot stand in for the comparison above. These paragraphs
+//! replace ones that outlived their subject and went on describing the gap
+//! after it had been closed, which is AICD §39's defect class seen from the
+//! other side: a claim about what is verified that is the opposite of the
+//! truth.
 //!
 //! # Why the enum is written out rather than derived
 //!
