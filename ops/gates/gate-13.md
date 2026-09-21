@@ -5,7 +5,7 @@
 | Gate | CI_CD section 1, item 13 |
 | Command | `bash scripts/gates.sh --commit-trailers` |
 | Ticket | ORI-T-0017 |
-| **State** | **Proven, not Installed** |
+| **State** | **Installed** |
 | Written by | The lead, from the coder's verified evidence (ruling R25) |
 
 Gate 13 did not exist before this ticket: nothing in `.github/workflows/ci.yml` read a commit message, `scripts/gates.sh` reported it unavailable, and the gate was a line in a specification. This ticket builds it and proves it. What is owed for Installed is at the end.
@@ -93,13 +93,33 @@ Eight weakenings applied to a copy of the tree; the prover caught every one.
 | the trap message repaired by deleting one blank line | exit 2 |
 | a planted message deleted | exit 2 |
 
+## The failure is visible where a human would look
+
+AICD §14's third condition, established by observation.
+
+**Run 35654836919**, this ticket's own pull request: seventeen jobs green, `gate-13` and `gate-13-proof` among them.
+
+**Run 35656176844**, a throwaway branch carrying one commit whose `Ticket:` and `Spec:` lines sit above the `Co-Authored-By:` paragraph, so a regex finds both and git parses neither: **`gate-13` failed and the `ci` aggregate failed.** The refusal named the repair rather than only the fault:
+
+```
+ed36c9d964fa REFUSED   chore: deliberate gate 13 violation
+    codes: TICKET_UNPARSED SPEC_UNPARSED
+    - the message contains a 'Ticket:' line and GIT'S TRAILER PARSER DOES
+      NOT SEE IT. Git reads trailers out of the LAST PARAGRAPH of the
+      message only. Move the 'Ticket:' line into the final paragraph,
+      beside Co-Authored-By, with no blank line between them. Until then
+      every tool that reads trailers, the traceability chain of AICD §13
+      among them, sees nothing here
+```
+
+The branch was deleted; the run persists.
+
 ## What is not established
 
-1. **The visibility clause of AICD §14.** Owed: a green `gate-13-proof` on a real run, and an observed red `gate-13` on a real non-conforming commit.
-2. **That a real runner hands this gate the commits the harness hands it.** The payloads are written by the prover. GitHub's side of the contract cannot be exercised here; the cross-check against `pull_request.commits` turns a disagreement there into a refusal rather than a quietly short range.
-3. **That gate 13 has ever failed on a commit in this repository's history.** Every commit since the baseline carries both trailers where git reads them. What is proven is that it would not pass one that did not.
-4. **That a failing `ci` blocks a merge.** `ci` is not a required status check. Four proofs now record this as owed.
-5. **That the job running the prover stays live.** The recursion does not terminate inside the file; that path is tier 2 for this reason.
+1. **That a real runner hands this gate the commits the harness hands it.** The payloads are written by the prover. GitHub's side of the contract cannot be exercised here; the cross-check against `pull_request.commits` turns a disagreement there into a refusal rather than a quietly short range.
+2. **That gate 13 has ever failed on a commit in this repository's history.** Every commit since the baseline carries both trailers where git reads them. What is proven is that it would not pass one that did not.
+3. **That a failing `ci` blocks a merge.** `ci` is not a required status check. Four proofs now record this as owed.
+4. **That the job running the prover stays live.** The recursion does not terminate inside the file; that path is tier 2 for this reason.
 
 ## Rollback
 
