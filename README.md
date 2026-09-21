@@ -72,10 +72,10 @@ actually contains today, not what the roadmap describes.
 | Specification | Written. The registry in [`spec/README.md`](spec/README.md) lists 24 documents with an owner seat and a state. Most carry the state Draft, and phase 1 cannot launch until the foundation set is approved. |
 | Methodology | Present: `methodology/AICD_Methodology_v0.3.html`, with a generated machine readable section index at `methodology/sections.json`. |
 | Engine code | Sixteen crates under `crates/`, plus a desktop scaffold at `apps/desktop/`. Almost all of them are a `Cargo.toml` and one source file holding a doc comment that names what the crate will own and which AICD sections it implements, and nothing else. The one exception is `ori-gates`, which contains the generator for the methodology section index. |
-| Tests | 31, all in `ori-gates`, and all covering that section index generator. Every other crate has none, because there is nothing in them yet to test. |
+| Tests | All of them are in `ori-gates`, and all of them cover that section index generator. Every other crate has none, because there is nothing in them yet to test. |
 | The `ori` binary | Builds. Its `main` is empty. |
 | Desktop app | Directory structure and READMEs only. There is no Tauri dependency, no `package.json` and no UI code. The application is phase 3. |
-| CI | There is no CI workflow in this repository yet. `scripts/gates.sh` is what exists, and it has a local runner for 2 of the 14 required gates. |
+| CI | `.github/workflows/ci.yml` runs on every pull request, on a push to `main` and in the merge queue: build, `fmt`, `clippy` and `test` across macOS, Windows and Linux, a proof job for gate 1, and a `ci` job that fails unless every one of them succeeded. `ops/gates/gate-1.md` records one green run and one deliberately red one. That is not fourteen working gates. A gate counts as installed here only once a proof file records it failing on a planted defect, and `ops/gates/` holds those files: today it holds one, gate 1, `fmt` and `clippy`. Nor does CI block anything yet, because `ci` is not a required status check and `main` requires none, so a red run marks the pull request and stops no merge; `ops/gates/branch-protection.md` records why. Locally, `scripts/gates.sh` still reports all fourteen and has a runner for 2 of them. |
 
 **One thing that will mislead you if nobody says it.** After
 `cargo build --workspace`, the binary at `target/debug/ori` exists, runs, prints
@@ -120,6 +120,37 @@ and the same engine runs headless on a server or in CI. Source:
 Inside Ori Studio, every one of those boxes is a skeleton today. The engine, the
 memory service, the broker and the CLI are crates with no implementation in
 them, and the desktop app is a directory tree with no application in it.
+
+## What the interface is designed to be
+
+Ori Studio has no interface yet. The two images below are its design
+reference opened in a browser: a mockup of the desktop application phase 3
+will build, not a program you can run today.
+
+![Dark desktop window titled Ori Studio, on the "Dashboard by seat" tab. A left drawer lists four seats held by one person, Architect, Verification lead, Reliability and governance and Product owner, each with a count of items waiting on it. The main column carries an open incident banner, a strip reading queue depth 14, escalations 2, incidents 1, cost today $41 and matrix 96%, then one panel per seat holding only that seat's items: an ADR revisit condition and a blocked contract change for the architect, a tier 2 diff read and three proposed criteria for the verification lead, the incident and a passing forbidden-action test for reliability and governance. Each panel is footed with a line naming what is hidden from that seat. A right-hand assistant panel answers two questions about the fleet from operational memory and offers a decisional confirmation card with an accept button and a decline button.](docs/images/dashboard-by-seat.jpg)
+
+Dashboard by seat. One person holds all four AICD seats here, so each panel
+carries only what that seat decides and names what it is hiding. The
+assistant answers from operational memory, cites the methodology section
+behind a refusal, and puts a decisional change behind a confirmation instead
+of making it.
+
+![The same window on the "Fleet" tab. A table of six agent identities gives each one a ticket, a budget bar with elapsed time or attempt count, a model, GPT-5.1, Claude Opus, Gemini 3 Pro or Claude Sonnet, and an isolation mode of worktree or container: lead-01 is reviewing coder-02 with cross-model review enforced, coder-01 and qa-01 are running in containers, coder-02 sits at 100 percent of its budget, stopped and blocked on a contract change, and docs-01 is idle. Below the table, a lock table holds four scopes and records one refused start, a merge queue lists three tickets at tier 0, tier 1 and tier 2, and the broker reports the forbidden-action test passing on six identities out of six.](docs/images/fleet.jpg)
+
+Fleet. Six agent identities, each with its ticket, its budget, its model and
+an isolation mode of worktree or container, the lead reviewing a coder on a
+different model. Below them, a lock table that refused a start because
+another ticket had already claimed the scope, a merge queue in which the
+tier 0 ticket is green, the tier 1 ticket awaits one human and the tier 2
+ticket is held for a separate session, and the credential broker's
+forbidden-action test, kept as evidence.
+
+The reference is `spec/design/Ori Studio.html`, which is self contained and
+opens in any browser from a clone.
+[`spec/design/DESIGN.md`](spec/design/DESIGN.md) records it as DSN-001,
+approved for layout and tone and expressly not a complete flow set, and its
+section 6 lists fourteen further screens and flows that are still to design.
+The mockup is React; Ori Studio's UI is SolidJS, so it is ported, not reused.
 
 ## Its relationship to AICD
 
@@ -203,11 +234,15 @@ that is a conversation worth having on its own.
 
 ## License
 
-Apache 2.0 for the software. The AICD methodology document is CC BY 4.0. The
-name AICD is protected by a trademark policy.
+Apache 2.0 for the software, in [`LICENSE`](LICENSE), which is the Apache text
+unmodified. The methodology is CC BY 4.0 instead: that covers
+`methodology/AICD_Methodology_v0.3.html` and the `methodology/sections.json`
+generated from it. [`NOTICE`](NOTICE) is the authority on which licence covers
+which path, and it carries the attribution the CC BY files ask for.
 
-**There is no `LICENSE` file in this repository yet.** The statement above is
-the one made by [`spec/PROJECT_BRIEF.md`](spec/PROJECT_BRIEF.md)'s header table,
-and `Cargo.toml` declares `license = "Apache-2.0"` for the workspace. Until the
-file exists, those two are the only record of it, and neither is the grant
-itself. This is a known gap, not a considered choice.
+Two things here are unresolved, and neither is settled by the files above.
+[`spec/PROJECT_BRIEF.md`](spec/PROJECT_BRIEF.md)'s header table states that the
+name AICD is protected by a trademark policy; no such policy exists in this
+repository or is linked from it. And the methodology HTML carries no licence
+notice inside itself, so a copy of that file taken on its own travels with no
+statement of its terms. Both are known gaps, not considered choices.
