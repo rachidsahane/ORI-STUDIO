@@ -31,7 +31,7 @@ You run without permission prompts. Everything you can reach, you may use; every
 - `ori-core` has no IO and depends on nothing in the workspace. If you need IO in core, you are in the wrong crate.
 - Only `ori-broker` issues credentials and reads the keychain; only `ori-runtime` injects an issued credential at spawn and holds none beyond the session. Only `ori-orchestrator::merge_queue` calls `VcsHost::merge`. Only `ori-runtime` spawns processes. Only `ori-watch` reads the working tree outside a session. Only `ori-memory` writes operational memory.
 - Tier 2 modules are listed in `spec/RISK_MAP.md`. A change to any of them is tier 2 whatever the ticket says.
-- The four fixtures under `fixtures/` are AICD products used by the end-to-end suite. They are load-bearing test inputs, not examples to clean up.
+- `fixtures/` holds planted-defect harnesses, not AICD products. `fixtures/planted/` has one directory per gate that has been proven, `gate-1`, `gate-2`, `gate-7` and `gate-13` so far, each holding the defective inputs that gate must fail on and the `prove.sh` that runs it against them. They are load-bearing test inputs, not examples to clean up: delete one and that gate's proof is disarmed with nothing failing to say so. The AICD product fixtures the end-to-end suite will run against, `new-product`, `migrated-with-drift`, `inert-gate` and `looping-agent`, do not exist yet; `spec/TESTING.md` section 5 specifies them and `ops/phase-1-backlog.md` batch 15 schedules them as ORI-T-0073 to ORI-T-0076, with the suite itself as ORI-T-0077. `scripts/gates.sh` reporting gate 8 as not available for want of `fixtures/new-product` is that absence, not a defect to fix.
 
 ## Escalation triggers (AICD §12), each with the tool call
 
