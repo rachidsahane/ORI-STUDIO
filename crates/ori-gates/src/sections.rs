@@ -1016,6 +1016,14 @@ mod tests {
     // would put a fabricated reference in the coverage matrix, which is the
     // defect class AICD §39 exists to stop, so the names are descriptive and
     // the gap is reported instead.
+    //
+    // ORI-T-0085 adds the exception, and only because the exception is real.
+    // The tests named `ori_p1_033_*` at the end of this module exist for
+    // criterion ORI-P1-033 and for nothing else: one compares the repository's
+    // restatements of the index with the index, and three prove the reader that
+    // one depends on. Naming the criterion there is a report of what they cover,
+    // not an invention. The three that prove the reader prove the instrument
+    // rather than the criterion, and say so.
 
     /// The repository root, two levels above `crates/ori-gates`.
     fn repo_root() -> PathBuf {
@@ -1949,5 +1957,826 @@ mod tests {
         let numbers: Vec<&str> = found.iter().map(|c| c.number.as_str()).collect();
         assert_eq!(numbers, ["99"], "a citation in undecodable bytes is found");
         assert!(!methodology().contains("99"), "and does not resolve");
+    }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0085: the tie between a restatement of the index and the index.
+    //
+    // Criterion ORI-P1-033 reads "Carries `MethodologyRef` with a section that
+    // resolves in the methodology index". The crate that builds that reference
+    // is `ori-core`, and `spec/LLD.md` section 2 forbids it IO and forbids it
+    // importing any workspace crate, so it cannot read the index. It restates
+    // it instead, in two constants, and checks its own refusals against the
+    // restatement. Nothing compared the restatement with the index, because no
+    // crate could read both.
+    //
+    // The gap is not theoretical. On branch `feat/ORI-T-0019-domain-types`,
+    // setting `SECTION_COUNT` to 44 leaves all 27 of that crate's tests
+    // passing, exit 0. Every refusal would then be free to cite four sections
+    // the methodology does not have, and the criterion would be false with no
+    // test to say so. That is the defect class AICD §39 names, "present but
+    // reporting nothing".
+    //
+    // This module can read both: it already parses the methodology and already
+    // walks every file in the repository. So the comparison lives here, and it
+    // reads the restatement out of Rust source as text.
+    //
+    // The comparison is made against the index parsed from the methodology
+    // document, not against the bytes of `methodology/sections.json`. The two
+    // are already tied by
+    // `committed_sections_json_matches_a_fresh_parse_of_the_methodology`, so
+    // going through the JSON would add a second parser and a second way to be
+    // wrong without adding a fact.
+    // -----------------------------------------------------------------------
+
+    /// The name of the constant that restates how many sections there are.
+    const SECTION_COUNT_NAME: &str = "SECTION_COUNT";
+
+    /// The name of the constant that restates which subsections there are.
+    const SUBSECTIONS_NAME: &str = "NUMBERED_SUBSECTIONS";
+
+    /// Both names, for the sweep that looks for a restatement nobody registered.
+    const RESTATED_CONSTANTS: [&str; 2] = [SECTION_COUNT_NAME, SUBSECTIONS_NAME];
+
+    /// Every file that restates the index in Rust source, with why it must.
+    ///
+    /// A file listed here and absent from the tree is a failure, not a skip.
+    /// A check that passes when its subject is missing reports nothing, and a
+    /// check that reports nothing is what this test exists to remove; it would
+    /// also go on reporting nothing after the subject came back under a name
+    /// the list no longer matched.
+    const RESTATEMENTS: [(&str, &str); 1] = [(
+        "crates/ori-core/src/error.rs",
+        "`ori-core` may not do IO and may not import a workspace crate \
+         (`spec/LLD.md` section 2, and CLAUDE.md's load-bearing facts), so it \
+         restates the index rather than reading it. The file arrives with pull \
+         request 27, ORI-T-0019, which is open and unmerged, so this test is \
+         red until that merges and this branch merges after it",
+    )];
+
+    /// Files that carry the text of a restatement without being one.
+    ///
+    /// Checked, not trusted: the test below asserts each of these still carries
+    /// the text it is exempted for, so an exemption that has outlived its
+    /// reason is a failure rather than a permanent blind spot.
+    const NOT_A_RESTATEMENT: [(&str, &str); 1] = [(
+        "crates/ori-gates/src/sections.rs",
+        "this file, whose fixtures quote a restatement in order to prove the \
+         reader that finds one",
+    )];
+
+    /// What one file's Rust source says the methodology index holds.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct Restated {
+        /// The type [`SECTION_COUNT_NAME`] is declared as, for the message.
+        declared: String,
+        /// The value of [`SECTION_COUNT_NAME`].
+        sections: u64,
+        /// The pairs of [`SUBSECTIONS_NAME`], in the order they are written.
+        subsections: Vec<(u64, String)>,
+    }
+
+    /// The first offset at or after `at` that is neither whitespace nor comment.
+    ///
+    /// Nested block comments are not handled: `/* /* */ */` is taken to end at
+    /// the first `*/`. The reader below refuses what it cannot parse, so the
+    /// consequence of that simplification is a loud failure and never a wrong
+    /// answer.
+    fn noise_end(source: &str, mut at: usize) -> usize {
+        let bytes = source.as_bytes();
+        loop {
+            while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+                at += 1;
+            }
+            let tail = &source[at..];
+            if let Some(rest) = tail.strip_prefix("//") {
+                at += 2 + rest.find('\n').map_or(rest.len(), |end| end + 1);
+                continue;
+            }
+            if let Some(rest) = tail.strip_prefix("/*") {
+                at += 2 + rest.find("*/").map_or(rest.len(), |end| end + 2);
+                continue;
+            }
+            return at;
+        }
+    }
+
+    /// Whether a byte can sit inside a Rust identifier.
+    fn is_ident_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_'
+    }
+
+    /// A position in Rust source that reads tokens and skips comments.
+    ///
+    /// Deliberately not a Rust lexer. It knows the one grammar the two
+    /// constants are written in and refuses everything else, because a reader
+    /// that guesses at a form it was not given would report agreement it never
+    /// checked.
+    struct Cursor<'a> {
+        source: &'a str,
+        at: usize,
+    }
+
+    impl<'a> Cursor<'a> {
+        fn new(source: &'a str, at: usize) -> Self {
+            Cursor { source, at }
+        }
+
+        /// Moves past whitespace and comments.
+        fn skip(&mut self) {
+            self.at = noise_end(self.source, self.at);
+        }
+
+        /// Consumes `token` if it is next, and says whether it was.
+        fn eat(&mut self, token: &str) -> bool {
+            self.skip();
+            if self.source[self.at..].starts_with(token) {
+                self.at += token.len();
+                true
+            } else {
+                false
+            }
+        }
+
+        /// Moves past the next `token`, or says the source ran out first.
+        ///
+        /// Used only to cross a type annotation, which carries no string and no
+        /// `=`, so it does not need to know either.
+        fn seek(&mut self, token: &str) -> bool {
+            loop {
+                self.skip();
+                if self.at >= self.source.len() {
+                    return false;
+                }
+                if self.eat(token) {
+                    return true;
+                }
+                let step = self.source[self.at..]
+                    .chars()
+                    .next()
+                    .map_or(1, char::len_utf8);
+                self.at += step;
+            }
+        }
+
+        /// A Rust identifier, such as the type a constant is declared as.
+        fn identifier(&mut self) -> Option<String> {
+            self.skip();
+            let tail = &self.source[self.at..];
+            let read = tail
+                .char_indices()
+                .find(|(_, character)| !(character.is_ascii_alphanumeric() || *character == '_'))
+                .map_or(tail.len(), |(offset, _)| offset);
+            if read == 0 {
+                return None;
+            }
+            self.at += read;
+            Some(tail[..read].to_string())
+        }
+
+        /// A decimal integer literal, with `_` separators and any type suffix.
+        ///
+        /// `40`, `40u8` and `4_0` are the same literal, and all three are read,
+        /// so a change of integer form is not a change of meaning here.
+        fn integer(&mut self) -> Option<u64> {
+            self.skip();
+            let tail = &self.source[self.at..];
+            let mut digits = String::new();
+            let mut read = 0usize;
+            for character in tail.chars() {
+                if character.is_ascii_digit() {
+                    digits.push(character);
+                } else if character != '_' {
+                    break;
+                }
+                read += character.len_utf8();
+            }
+            if digits.is_empty() {
+                return None;
+            }
+            for character in tail[read..].chars() {
+                if character.is_ascii_alphanumeric() || character == '_' {
+                    read += character.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            self.at += read;
+            digits.parse().ok()
+        }
+
+        /// A double-quoted string literal.
+        ///
+        /// Raw strings and escapes other than the six below are refused rather
+        /// than guessed at, for the reason the type carries: a guess is a report
+        /// of something the source does not say.
+        fn string(&mut self) -> Option<String> {
+            self.skip();
+            let bytes = self.source.as_bytes();
+            if bytes.get(self.at) != Some(&b'"') {
+                return None;
+            }
+            let mut at = self.at + 1;
+            let mut value = String::new();
+            while at < bytes.len() {
+                match bytes[at] {
+                    b'"' => {
+                        self.at = at + 1;
+                        return Some(value);
+                    }
+                    b'\\' => {
+                        value.push(match *bytes.get(at + 1)? {
+                            b'"' => '"',
+                            b'\\' => '\\',
+                            b'n' => '\n',
+                            b'r' => '\r',
+                            b't' => '\t',
+                            b'0' => '\0',
+                            _ => return None,
+                        });
+                        at += 2;
+                    }
+                    _ => {
+                        let character = self.source[at..].chars().next()?;
+                        value.push(character);
+                        at += character.len_utf8();
+                    }
+                }
+            }
+            None
+        }
+
+        /// The next forty characters, quoted, for a message that has to say
+        /// what was found instead of what was looked for.
+        fn rest(&self) -> String {
+            let at = noise_end(self.source, self.at);
+            let tail = &self.source[at..];
+            let cut = tail
+                .char_indices()
+                .nth(40)
+                .map_or(tail.len(), |(offset, _)| offset);
+            format!("{:?}", &tail[..cut])
+        }
+    }
+
+    /// A cursor just past the one `const <name>` in `source`.
+    ///
+    /// None and several are both refused. None is the reformat or the rename
+    /// that would otherwise turn this whole test into a green run that compared
+    /// nothing, which AICD §39 names as the defect worth more than the one it
+    /// hides. Several is ambiguity, and picking one would be a guess.
+    fn declaration<'a>(source: &'a str, name: &str) -> Result<Cursor<'a>, String> {
+        let needle = format!("const {name}");
+        let bytes = source.as_bytes();
+        let mut ends: Vec<usize> = Vec::new();
+        let mut at = 0usize;
+        while let Some(offset) = source[at..].find(&needle) {
+            let start = at + offset;
+            let end = start + needle.len();
+            let before = start == 0 || !is_ident_byte(bytes[start - 1]);
+            let after = match bytes.get(end) {
+                None => true,
+                Some(byte) => !is_ident_byte(*byte),
+            };
+            if before && after {
+                ends.push(end);
+            }
+            at = end;
+        }
+        match ends.len() {
+            1 => Ok(Cursor::new(source, ends[0])),
+            0 => Err(format!(
+                "there is no `const {name}` here. It was renamed, removed, or written in a form \
+                 this reader does not recognise, so nothing at all was compared against \
+                 {OUTPUT_PATH}. That is why this is a failure rather than a pass: the reader \
+                 reports what it checked, and it checked nothing."
+            )),
+            many => Err(format!(
+                "there are {many} declarations of `const {name}` here, so which one restates \
+                 {OUTPUT_PATH} is ambiguous and none was used."
+            )),
+        }
+    }
+
+    /// The type and value of `const <name>: <type> = <integer>;`.
+    fn integer_constant(source: &str, name: &str) -> Result<(String, u64), String> {
+        let mut cursor = declaration(source, name)?;
+        if !cursor.eat(":") {
+            return Err(format!(
+                "`const {name}` is not followed by `: <type>` but by {}",
+                cursor.rest()
+            ));
+        }
+        let Some(declared) = cursor.identifier() else {
+            return Err(format!(
+                "`const {name}` is not declared with a plain type name but with {}",
+                cursor.rest()
+            ));
+        };
+        if !cursor.eat("=") {
+            return Err(format!(
+                "`const {name}: {declared}` is not followed by `=` but by {}",
+                cursor.rest()
+            ));
+        }
+        let Some(value) = cursor.integer() else {
+            return Err(format!(
+                "`const {name}: {declared}` is not given an integer literal but {}",
+                cursor.rest()
+            ));
+        };
+        if !cursor.eat(";") {
+            return Err(format!(
+                "`const {name}: {declared} = {value}` is not closed by `;` but by {}",
+                cursor.rest()
+            ));
+        }
+        Ok((declared, value))
+    }
+
+    /// The pairs of `const <name>: &[(<integer>, &str)] = &[(n, "s"), ...];`.
+    fn pair_slice_constant(source: &str, name: &str) -> Result<Vec<(u64, String)>, String> {
+        let mut cursor = declaration(source, name)?;
+        if !cursor.eat(":") {
+            return Err(format!(
+                "`const {name}` is not followed by `: <type>` but by {}",
+                cursor.rest()
+            ));
+        }
+        if !cursor.seek("=") {
+            return Err(format!(
+                "`const {name}` is declared with no `=` and so no value"
+            ));
+        }
+        if !cursor.eat("&") || !cursor.eat("[") {
+            return Err(format!(
+                "`const {name}` is not given a `&[...]` slice literal but {}",
+                cursor.rest()
+            ));
+        }
+        let mut pairs: Vec<(u64, String)> = Vec::new();
+        loop {
+            if cursor.eat("]") {
+                break;
+            }
+            let nth = pairs.len() + 1;
+            if !cursor.eat("(") {
+                return Err(format!(
+                    "`const {name}` entry {nth} does not open with `(` but with {}",
+                    cursor.rest()
+                ));
+            }
+            let Some(section) = cursor.integer() else {
+                return Err(format!(
+                    "`const {name}` entry {nth} has no section number but {}",
+                    cursor.rest()
+                ));
+            };
+            if !cursor.eat(",") {
+                return Err(format!(
+                    "`const {name}` entry {nth} has no `,` after {section} but {}",
+                    cursor.rest()
+                ));
+            }
+            let Some(subsection) = cursor.string() else {
+                return Err(format!(
+                    "`const {name}` entry {nth} has no quoted subsection but {}",
+                    cursor.rest()
+                ));
+            };
+            cursor.eat(",");
+            if !cursor.eat(")") {
+                return Err(format!(
+                    "`const {name}` entry {nth} does not close with `)` but with {}",
+                    cursor.rest()
+                ));
+            }
+            pairs.push((section, subsection));
+            if cursor.eat(",") {
+                continue;
+            }
+            if cursor.eat("]") {
+                break;
+            }
+            return Err(format!(
+                "`const {name}` has neither `,` nor `]` after entry {nth} but {}",
+                cursor.rest()
+            ));
+        }
+        if !cursor.eat(";") {
+            return Err(format!(
+                "`const {name}` is not closed by `;` but by {}",
+                cursor.rest()
+            ));
+        }
+        if pairs.is_empty() {
+            return Err(format!(
+                "`const {name}` is an empty slice, so nothing was compared against {OUTPUT_PATH}"
+            ));
+        }
+        Ok(pairs)
+    }
+
+    /// What one file's source says the index holds, or why it could not be read.
+    fn read_restatement(source: &str) -> Result<Restated, String> {
+        let (declared, sections) = integer_constant(source, SECTION_COUNT_NAME)?;
+        let subsections = pair_slice_constant(source, SUBSECTIONS_NAME)?;
+        Ok(Restated {
+            declared,
+            sections,
+            subsections,
+        })
+    }
+
+    /// A list for a message, cut short before it stops being readable.
+    fn at_most(items: &[String], cap: usize) -> String {
+        if items.len() <= cap {
+            return items.join(", ");
+        }
+        format!(
+            "{}, and {} more",
+            items[..cap].join(", "),
+            items.len() - cap
+        )
+    }
+
+    /// Every way a restatement disagrees with the index, in the words a human
+    /// needs in order to fix it.
+    ///
+    /// Returns the disagreements rather than asserting, so the same comparison
+    /// serves the repository and the fixtures the planted defects are applied
+    /// to, and so one run names every defect instead of the first.
+    fn restatement_defects(restated: &Restated, index: &Index) -> Vec<String> {
+        let mut defects: Vec<String> = Vec::new();
+
+        let carried = index.count(EntryKind::Section) as u64;
+        let stated = restated.sections;
+        if stated != carried {
+            let declared = &restated.declared;
+            let consequence = if stated > carried {
+                let fabricated: Vec<String> = ((carried + 1)..=stated)
+                    .map(|n| spell(&n.to_string()))
+                    .collect();
+                format!(
+                    "{} would be built without complaint and resolve against no heading",
+                    at_most(&fabricated, 8)
+                )
+            } else {
+                let lost: Vec<String> = ((stated + 1)..=carried)
+                    .map(|n| spell(&n.to_string()))
+                    .collect();
+                format!(
+                    "{} are headings of the methodology that no refusal can cite",
+                    at_most(&lost, 8)
+                )
+            };
+            defects.push(format!(
+                "`{SECTION_COUNT_NAME}: {declared} = {stated}` restates {} as carrying {stated} \
+                 numbered sections; it carries {carried}, so {consequence}",
+                index.source
+            ));
+        }
+
+        // `spec/LLD.md` section 4 types `MethodologyRef::section` as `u8`, so a
+        // subsection of an appendix (`A.1`) cannot be written as one. Those are
+        // not expected in the restatement and their absence is not a defect.
+        let mut expressible: BTreeSet<(u64, String)> = BTreeSet::new();
+        for entry in index
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Subsection)
+        {
+            let Some((section, subsection)) = entry.number.split_once('.') else {
+                defects.push(format!(
+                    "the index carries a subsection numbered {} with no `.` in it, which this \
+                     comparison cannot place, so it is reported rather than passed over",
+                    entry.number
+                ));
+                continue;
+            };
+            if let Ok(number) = section.parse::<u64>() {
+                expressible.insert((number, subsection.to_string()));
+            }
+        }
+
+        let listed: BTreeSet<(u64, String)> = restated.subsections.iter().cloned().collect();
+        if listed.len() != restated.subsections.len() {
+            defects.push(format!(
+                "`{SUBSECTIONS_NAME}` lists {} pairs of which only {} are distinct",
+                restated.subsections.len(),
+                listed.len()
+            ));
+        }
+        for (section, subsection) in expressible.difference(&listed) {
+            defects.push(format!(
+                "the methodology has a heading {} and `{SUBSECTIONS_NAME}` does not carry \
+                 ({section}, {subsection:?}), so no refusal can cite it",
+                spell(&format!("{section}.{subsection}"))
+            ));
+        }
+        for (section, subsection) in listed.difference(&expressible) {
+            defects.push(format!(
+                "`{SUBSECTIONS_NAME}` carries ({section}, {subsection:?}) and the methodology has \
+                 no heading {}, so a refusal citing it would resolve against nothing",
+                spell(&format!("{section}.{subsection}"))
+            ));
+        }
+
+        defects
+    }
+
+    /// Whether `bytes` declares `const <name>` at a token boundary.
+    ///
+    /// Bytes, not text, for the reason [`citations_in`] gives: a file that is
+    /// not valid UTF-8 must not become a file the sweep passes over in silence.
+    fn declares(bytes: &[u8], name: &str) -> bool {
+        let needle = format!("const {name}");
+        let needle = needle.as_bytes();
+        bytes.windows(needle.len()).enumerate().any(|(at, window)| {
+            window == needle
+                && (at == 0 || !is_ident_byte(bytes[at - 1]))
+                && match bytes.get(at + needle.len()) {
+                    None => true,
+                    Some(byte) => !is_ident_byte(*byte),
+                }
+        })
+    }
+
+    /// ORI-P1-033: every restatement of the methodology index in this
+    /// repository says what the index says.
+    ///
+    /// Derived from criterion ORI-P1-033 in `spec/criteria/phase-1.md`, "Carries
+    /// `MethodologyRef` with a section that resolves in the methodology index",
+    /// and from AICD §39, which is where the rule that references are checked
+    /// mechanically comes from. The criterion's own tests live in `ori-core` and
+    /// check refusals against that crate's restatement of the index; this test
+    /// is the missing half, the one that checks the restatement against the
+    /// index, without which the criterion can be false with every test green.
+    ///
+    /// The three other tests named `ori_p1_033_reader_*` prove the reader this
+    /// one depends on, on fixtures carrying planted defects (AICD §14). They
+    /// prove the instrument, not the criterion.
+    #[test]
+    fn ori_p1_033_every_restatement_of_the_index_agrees_with_the_index() {
+        let index = methodology();
+        let root = repo_root();
+        let mut defects: Vec<String> = Vec::new();
+
+        for (path, why) in RESTATEMENTS {
+            match fs::read_to_string(root.join(path)) {
+                Ok(source) => match read_restatement(&source) {
+                    Ok(restated) => defects.extend(
+                        restatement_defects(&restated, &index)
+                            .into_iter()
+                            .map(|defect| format!("{path}: {defect}")),
+                    ),
+                    Err(reason) => defects.push(format!("{path}: {reason}")),
+                },
+                Err(error) => defects.push(format!(
+                    "{path}: cannot be read ({error}). It is registered as a restatement of \
+                     {OUTPUT_PATH} because {why}. A registered restatement that is absent is a \
+                     failure and not a skip, because a check that passes when its subject is \
+                     missing is a check that reports nothing."
+                )),
+            }
+        }
+
+        // The sweep: a restatement nobody registered is a restatement nobody
+        // checks, and the register is a hand-kept list, which is the thing this
+        // repository keeps finding to have gone quietly stale.
+        for (path, why) in NOT_A_RESTATEMENT {
+            let bytes = fs::read(root.join(path))
+                .unwrap_or_else(|error| panic!("cannot read the exempt {path}: {error}"));
+            assert!(
+                RESTATED_CONSTANTS.iter().any(|name| declares(&bytes, name)),
+                "{path} is exempt from the restatement sweep because it is {why}, and it now \
+                 declares neither {SECTION_COUNT_NAME} nor {SUBSECTIONS_NAME}. The exemption has \
+                 outlived its reason and is a blind spot until it is removed."
+            );
+        }
+
+        let (files, _) = scan_repository();
+        assert!(
+            !files.is_empty(),
+            "the scan visited no file under {}, so the sweep below stands for nothing",
+            root.display()
+        );
+        let registered: BTreeSet<&str> = RESTATEMENTS
+            .iter()
+            .chain(NOT_A_RESTATEMENT.iter())
+            .map(|(path, _)| *path)
+            .collect();
+        for file in &files {
+            if registered.contains(file.as_str()) {
+                continue;
+            }
+            let bytes = fs::read(root.join(file))
+                .unwrap_or_else(|error| panic!("cannot read {file}: {error}"));
+            for name in RESTATED_CONSTANTS {
+                if declares(&bytes, name) {
+                    defects.push(format!(
+                        "{file} declares `const {name}` and is in neither RESTATEMENTS nor \
+                         NOT_A_RESTATEMENT, so a second restatement of {OUTPUT_PATH} exists that \
+                         nothing compares with it"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            defects.is_empty(),
+            "{} between the repository's restatements of {OUTPUT_PATH} and {}:\n  {}",
+            count(defects.len(), "disagreement"),
+            index.source,
+            defects.join("\n  ")
+        );
+    }
+
+    // ---- the reader, on fixtures written for the purpose (AICD §14) ----
+
+    /// A restatement in the form `crates/ori-core/src/error.rs` writes it on
+    /// branch `feat/ORI-T-0019-domain-types`, trimmed to what is read.
+    ///
+    /// The fixture proves the reader; the test above proves the fixture is the
+    /// form the repository actually uses, because it runs the same reader over
+    /// the real file and refuses what it cannot parse.
+    const RESTATEMENT_FIXTURE: &str = concat!(
+        "//! [`SECTION_COUNT`] and [`NUMBERED_SUBSECTIONS`] restate the index.\n",
+        "\n",
+        "/// How many numbered sections the methodology carries.\n",
+        "pub const SECTION_COUNT: u8 = 40;\n",
+        "\n",
+        "/// Every subsection the methodology numbers, as (section, subsection).\n",
+        "pub const NUMBERED_SUBSECTIONS: &[(u8, &str)] = &[\n",
+        "    (24, \"1\"),\n",
+        "    (24, \"2\"),\n",
+        "    (24, \"3\"),\n",
+        "    (24, \"4\"),\n",
+        "    (24, \"5\"),\n",
+        "    (24, \"6\"),\n",
+        "    (24, \"7\"),\n",
+        "    (24, \"8\"),\n",
+        "];\n",
+        "\n",
+        "fn resolves(reference: &MethodologyRef) -> bool {\n",
+        "    reference.section >= 1 && reference.section <= SECTION_COUNT\n",
+        "}\n",
+    );
+
+    /// The fixture with one substitution, which must actually substitute.
+    ///
+    /// A planted defect that failed to land leaves the check passing on an
+    /// unaltered fixture and that pass being recorded as a proof, which is the
+    /// inverted instrument of AICD §14 and of `ops/calibration.md` CR-004.
+    fn planted(from: &str, to: &str) -> String {
+        assert!(
+            RESTATEMENT_FIXTURE.contains(from),
+            "the fixture does not contain {from:?}, so this defect was never planted and \
+             whatever the check says next is about the unaltered fixture"
+        );
+        let altered = RESTATEMENT_FIXTURE.replace(from, to);
+        assert_ne!(
+            altered, RESTATEMENT_FIXTURE,
+            "the substitution left the fixture unchanged"
+        );
+        altered
+    }
+
+    /// The defects the reader and the comparison find in one fixture.
+    fn fixture_defects(source: &str) -> Vec<String> {
+        match read_restatement(source) {
+            Ok(restated) => restatement_defects(&restated, &methodology()),
+            Err(reason) => vec![reason],
+        }
+    }
+
+    #[test]
+    fn ori_p1_033_reader_reads_the_form_ori_core_writes_and_finds_it_agrees() {
+        let restated = read_restatement(RESTATEMENT_FIXTURE).expect("the fixture is readable");
+        assert_eq!(restated.declared, "u8", "the declared type");
+        assert_eq!(restated.sections, 40, "the restated section count");
+        assert_eq!(
+            restated.subsections,
+            (1..=8)
+                .map(|n| (24u64, n.to_string()))
+                .collect::<Vec<(u64, String)>>(),
+            "the restated subsections"
+        );
+        assert!(
+            restatement_defects(&restated, &methodology()).is_empty(),
+            "the unaltered fixture disagrees with the methodology"
+        );
+    }
+
+    #[test]
+    fn ori_p1_033_reader_reads_the_constants_however_they_are_spaced() {
+        // An innocent reformat must not be a failure, or the check becomes a
+        // thing people route around. Four forms of the same two constants:
+        // one line, a suffixed literal, an interleaved comment, no trailing
+        // comma.
+        let reformatted = concat!(
+            "pub const SECTION_COUNT : u8=4_0u8 ;\n",
+            "pub const NUMBERED_SUBSECTIONS: &[(u8, &str)] = &[(24,\"1\"),(24,\"2\"),\n",
+            "  /* a comment mid-slice */ (24,\"3\",),(24,\"4\"),(24,\"5\"),(24,\"6\"),\n",
+            "  (24,\"7\"), // and a line comment\n",
+            "  (24,\"8\")];\n",
+        );
+        let restated = read_restatement(reformatted).expect("the reformatted source is readable");
+        assert_eq!(restated.sections, 40);
+        assert_eq!(restated.subsections.len(), 8);
+        assert!(restatement_defects(&restated, &methodology()).is_empty());
+    }
+
+    #[test]
+    fn ori_p1_033_reader_catches_a_restatement_that_disagrees_with_the_index() {
+        let wrong_count = fixture_defects(&planted(
+            "SECTION_COUNT: u8 = 40;",
+            "SECTION_COUNT: u8 = 44;",
+        ));
+        assert_eq!(wrong_count.len(), 1, "one defect, found: {wrong_count:?}");
+        assert!(
+            wrong_count[0].contains("carrying 44") && wrong_count[0].contains("carries 40"),
+            "the message does not say what disagrees: {}",
+            wrong_count[0]
+        );
+
+        let removed = fixture_defects(&planted("    (24, \"8\"),\n", ""));
+        assert_eq!(removed.len(), 1, "one defect, found: {removed:?}");
+        assert!(
+            removed[0].contains("24.8") && removed[0].contains("does not carry"),
+            "the message does not name the missing subsection: {}",
+            removed[0]
+        );
+
+        let invented = fixture_defects(&planted(
+            "    (24, \"8\"),\n",
+            "    (24, \"8\"),\n    (24, \"9\"),\n",
+        ));
+        assert_eq!(invented.len(), 1, "one defect, found: {invented:?}");
+        assert!(
+            invented[0].contains("24.9") && invented[0].contains("no heading"),
+            "the message does not name the invented subsection: {}",
+            invented[0]
+        );
+    }
+
+    #[test]
+    fn ori_p1_033_reader_refuses_a_constant_it_can_no_longer_find() {
+        // The defect that matters most. A rename or a rewrite that the reader
+        // cannot parse must be a failure, because the alternative is a reader
+        // that finds nothing, compares nothing and reports success forever
+        // (AICD §39, "present but reporting nothing").
+        for (what, source) in [
+            (
+                "renamed",
+                planted("const SECTION_COUNT:", "const SECTION_TOTAL:"),
+            ),
+            (
+                "rewritten as a function",
+                planted(
+                    "pub const SECTION_COUNT: u8 = 40;",
+                    "pub const fn section_count() -> u8 { 40 }",
+                ),
+            ),
+            (
+                "rewritten as a macro invocation",
+                planted(
+                    "pub const NUMBERED_SUBSECTIONS: &[(u8, &str)] = &[",
+                    "pub const NUMBERED_SUBSECTIONS: &[(u8, &str)] = subsections![",
+                ),
+            ),
+            (
+                "given an entry in a shape the reader was not taught",
+                planted(
+                    "    (24, \"8\"),\n",
+                    "    Pair { section: 24, subsection: \"8\" },\n",
+                ),
+            ),
+            (
+                "emptied",
+                planted(
+                    concat!(
+                        "    (24, \"1\"),\n    (24, \"2\"),\n    (24, \"3\"),\n    (24, \"4\"),\n",
+                        "    (24, \"5\"),\n    (24, \"6\"),\n    (24, \"7\"),\n    (24, \"8\"),\n"
+                    ),
+                    "",
+                ),
+            ),
+            (
+                "declared twice",
+                planted(
+                    "pub const SECTION_COUNT: u8 = 40;",
+                    "pub const SECTION_COUNT: u8 = 40;\npub const SECTION_COUNT: u8 = 40;",
+                ),
+            ),
+        ] {
+            let reason = read_restatement(&source)
+                .err()
+                .unwrap_or_else(|| panic!("a constant {what} was read as if nothing had changed"));
+            assert!(
+                reason.contains(SECTION_COUNT_NAME) || reason.contains(SUBSECTIONS_NAME),
+                "the refusal for a constant {what} does not name the constant: {reason}"
+            );
+        }
     }
 }
