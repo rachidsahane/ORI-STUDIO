@@ -70,7 +70,9 @@ Nothing else starts until this merges: every later PR depends on these gates bei
 | ORI-T-0015 | **Gate 3 (contract tests) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 3 job), `fixtures/planted/contract/**`, `ops/gates/contract.md` | CI_CD §1.3, AICD §14 | none |
 | ORI-T-0016 | **Gate 7 (audit, deny, secret scan) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 7 job), `deny.toml`, `fixtures/planted/supply-chain/**`, `ops/gates/supply-chain.md` | CI_CD §1.7, AICD §14 | none |
 | ORI-T-0017 | **Gate 13 (commit trailers) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 13 job), `fixtures/planted/trailers/**`, `ops/gates/trailers.md` | CI_CD §1.13, PRD G-02 | none |
-| ORI-T-0018 | Smoke ticket: a doc comment change travels the full path | 0 | `crates/ori-core/src/lib.rs` (doc comment only) | AICD §23 G4 | none |
+| ORI-T-0018 | Smoke ticket: a doc comment change travels the full path | 0 | ~~`crates/ori-core/src/lib.rs`~~ **`crates/ori-cli/src/main.rs`** (doc comment only) | AICD §23 G4 | none |
+
+**Correction, recorded after the fact.** ORI-T-0018 landed in `crates/ori-cli/src/main.rs`, not the path this row named, and it entered no claim in `ops/lock-table.md` before it ran. Both are recorded in the lock table and in CR-005 of `ops/calibration.md`. The row is corrected here rather than left to disagree with the commit.
 
 **Gate 9 (citation) is deliberately absent from batch 1.** Your ruling: it stays `Defined`, not `Installed`, until the methodology HTML anchors are fixed and `sections.json` is regenerated. ORI-T-0005 builds the generator and ORI-T-0006 produces the defect list you carry to the methodology repository; the gate itself is ticketed in batch 7 as ORI-T-0047, gated on your fix.
 
