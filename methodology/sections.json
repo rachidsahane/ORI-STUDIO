@@ -1,0 +1,525 @@
+{
+  "generator": "crates/ori-gates/src/sections.rs",
+  "generated_under": "AICD §39, ruling R1 (ops/rulings.md)",
+  "regenerate": "ORI_SECTIONS_REGENERATE=1 cargo test -p ori-gates sections",
+  "source": "methodology/AICD_Methodology_v0.3.html",
+  "source_bytes": 171820,
+  "source_lines": 1519,
+  "counts": {
+    "section": 40,
+    "appendix": 3,
+    "subsection": 13,
+    "total": 56
+  },
+  "anchor_states": {
+    "unique": 41,
+    "duplicated": 2,
+    "absent": 13
+  },
+  "entries": [
+    {
+      "number": "1",
+      "kind": "section",
+      "parent": null,
+      "title": "Why a new methodology",
+      "anchor": "s1",
+      "anchor_state": "unique",
+      "line": 191
+    },
+    {
+      "number": "2",
+      "kind": "section",
+      "parent": null,
+      "title": "AICD in one page",
+      "anchor": "s2",
+      "anchor_state": "unique",
+      "line": 212
+    },
+    {
+      "number": "3",
+      "kind": "section",
+      "parent": null,
+      "title": "Founding principles",
+      "anchor": "s3",
+      "anchor_state": "unique",
+      "line": 241
+    },
+    {
+      "number": "4",
+      "kind": "section",
+      "parent": null,
+      "title": "What stays, what changes",
+      "anchor": "s4",
+      "anchor_state": "unique",
+      "line": 261
+    },
+    {
+      "number": "5",
+      "kind": "section",
+      "parent": null,
+      "title": "Design philosophy: open to extension, closed to modification",
+      "anchor": "s5",
+      "anchor_state": "unique",
+      "line": 279
+    },
+    {
+      "number": "6",
+      "kind": "section",
+      "parent": null,
+      "title": "The five layers",
+      "anchor": "s6",
+      "anchor_state": "unique",
+      "line": 303
+    },
+    {
+      "number": "7",
+      "kind": "section",
+      "parent": null,
+      "title": "The agent team and separation of duties",
+      "anchor": "s7",
+      "anchor_state": "unique",
+      "line": 337
+    },
+    {
+      "number": "8",
+      "kind": "section",
+      "parent": null,
+      "title": "Memory architecture",
+      "anchor": "s8",
+      "anchor_state": "unique",
+      "line": 373
+    },
+    {
+      "number": "9",
+      "kind": "section",
+      "parent": null,
+      "title": "The specification system",
+      "anchor": "s9",
+      "anchor_state": "unique",
+      "line": 424
+    },
+    {
+      "number": "10",
+      "kind": "section",
+      "parent": null,
+      "title": "Feature flow: from idea to observed behavior",
+      "anchor": "s10",
+      "anchor_state": "unique",
+      "line": 447
+    },
+    {
+      "number": "11",
+      "kind": "section",
+      "parent": null,
+      "title": "Ticket lifecycle and categories",
+      "anchor": "s11",
+      "anchor_state": "unique",
+      "line": 466
+    },
+    {
+      "number": "12",
+      "kind": "section",
+      "parent": null,
+      "title": "Working validated tickets: fleet mode, pairing mode, escalation",
+      "anchor": "s12",
+      "anchor_state": "unique",
+      "line": 500
+    },
+    {
+      "number": "13",
+      "kind": "section",
+      "parent": null,
+      "title": "Git and release workflow",
+      "anchor": "s13",
+      "anchor_state": "unique",
+      "line": 534
+    },
+    {
+      "number": "14",
+      "kind": "section",
+      "parent": null,
+      "title": "Verification: tests written in language, built by AI, checked by humans",
+      "anchor": "s14",
+      "anchor_state": "unique",
+      "line": 577
+    },
+    {
+      "number": "15",
+      "kind": "section",
+      "parent": null,
+      "title": "The continuous test environment",
+      "anchor": "s15",
+      "anchor_state": "unique",
+      "line": 619
+    },
+    {
+      "number": "16",
+      "kind": "section",
+      "parent": null,
+      "title": "Operations and the observability loop",
+      "anchor": "s16",
+      "anchor_state": "unique",
+      "line": 657
+    },
+    {
+      "number": "17",
+      "kind": "section",
+      "parent": null,
+      "title": "Autonomy tiers and the permission model",
+      "anchor": "s17",
+      "anchor_state": "unique",
+      "line": 680
+    },
+    {
+      "number": "18",
+      "kind": "section",
+      "parent": null,
+      "title": "Human roles",
+      "anchor": "s18",
+      "anchor_state": "unique",
+      "line": 714
+    },
+    {
+      "number": "19",
+      "kind": "section",
+      "parent": null,
+      "title": "Hiring and keeping judgment sharp",
+      "anchor": "s19",
+      "anchor_state": "unique",
+      "line": 734
+    },
+    {
+      "number": "20",
+      "kind": "section",
+      "parent": null,
+      "title": "Stack selection policy",
+      "anchor": "s20",
+      "anchor_state": "unique",
+      "line": 755
+    },
+    {
+      "number": "21",
+      "kind": "section",
+      "parent": null,
+      "title": "Economics and metrics",
+      "anchor": "s21",
+      "anchor_state": "unique",
+      "line": 773
+    },
+    {
+      "number": "22",
+      "kind": "section",
+      "parent": null,
+      "title": "Failure modes and safeguards",
+      "anchor": "s22",
+      "anchor_state": "unique",
+      "line": 810
+    },
+    {
+      "number": "23",
+      "kind": "section",
+      "parent": null,
+      "title": "Starting a new product under AICD",
+      "anchor": "s24",
+      "anchor_state": "unique",
+      "line": 837
+    },
+    {
+      "number": "24",
+      "kind": "section",
+      "parent": null,
+      "title": "Migrating an existing product into AICD",
+      "anchor": "s25",
+      "anchor_state": "unique",
+      "line": 910
+    },
+    {
+      "number": "24.1",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Phase M0: Freeze and snapshot",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 927
+    },
+    {
+      "number": "24.2",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Phase M1: Access attribution",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 936
+    },
+    {
+      "number": "24.3",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Phase M2: Reverse-engineering the as-built specification",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 957
+    },
+    {
+      "number": "24.4",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Phase M3: Verification baseline",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 985
+    },
+    {
+      "number": "24.5",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Phase M4: Observability onboarding",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 995
+    },
+    {
+      "number": "24.6",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Phase M5: Fleet activation and progressive autonomy",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 998
+    },
+    {
+      "number": "24.7",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Migration exit checklist",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 1008
+    },
+    {
+      "number": "24.8",
+      "kind": "subsection",
+      "parent": "24",
+      "title": "Special cases",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 1021
+    },
+    {
+      "number": "25",
+      "kind": "section",
+      "parent": null,
+      "title": "Memory service: implementation model",
+      "anchor": "s26",
+      "anchor_state": "unique",
+      "line": 1033
+    },
+    {
+      "number": "26",
+      "kind": "section",
+      "parent": null,
+      "title": "Operating several products with one team",
+      "anchor": "s27",
+      "anchor_state": "unique",
+      "line": 1060
+    },
+    {
+      "number": "27",
+      "kind": "section",
+      "parent": null,
+      "title": "Security and compliance in depth",
+      "anchor": "s28",
+      "anchor_state": "unique",
+      "line": 1073
+    },
+    {
+      "number": "28",
+      "kind": "section",
+      "parent": null,
+      "title": "The fleet dashboard",
+      "anchor": "s29",
+      "anchor_state": "unique",
+      "line": 1105
+    },
+    {
+      "number": "29",
+      "kind": "section",
+      "parent": null,
+      "title": "Evolving the methodology: the extension process",
+      "anchor": "s30",
+      "anchor_state": "unique",
+      "line": 1126
+    },
+    {
+      "number": "30",
+      "kind": "section",
+      "parent": null,
+      "title": "Calibration procedures",
+      "anchor": "s31",
+      "anchor_state": "duplicated",
+      "line": 1145
+    },
+    {
+      "number": "31",
+      "kind": "section",
+      "parent": null,
+      "title": "Simulation personas and finding quality",
+      "anchor": "s31",
+      "anchor_state": "duplicated",
+      "line": 1181
+    },
+    {
+      "number": "32",
+      "kind": "section",
+      "parent": null,
+      "title": "Agent instruction design",
+      "anchor": "s32",
+      "anchor_state": "unique",
+      "line": 1206
+    },
+    {
+      "number": "33",
+      "kind": "section",
+      "parent": null,
+      "title": "Design in the loop",
+      "anchor": "s33",
+      "anchor_state": "unique",
+      "line": 1227
+    },
+    {
+      "number": "34",
+      "kind": "section",
+      "parent": null,
+      "title": "The reference organizational repository",
+      "anchor": "s34",
+      "anchor_state": "unique",
+      "line": 1237
+    },
+    {
+      "number": "35",
+      "kind": "section",
+      "parent": null,
+      "title": "Profile: products with mobile clients",
+      "anchor": "s35",
+      "anchor_state": "unique",
+      "line": 1253
+    },
+    {
+      "number": "36",
+      "kind": "section",
+      "parent": null,
+      "title": "Profile: operating without live telemetry",
+      "anchor": "s36",
+      "anchor_state": "unique",
+      "line": 1304
+    },
+    {
+      "number": "37",
+      "kind": "section",
+      "parent": null,
+      "title": "Profile: regulated domains",
+      "anchor": "s37",
+      "anchor_state": "unique",
+      "line": 1314
+    },
+    {
+      "number": "38",
+      "kind": "section",
+      "parent": null,
+      "title": "Profile: the single operator",
+      "anchor": "s38",
+      "anchor_state": "unique",
+      "line": 1340
+    },
+    {
+      "number": "39",
+      "kind": "section",
+      "parent": null,
+      "title": "Lessons from the first application",
+      "anchor": "s39",
+      "anchor_state": "unique",
+      "line": 1352
+    },
+    {
+      "number": "40",
+      "kind": "section",
+      "parent": null,
+      "title": "Open questions and next explorations",
+      "anchor": "s40",
+      "anchor_state": "unique",
+      "line": 1370
+    },
+    {
+      "number": "A",
+      "kind": "appendix",
+      "parent": null,
+      "title": "Templates",
+      "anchor": "a1",
+      "anchor_state": "unique",
+      "line": 1393
+    },
+    {
+      "number": "A.1",
+      "kind": "subsection",
+      "parent": "A",
+      "title": "Acceptance criterion",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 1395
+    },
+    {
+      "number": "A.2",
+      "kind": "subsection",
+      "parent": "A",
+      "title": "Ticket",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 1406
+    },
+    {
+      "number": "A.3",
+      "kind": "subsection",
+      "parent": "A",
+      "title": "Pull request report",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 1419
+    },
+    {
+      "number": "A.4",
+      "kind": "subsection",
+      "parent": "A",
+      "title": "Architecture decision record",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 1431
+    },
+    {
+      "number": "A.5",
+      "kind": "subsection",
+      "parent": "A",
+      "title": "Blocked report",
+      "anchor": null,
+      "anchor_state": "absent",
+      "line": 1442
+    },
+    {
+      "number": "B",
+      "kind": "appendix",
+      "parent": null,
+      "title": "Glossary",
+      "anchor": "a2",
+      "anchor_state": "unique",
+      "line": 1452
+    },
+    {
+      "number": "C",
+      "kind": "appendix",
+      "parent": null,
+      "title": "Document history",
+      "anchor": "a3",
+      "anchor_state": "unique",
+      "line": 1490
+    }
+  ]
+}

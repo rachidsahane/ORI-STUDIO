@@ -5,3 +5,6 @@
 //! (`spec/LLD.md` section 2).
 //!
 //! Must not: report a gate installed without a proof (`spec/LLD.md` section 2).
+
+/// The methodology's machine-readable section index and its generator (AICD §39).
+pub mod sections;
