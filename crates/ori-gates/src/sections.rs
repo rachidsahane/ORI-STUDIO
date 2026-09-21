@@ -1951,3 +1951,13 @@ mod tests {
         assert!(!methodology().contains("99"), "and does not resolve");
     }
 }
+
+#[cfg(test)]
+mod visibility_probe {
+    /// Deliberate failure. AICD 14 visibility demonstration for gate 2.
+    /// Throwaway branch, never merged.
+    #[test]
+    fn gate_2_must_go_red_and_a_human_must_see_it() {
+        assert_eq!(1, 2, "deliberate: proving gate 2's failure is visible");
+    }
+}
