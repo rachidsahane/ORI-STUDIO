@@ -3,6 +3,27 @@
 # anchored whole-file grep matches it and reports the gate proved; the gate is
 # switched off and every check is green. This is the construction that broke
 # the first version of this harness.
+#
+# This file is valid YAML as it stands and the `echo` below carries no colon.
+# Until ORI-T-0084 repaired it, the step read:
+#
+#     run: echo 'gate 1 fmt half: disabled'
+#
+# A plain YAML scalar may not contain a colon followed by a space, so that
+# line was a parse error and GitHub would have rejected the whole file. A
+# workflow nobody can run is not the construction this sample is about.
+# `workflow-facts.awk` does not enforce YAML, so the sample was classified
+# `dead` anyway, the table in `prove.sh` owed `dead`, the two agreed and
+# `prove.sh` exited 0, while the input exercised the right path for a reason
+# that could never have arisen. ORI-T-0014 found the same defect in gate 2's
+# copy of this sample and repaired that copy. Both were found by parsing every
+# sample with a real YAML parser, not by reading them.
+#
+# Nothing in either `prove.sh` checks YAML validity, so this repair is of one
+# file and not of the hole. The next sample written or edited here can be
+# invalid YAML and every gate will stay green. Until a standing check exists,
+# parse every file in this directory with a real YAML parser after editing it
+# and before trusting the verdict `prove.sh` prints.
 name: sample-dead-command-is-block-scalar-text
 on:
   pull_request:
@@ -11,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: gate 1 fmt half, disabled
-        run: echo 'gate 1 fmt half: disabled'
+        run: echo 'gate 1 fmt half is disabled'
   other:
     runs-on: ubuntu-latest
     steps:
