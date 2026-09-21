@@ -1,0 +1,21 @@
+# LIVE. The shape `.github/workflows/ci.yml` has: a real trigger, the gate
+# command as a step of a named job, that job in the aggregate's `needs:`, and
+# nothing making either conditional. prove.sh must classify this one `live`,
+# and a run in which it does not is a run whose liveness check answers `dead`
+# to everything and therefore proves nothing about the others.
+name: sample-live
+on:
+  pull_request:
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+  ci:
+    needs: [fmt]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

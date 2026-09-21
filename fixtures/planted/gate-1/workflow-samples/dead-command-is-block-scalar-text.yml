@@ -1,0 +1,30 @@
+# DEAD: the fmt job runs `echo`, and the byte-identical `run: cargo fmt --all
+# --check` line survives only as text inside another job's shell script. An
+# anchored whole-file grep matches it and reports the gate proved; the gate is
+# switched off and every check is green. This is the construction that broke
+# the first version of this harness.
+name: sample-dead-command-is-block-scalar-text
+on:
+  pull_request:
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: gate 1 fmt half, disabled
+        run: echo 'gate 1 fmt half: disabled'
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a shell script that mentions the gate command
+        run: |
+          cat <<'EOF' >/dev/null
+          run: cargo fmt --all --check
+          EOF
+          echo done
+  ci:
+    needs: [fmt, other]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate
