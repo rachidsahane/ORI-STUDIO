@@ -1,0 +1,16 @@
+Ori Studio
+Copyright 2026 Alim Sahane
+
+This repository distributes content under two licences.
+
+Apache License, Version 2.0
+  Covers every path in this repository except the paths named below.
+  Text: the LICENSE file in this repository, and
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Creative Commons Attribution 4.0 International
+  Covers methodology/AICD_Methodology_v0.3.html, and methodology/sections.json,
+  which is generated from that file and carries its section titles.
+  Attribution: "AICD: Artificial Intelligence Centered Development,
+  by Alim Sahane."
+  Text: https://creativecommons.org/licenses/by/4.0/legalcode
