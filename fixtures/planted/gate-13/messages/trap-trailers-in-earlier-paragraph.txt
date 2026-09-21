@@ -1,0 +1,12 @@
+feat(gates): THE TRAP, exactly as the lead wrote it
+
+Both required trailer lines are below. They are correctly spelled, they
+are at the start of their lines, and any human and any regex will find
+them. Git's trailer parser finds neither, because git reads trailers out
+of the LAST paragraph of a message and the last paragraph here is the
+Co-Authored-By line on its own.
+
+Ticket: ORI-T-0017
+Spec: CI_CD.md#1-pipeline-on-every-pull-request
+
+Co-Authored-By: Someone <someone@example.com>

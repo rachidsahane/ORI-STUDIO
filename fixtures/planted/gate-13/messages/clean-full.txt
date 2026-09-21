@@ -1,0 +1,8 @@
+feat(gates): a message with everything this gate asks for
+
+A body paragraph, because a real commit message has one and because the
+trailer block must be the LAST paragraph and not merely A paragraph.
+
+Ticket: ORI-T-0017
+Spec: CI_CD.md#1-pipeline-on-every-pull-request
+Co-Authored-By: Someone <someone@example.com>

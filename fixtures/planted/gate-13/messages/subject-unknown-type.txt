@@ -1,0 +1,8 @@
+wip(gates): a type this repository does not use
+
+Conventional Commits v1.0.0 mandates `feat` and `fix` and leaves the rest
+to the project. This repository's 22 conventional commits use five types
+and `wip` is not one of them.
+
+Ticket: ORI-T-0017
+Spec: CONVENTIONS.md#git

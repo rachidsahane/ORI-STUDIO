@@ -1,0 +1,7 @@
+feat(gates): a Spec trailer whose anchor is empty
+
+The separator is there and there is nothing after it, which reads as an
+anchor to a regex counting characters and as no anchor at all to a reader.
+
+Ticket: ORI-T-0017
+Spec: CI_CD.md#

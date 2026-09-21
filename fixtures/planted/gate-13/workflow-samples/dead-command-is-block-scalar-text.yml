@@ -1,0 +1,47 @@
+# DEAD: the gate-13 job runs `echo`, and the byte-identical
+# `run: bash scripts/gates.sh --commit-trailers` line survives only as text
+# inside another job's shell script. An anchored whole-file grep matches it and
+# reports the gate proved; the gate is switched off and every check is green.
+#
+# This is the construction that broke the first version of gate 1's harness,
+# and it has a particular sting here. Gate 13 is the gate whose own subject is
+# "a check that reads the right-looking text and the mechanism sees nothing":
+# a grep for a `run:` line that is really a here-document is the same defect as
+# a grep for a `Ticket:` line that is really body text. The parser is what
+# tells the two apart in the workflow, and git's trailer parser is what tells
+# them apart in the commit message.
+#
+# The `echo` below carries no colon followed by a space. A plain YAML scalar
+# may not contain one, so `run: echo 'gate 13: disabled'` is a parse error and
+# GitHub would reject the whole file: a workflow nobody can run is not the
+# construction this sample is about. `workflow-facts.awk` does not enforce
+# YAML, so the sample would still have been classified `dead`, for a reason
+# that could never arise. ORI-T-0014 found it by parsing every sample with a
+# real YAML parser, and gate 1's, gate 2's and gate 7's copies all carry the
+# repaired form; ORI-T-0017 re-ran that parse over every sample in this
+# directory before believing any of them.
+name: sample-dead-command-is-block-scalar-text
+on:
+  pull_request:
+jobs:
+  gate-13:
+    runs-on: ubuntu-latest
+    steps:
+      - name: gate 13, disabled
+        run: echo 'gate 13 is disabled'
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a shell script that mentions the gate command
+        run: |
+          cat <<'INNER' >/dev/null
+          run: bash scripts/gates.sh --commit-trailers
+          INNER
+          echo done
+  ci:
+    needs: [gate-13, other]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

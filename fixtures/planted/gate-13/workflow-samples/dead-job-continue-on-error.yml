@@ -1,0 +1,22 @@
+# DEAD: `continue-on-error: true` on the job. The gate command still runs and still
+# reports every refusal; GitHub records the job's conclusion as success, the
+# aggregate reads `success`, and the pull request is green with a known
+# vulnerability named in the log. The command string is untouched, which is
+# what makes this the cheapest weakening of all.
+name: sample-dead-job-continue-on-error
+on:
+  pull_request:
+jobs:
+  gate-13:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: bash scripts/gates.sh --commit-trailers
+        run: bash scripts/gates.sh --commit-trailers
+  ci:
+    needs: [gate-13]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

@@ -1,0 +1,9 @@
+feat(gates): two Ticket trailers, so the value is ambiguous
+
+Git returns both. A consumer reading %(trailers:key=Ticket,valueonly)
+receives two lines and has to pick one, and whichever it picks the other
+commit's ticket is wrong.
+
+Ticket: ORI-T-0017
+Ticket: ORI-T-9999
+Spec: CI_CD.md#1-pipeline-on-every-pull-request

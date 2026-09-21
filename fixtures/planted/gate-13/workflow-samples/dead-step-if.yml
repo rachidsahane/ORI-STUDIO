@@ -1,0 +1,19 @@
+# DEAD: the same, one level down. The job runs and reports success; the step
+# carrying the gate command is skipped.
+name: sample-dead-step-if
+on:
+  pull_request:
+jobs:
+  gate-13:
+    runs-on: ubuntu-latest
+    steps:
+      - name: bash scripts/gates.sh --commit-trailers
+        if: false
+        run: bash scripts/gates.sh --commit-trailers
+  ci:
+    needs: [gate-13]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

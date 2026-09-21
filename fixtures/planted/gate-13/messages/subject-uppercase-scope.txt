@@ -1,0 +1,7 @@
+feat(Gates): a scope that is not [a-z0-9-]+
+
+All nine scopes on main are lowercase single words or hyphenated ones.
+Two spellings of one scope are two scopes to every tool that groups by it.
+
+Ticket: ORI-T-0017
+Spec: CONVENTIONS.md#git

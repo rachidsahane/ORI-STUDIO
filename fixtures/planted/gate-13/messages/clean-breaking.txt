@@ -1,0 +1,9 @@
+feat(store)!: the breaking-change marker is part of the grammar
+
+Conventional Commits v1.0.0 puts `!` immediately before the colon to mark
+a breaking change. No commit on main uses it yet, and the grammar has it,
+so the gate accepts it rather than refusing a shape the specification it
+cites defines.
+
+Ticket: ORI-T-0017
+Spec: CONVENTIONS.md#git

@@ -926,6 +926,164 @@ jobs:
         # 3, "visible where a human would look".
         run: bash fixtures/planted/gate-7/prove.sh
 
+  gate-13:
+    # spec/CI_CD.md section 1, item 13: "Commit-trailer gate (every commit on
+    # the PR: Conventional Commits, `Ticket: <id>` and `Spec:
+    # <document>#<section>` trailers, per CONVENTIONS; PRD G-02)".
+    # spec/CONVENTIONS.md "Git". spec/PRD.md G-02.
+    #
+    # THE CHECK LIVES IN `scripts/gates.sh` AND THIS JOB CALLS IT. Ruling R28
+    # keeps the checker beside the other scripts a gate runs rather than under
+    # `fixtures/planted/`, and there is exactly one implementation: this job,
+    # a coder at a desk, and `fixtures/planted/gate-13/prove.sh` all reach it.
+    # A second copy written inline here would be a gate that can be repaired in
+    # the copy CI does not run.
+    #
+    # WHY IT ASKS GIT AND NEVER A REGEX. Git parses trailers out of the LAST
+    # PARAGRAPH of a commit message and nothing else. A message carrying
+    # `Ticket:` and `Spec:` in an earlier paragraph, with `Co-Authored-By:`
+    # alone at the end, has both lines where any human and any regex finds
+    # them, and `git interpret-trailers --parse` returns neither. Everything
+    # downstream that reads trailers, the traceability chain of AICD §13 among
+    # them, sees nothing. The lead shipped exactly that shape in the first
+    # commit this project made under CONVENTIONS, and `gate-13-proof` below
+    # prints the contrast on every run: the regex answer, git's answer and this
+    # gate's answer, for that one message.
+    #
+    # WHY THE CHECKOUT ASKS FOR THE WHOLE HISTORY, and this line is the one to
+    # read twice. `actions/checkout` defaults to `fetch-depth: 1`, which
+    # produces a clone holding one commit. The base and head SHAs a
+    # `pull_request` payload names are then simply not objects this repository
+    # has, and a gate that enumerated "whatever is present" would check a
+    # shorter range and report on it as though it were the whole pull request:
+    # a gate that checked one commit of twelve and went green. `fetch-depth: 0`
+    # is what puts the commits of the pull request on the runner.
+    #
+    # The gate does not tolerate the shallow case: it refuses (exit 2) and
+    # names `fetch-depth: 0` as the repair, so deleting these two lines turns
+    # this job red rather than turning the gate off quietly.
+    # `fixtures/planted/gate-13/prove.sh` reads the value out of this file on
+    # every run and refuses if it is anything but 0.
+    #
+    # WHICH COMMITS, UNDER WHICH EVENT. This workflow fires on four events and
+    # "every commit on the PR" names a different set under each, so the gate
+    # has a rule for each and no rule that invents one:
+    #
+    #   pull_request       merge-base(base.sha, head.sha)..head.sha, read from
+    #                      the event payload, and then CROSS-CHECKED against
+    #                      `pull_request.commits`, the count GitHub itself
+    #                      reports. If GitHub says twelve and the range holds
+    #                      three, neither answer may be reported as a pass and
+    #                      the gate refuses.
+    #   merge_group        merge_group.base_sha..head_sha. spec/CI_CD.md
+    #                      section 2: the queue rebases and re-runs gates 1 to
+    #                      10 plus 13 and 14 on the rebased head. Those are new
+    #                      commit objects carrying the messages under review,
+    #                      so the messages are read again rather than a verdict
+    #                      being remembered against a SHA that no longer
+    #                      exists.
+    #   push (main only)   before..after, the commits this push landed. An
+    #                      all-zero `before` means the ref was created by this
+    #                      push, which on `main` is itself the thing to look
+    #                      at, and the gate refuses rather than inventing a
+    #                      range for it.
+    #   workflow_dispatch  the single checked-out commit. That is a SMALLER
+    #                      claim than the one this gate makes on a pull
+    #                      request, and the verdict says so in its own output
+    #                      rather than letting a green check imply the larger
+    #                      one.
+    #
+    # AND WHAT IT DOES WHEN THAT SET IS EMPTY. It refuses, with a status that
+    # is not 0, on every path: an empty range, a base or head missing from the
+    # clone, an unreadable payload, a payload naming no SHAs, an event nobody
+    # wrote a rule for, or a set it enumerated and then failed to read. A gate
+    # that checks zero commits and reports success is AICD §39's "present but
+    # reporting nothing" and it is the defect class this whole pipeline is
+    # arranged against; there is no path through this gate that yields an empty
+    # set and an answer of "pass". `gate-13-proof` plants eleven of those
+    # states and requires that none of them printed PASSED.
+    #
+    # NO TOOLCHAIN ASSERT HERE, unlike `build`, `fmt`, `clippy`, `test` and the
+    # gate 1 and gate 2 proofs. This gate reads git and a workflow file; it
+    # runs no cargo command, so a Rust pin has nothing to do with its verdict
+    # and asserting one would make the gate unrunnable for a reason unrelated
+    # to what it checks.
+    #
+    # Tier 2 by spec/RISK_MAP.md, row `.github/workflows`, reason "Supply
+    # chain".
+    name: gate-13
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Not a default, and not tidiness. See the comment above: without it
+          # the commits this gate exists to read are not on the runner.
+          fetch-depth: 0
+      - name: bash scripts/gates.sh --commit-trailers
+        # Exit 0 every commit in the set conforms and the set was not empty; 1
+        # at least one does not, with the commit and the reason code named in
+        # the log; 2 the set could not be determined, so NO COMMIT WAS CHECKED;
+        # 3 there was legitimately nothing to enumerate, which cannot happen
+        # under any of this workflow's four events and is a coder's desk. "I
+        # could not check" never shares an exit code with "I checked and it was
+        # fine".
+        run: bash scripts/gates.sh --commit-trailers
+
+  gate-13-proof:
+    # spec/CI_CD.md section 1 item 13, the demonstration AICD §14 asks for. The
+    # fourth job in this file whose success condition is the opposite of the
+    # job it proves: it passes when gate 13 refuses the commit messages planted
+    # for it under `fixtures/planted/gate-13/messages/` and refuses the commit
+    # sets planted for it.
+    #
+    # WHY IT IS SEPARATE FROM `gate-13` ABOVE. `gate-13` answers "do the
+    # commits on this pull request conform". This job answers "would gate 13
+    # say so if they did not", and the second question is the one AICD §14 is
+    # about. Both are needed and neither substitutes for the other: every
+    # commit on `main` already carries both trailers where git can read them,
+    # so `gate-13` would be green from its first run, and a gate that has only
+    # ever been seen passing is not installed.
+    #
+    # WHAT THE HARNESS ASKS, beyond running the gate. It parses this file
+    # rather than grepping it, and requires of the gate command AND of THIS
+    # job that the command is the `run:` of a step of a named job, that neither
+    # job nor step carries `if:` or `continue-on-error:`, that the job is in
+    # `ci`'s `needs:`, that `ci` carries no `continue-on-error:`, and that an
+    # unfiltered `pull_request` fires the workflow. It also reads `fetch-depth`
+    # out of the `gate-13` job's checkout, because that one value decides
+    # whether the commits of a pull request are on the runner at all. Every one
+    # of those checks is exercised against planted workflows before it is
+    # believed.
+    #
+    # It needs no toolchain and no network: it builds throwaway git
+    # repositories in a temporary directory, writes the event payloads itself,
+    # and runs the same `scripts/gates.sh --commit-trailers` this file runs
+    # against them with `--repo`, which changes WHICH repository git reads and
+    # never HOW the commit set is computed.
+    name: gate-13-proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Gate 13 must refuse every planted commit message and never pass a set it did not read
+        # The harness exits 0 only from its final verdict. It exits 1 when gate
+        # 13 stopped refusing something still planted, or reported a pass over
+        # a commit set it never read; 2 when it could not prove what it claims,
+        # which covers a comparator that cannot tell agreement from
+        # disagreement, a gate command this file no longer runs where a failure
+        # would fail this run, a `gate-13-proof` job that is itself not one
+        # whose failure fails this run or that the harness can no longer find
+        # in this file, a `gate-13` checkout that no longer asks for the whole
+        # history, a planted message that no longer contains what it was
+        # planted to contain, and an answer given for a reason other than the
+        # planted one; and 3 when git, jq, awk or `scripts/gates.sh` was not
+        # usable here, so nothing was checked. It writes `::error::`
+        # annotations, so the reason lands on the pull request check rather
+        # than only in a log somebody has to open: spec/runbooks/prove-gate.md
+        # step 3, "visible where a human would look".
+        run: bash fixtures/planted/gate-13/prove.sh
+
   ci:
     # THE ONE REQUIRED CHECK. Branch protection and the merge queue should
     # require `ci` and nothing else: the matrix job names above carry the
@@ -954,7 +1112,7 @@ jobs:
     # AICD §39 and spec/PRD.md Z-02 name all three as one defect class:
     # "present but reporting nothing".
     name: ci
-    needs: [build, fmt, clippy, test, gate-1-proof, gate-2-proof, gate-7, gate-7-proof]
+    needs: [build, fmt, clippy, test, gate-1-proof, gate-2-proof, gate-7, gate-7-proof, gate-13, gate-13-proof]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10

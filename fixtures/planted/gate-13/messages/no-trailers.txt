@@ -1,0 +1,4 @@
+feat(gates): a conventional subject and no trailers anywhere
+
+Nothing in this message resembles a trailer, so the refusal must say
+"missing" and not "in the wrong paragraph". Those are different repairs.

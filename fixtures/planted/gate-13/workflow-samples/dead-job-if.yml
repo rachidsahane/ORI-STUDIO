@@ -1,0 +1,22 @@
+# DEAD: the job carries an `if:`. This parser does not evaluate GitHub
+# expressions, so it cannot tell `if: always()` from `if: false` or from a
+# condition true on one branch only. A job that may not run is a gate that may
+# not run, and the honest answer is to refuse and ask for a deliberate
+# re-proof.
+name: sample-dead-job-if
+on:
+  pull_request:
+jobs:
+  gate-13:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: bash scripts/gates.sh --commit-trailers
+        run: bash scripts/gates.sh --commit-trailers
+  ci:
+    needs: [gate-13]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

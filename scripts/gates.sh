@@ -427,6 +427,10 @@ done
 GATE_RUNNER[1]='local'
 GATE_RUNNER[2]='local'
 GATE_RUNNER[7]='local'
+# Gate 13 has a local runner as of ORI-T-0017, and CI runs the same one:
+# `.github/workflows/ci.yml`'s `gate-13` job invokes this script with
+# `--commit-trailers`. There is one implementation and three callers.
+GATE_RUNNER[13]='local'
 
 set_state() { GATE_STATE[$1]="$2"; GATE_NOTE[$1]="$3"; }
 
@@ -659,6 +663,579 @@ probe_unavailable() {
         if [ -n "$missing" ]; then missing="$missing $mp"; else missing="$mp"; fi
     fi
     set_state "$idx" 'not available' "$(join_reason "$missing" "$kind")"
+}
+
+# ---------------------------------------------------------------------------
+# Gate 13: the commit-trailer gate.
+#
+# spec/CI_CD.md section 1 item 13: "every commit on the PR: Conventional
+# Commits, `Ticket: <id>` and `Spec: <document>#<section>` trailers, per
+# CONVENTIONS; PRD G-02". spec/CONVENTIONS.md "Git". spec/PRD.md G-02.
+# Ticket: ORI-T-0017. Proof: fixtures/planted/gate-13/, ops/gates/gate-13.md.
+#
+# THE IMPLEMENTATION LIVES HERE, IN ONE PLACE, AND CI CALLS IT.
+#
+# `.github/workflows/ci.yml` runs `bash scripts/gates.sh --commit-trailers`
+# and `fixtures/planted/gate-13/prove.sh` runs the same command against
+# planted repositories. There is exactly one implementation of this gate and
+# all three callers reach it. Ruling R28 is the reason it is not under
+# `fixtures/planted/gate-13/`: a fixture directory holds inputs a gate is run
+# against, never the checker the gate invokes. A second copy inline in the
+# workflow would be the other half of the same defect, a gate that can be
+# repaired in the copy CI does not run.
+#
+# WHY IT USES GIT'S OWN TRAILER PARSER AND NEVER A REGEX OVER THE MESSAGE.
+#
+# This is the whole point of the gate and it is not a style preference. Git
+# parses trailers out of the LAST PARAGRAPH of a commit message and nothing
+# else. A message written like this:
+#
+#     feat(gates): a subject
+#
+#     A body paragraph.
+#
+#     Ticket: ORI-T-0017
+#     Spec: CI_CD.md#1-pipeline-on-every-pull-request
+#
+#     Co-Authored-By: Someone <someone@example.com>
+#
+# has both required lines, correctly spelled, visible to any human and to any
+# regex. Git parses NEITHER of them: `git log --format='%(trailers:key=Ticket)'`
+# returns empty, because the trailer block is the last paragraph and the last
+# paragraph here holds only `Co-Authored-By`. Everything downstream that reads
+# trailers, the traceability chain of AICD §13, changelog generation, the audit
+# chain, sees nothing.
+#
+# A regex-based gate passes that commit. It would confirm the trailers are
+# present while the mechanism that consumes them sees nothing, which is AICD
+# §39's "present but reporting nothing" sitting inside the gate that guards the
+# audit trail. So every trailer question below is asked of
+# `%(trailers:only=true,unfold=true)`, which is git's own parser, and the
+# answer is whatever git says.
+#
+# A regex over the message text IS used, in exactly one direction and for
+# exactly one purpose: when git reports no `Ticket:` trailer and the message
+# nevertheless contains a `Ticket:`-shaped line, the refusal is reported as
+# TICKET_UNPARSED rather than TICKET_MISSING, so the author is told the line is
+# in the wrong paragraph instead of being told it is absent. That regex can
+# only ever turn one refusal into a better-explained refusal. No path exists
+# from it to a pass, and `fixtures/planted/gate-13/prove.sh` asserts that.
+#
+# WHAT IS ENFORCED, AND WHICH PART OF IT IS A DECISION
+#
+# Structure, from Conventional Commits v1.0.0 itself:
+#   <type>[(<scope>)][!]: <description>
+#   one colon, one space, a non-empty description that does not begin with a
+#   further space.
+#
+# Vocabulary, and this is the one decision this gate makes:
+#   the type is one of `feat fix docs ci chore` and the scope, when present,
+#   matches [a-z0-9-]+. Conventional Commits v1.0.0 mandates only `feat` and
+#   `fix` and leaves the rest to the project; spec/CONVENTIONS.md says
+#   "Conventional Commits" and names no list. So the list is a repository
+#   decision and the only evidence of that decision is what the repository
+#   does: of the 23 commits on `main` at ORI-T-0017, 22 carry a conventional
+#   subject and they use exactly those five types (docs 8, feat 7, ci 4, fix 2,
+#   chore 1) and nine scopes, all matching [a-z0-9-]+. A closed set is chosen
+#   over an open [a-z]+ because an open set accepts `wip:`, `misc:` and
+#   `update:`, which is the vocabulary rot Conventional Commits exists to
+#   prevent. The cost is stated rather than hidden: the first legitimate
+#   `refactor:` or `test:` commit fails this gate, and the fix is one word
+#   added to CT_TYPES below in a ticket. That is the deliberate decision an
+#   open set would let past in silence.
+#
+# WHAT IS DELIBERATELY NOT ENFORCED, so that nobody reads a green gate 13 as
+# more than it is:
+#   - subject length. CONVENTIONS names none and Conventional Commits names
+#     none. The longest subject on `main` is 79 characters.
+#   - capitalisation of the description, and a trailing full stop. Both are
+#     Angular-convention habits that all 22 conventional commits happen to
+#     follow, and neither is in Conventional Commits v1.0.0 or in CONVENTIONS.
+#     A gate that fails a commit for a rule no specification states is a gate
+#     inventing policy.
+#   - that the `Spec:` anchor resolves. See ct_check_commit: the document half
+#     is OBSERVED and printed, never judged. The reasons are in ops/gates/gate-13.md.
+#   - that a subject paragraph is one line. `%s` is what every consumer
+#     displays and `%s` collapses a wrapped subject paragraph into one line, so
+#     this gate judges what the consumer sees.
+# ---------------------------------------------------------------------------
+
+# The vocabulary. One source for the subject pattern and for the message that
+# is printed when a type is refused, so the two cannot drift.
+CT_TYPES='feat fix docs ci chore'
+CT_SCOPE_RE='^[a-z0-9-]+$'
+CT_TICKET_RE='^ORI-T-[0-9][0-9][0-9][0-9]$'
+# `<document>#<section>`, with the document a relative path under spec/ ending
+# in .md and the section a non-empty GitHub-style anchor. No leading slash and
+# no `..`: a trailer is a pointer into the specification, not into a filesystem.
+CT_SPEC_RE='^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md#[A-Za-z0-9][A-Za-z0-9._-]*$'
+
+# The subject grammar of Conventional Commits v1.0.0, as a bash ERE. The type
+# and scope are captured rather than constrained here, so that a subject with
+# the right SHAPE and the wrong vocabulary is reported as a vocabulary problem
+# and not as an unreadable subject. Telling those two apart is what makes a
+# refusal actionable.
+CT_SUBJECT_RE='^([A-Za-z0-9_]+)(\(([^)]+)\))?(!)?: (.+)$'
+
+# Under GitHub Actions a message a human must see is additionally emitted as a
+# workflow annotation, which is what puts it on the pull request check rather
+# than only in a log somebody has to open. spec/runbooks/prove-gate.md step 3.
+ct_emit() {
+    local kind="$1"; shift
+    printf '%s: %s\n' "$kind" "$*"
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        printf '::%s file=scripts/gates.sh::%s\n' "$kind" "$*"
+    fi
+}
+
+# --- one commit ------------------------------------------------------------
+#
+# Sets CT_CODES to a space-separated list of reason codes, empty when the
+# commit conforms, and CT_DETAIL to the human sentences behind them. Every
+# code names the mechanism that produced it, so that a planted defect can be
+# attributed to the thing planted in it rather than to "the gate said no".
+#
+#   SUBJECT_SHAPE     the subject is not <type>[(scope)][!]: <description>
+#   SUBJECT_TYPE      the shape is right and the type is not one of CT_TYPES
+#   SUBJECT_SCOPE     the shape is right and the scope is not [a-z0-9-]+
+#   TICKET_MISSING    git's trailer parser reports no Ticket: trailer, and the
+#                     message contains no Ticket:-shaped line either
+#   TICKET_UNPARSED   git's trailer parser reports none and the message DOES
+#                     contain one: it is not in the last paragraph, so the
+#                     mechanism that consumes trailers cannot see it
+#   TICKET_CASE       git parsed a trailer whose key is a case variant of
+#                     Ticket. Git's own lookup is case-insensitive, so this
+#                     one is consumed; CONVENTIONS writes `Ticket:` and this
+#                     gate enforces that spelling, because the trailer is also
+#                     read by humans and by tools that are not git
+#   TICKET_DUPLICATE  more than one Ticket: trailer, so its value is ambiguous
+#   TICKET_VALUE      present, single, and not ORI-T-NNNN
+#   SPEC_*            the same five, for the Spec: trailer
+CT_CODES=''
+CT_DETAIL=''
+ct_check_commit() {
+    local repo="$1" sha="$2"
+    local subject message trailers status
+    local type scope desc
+    local key n value
+    CT_CODES=''
+    CT_DETAIL=''
+
+    ct_note() { CT_CODES="${CT_CODES:+$CT_CODES }$1"; CT_DETAIL="${CT_DETAIL}      - $2"$'\n'; }
+
+    subject=$(git -C "$repo" show -s --format='%s' "$sha" 2>/dev/null) || subject=''
+    message=$(git -C "$repo" show -s --format='%B' "$sha" 2>/dev/null) || message=''
+
+    # Git's own parser. Its exit status is captured before anything reads the
+    # output, because a git that does not understand this format string would
+    # otherwise hand an empty string to every check below and every commit
+    # would be reported as carrying no trailers at all: a gate failing on
+    # everything, which is as useless as one passing on everything and rather
+    # more convincing.
+    trailers=$(git -C "$repo" show -s --format='%(trailers:only=true,unfold=true)' "$sha" 2>/dev/null)
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        CT_CODES='HARNESS'
+        CT_DETAIL="      - git could not read the trailers of $sha (exit $status). This git may not understand '%(trailers:only=true,unfold=true)', in which case nothing below would mean anything."$'\n'
+        return 0
+    fi
+
+    # --- the subject -------------------------------------------------------
+    if [[ "$subject" =~ $CT_SUBJECT_RE ]]; then
+        type="${BASH_REMATCH[1]}"
+        scope="${BASH_REMATCH[3]}"
+        desc="${BASH_REMATCH[5]}"
+        case "$desc" in
+            ' '*) ct_note SUBJECT_SHAPE "the description begins with a further space: Conventional Commits puts exactly one space after the colon" ;;
+        esac
+        case " $CT_TYPES " in
+            *" $type "*) ;;
+            *) ct_note SUBJECT_TYPE "the type is '$type' and this repository's types are: $CT_TYPES. Adding one is a deliberate decision, made by editing CT_TYPES in scripts/gates.sh in a ticket" ;;
+        esac
+        if [ -n "$scope" ] && ! printf '%s\n' "$scope" | grep -Eq "$CT_SCOPE_RE"; then
+            ct_note SUBJECT_SCOPE "the scope is '$scope' and a scope here matches $CT_SCOPE_RE"
+        fi
+    else
+        ct_note SUBJECT_SHAPE "the subject is not '<type>[(<scope>)][!]: <description>': [$subject]"
+    fi
+
+    # --- the trailers, asked of git and of nothing else --------------------
+    for key in Ticket Spec; do
+        # One line per trailer, the original spelling of the key preserved,
+        # folded continuations unfolded onto their own trailer line exactly as
+        # a consumer reading %(trailers:key=...,valueonly) would receive them.
+        n=$(printf '%s\n' "$trailers" | grep -c "^$key:" 2>/dev/null) || n=0
+        if [ "$n" -eq 0 ]; then
+            # Three different states hide behind "git reports none", and a
+            # coder can only act on the one they are actually in.
+            if printf '%s\n' "$trailers" | grep -qi "^$key:"; then
+                ct_note "$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')_CASE" \
+                    "git parsed a trailer whose key is a case variant of '$key'. Git's own lookup is case-insensitive so that one is consumed, but spec/CONVENTIONS.md writes '$key:' and this gate enforces that spelling"
+            elif printf '%s\n' "$message" | grep -Eq "^[[:space:]]*$key:"; then
+                ct_note "$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')_UNPARSED" \
+                    "the message contains a '$key:' line and GIT'S TRAILER PARSER DOES NOT SEE IT. Git reads trailers out of the LAST PARAGRAPH of the message only. Move the '$key:' line into the final paragraph, beside Co-Authored-By, with no blank line between them. Until then every tool that reads trailers, the traceability chain of AICD §13 among them, sees nothing here"
+            else
+                ct_note "$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')_MISSING" \
+                    "no '$key:' trailer. spec/CONVENTIONS.md 'Git': every message ends with 'Ticket: <id>' and 'Spec: <document>#<section>'"
+            fi
+            continue
+        fi
+        if [ "$n" -gt 1 ]; then
+            ct_note "$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')_DUPLICATE" \
+                "$n '$key:' trailers, so the value a consumer reads is ambiguous"
+            continue
+        fi
+        value=$(printf '%s\n' "$trailers" | sed -n "s/^$key:[[:space:]]*//p" | head -1)
+        case "$key" in
+            Ticket)
+                if ! printf '%s\n' "$value" | grep -Eq "$CT_TICKET_RE"; then
+                    ct_note TICKET_VALUE "the Ticket trailer's value is [$value] and a ticket identifier here matches $CT_TICKET_RE"
+                fi
+                ;;
+            Spec)
+                if ! printf '%s\n' "$value" | grep -Eq "$CT_SPEC_RE"; then
+                    ct_note SPEC_VALUE "the Spec trailer's value is [$value] and spec/CONVENTIONS.md 'Git' asks for '<document>#<section>', matching $CT_SPEC_RE"
+                else
+                    # OBSERVED, NEVER JUDGED. ops/gates/gate-13.md argues the
+                    # case; the short form is that the anchor half cannot be
+                    # resolved by anything that exists yet, so a check of the
+                    # document alone would be green while the anchor pointed
+                    # nowhere, and that a commit whose cited document is
+                    # renamed later in the same pull request could never be
+                    # repaired, because CONVENTIONS forbids rewriting history.
+                    local doc="${value%%#*}"
+                    if [ -f "$repo/spec/$doc" ]; then
+                        CT_DETAIL="${CT_DETAIL}      - observed, not judged: spec/$doc exists in the tree this run checked out"$'\n'
+                    else
+                        CT_DETAIL="${CT_DETAIL}      - observed, not judged: spec/$doc is NOT in the tree this run checked out. This gate does not fail a commit for it; see ops/gates/gate-13.md"$'\n'
+                    fi
+                fi
+                ;;
+        esac
+    done
+    return 0
+}
+
+# --- which commits ---------------------------------------------------------
+#
+# CI_CD says "every commit on the PR". Working out exactly which those are on a
+# GitHub runner is half this gate, and the other half of the defect class: a
+# gate that enumerates nothing and reports success has checked nothing while
+# looking exactly like a gate that checked everything and found nothing wrong.
+# So there is no path through this function that yields an empty set and an
+# answer of 'ok'.
+#
+# Sets CT_ENUM_STATE to one of:
+#   ok        CT_COMMITS holds one or more commits, oldest first
+#   refuse    this event names a commit set and it could not be determined.
+#             Nothing was checked and the run says so (exit 2)
+#   nothing   there is legitimately nothing to check here, which happens only
+#             off a GitHub event: a local run sitting on the base branch with
+#             no commits of its own. Nothing was checked and the run says so
+#             (exit 3). It is never reported as a pass
+CT_ENUM_STATE=''
+CT_ENUM_WHY=''
+CT_RANGE_DESC=''
+CT_COMMITS=''
+ct_enumerate() {
+    local repo="$1"
+    local event="${GITHUB_EVENT_NAME:-}"
+    local payload="${GITHUB_EVENT_PATH:-}"
+    local base head want got mb before after sha ref
+    CT_ENUM_STATE=''
+    CT_ENUM_WHY=''
+    CT_RANGE_DESC=''
+    CT_COMMITS=''
+
+    ct_refuse() { CT_ENUM_STATE='refuse'; CT_ENUM_WHY="$1"; }
+    ct_nothing() { CT_ENUM_STATE='nothing'; CT_ENUM_WHY="$1"; }
+
+    # Every SHA this function is handed comes from an event payload, and a SHA
+    # that is not in the clone is the shallow-checkout failure: the gate would
+    # enumerate a shorter range, or none, and report on it as though it were
+    # the whole pull request. Named rather than tolerated.
+    ct_have() { git -C "$repo" cat-file -e "$1^{commit}" 2>/dev/null; }
+
+    case "$event" in
+        pull_request|pull_request_target)
+            if [ -z "$payload" ] || [ ! -f "$payload" ]; then
+                ct_refuse "the event is '$event' and there is no readable event payload at GITHUB_EVENT_PATH ('$payload'), so the commits of this pull request cannot be named"
+                return 0
+            fi
+            if ! command -v jq >/dev/null 2>&1; then
+                ct_refuse "the event is '$event' and jq is not on this runner, so the event payload cannot be read and the commits of this pull request cannot be named"
+                return 0
+            fi
+            base=$(jq -r '.pull_request.base.sha // empty' "$payload" 2>/dev/null) || base=''
+            head=$(jq -r '.pull_request.head.sha // empty' "$payload" 2>/dev/null) || head=''
+            want=$(jq -r '.pull_request.commits // empty' "$payload" 2>/dev/null) || want=''
+            if [ -z "$base" ] || [ -z "$head" ]; then
+                ct_refuse "the event payload names no pull_request.base.sha or no pull_request.head.sha, so the commits of this pull request cannot be named"
+                return 0
+            fi
+            if ! ct_have "$base"; then
+                ct_refuse "the base commit $base named by the event payload is not in this clone. The checkout is too shallow for this gate: give the job 'fetch-depth: 0'. Enumerating what happens to be present would check a shorter range and report on it as though it were the whole pull request"
+                return 0
+            fi
+            if ! ct_have "$head"; then
+                ct_refuse "the head commit $head named by the event payload is not in this clone. The checkout is too shallow for this gate: give the job 'fetch-depth: 0'"
+                return 0
+            fi
+            mb=$(git -C "$repo" merge-base "$base" "$head" 2>/dev/null) || mb=''
+            if [ -z "$mb" ]; then
+                ct_refuse "no merge base resolves between $base and $head, so 'the commits on this pull request' names no set"
+                return 0
+            fi
+            CT_COMMITS=$(git -C "$repo" rev-list --reverse "$mb..$head" 2>/dev/null) || CT_COMMITS=''
+            CT_RANGE_DESC="$event: merge-base($base, $head)=$mb .. $head"
+            if [ -z "$CT_COMMITS" ]; then
+                ct_refuse "the range $mb..$head is empty, so this run would check no commit at all. GitHub does not open a pull request with no commits, so an empty set here means the range was computed wrongly, and a gate that checks nothing must not report success"
+                return 0
+            fi
+            # The cross-check. GitHub itself says how many commits this pull
+            # request has; this gate says which ones. If the two disagree, one
+            # of them is wrong about the thing the gate exists to cover, and
+            # neither answer may be reported as a pass.
+            got=$(printf '%s\n' "$CT_COMMITS" | grep -c . 2>/dev/null) || got=0
+            if [ -n "$want" ] && [ "$want" != "$got" ]; then
+                ct_refuse "GitHub reports $want commit(s) on this pull request and this gate enumerated $got from $mb..$head. Until those agree the gate cannot say it checked every commit on the pull request, and it will not report a pass on a set it cannot vouch for"
+                return 0
+            fi
+            CT_ENUM_STATE='ok'
+            CT_ENUM_WHY="GitHub reports $want commit(s) on this pull request and this gate enumerated $got; they agree"
+            ;;
+        merge_group)
+            # spec/CI_CD.md section 2: the merge queue rebases and re-runs
+            # gates 1 to 10 plus 13 and 14 on the rebased head. The set is the
+            # rebased commits, which are not the pull request's commits: they
+            # are new objects with the same messages.
+            if [ -z "$payload" ] || [ ! -f "$payload" ] || ! command -v jq >/dev/null 2>&1; then
+                ct_refuse "the event is 'merge_group' and either there is no readable payload at GITHUB_EVENT_PATH ('$payload') or jq is absent, so the rebased commits cannot be named"
+                return 0
+            fi
+            base=$(jq -r '.merge_group.base_sha // empty' "$payload" 2>/dev/null) || base=''
+            head=$(jq -r '.merge_group.head_sha // empty' "$payload" 2>/dev/null) || head=''
+            if [ -z "$base" ] || [ -z "$head" ]; then
+                ct_refuse "the merge_group payload names no base_sha or no head_sha, so the rebased commits cannot be named"
+                return 0
+            fi
+            if ! ct_have "$base" || ! ct_have "$head"; then
+                ct_refuse "the merge group's base ($base) or head ($head) is not in this clone; the checkout is too shallow for this gate"
+                return 0
+            fi
+            CT_COMMITS=$(git -C "$repo" rev-list --reverse "$base..$head" 2>/dev/null) || CT_COMMITS=''
+            CT_RANGE_DESC="merge_group: $base..$head"
+            if [ -z "$CT_COMMITS" ]; then
+                ct_refuse "the merge group range $base..$head is empty. A merge queue entry with no commits is not a state this gate can report a pass on"
+                return 0
+            fi
+            CT_ENUM_STATE='ok'
+            CT_ENUM_WHY='the merge queue rebases, so these are new commit objects carrying the messages under review (spec/CI_CD.md section 2)'
+            ;;
+        push)
+            if [ -z "$payload" ] || [ ! -f "$payload" ] || ! command -v jq >/dev/null 2>&1; then
+                ct_refuse "the event is 'push' and either there is no readable payload at GITHUB_EVENT_PATH ('$payload') or jq is absent, so the commits this push landed cannot be named"
+                return 0
+            fi
+            before=$(jq -r '.before // empty' "$payload" 2>/dev/null) || before=''
+            after=$(jq -r '.after // empty' "$payload" 2>/dev/null) || after=''
+            if [ -z "$before" ] || [ -z "$after" ]; then
+                ct_refuse "the push payload names no 'before' or no 'after', so the commits this push landed cannot be named"
+                return 0
+            fi
+            case "$before" in
+                *[!0]*) ;;
+                *)
+                    ct_refuse "this push reports an all-zero 'before', which means the ref was created by this push. spec/CONVENTIONS.md 'Git' forbids force pushing and history rewriting, so on 'main' that state is itself the thing to look at, and this gate will not invent a range for it"
+                    return 0
+                    ;;
+            esac
+            if ! ct_have "$before" || ! ct_have "$after"; then
+                ct_refuse "the push's before ($before) or after ($after) is not in this clone; the checkout is too shallow for this gate, or the ref was rewritten"
+                return 0
+            fi
+            CT_COMMITS=$(git -C "$repo" rev-list --reverse "$before..$after" 2>/dev/null) || CT_COMMITS=''
+            CT_RANGE_DESC="push: $before..$after"
+            if [ -z "$CT_COMMITS" ]; then
+                ct_refuse "the push range $before..$after is empty, so this run would check no commit. A push that moved a ref backwards or not at all is not a state this gate reports a pass on"
+                return 0
+            fi
+            CT_ENUM_STATE='ok'
+            CT_ENUM_WHY='on a push there is no pull request, so the set is the commits this push landed on the branch'
+            ;;
+        workflow_dispatch)
+            # There is no pull request and no range. The only commit this event
+            # names is the one that was checked out, so that is the one that is
+            # checked, and the report says so rather than reporting a pass over
+            # a set nobody defined.
+            sha="${GITHUB_SHA:-}"
+            if [ -z "$sha" ]; then
+                sha=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || sha=''
+            fi
+            if [ -z "$sha" ] || ! ct_have "$sha"; then
+                ct_refuse "the event is 'workflow_dispatch' and no commit could be resolved for it (GITHUB_SHA='${GITHUB_SHA:-}')"
+                return 0
+            fi
+            CT_COMMITS=$(git -C "$repo" rev-parse "$sha^{commit}" 2>/dev/null) || CT_COMMITS=''
+            CT_RANGE_DESC="workflow_dispatch: the single commit $sha"
+            if [ -z "$CT_COMMITS" ]; then
+                ct_refuse "the commit $sha could not be resolved"
+                return 0
+            fi
+            CT_ENUM_STATE='ok'
+            CT_ENUM_WHY='a manual dispatch names no pull request and no range, so the set is the one commit that was checked out. This is a smaller claim than the one this gate makes on a pull request and the verdict says so'
+            ;;
+        '')
+            # A local run at a coder's desk. The set is this branch's own
+            # commits: everything since it left the base branch.
+            for ref in origin/main main; do
+                if git -C "$repo" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1; then
+                    base="$ref"
+                    break
+                fi
+            done
+            if [ -z "${base:-}" ]; then
+                ct_nothing "no base branch resolves here: neither 'origin/main' nor 'main' names a commit in this repository, so 'the commits on this branch' names no set"
+                return 0
+            fi
+            mb=$(git -C "$repo" merge-base "$base" HEAD 2>/dev/null) || mb=''
+            if [ -z "$mb" ]; then
+                ct_nothing "no merge base resolves between '$base' and HEAD, so there is no range for this gate to read"
+                return 0
+            fi
+            CT_COMMITS=$(git -C "$repo" rev-list --reverse "$mb..HEAD" 2>/dev/null) || CT_COMMITS=''
+            CT_RANGE_DESC="local: merge-base($base, HEAD)=$mb .. HEAD"
+            if [ -z "$CT_COMMITS" ]; then
+                ct_nothing "this branch carries no commit of its own against '$base' (merge base $mb is HEAD), so there is nothing here for this gate to read. That is not a pass: nothing was checked"
+                return 0
+            fi
+            CT_ENUM_STATE='ok'
+            CT_ENUM_WHY="off a GitHub event the set is this branch's own commits against '$base'"
+            ;;
+        *)
+            ct_refuse "this gate has no rule for the event '$event'. CI_CD section 1 item 13 says 'every commit on the PR' and section 2 adds the merge queue; an event nobody wrote a rule for gets a refusal, because inventing a set here is how a gate ends up checking something other than what it reports"
+            ;;
+    esac
+    return 0
+}
+
+# --- the whole gate --------------------------------------------------------
+#
+# MERGE COMMITS, and why there is no exemption.
+#
+# `main` carries one merge commit, ffab3fd, from before rebase-only merges were
+# configured. It has no trailers and never will, because CONVENTIONS forbids
+# rewriting history. It is nevertheless never enumerated here, and not because
+# it is exempt: it is an ancestor of the base of every range this gate can
+# build, and a range excludes its base. The gate does not need a rule for it
+# and does not have one.
+#
+# Nothing else that reaches this gate should be a merge commit either.
+# `allow_merge_commit` is false, so the merge queue rebases and produces none.
+# A merge commit INSIDE a pull request's range therefore means somebody merged
+# `main` into their branch instead of rebasing onto it, which spec/CONVENTIONS.md
+# "Git" forbids in as many words: "Rebase on `main` before ready". Failing it is
+# the correct verdict, not a false positive.
+#
+# So the exemption a reader might expect is refused deliberately, and the
+# shapes it would have taken are both worse:
+#   - "has two or more parents" exempts exactly the case above, which is the
+#     case that should fail.
+#   - "the subject starts with `Merge pull request`" is a regex over the
+#     message, which is the mechanism this entire gate exists to reject.
+# fixtures/planted/gate-13/ proves both halves: a range CONTAINING a merge
+# commit fails, and a range whose BASE is a merge commit passes.
+CT_RESULT=''
+CT_CHECKED=0
+CT_FAILED=0
+ct_run() {
+    local repo="$1"
+    local sha subject codes n=0 bad=0
+    CT_RESULT=''
+    CT_CHECKED=0
+    CT_FAILED=0
+
+    if ! command -v git >/dev/null 2>&1; then
+        CT_RESULT='refuse'
+        ct_emit error "git is not on PATH, so gate 13 read no commit at all. Nothing was checked."
+        return 0
+    fi
+    if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then
+        if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+            CT_RESULT='refuse'
+            ct_emit error "'$repo' is not a git repository, so gate 13 read no commit at all. Nothing was checked."
+            return 0
+        fi
+    fi
+
+    ct_enumerate "$repo"
+    say "  event            : ${GITHUB_EVENT_NAME:-(none: a local run)}"
+    say "  commit set       : ${CT_RANGE_DESC:-(none)}"
+    case "$CT_ENUM_STATE" in
+        ok)
+            say "  why this set     : $CT_ENUM_WHY"
+            ;;
+        refuse)
+            CT_RESULT='refuse'
+            ct_emit error "gate 13 could not determine which commits to check, so it checked none. $CT_ENUM_WHY"
+            return 0
+            ;;
+        nothing)
+            CT_RESULT='nothing'
+            say "  nothing to check : $CT_ENUM_WHY"
+            return 0
+            ;;
+        *)
+            CT_RESULT='refuse'
+            ct_emit error "gate 13's enumeration returned '$CT_ENUM_STATE', which is not one of its three answers. That is a bug in this script, not a result."
+            return 0
+            ;;
+    esac
+
+    say ''
+    printf '  %-12s %-9s %s\n' 'commit' 'verdict' 'subject'
+    printf '  %-12s %-9s %s\n' '------------' '---------' '----------------------------------------------'
+    while IFS= read -r sha; do
+        [ -n "$sha" ] || continue
+        n=$((n + 1))
+        subject=$(git -C "$repo" show -s --format='%s' "$sha" 2>/dev/null) || subject='(unreadable)'
+        ct_check_commit "$repo" "$sha"
+        codes="$CT_CODES"
+        if [ -z "$codes" ]; then
+            printf '  %-12s %-9s %s\n' "${sha:0:12}" 'ok' "$subject"
+            if [ -n "$CT_DETAIL" ]; then printf '%s' "$CT_DETAIL"; fi
+        else
+            bad=$((bad + 1))
+            printf '  %-12s %-9s %s\n' "${sha:0:12}" 'REFUSED' "$subject"
+            printf '      codes: %s\n' "$codes"
+            printf '%s' "$CT_DETAIL"
+        fi
+    done <<EOF
+$CT_COMMITS
+EOF
+
+    CT_CHECKED="$n"
+    CT_FAILED="$bad"
+
+    # The floor of this gate. Everything above can be correct and this can
+    # still be the state that matters: a loop that ran zero times prints a
+    # header, a rule, and nothing, and a caller reading only the exit status
+    # cannot tell it from a clean pass.
+    if [ "$n" -eq 0 ]; then
+        CT_RESULT='refuse'
+        ct_emit error "gate 13 enumerated a non-empty commit set and then checked none of it. That is a bug in this script, not a result, and it is exactly the state this gate exists to refuse."
+        return 0
+    fi
+
+    say ''
+    say "  checked $n commit(s), $bad refused"
+    if [ "$bad" -ne 0 ]; then
+        CT_RESULT='fail'
+        ct_emit error "gate 13: $bad of $n commit(s) under review do not meet spec/CONVENTIONS.md 'Git'. Every code and every reason is in the table above. Amend or reword the commits named there; spec/CI_CD.md section 1 item 13 asks this of EVERY commit on the pull request, not of the branch as a whole."
+        return 0
+    fi
+    CT_RESULT='pass'
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1080,20 +1657,32 @@ gate_12() {
 }
 
 gate_13() {
-    # Two reasons, and both are stated rather than assumed. The runner does not
-    # exist, and in this fleet the lead makes the commits while the coder
-    # produces the work, so the commits this gate reads are not made in this
-    # worktree. The count below is what this branch actually carries.
-    probe_unavailable 13 'runner' path:crates/ori-gates/src/trailers.rs
-    local own=''
-    if command -v git >/dev/null 2>&1; then
-        own=$(git rev-list --count main..HEAD 2>/dev/null || true)
-    fi
-    if [ -n "$own" ]; then
-        append_note 13 "in this fleet the lead makes the commits and the coder produces the work, and this branch carries $own commit(s) of its own, so the trailers this gate reads are not written here"
-    else
-        append_note 13 'in this fleet the lead makes the commits and the coder produces the work, and no commit count could be read here, so the trailers this gate reads are not written here'
-    fi
+    # A real runner as of ORI-T-0017. The same ct_run() that
+    # `bash scripts/gates.sh --commit-trailers` runs in CI, over the same
+    # implementation, differing only in which commits it enumerates: off a
+    # GitHub event the set is this branch's own commits against origin/main.
+    #
+    # In this fleet the lead makes the commits and the coder produces the work,
+    # so a coder's worktree usually carries no commit of its own. That is
+    # reported as BLOCKED, never as passed: gates.sh has a runner for gate 13
+    # and this run checked no commit, and "I could not check" never shares a
+    # state with "I checked and it was fine". The note says which of the two
+    # happened.
+    ct_run "$REPO_ROOT"
+    case "$CT_RESULT" in
+        pass)
+            set_state 13 'passed' "$CT_CHECKED commit(s) on this branch carry a Conventional Commits subject and the Ticket: and Spec: trailers, read with git's own trailer parser; range: $CT_RANGE_DESC"
+            ;;
+        fail)
+            set_state 13 'failed' "$CT_FAILED of $CT_CHECKED commit(s) on this branch do not meet spec/CONVENTIONS.md \"Git\"; the table above names each one and why"
+            ;;
+        nothing)
+            set_state 13 'blocked' "nothing was checked: $CT_ENUM_WHY. In this fleet the lead makes the commits and the coder produces the work, so a coder's worktree commonly reaches this state; it is not a pass"
+            ;;
+        *)
+            set_state 13 'blocked' "nothing was checked: ${CT_ENUM_WHY:-gate 13 refused to name a commit set on this machine}"
+            ;;
+    esac
 }
 
 gate_14() {
@@ -1159,6 +1748,17 @@ gates.sh: the local gate set a coder runs before opening a pull request.
 
   scripts/gates.sh                run the gate set and print the summary
   scripts/gates.sh --self-check   run only the harness self-check and stop
+  scripts/gates.sh --commit-trailers [--repo DIR]
+                                  run gate 13 alone, over the commits the
+                                  current event names, and exit with gate 13's
+                                  own verdict. This is the form CI runs
+                                  (.github/workflows/ci.yml, job `gate-13`) and
+                                  the form fixtures/planted/gate-13/prove.sh
+                                  presents planted repositories to. --repo
+                                  changes only WHICH repository git reads,
+                                  never HOW the commit set is computed, so the
+                                  enumeration the proof exercises is the
+                                  enumeration CI uses.
   scripts/gates.sh --help         this text
 
 Every gate in spec/CI_CD.md section 1 is reported in one of five states:
@@ -1175,6 +1775,19 @@ Exit status
      on this machine, or no gate reached a verdict at all
  130 interrupted by SIGINT; 143 by SIGTERM; 129 by SIGHUP
 
+Exit status of --commit-trailers, which reports on one gate and so answers a
+narrower question:
+  0  every commit in the set this event names conforms, and the set was not
+     empty
+  1  at least one commit does not
+  2  the set could not be determined, so no commit was checked. An unknown
+     event, an unreadable event payload, a base or head commit missing from a
+     shallow clone, or GitHub and this gate disagreeing about how many commits
+     the pull request has
+  3  there was legitimately nothing to enumerate, which happens only off a
+     GitHub event: a local branch with no commits of its own. Nothing was
+     checked, and this status says so rather than reporting a pass
+
 This script is the last thing a coder runs before saying the work is done, so
 "I could not check" never shares an exit code with "I checked and it was fine".
 A gate gates.sh has no runner for is not an error: nothing at the coder's desk
@@ -1190,12 +1803,23 @@ EOF
 
 main() {
     local only_self_check=0
+    local only_commit_trailers=0
+    local ct_repo="$REPO_ROOT"
 
     STAGE='reading arguments'
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -h|--help) usage; finish 0 ;;
             --self-check) only_self_check=1; shift ;;
+            --commit-trailers) only_commit_trailers=1; shift ;;
+            --repo)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    say "gates.sh: --repo needs a directory"
+                    finish 2
+                fi
+                ct_repo="$2"
+                shift 2
+                ;;
             --plant-abort=*)
                 # Handled at the top level, before the log directory exists.
                 # Reaching here means that handler did not fire.
@@ -1233,6 +1857,48 @@ main() {
         finish 2
     fi
 
+    if [ "$only_commit_trailers" -eq 1 ]; then
+        STAGE='gate 13 alone, the commit-trailer gate'
+        head1 "Gate 13 (alone): ${GATE_NAME[13]}"
+        say "  spec/CI_CD.md section 1 item 13, spec/CONVENTIONS.md \"Git\", spec/PRD.md G-02"
+        say "  repository       : $ct_repo"
+        say ""
+        ct_run "$ct_repo"
+        say ""
+        case "$CT_RESULT" in
+            pass)
+                say "  ${C_GREEN}PASSED.${C_RESET} Every one of the $CT_CHECKED commit(s) this event names carries a"
+                say "  Conventional Commits subject and a Ticket: and a Spec: trailer that GIT'S OWN"
+                say "  PARSER reads, which is the only reader whose answer matters: every consumer of"
+                say "  these trailers goes through it."
+                say ""
+                say "  NOT ESTABLISHED: that the Spec: anchor resolves. The document half is printed"
+                say "  above as an observation and is never judged; nothing in this repository resolves"
+                say "  a markdown anchor yet. ops/gates/gate-13.md states why that is the choice."
+                finish 0
+                ;;
+            fail)
+                say "  ${C_RED}FAILED.${C_RESET} $CT_FAILED of $CT_CHECKED commit(s) do not meet spec/CONVENTIONS.md \"Git\"."
+                finish 1
+                ;;
+            refuse)
+                say "  ${C_RED}NOTHING WAS CHECKED.${C_RESET} Gate 13 could not name the commits this event covers,"
+                say "  so it read none of them. This is not a pass and not a failure of any commit."
+                finish 2
+                ;;
+            nothing)
+                say "  ${C_RED}NOTHING WAS CHECKED.${C_RESET} There was no commit here for gate 13 to read."
+                say "  This is not a pass. Do not read it as one."
+                finish 3
+                ;;
+            *)
+                say "  ${C_RED}Gate 13 returned '$CT_RESULT', which is not one of its four answers.${C_RESET}"
+                say "  That is a bug in gates.sh, not a result."
+                finish 2
+                ;;
+        esac
+    fi
+
     if [ "$only_self_check" -eq 1 ]; then
         say ""
         say "Self-check only, requested with --self-check. ${C_YELLOW}No gate was run,${C_RESET}"
@@ -1255,10 +1921,14 @@ main() {
     head1 "Gate 7: ${GATE_NAME[7]}"
     gate_7
 
-    STAGE='gates 3 to 6 and 8 to 14, availability probes'
-    head1 "Gates 3 to 6 and 8 to 14: probing availability"
+    STAGE='gate 13, the commit-trailer gate'
+    head1 "Gate 13: ${GATE_NAME[13]}"
+    gate_13
+
+    STAGE='gates 3 to 6, 8 to 12 and 14, availability probes'
+    head1 "Gates 3 to 6, 8 to 12 and 14: probing availability"
     gate_3; gate_4; gate_5; gate_6; gate_8
-    gate_9; gate_10; gate_11; gate_12; gate_13; gate_14
+    gate_9; gate_10; gate_11; gate_12; gate_14
 
     local probed=0 i
     i=1

@@ -1,0 +1,7 @@
+feat(gates): a Spec trailer with a document and no section
+
+CONVENTIONS asks for `<document>#<section>`. A document on its own points
+at a file, not at the part of it the commit implements.
+
+Ticket: ORI-T-0017
+Spec: CI_CD.md

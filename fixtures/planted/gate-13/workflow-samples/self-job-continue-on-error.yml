@@ -1,0 +1,35 @@
+# DEAD, and this is the sharp one: `continue-on-error: true` on the job that
+# runs the prover, not on the job the prover is proving.
+#
+# The harness still runs. It still presents every planted defect. It still
+# refuses, with a non-zero exit status and an `::error::` annotation. GitHub
+# records the job's conclusion as success, the aggregate reads `success`, and
+# the pull request is green. Every refusal the prover can issue is switched off
+# by one line, in the one job whose own liveness the prover is the only thing
+# that could check.
+#
+# prove.sh must classify this `dead`. A run in which it does not is a run in
+# which the prover reports on gate 13 while unable to say whether anyone would
+# hear it say otherwise.
+name: sample-self-job-continue-on-error
+on:
+  pull_request:
+jobs:
+  gate-13:
+    runs-on: ubuntu-latest
+    steps:
+      - name: bash scripts/gates.sh --commit-trailers
+        run: bash scripts/gates.sh --commit-trailers
+  gate-13-proof:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove gate 13
+        run: bash fixtures/planted/gate-13/prove.sh
+  ci:
+    needs: [gate-13, gate-13-proof]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

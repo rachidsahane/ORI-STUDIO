@@ -1,0 +1,9 @@
+feat(gates): a Ticket trailer whose value is not a ticket
+
+Git parses this one. The trailer is in the last paragraph, spelled
+correctly and read by every consumer. What it carries is not an
+identifier this project issues, and a trailer nobody can resolve is the
+traceability chain of AICD section 13 broken quietly.
+
+Ticket: T-17
+Spec: CI_CD.md#1-pipeline-on-every-pull-request
