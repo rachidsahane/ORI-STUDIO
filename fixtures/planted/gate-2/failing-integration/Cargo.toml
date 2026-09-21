@@ -1,0 +1,30 @@
+# failing-integration: an integration test that fails (ORI-T-0014).
+# 
+# Spec: spec/CI_CD.md section 1 gate 2. Proof: ops/gates/gate-2.md.
+# 
+# The same planted defect one level out: the failure is in a test under tests/,
+# which cargo builds as its own binary. A gate that caught a unit test failure
+# and not an integration test failure would pass this tree, so the level is
+# exercised separately rather than assumed to behave the same way.
+#
+# THE EMPTY [workspace] TABLE BELOW IS LOAD BEARING. It makes this directory
+# its own workspace root, so the repository workspace at the root of the
+# checkout, whose root Cargo.toml lists its members explicitly and uses no
+# globs, never reaches this package. That is what lets a deliberately broken
+# package sit in this tree while `cargo build --workspace`, `cargo test
+# --workspace`, `cargo fmt --all` and `cargo clippy --workspace` at the
+# repository root all stay green.
+#
+# No dependencies, deliberately: CLAUDE.md rule 6 forbids adding a crate, and a
+# package with no dependencies also needs no network, so this proof runs on an
+# offline runner.
+[package]
+name = "gate-2-failing-integration"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

@@ -1,0 +1,9 @@
+# The member. Its test passes, so the run this workspace produces is green.
+[package]
+name = "gate-2-listed"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"

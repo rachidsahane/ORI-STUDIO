@@ -1,0 +1,35 @@
+# MISNAMED. The harness is run, and by a job whose name is not the one the
+# harness identifies itself as.
+#
+# This is the failure mode of the obvious fix. A prover that looked itself up
+# by job name alone would find no job called `gate-2-proof` here and, written
+# the natural way, would skip its own check and carry on proving gate 2: the
+# self-check switched off by a rename, which is cheaper than the
+# `continue-on-error:` it exists to catch. A prover that looked itself up by
+# the command alone would follow the rename without noticing, and a renamed
+# proof job is a deliberate edit to the job that carries the proof.
+#
+# So both are required and both must agree, and the answer owed here is neither
+# `live` nor `dead` but `misnamed`: prove.sh refuses, names the job it found,
+# and asks for `SELF_JOB` to be updated in the same commit as the rename.
+name: sample-self-renamed
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+  gate-2-proof-disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove gate 2
+        run: bash fixtures/planted/gate-2/prove.sh
+  ci:
+    needs: [test, gate-2-proof-disabled]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

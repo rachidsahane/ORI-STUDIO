@@ -1,0 +1,27 @@
+# unlisted-member: a workspace whose failing test is not a member of it.
+# Planted for gate 2 (ORI-T-0014).
+#
+# Spec: spec/CI_CD.md section 1 gate 2, which says "workspace-wide". Proof:
+# ops/gates/gate-2.md. Rule: AICD §14, and AICD §39 "present but reporting
+# nothing".
+#
+# The fourth state gate 2 reports as success, and the one that is about the
+# word "workspace-wide" rather than about the tests. `listed/` is a member and
+# its test passes. `unlisted/` sits beside it, is a package, has a test that
+# fails, and is not in `members` below. `cargo test --workspace --locked` run
+# here compiles `listed`, runs its one test, prints "test result: ok" and exits
+# 0. It never mentions `unlisted` at all.
+#
+# THIS IS NOT A HYPOTHETICAL FOR THIS REPOSITORY. The root Cargo.toml lists its
+# seventeen members by hand and uses no globs, which is the same property
+# `fixtures/planted/gate-1/` and this directory rely on to keep their planted
+# defects out of the real build. The same property means a crate added under
+# `crates/` and left out of that list is a crate `cargo test --workspace` never
+# runs, and gate 2 stays green.
+#
+# There is no `exclude` entry for `unlisted/` on purpose: adding one would be a
+# deliberate statement that the package is meant to be outside the workspace,
+# and what is planted here is the absence of any such statement.
+[workspace]
+resolver = "3"
+members = ["listed"]

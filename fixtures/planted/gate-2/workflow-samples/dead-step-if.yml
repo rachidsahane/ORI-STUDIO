@@ -1,0 +1,19 @@
+# DEAD: the same, one level down. The job runs and reports success; the step
+# carrying the gate command is skipped.
+name: sample-dead-step-if
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo test --workspace --locked
+        if: false
+        run: cargo test --workspace --locked
+  ci:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

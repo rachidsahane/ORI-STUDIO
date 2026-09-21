@@ -1,0 +1,22 @@
+# DEAD: `continue-on-error: true` on the job. The test suite still runs and
+# still fails; GitHub records the job's conclusion as success, the aggregate
+# reads `success`, and the pull request is green with a failing test in the
+# log. The command string is untouched, which is what makes this the cheapest
+# weakening of all.
+name: sample-dead-job-continue-on-error
+on:
+  pull_request:
+jobs:
+  test:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+  ci:
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

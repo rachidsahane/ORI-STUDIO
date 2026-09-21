@@ -1,0 +1,39 @@
+# DEAD: the test job runs `echo`, and the byte-identical
+# `run: cargo test --workspace --locked` line survives only as text inside
+# another job's shell script. An anchored whole-file grep matches it and
+# reports the gate proved; the gate is switched off and every check is green.
+# This is the construction that broke the first version of gate 1's harness.
+#
+# The `echo` below carries no colon. A plain YAML scalar may not contain one
+# followed by a space, so `run: echo 'gate 2: disabled'` is a parse error and
+# GitHub would reject the whole file: a workflow nobody can run is not the
+# construction this sample is about. `workflow-facts.awk` does not enforce
+# YAML, so the sample would still have been classified `dead`, for a reason
+# that could never arise. ORI-T-0014 found it by parsing every sample with a
+# real YAML parser; `fixtures/planted/gate-1/workflow-samples/` has the same
+# defect in its copy and it is outside that ticket's scope.
+name: sample-dead-command-is-block-scalar-text
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: gate 2, disabled
+        run: echo 'gate 2 is disabled'
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a shell script that mentions the gate command
+        run: |
+          cat <<'INNER' >/dev/null
+          run: cargo test --workspace --locked
+          INNER
+          echo done
+  ci:
+    needs: [test, other]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate
