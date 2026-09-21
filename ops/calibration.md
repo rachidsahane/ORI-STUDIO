@@ -113,3 +113,45 @@ returns the exit status of `tail`, not of `git push`. The control was sound; the
 **What it changes.** Every gate this project writes must capture the exit status of the command it gates before piping that command's output anywhere: a separate capture, `PIPESTATUS`, or `set -o pipefail`. A gate whose command is piped into a formatter has no exit status of its own and passes on every input, which is indistinguishable from working until a planted defect is put in front of it.
 
 This is the strongest evidence yet for AICD §14's planted-defect requirement. Without a deliberately failing input, the inverted harness above would have been recorded as a successful proof, and branch protection would have been cited as installed on the strength of a check that could not fail.
+
+## CR-005: the lead's records are the least gated artifact in the project
+
+Measured on ORI-T-0018, the G4 trivial-ticket test. The ticket's change was one doc comment. Its journey found seven defects, and **five of the seven are in records the lead wrote**, none of which any gate reads.
+
+| # | Defect | Where | Would any gate have caught it |
+|---|---|---|---|
+| 1 | list item deleted without renumbering (`1. 3.`) | `ops/gates/gate-2.md` | no |
+| 2 | same, and a placeholder run id `Run 35655...` where every other record carries a real one | `ops/gates/gate-13.md` | no |
+| 3 | worktree handed to the coder dirty with the lead's uncommitted `ops/` edits | working tree | no |
+| 4 | the ticket never claimed anything in `ops/lock-table.md`, and `ops/phase-1-backlog.md` declares a scope path the change did not touch | `ops/lock-table.md`, `ops/phase-1-backlog.md` | no |
+| 5 | the pull request's exact check names written from memory: `clippy` as one job when it is three, `gate-2-proof` and `GitGuardian Security Checks` missing | pull request body | no |
+
+The two that are not the lead's are a bare `§28` that gate 9 does not collect, and AICD §28's opening sentence, which is a methodology defect.
+
+### What the numbers say
+
+**Eighteen checks judge `crates/`. Zero judge `ops/`.** Every line of Rust in this repository is read by `fmt`, `clippy`, `test` on three platforms, two supply-chain checks and a secret scanner. Every line of the operational record that those gates' own evidence lives in is read by nobody, and the only reason the project knows about these five is that a coder was asked to report friction and did.
+
+That inverts the project's own claim. `ops/gates/*.md` is where a reader goes to find out whether a gate is real. A placeholder run id in that file is not a typo; it is the evidence for AICD §14's visibility clause being absent while the file says **Installed**. Defect 2 shipped a gate record whose state line and whose evidence disagreed, and it was the record, not the gate, that was wrong.
+
+### The class, and its count
+
+Defect 4 is the fourth occurrence of a single failure: **a grant, a ruling or a claim that exists in the lead's intent and not in a file.**
+
+| # | Occurrence | Cost |
+|---|---|---|
+| 1 | rulings R15 to R24 issued in prompts, never recorded | six dangling `R16` and `R19` references shipped in code |
+| 2 | the same rulings written to a working tree and never committed | ORI-T-0005's reviewer failed the ticket a second time, correctly |
+| 3 | ORI-T-0016's scope extension granted in a prompt (ruling R28) | a reviewer reported `scripts/gates.sh` as an unrecorded scope violation, correctly |
+| 4 | ORI-T-0018 never entered in the lock table, against a backlog path it did not touch | nothing, because nothing else was in flight |
+
+Occurrence 4 cost nothing only because the fleet was serial. The lock table's whole purpose is parallel work; the first batch that runs two coders at once is the batch where this class stops being free.
+
+### What it recommends to the methodology
+
+AICD §14 says a gate is installed when it has been seen to fail on a planted defect. It is silent on the record that asserts this, and that record is load-bearing: it is what a human reads instead of re-running the proof. Two proposals for AICD §30, alongside the lens-split note of CR-001 and the executable-precondition note of CR-003:
+
+1. **The evidence record is part of the gate.** A gate is installed when the proof has been seen to fail *and* its record names the runs that were observed. A record citing a run id that does not resolve is an uninstalled gate, not an untidy file, and that is mechanically checkable.
+2. **Fleet bookkeeping needs a gate of its own.** The lock table, the rulings file and the backlog are the fleet's control surface under §12, and in this project they are the only artifacts with no check on them. `ori-watch` (§12) is specified to detect unattributed change and does not exist yet; INC-0001 went undetected for 100 minutes for the same reason.
+
+**Measured cost of the control that found these.** One instruction to the coder: report what the path did wrong, not only what the ticket did. Five lead defects, none of which any gate in the repository can see. It is the same shape as CR-003's finding: the highest-yield controls so far are the ones that cost a sentence.
