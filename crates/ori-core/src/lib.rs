@@ -12,3 +12,6 @@
 //! `Tier` and `Scope` from the autonomy tiers and permission model in AICD §17.
 //!
 //! Must not: do IO, or import any other workspace crate (`spec/LLD.md` section 2).
+
+pub mod error;
+pub mod types;
