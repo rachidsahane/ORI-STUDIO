@@ -7,7 +7,7 @@ Written by the lead at batch 1 close. Every number here was read from the reposi
 | | |
 |---|---|
 | Tickets merged | 15 of 18 planned, plus 5 raised during the batch |
-| Tickets not merged | 3: ORI-T-0010 and ORI-T-0015 blocked, ORI-T-0018 open as pull request 25 |
+| Tickets not merged | 2: ORI-T-0010 and ORI-T-0015, both blocked |
 | Escalations opened | 4, all open with the operator |
 | Gates installed | 3 of 5 in this batch's scope, 1 partial, 1 with no subject yet |
 | Deliberate red runs | 3, on branches closed unmerged and deleted. No planted defect entered `main` |
@@ -42,10 +42,10 @@ Closed unmerged on purpose: 17, 20 and 24, the three visibility demonstrations. 
 | Gate | Ticket | State | Evidence |
 |---|---|---|---|
 | 1, `fmt` and `clippy` | ORI-T-0013 | **Installed** | green run, plus run on pull request 17 observed red |
-| 2, `cargo test` workspace-wide | ORI-T-0014 | **Installed** on merge of pull request 25 | run 35598542173 green, run 35609765474 observed red on three platforms |
+| 2, `cargo test` workspace-wide | ORI-T-0014 | **Installed** | run 35598542173 green, run 35609765474 observed red on three platforms |
 | 3, contract tests | ORI-T-0015 | **Not started, and cannot be** | there is no contract to test until `ori-rpc` exists |
 | 7, audit, deny, secret scan | ORI-T-0016 | **Partially installed, two checks of three** | advisories and licences proven on planted defects; the secret scan is escalation E-0003 |
-| 13, commit trailers | ORI-T-0017 | **Installed** on merge of pull request 25 | run 35654836919 green, run 35656176844 observed red |
+| 13, commit trailers | ORI-T-0017 | **Installed** | run 35654836919 green, run 35656176844 observed red |
 
 Eighteen checks now run on every pull request: `build`, `clippy` and `test` on ubuntu, macos and windows; `fmt`; `gate-1-proof`; `gate-2-proof`; `gate-7`; `gate-7-proof`; `gate-13`; `gate-13-proof`; `ci`; and `GitGuardian Security Checks`, which nobody in this project installed.
 
@@ -56,7 +56,7 @@ The backlog says: "every gate below proven on a planted defect, the smoke ticket
 | Clause | State |
 |---|---|
 | `cargo build --workspace` green on three platforms | **met**, and on every pull request since 12 |
-| the smoke ticket merged | **waits on the operator**, pull request 25, eighteen of eighteen green |
+| the smoke ticket merged | **met**. Pull request 25 merged at `bf05ef9` |
 | every gate proven | **not met, and two of the gaps are not closable inside batch 1** |
 
 **Gate 3 has no subject.** It proves contract tests against an interface that `ori-rpc` does not define yet. `ori-rpc` is batch 8. The ticket was planned into batch 1 because the batch is titled "CI skeleton", and that was a planning error: a gate cannot be proven on a planted defect when nothing exists to plant a defect in. ORI-T-0015 moves to the batch that creates its subject.
@@ -89,7 +89,27 @@ And one incident: **INC-0001**, an unattributed change undetected for 100 minute
 
 ## What the operator owes before batch 2 can run in full
 
-1. Merge pull request 25, or say it does not merge.
 2. Answer E-0004. Three of batch 2's four tickets stop on it; ORI-T-0019 has started without it.
 3. Decide whether tier 0 auto-merge turns on now that gates 1, 2 and 13 are installed, or stays off. The batch 1 ruling disabled it "on unproven gates" and that condition has changed.
 4. Optionally: make `ci` a required status check, which is what turns eighteen green checks into eighteen enforced ones.
+
+## Position at the time this record merges, which is later than the rest of it
+
+The body above was written when batch 1 closed. Four pull requests then merged in the order this record asked for, and the facts have moved. Updated rather than left to disagree with `main`, which is the defect ORI-T-0018 found in two gate records.
+
+| Pull request | Ticket | Landed at | State |
+|---|---|---|---|
+| 25 | ORI-T-0018, the G4 trivial-ticket test | `bf05ef9` | merged |
+| 27 | ORI-T-0019, domain types and the error enum | `0974dd1` | merged |
+| 28 | ORI-T-0085, tie the index restatement to the index | `478173e` | merged |
+| 26 | this record | | open |
+
+**`main` is green at `478173e`**, run 35664113834. That matters more than it reads: pull request 28 was deliberately red on its own branch, because the test it adds fails when `crates/ori-core/src/error.rs` is absent and that file arrived with 27. The merge order held, the subject arrived, and the test went green on `main` without anyone editing it. A check that was red for a stated reason and turned green when the reason was removed is a check that was measuring something.
+
+So gate 2 and gate 13 are **Installed** without qualification, and batch 2 has its first two tickets merged rather than open.
+
+### What this changes in the list below
+
+Item 1, merging pull request 25, is done and is struck from the list. Items 2, 3 and 4 stand: escalation E-0004 is still unanswered and still holds ORI-T-0020, ORI-T-0021 and ORI-T-0022; the tier 0 auto-merge condition is still the operator's to resolve; and `ci` is still not a required status check.
+
+That last one acquired a demonstration while this record sat open. Pull request 28 carried four red checks, `test` on three platforms and `ci`, and **nothing in the repository would have prevented it being merged in that state.** It was merged deliberately, in the right order, by a human who had read why. The point is that the eighteen checks played no part in that decision, because none of them can.
