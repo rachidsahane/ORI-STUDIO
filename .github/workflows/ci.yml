@@ -1,0 +1,455 @@
+# ci.yml: the pull request pipeline for Ori Studio.
+#
+# Ticket: ORI-T-0012.  Spec: spec/CI_CD.md#1 ("Pipeline on every pull request").
+# Tier 2 by spec/RISK_MAP.md, row `.github/workflows, scripts/release*`, reason
+# "Supply chain".
+#
+# ===========================================================================
+# THE TRIGGER THAT FIRES THIS WORKFLOW, NAMED
+# ===========================================================================
+#
+# spec/PRD.md Z-02 requires that every artifact citing a gate names the trigger
+# that fires it. AICD §39 records why: "Two CI workflows sat intact behind a
+# manual trigger and a build target had no recipe, while every document cited
+# them as gates", and the rule that lesson earned is that "present but
+# reporting nothing" is a named defect class.
+#
+# FIRES ON, and these are the only four:
+#
+#   pull_request     every pull request into any branch, default activity
+#                    types `opened`, `synchronize` and `reopened`. This is the
+#                    trigger spec/CI_CD.md section 1 names. There is no
+#                    `branches:` filter, because the specification says every
+#                    pull request and not every pull request into main.
+#   push (main only) the merge commit itself. Without it, `main` carries no
+#                    green run of its own and the batch 1 exit criterion
+#                    ("cargo build --workspace green on all three platforms in
+#                    CI") would have no record on the branch it is about.
+#   merge_group      spec/CI_CD.md section 2: "Only the merge queue merges. It
+#                    rebases, re-runs gates 1 to 10, plus 13 and 14, on the
+#                    rebased head". GitHub's merge queue raises `merge_group`
+#                    and nothing else. A required check that does not fire on
+#                    `merge_group` leaves the queue waiting forever on a status
+#                    that can never arrive.
+#   workflow_dispatch  additive only, never the sole trigger. It exists so the
+#                    lead can fire a run by hand while verifying this file.
+#                    Removing it would change nothing about what runs on a
+#                    pull request. This is the trigger AICD §39 warns about;
+#                    it is safe here only because the three real events above
+#                    are present, and it must stay that way.
+#
+# DOES NOT FIRE ON, stated so that nobody infers coverage this file does not
+# have:
+#
+#   - pushes to any branch other than `main` (a branch with no pull request is
+#     not checked by anything; that is deliberate, the pull request is the unit)
+#   - tag pushes `v*`. The release pipeline is spec/CI_CD.md section 4 and is
+#     not ticketed in batch 1. Nothing here builds, signs or publishes.
+#   - `schedule`. The liveness gate that spec/CI_CD.md section 1 describes
+#     ("the liveness gate (scheduled) fails loudly if any required workflow has
+#     not executed inside its window") is ORI-T-0046,
+#     `crates/ori-gates/src/liveness.rs`, spec/PRD.md O-06. Putting a cron on
+#     this workflow would make it run on a timer; it would not make it a
+#     liveness check, and it would let a reader believe liveness is covered.
+#   - `pull_request_target`. Deliberately absent: it runs the base branch's
+#     workflow with write scope against a fork's code.
+#   - draft pull requests are covered. `opened` fires when a pull request is
+#     created as a draft and `synchronize` fires on every later push to it.
+#     `ready_for_review` is not in the default type set and is not needed,
+#     because a run has already happened by then.
+#
+# ===========================================================================
+# WHAT THIS FILE INSTALLS, AND WHAT IT DOES NOT
+# ===========================================================================
+#
+# It installs NO GATES. AICD §14, under "The verification cycle", states the
+# rule: "a gate is installed only when it has been seen to fail", and "Every
+# gate (a CI check, a coverage matrix checker, a mutation threshold, a liveness
+# check, a permission rule) enters service only after a demonstration on a
+# planted defect: it passes on a clean tree, it fails on the planted defect, and
+# the failure is visible where a human would look." AICD §39 restates it as "A
+# gate is installed only after it has been seen to fail on a planted defect
+# (section 14)".
+#
+# Nothing here has been demonstrated on a planted defect, so nothing here may be
+# cited as an installed gate, in this repository or anywhere else.
+#
+# The commands for gates 1 and 2 of spec/CI_CD.md section 1 do run, from the
+# first pull request, because they need no tooling this repository does not
+# already have. Running is not installed:
+#
+#   job `fmt`     `cargo fmt --all --check`                 gate 1, first half
+#   job `clippy`  `cargo clippy ... -D warnings`            gate 1, second half
+#                 Proven and installed by ORI-T-0013, with a planted defect
+#                 under `fixtures/planted/fmt-clippy/` and a proof at
+#                 `ops/gates/fmt-clippy.md`.
+#   job `test`    `cargo test --workspace`                  gate 2
+#                 Proven and installed by ORI-T-0014, `fixtures/planted/tests/`
+#                 and `ops/gates/tests.md`.
+#   job `build`   the three-platform build                  gate 11
+#                 `spec/CI_CD.md` section 1 gate 11 allows "cross-compilation or
+#                 matrix"; this is the matrix, built natively on each runner.
+#
+# Gates 3, 7 and 13 arrive with ORI-T-0015, ORI-T-0016 and ORI-T-0017; gates 9
+# and 14 with ORI-T-0047 and ORI-T-0048. They all edit this file and they run
+# serially for that reason (ops/phase-1-backlog.md, batch 1 order, and the lock
+# table row for this path). Adding one is meant to be two edits: a new job, and
+# its name added to `ci`'s `needs:`. The `ci` job at the bottom fails loudly if
+# only the first of the two is done.
+#
+# ===========================================================================
+# WHY EVERY COMPILING JOB ASSERTS THE TOOLCHAIN PIN FIRST
+# ===========================================================================
+#
+# `rust-toolchain.toml` pins 1.98.1 with the rustfmt and clippy components. The
+# GitHub runners ship rustup, and rustup's proxies install and select the pinned
+# toolchain on the first `rustc` call, so this workflow installs no toolchain of
+# its own and needs no toolchain action. That is a claim about somebody else's
+# runner image, and an unchecked claim about a toolchain is how a build goes
+# green on the wrong compiler while every document says it is pinned. So each
+# compiling job checks it, on its own runner, before anything is built:
+#
+#   - the channel must be an exact x.y.z. A channel pin such as `stable` makes
+#     the clippy lint set, and therefore the verdict of gate 1, an untracked
+#     input; `rust-toolchain.toml` argues that case at length and this check
+#     enforces what it decided.
+#   - `rustc --version` must equal the pin. If it does not, this runner is not
+#     honouring the pin and no result it produces means what it appears to mean.
+#   - `cargo fmt --version` and `cargo clippy --version` must both work. A
+#     missing component makes gate 1 unrunnable, and a job that cannot run a
+#     check has to fail rather than pass quietly.
+#
+# The assert is byte for byte the same in all four jobs. GitHub Actions has no
+# YAML anchors and no way to share a step body, and a composite action would
+# live at `.github/actions/`, outside this ticket's declared scope. If you edit
+# one copy, edit all four.
+#
+# ===========================================================================
+# WHY EVERY ACTION IS PINNED TO A COMMIT SHA
+# ===========================================================================
+#
+# This path is tier 2 for supply chain. A tag is a mutable pointer: whoever can
+# move `v7` can run their code with this repository checked out. The SHA below
+# was resolved against the GitHub API on 2026-09-21 and the tag it belonged to
+# is recorded in the trailing comment so a human can audit the pin.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+# Least privilege, set once at the top so no job can quietly inherit more. No
+# job here writes anything to the repository, the packages registry or the
+# checks API.
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede an in-flight run of the same pull request, and never supersede a
+  # run on `main` or in the merge queue: cancelling a merge queue run drops the
+  # queue's status and wedges it.
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # One shell on all three runners. The Windows runner defaults to pwsh, and
+    # a step whose body is interpreted by a different shell on one platform is
+    # a step whose exit status means something different there.
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    # The batch 1 exit criterion: `cargo build --workspace` green on all three
+    # platforms in CI. Natively on each runner, not cross-compiled.
+    name: build (${{ matrix.os }})
+    strategy:
+      # Report all three. With fail-fast on, one platform's failure cancels the
+      # other two and the run says nothing about them.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert the pinned toolchain is the one in use
+        run: |
+          set -euo pipefail
+          pin="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          pin="${pin%%$'\n'*}"
+          if [ -z "$pin" ]; then
+            echo "::error file=rust-toolchain.toml::no [toolchain] channel line found, so the pin cannot be checked at all"
+            exit 1
+          fi
+          if [[ ! "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=rust-toolchain.toml::the pin is '$pin', which is not an exact x.y.z version. rust-toolchain.toml states why the pin is exact: under a channel pin an upstream release changes the clippy lint set, and the verdict of gate 1 changes with no commit in this repository. Restore the exact pin, or change this check deliberately in a ticket."
+            exit 1
+          fi
+          banner="$(rustc --version)"
+          active="$(awk '{print $2}' <<<"$banner")"
+          echo "rust-toolchain.toml pins : $pin"
+          echo "rustc on PATH reports    : $active   ($banner)"
+          if [ "$pin" != "$active" ]; then
+            echo "::error file=rust-toolchain.toml::rustc is $active but rust-toolchain.toml pins $pin. This runner is not honouring the pin, and a green result here would be a green result on a toolchain nothing in this repository names."
+            exit 1
+          fi
+          for probe in fmt clippy; do
+            if ! cargo "$probe" --version; then
+              echo "::error file=rust-toolchain.toml::'cargo $probe --version' failed, so the '$probe' component listed in rust-toolchain.toml is not usable on this runner"
+              exit 1
+            fi
+          done
+      - name: cargo build --workspace --locked
+        # `--locked` so a resolver that wants to rewrite Cargo.lock fails here
+        # instead of silently building against versions no commit records. On a
+        # supply-chain-tiered path that is the whole point of having a lock file.
+        run: cargo build --workspace --locked
+
+  fmt:
+    # spec/CI_CD.md section 1, gate 1, first half. Not an installed gate:
+    # ORI-T-0013 proves it on a planted defect and installs it.
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert the pinned toolchain is the one in use
+        run: |
+          set -euo pipefail
+          pin="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          pin="${pin%%$'\n'*}"
+          if [ -z "$pin" ]; then
+            echo "::error file=rust-toolchain.toml::no [toolchain] channel line found, so the pin cannot be checked at all"
+            exit 1
+          fi
+          if [[ ! "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=rust-toolchain.toml::the pin is '$pin', which is not an exact x.y.z version. rust-toolchain.toml states why the pin is exact: under a channel pin an upstream release changes the clippy lint set, and the verdict of gate 1 changes with no commit in this repository. Restore the exact pin, or change this check deliberately in a ticket."
+            exit 1
+          fi
+          banner="$(rustc --version)"
+          active="$(awk '{print $2}' <<<"$banner")"
+          echo "rust-toolchain.toml pins : $pin"
+          echo "rustc on PATH reports    : $active   ($banner)"
+          if [ "$pin" != "$active" ]; then
+            echo "::error file=rust-toolchain.toml::rustc is $active but rust-toolchain.toml pins $pin. This runner is not honouring the pin, and a green result here would be a green result on a toolchain nothing in this repository names."
+            exit 1
+          fi
+          for probe in fmt clippy; do
+            if ! cargo "$probe" --version; then
+              echo "::error file=rust-toolchain.toml::'cargo $probe --version' failed, so the '$probe' component listed in rust-toolchain.toml is not usable on this runner"
+              exit 1
+            fi
+          done
+      - name: cargo fmt --all --check
+        # One runner is enough and three would not be more true: rustfmt's
+        # verdict is a function of the source and rustfmt.toml, not of the host.
+        run: cargo fmt --all --check
+
+  clippy:
+    # spec/CI_CD.md section 1, gate 1, second half. Not an installed gate:
+    # ORI-T-0013 proves it on a planted defect and installs it.
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # All three, unlike fmt. Lints fire on the code the target actually
+        # compiles, so a `cfg(target_os)` branch that only Windows compiles is
+        # only ever linted on Windows. This workspace will have such branches;
+        # `ori-runtime` and `ori-broker` cannot avoid them.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert the pinned toolchain is the one in use
+        run: |
+          set -euo pipefail
+          pin="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          pin="${pin%%$'\n'*}"
+          if [ -z "$pin" ]; then
+            echo "::error file=rust-toolchain.toml::no [toolchain] channel line found, so the pin cannot be checked at all"
+            exit 1
+          fi
+          if [[ ! "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=rust-toolchain.toml::the pin is '$pin', which is not an exact x.y.z version. rust-toolchain.toml states why the pin is exact: under a channel pin an upstream release changes the clippy lint set, and the verdict of gate 1 changes with no commit in this repository. Restore the exact pin, or change this check deliberately in a ticket."
+            exit 1
+          fi
+          banner="$(rustc --version)"
+          active="$(awk '{print $2}' <<<"$banner")"
+          echo "rust-toolchain.toml pins : $pin"
+          echo "rustc on PATH reports    : $active   ($banner)"
+          if [ "$pin" != "$active" ]; then
+            echo "::error file=rust-toolchain.toml::rustc is $active but rust-toolchain.toml pins $pin. This runner is not honouring the pin, and a green result here would be a green result on a toolchain nothing in this repository names."
+            exit 1
+          fi
+          for probe in fmt clippy; do
+            if ! cargo "$probe" --version; then
+              echo "::error file=rust-toolchain.toml::'cargo $probe --version' failed, so the '$probe' component listed in rust-toolchain.toml is not usable on this runner"
+              exit 1
+            fi
+          done
+      - name: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    # spec/CI_CD.md section 1, gate 2, workspace-wide. Not an installed gate:
+    # ORI-T-0014 proves it on a planted defect and installs it.
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert the pinned toolchain is the one in use
+        run: |
+          set -euo pipefail
+          pin="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          pin="${pin%%$'\n'*}"
+          if [ -z "$pin" ]; then
+            echo "::error file=rust-toolchain.toml::no [toolchain] channel line found, so the pin cannot be checked at all"
+            exit 1
+          fi
+          if [[ ! "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=rust-toolchain.toml::the pin is '$pin', which is not an exact x.y.z version. rust-toolchain.toml states why the pin is exact: under a channel pin an upstream release changes the clippy lint set, and the verdict of gate 1 changes with no commit in this repository. Restore the exact pin, or change this check deliberately in a ticket."
+            exit 1
+          fi
+          banner="$(rustc --version)"
+          active="$(awk '{print $2}' <<<"$banner")"
+          echo "rust-toolchain.toml pins : $pin"
+          echo "rustc on PATH reports    : $active   ($banner)"
+          if [ "$pin" != "$active" ]; then
+            echo "::error file=rust-toolchain.toml::rustc is $active but rust-toolchain.toml pins $pin. This runner is not honouring the pin, and a green result here would be a green result on a toolchain nothing in this repository names."
+            exit 1
+          fi
+          for probe in fmt clippy; do
+            if ! cargo "$probe" --version; then
+              echo "::error file=rust-toolchain.toml::'cargo $probe --version' failed, so the '$probe' component listed in rust-toolchain.toml is not usable on this runner"
+              exit 1
+            fi
+          done
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+
+  ci:
+    # THE ONE REQUIRED CHECK. Branch protection and the merge queue should
+    # require `ci` and nothing else: the matrix job names above carry the
+    # runner label in them and would have to be re-entered by hand in the
+    # repository settings every time the matrix changes, which is a list that
+    # drifts silently.
+    #
+    # WHAT THIS JOB IS FOR. It exists to make three states that look like
+    # success report as failure:
+    #
+    #   1. A job was skipped or cancelled. GitHub reports a skipped required
+    #      check as neutral, and an aggregate job written with the default `if`
+    #      is itself skipped when a dependency fails, which a branch protection
+    #      rule can be configured to treat as passing. `if: always()` plus an
+    #      explicit result comparison removes that path.
+    #   2. A gate job was added to this file and left out of `needs:` below. It
+    #      would run, it would fail, and it would block nothing. The job list is
+    #      read out of this file rather than kept in a hand-written list here,
+    #      so the two cannot drift.
+    #   3. Nothing ran at all. An empty `needs` payload, or a job list this
+    #      check failed to parse, exits non-zero rather than comparing two empty
+    #      sets and calling it agreement.
+    #
+    # AICD §39 and spec/PRD.md Z-02 name all three as one defect class:
+    # "present but reporting nothing".
+    name: ci
+    needs: [build, fmt, clippy, test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Every job in this file must be gated, must have run, and must have succeeded
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          WORKFLOW_FILE: .github/workflows/ci.yml
+          SELF: ci
+        run: |
+          set -euo pipefail
+
+          echo "event that fired this run: ${GITHUB_EVENT_NAME}"
+          echo "ref: ${GITHUB_REF}"
+          echo
+
+          # jq ships on the GitHub-hosted ubuntu image, which is somebody else's
+          # image and therefore somebody else's promise. Without this line a
+          # missing jq would still fail, but through a command substitution that
+          # yields an empty string, and the run would blame the needs payload for
+          # a state the payload had nothing to do with. Name the real cause.
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is not on this runner, so this check cannot read the needs payload and cannot report on any job"
+            exit 1
+          fi
+
+          # --- 1. the jobs this file defines ---------------------------------
+          #
+          # Parsed from the file, not from a list maintained here by hand. The
+          # parse relies on one property of this file: `jobs:` is the last
+          # top-level key, and every job name is alone on its line at exactly
+          # two spaces of indentation. Keep it that way. The two assertions
+          # below fail loudly if the parse ever stops matching, instead of
+          # comparing empty sets and passing.
+          defined="$(sed -n '/^jobs:[[:space:]]*$/,$ s/^  \([A-Za-z0-9_-][A-Za-z0-9_-]*\):[[:space:]]*$/\1/p' "$WORKFLOW_FILE" | sort -u)"
+          if [ -z "$defined" ]; then
+            echo "::error file=$WORKFLOW_FILE::no job names were parsed out of this file, so this check cannot report on the jobs it is supposed to cover"
+            exit 1
+          fi
+          if ! grep -qx -- "$SELF" <<<"$defined"; then
+            echo "::error file=$WORKFLOW_FILE::the job list parsed from this file does not contain '$SELF', so the parse is wrong and every comparison below would be meaningless"
+            exit 1
+          fi
+
+          want="$(grep -vx -- "$SELF" <<<"$defined" || true)"
+          if [ -z "$want" ]; then
+            echo "::error file=$WORKFLOW_FILE::this file defines no job other than '$SELF'. A pipeline whose only job is the check that the other jobs passed is a pipeline that checks nothing."
+            exit 1
+          fi
+
+          # --- 2. the jobs this check actually waited on ----------------------
+          if [ "$(jq -r 'type' <<<"$NEEDS_JSON")" != "object" ]; then
+            echo "::error::the needs payload is not an object; this check cannot report on jobs it cannot see"
+            exit 1
+          fi
+          have="$(jq -r 'keys[]' <<<"$NEEDS_JSON" | sort -u)"
+
+          flatten() { tr '\n' ' ' <<<"${1:-}" | sed 's/  */ /g; s/^ //; s/ *$//'; }
+          want_flat="$(flatten "$want")"
+          have_flat="$(flatten "$have")"
+          echo "jobs defined in this file (excluding '$SELF') : $want_flat"
+          echo "jobs this check waits on via needs:          : $have_flat"
+          echo
+
+          if [ "$want_flat" != "$have_flat" ]; then
+            echo "::error file=$WORKFLOW_FILE::coverage drift. This file defines [$want_flat] but '$SELF' waits on [$have_flat]. Every job here except '$SELF' must be listed in '$SELF''s needs:, or it runs without blocking anything. Add the missing name to needs:."
+            exit 1
+          fi
+
+          # --- 3. every one of them succeeded --------------------------------
+          #
+          # 'skipped' and 'cancelled' are failures here. A job that did not run
+          # checked nothing, and a check that reports success for a job that did
+          # not run is the defect this whole file is arranged around.
+          jq -r 'to_entries[] | "  \(.key) = \(.value.result)"' <<<"$NEEDS_JSON"
+          bad="$(jq -r '[to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"] | join(" ")' <<<"$NEEDS_JSON")"
+          if [ -n "$bad" ]; then
+            echo "::error::not every job succeeded: $bad"
+            exit 1
+          fi
+
+          echo
+          echo "every job defined in $WORKFLOW_FILE is gated by '$SELF', ran, and succeeded (fired by ${GITHUB_EVENT_NAME})"
