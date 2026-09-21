@@ -1,0 +1,33 @@
+# fmt-defect: an input for the gate 1 proof of ORI-T-0013.
+#
+# Spec: spec/TESTING.md section 4 ("Every gate in CI_CD ships with a planted
+# defect under `fixtures/planted/` and a proof recorded in `ops/gates/`"),
+# spec/CI_CD.md section 1 gate 1, spec/runbooks/prove-gate.md step 1.
+# Criterion served: ORI-P1-013. Proof: ops/gates/gate-1.md.
+#
+# This package carries the planted formatting defect. It must FAIL `cargo fmt
+# --all --check` and PASS `cargo clippy ... -D warnings`, so that the failure
+# is attributable to the half of gate 1 it is aimed at and to nothing else.
+#
+# THE EMPTY [workspace] TABLE BELOW IS LOAD BEARING. It makes this directory
+# its own workspace root. The repository workspace at the root of the checkout
+# lists its members explicitly in the root Cargo.toml and uses no globs, so a
+# package here is invisible to `cargo build --workspace`, `cargo fmt --all`
+# and `cargo clippy --workspace` run from the root. That is the whole reason a
+# deliberately broken package can sit in the tree while the real build stays
+# green. Remove the table and cargo starts asking why a package inside the
+# workspace directory is neither a member nor excluded.
+#
+# No dependencies, deliberately: CLAUDE.md rule 6 forbids adding a crate, and a
+# package with no dependencies also needs no network to lint, so this proof
+# runs on an offline runner.
+[package]
+name = "gate-1-fmt-defect"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

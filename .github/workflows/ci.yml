@@ -62,33 +62,64 @@
 # WHAT THIS FILE INSTALLS, AND WHAT IT DOES NOT
 # ===========================================================================
 #
-# It installs NO GATES. AICD §14, under "The verification cycle", states the
-# rule: "a gate is installed only when it has been seen to fail", and "Every
-# gate (a CI check, a coverage matrix checker, a mutation threshold, a liveness
-# check, a permission rule) enters service only after a demonstration on a
-# planted defect: it passes on a clean tree, it fails on the planted defect, and
-# the failure is visible where a human would look." AICD §39 restates it as "A
-# gate is installed only after it has been seen to fail on a planted defect
-# (section 14)".
+# IT INSTALLS NO GATE. Not one job in this file has ever run, on any event, so
+# there is nothing in this repository that any document may cite as an
+# installed gate.
 #
-# Nothing here has been demonstrated on a planted defect, so nothing here may be
-# cited as an installed gate, in this repository or anywhere else.
+# AICD §14, under "The verification cycle", states the rule: "a gate is
+# installed only when it has been seen to fail", and "Every gate (a CI check, a
+# coverage matrix checker, a mutation threshold, a liveness check, a permission
+# rule) enters service only after a demonstration on a planted defect: it
+# passes on a clean tree, it fails on the planted defect, and the failure is
+# visible where a human would look." AICD §39 restates it as "A gate is
+# installed only after it has been seen to fail on a planted defect (section
+# 14)".
 #
-# The commands for gates 1 and 2 of spec/CI_CD.md section 1 do run, from the
-# first pull request, because they need no tooling this repository does not
-# already have. Running is not installed:
+# Gate 1 has had two thirds of that demonstration, in ORI-T-0013, recorded in
+# `ops/gates/gate-1.md`: its two commands were run against the defects planted
+# for them under `fixtures/planted/gate-1/`, they passed the clean input, they
+# failed the planted ones, and each failure was shown to be the planted one and
+# not some other failure. What has not been observed is the third clause. No
+# run of this workflow has happened, so "the failure is visible where a human
+# would look" rests on GitHub's documented handling of a failed step and of
+# `::error::` annotations rather than on anything anybody saw.
 #
-#   job `fmt`     `cargo fmt --all --check`                 gate 1, first half
-#   job `clippy`  `cargo clippy ... -D warnings`            gate 1, second half
-#                 Proven and installed by ORI-T-0013, with a planted defect
-#                 under `fixtures/planted/fmt-clippy/` and a proof at
-#                 `ops/gates/fmt-clippy.md`.
-#   job `test`    `cargo test --workspace`                  gate 2
-#                 Proven and installed by ORI-T-0014, `fixtures/planted/tests/`
-#                 and `ops/gates/tests.md`.
-#   job `build`   the three-platform build                  gate 11
-#                 `spec/CI_CD.md` section 1 gate 11 allows "cross-compilation or
-#                 matrix"; this is the matrix, built natively on each runner.
+# spec/DATA_MODEL.md gives the state machine `Defined -> Proven (GateProof
+# present) -> Installed`. Gate 1 is PROVEN. Two observations stand between it
+# and Installed, and neither is a coder's to make:
+#
+#   1. the first run of this workflow on a pull request, with `gate-1-proof`
+#      green. That is what shows the trigger fires, the runner has the pinned
+#      toolchain, and the job reports where a human looks. Until it happens,
+#      this file is a workflow nobody has seen execute, which is the first
+#      example AICD §39 gives of "present but reporting nothing".
+#   2. `ci` added to the required status checks on `main`.
+#      `ops/gates/branch-protection.md` records that there are none yet, and
+#      that "each check name is added on the day its proof file lands, starting
+#      with ORI-T-0013". Until that is done a red check here blocks no merge.
+#
+# Both are the lead's, they are recorded in `ops/gates/gate-1.md` when they
+# happen, and until then the honest word for every gate named below is
+# "defined", or for gate 1 "proven". Not "installed".
+#
+#   job `fmt`          `cargo fmt --all --check`            gate 1, first half
+#   job `clippy`       `cargo clippy ... -D warnings`       gate 1, second half
+#   job `gate-1-proof` the demonstration that makes gate 1 proven, repeated on
+#                      every run rather than recorded once: it runs the same two
+#                      commands against the defects planted for them under
+#                      `fixtures/planted/gate-1/`, checks that each failure is
+#                      the planted one, checks that this file still runs those
+#                      commands somewhere a failure would fail this run, checks
+#                      that this job is itself one whose failure fails this run,
+#                      and fails this run if any of that stops being true.
+#                      ORI-T-0013; the record is `ops/gates/gate-1.md`.
+#   job `test`         `cargo test --workspace`             gate 2
+#                      Defined, not proven. ORI-T-0014 proves it, with
+#                      `fixtures/planted/tests/` and `ops/gates/tests.md`.
+#   job `build`        the three-platform build             gate 11
+#                      `spec/CI_CD.md` section 1 gate 11 allows
+#                      "cross-compilation or matrix"; this is the matrix, built
+#                      natively on each runner.
 #
 # Gates 3, 7 and 13 arrive with ORI-T-0015, ORI-T-0016 and ORI-T-0017; gates 9
 # and 14 with ORI-T-0047 and ORI-T-0048. They all edit this file and they run
@@ -119,10 +150,13 @@
 #     missing component makes gate 1 unrunnable, and a job that cannot run a
 #     check has to fail rather than pass quietly.
 #
-# The assert is byte for byte the same in all four jobs. GitHub Actions has no
-# YAML anchors and no way to share a step body, and a composite action would
-# live at `.github/actions/`, outside this ticket's declared scope. If you edit
-# one copy, edit all four.
+# The assert is byte for byte the same in all five jobs that compile anything.
+# GitHub Actions has no YAML anchors and no way to share a step body, and a
+# composite action would live at `.github/actions/`, outside the declared scope
+# of the tickets that have edited this file. If you edit one copy, edit all
+# five. `gate-1-proof` carries it for the same reason as the others and one
+# more: a clippy verdict is a function of the lint set the toolchain ships, so
+# a proof that gate 1 catches a lint is a claim about a specific toolchain.
 #
 # ===========================================================================
 # WHY EVERY ACTION IS PINNED TO A COMMIT SHA
@@ -215,8 +249,14 @@ jobs:
         run: cargo build --workspace --locked
 
   fmt:
-    # spec/CI_CD.md section 1, gate 1, first half. Not an installed gate:
-    # ORI-T-0013 proves it on a planted defect and installs it.
+    # spec/CI_CD.md section 1, gate 1, first half. Proven, not yet installed:
+    # the `gate-1-proof` job below presents this command with the unformatted
+    # line planted in `fixtures/planted/gate-1/fmt-defect`, which it must
+    # reject, and with a clean package, which it must accept, and it refuses to
+    # report a pass if this job stops being one whose failure fails this run.
+    # What is missing for installation is an observed run of this workflow and
+    # `ci` as a required check; see the top of this file. ORI-T-0013; the
+    # record is ops/gates/gate-1.md.
     name: fmt
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -255,8 +295,15 @@ jobs:
         run: cargo fmt --all --check
 
   clippy:
-    # spec/CI_CD.md section 1, gate 1, second half. Not an installed gate:
-    # ORI-T-0013 proves it on a planted defect and installs it.
+    # spec/CI_CD.md section 1, gate 1, second half. Proven, not yet installed:
+    # the `gate-1-proof` job below presents this command with the
+    # `clippy::len_zero` violation planted in
+    # `fixtures/planted/gate-1/clippy-defect`, which it must reject, and with a
+    # clean package, which it must accept, and it checks that the rejection
+    # names that lint rather than being any failure at all. What is missing for
+    # installation is an observed run of this workflow and `ci` as a required
+    # check; see the top of this file. ORI-T-0013; the record is
+    # ops/gates/gate-1.md.
     name: clippy (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -342,6 +389,112 @@ jobs:
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
 
+  gate-1-proof:
+    # spec/CI_CD.md section 1, gate 1, PROVEN and not yet installed. This job
+    # carries the demonstration, and it is the only job in this file whose
+    # success condition is the opposite of everything around it.
+    #
+    # AICD §14: "a gate is installed only when it has been seen to fail". The
+    # `fmt` and `clippy` jobs above have carried gate 1's two commands since
+    # ORI-T-0012 without either of them ever being seen to fail, which under
+    # that rule is not installation. This job presents gate 1 with defects
+    # planted for it, under `fixtures/planted/gate-1/`, and fails the run if the
+    # gate does not catch them, if a failure turns out to be some failure other
+    # than the planted one, or if this file stops running those commands
+    # somewhere their failure would fail the run. What it cannot do is observe
+    # itself running: the step below has never executed. The top of this file
+    # states what is still owed before gate 1 is installed.
+    #
+    # WHAT IT CHECKS ABOUT THIS JOB. The same six structural conditions it
+    # applies to `fmt` and `clippy`, applied here: no `if:` and no
+    # `continue-on-error:` on this job or on the step below, this job in `ci`'s
+    # `needs:`, an unfiltered `pull_request` trigger, and no
+    # `continue-on-error:` on `ci`. It applied none of them to this job until
+    # ORI-T-0013 attempt 3, and `continue-on-error: true` on this job is one
+    # line that turns every refusal the harness can issue into a green check.
+    # The harness finds this job in this file by the command below and by the
+    # name `gate-1-proof`, and refuses if the two stop agreeing, so renaming
+    # this job without renaming it in the harness is a refusal and not a
+    # silence. Where that recursion stops is stated in the harness's verdict
+    # and in its header: a `continue-on-error:` added here still leaves the run
+    # green, because that is what the key means, and the last link is a human
+    # reading the diff of this tier 2 file.
+    #
+    # WHY IT IS A JOB AND NOT ONLY A FILE IN ops/gates/. A proof file records
+    # that somebody once saw the gate fail. It stays on disk, unchanged and
+    # reassuring, on the day the gate is weakened. This job re-presents the same
+    # defects on every pull request, so "gate 1 catches this" is a statement
+    # about the commit under review and not about a commit from months ago. The
+    # proof file is still written, because AICD §14 asks for the demonstration
+    # to be recorded in the ticket, and because a human needs somewhere to read
+    # what was done without opening a workflow run.
+    #
+    # WHY THE PLANTED DEFECTS DO NOT TURN THIS REPOSITORY RED. Each planted
+    # package under `fixtures/planted/gate-1/` carries an empty `[workspace]`
+    # table, which makes it its own workspace root. The root `Cargo.toml` lists
+    # its members explicitly and uses no globs, so `cargo build --workspace`,
+    # `cargo fmt --all` and `cargo clippy --workspace` at the repository root
+    # never see them. The `fmt` and `clippy` jobs above are themselves the
+    # continuous check on that claim: if a planted package ever became visible
+    # to the root workspace, those two jobs would go red, and `ci` waits on
+    # both of them.
+    #
+    # WHY ONE RUNNER AND NOT THE CLIPPY MATRIX. What this job detects is gate 1
+    # being weakened: an edit to the command in this file, or to the planted
+    # input. Both are edits to shared files and neither is platform dependent,
+    # so three runners would cost three times as much to detect the same edit.
+    # The part that IS platform dependent, a lint that only fires on the code a
+    # `cfg(target_os)` branch compiles, is not planted here at all, and
+    # `ops/gates/gate-1.md` records that as an open gap rather than letting a
+    # three-runner matrix imply coverage this fixture does not have.
+    name: gate-1-proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert the pinned toolchain is the one in use
+        run: |
+          set -euo pipefail
+          pin="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          pin="${pin%%$'\n'*}"
+          if [ -z "$pin" ]; then
+            echo "::error file=rust-toolchain.toml::no [toolchain] channel line found, so the pin cannot be checked at all"
+            exit 1
+          fi
+          if [[ ! "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=rust-toolchain.toml::the pin is '$pin', which is not an exact x.y.z version. rust-toolchain.toml states why the pin is exact: under a channel pin an upstream release changes the clippy lint set, and the verdict of gate 1 changes with no commit in this repository. Restore the exact pin, or change this check deliberately in a ticket."
+            exit 1
+          fi
+          banner="$(rustc --version)"
+          active="$(awk '{print $2}' <<<"$banner")"
+          echo "rust-toolchain.toml pins : $pin"
+          echo "rustc on PATH reports    : $active   ($banner)"
+          if [ "$pin" != "$active" ]; then
+            echo "::error file=rust-toolchain.toml::rustc is $active but rust-toolchain.toml pins $pin. This runner is not honouring the pin, and a green result here would be a green result on a toolchain nothing in this repository names."
+            exit 1
+          fi
+          for probe in fmt clippy; do
+            if ! cargo "$probe" --version; then
+              echo "::error file=rust-toolchain.toml::'cargo $probe --version' failed, so the '$probe' component listed in rust-toolchain.toml is not usable on this runner"
+              exit 1
+            fi
+          done
+      - name: Gate 1 must fail on every planted defect and pass on the clean input
+        # The harness exits 0 only from its final verdict. It exits 1 when gate
+        # 1 stopped catching a defect that is still planted; 2 when it could not
+        # prove what it claims, which covers a comparator that cannot tell
+        # agreement from disagreement, a gate command this file no longer runs
+        # where a failure would fail this run, a `gate-1-proof` job that is
+        # itself not one whose failure fails this run or that the harness can
+        # no longer find in this file, and a planted input that failed for a
+        # reason other than the defect planted in it; and 3 when the
+        # toolchain made the gate unrunnable so nothing was checked. It writes
+        # `::error::` annotations, so the reason lands on the pull request check
+        # rather than only in a log somebody has to open:
+        # spec/runbooks/prove-gate.md step 3, "visible where a human would
+        # look".
+        run: bash fixtures/planted/gate-1/prove.sh
+
   ci:
     # THE ONE REQUIRED CHECK. Branch protection and the merge queue should
     # require `ci` and nothing else: the matrix job names above carry the
@@ -360,7 +513,9 @@ jobs:
     #   2. A gate job was added to this file and left out of `needs:` below. It
     #      would run, it would fail, and it would block nothing. The job list is
     #      read out of this file rather than kept in a hand-written list here,
-    #      so the two cannot drift.
+    #      and every line where a job could be defined is either classified as a
+    #      job or fails this check, so a job cannot be added in a spelling this
+    #      check does not see.
     #   3. Nothing ran at all. An empty `needs` payload, or a job list this
     #      check failed to parse, exits non-zero rather than comparing two empty
     #      sets and calling it agreement.
@@ -368,7 +523,7 @@ jobs:
     # AICD §39 and spec/PRD.md Z-02 name all three as one defect class:
     # "present but reporting nothing".
     name: ci
-    needs: [build, fmt, clippy, test]
+    needs: [build, fmt, clippy, test, gate-1-proof]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -401,10 +556,42 @@ jobs:
           # Parsed from the file, not from a list maintained here by hand. The
           # parse relies on one property of this file: `jobs:` is the last
           # top-level key, and every job name is alone on its line at exactly
-          # two spaces of indentation. Keep it that way. The two assertions
-          # below fail loudly if the parse ever stops matching, instead of
-          # comparing empty sets and passing.
-          defined="$(sed -n '/^jobs:[[:space:]]*$/,$ s/^  \([A-Za-z0-9_-][A-Za-z0-9_-]*\):[[:space:]]*$/\1/p' "$WORKFLOW_FILE" | sort -u)"
+          # two spaces of indentation. Keep it that way. The assertions below
+          # fail loudly if the parse ever stops matching, instead of comparing
+          # empty sets and passing.
+          #
+          # EVERY line at that indentation is classified, and one that cannot be
+          # is a failure. That is not pedantry. The first version of this parse
+          # was a single `sed` substitution, and `  audit: # gate 7` and
+          # `  "audit":` are both valid YAML that defines a job and both slipped
+          # past it: the new job vanished from the parsed set, the parsed set
+          # and the `needs:` set agreed, and this check reported that every job
+          # in the file was gated while the new one gated nothing. That is the
+          # "present but reporting nothing" class (AICD §39) inside the check
+          # that exists to catch it. ORI-T-0013 found it and closed it here.
+          jobs_seen="$(awk '
+              /^jobs:[ \t]*$/ { injobs = 1; next }
+              injobs != 1 { next }
+              /^[ \t]*$/ { next }
+              /^  [^ ]/ {
+                  line = $0
+                  sub(/[ \t]*#.*$/, "", line)
+                  if (line ~ /^[ \t]*$/) { next }
+                  if (line ~ /^  [A-Za-z0-9_-]+:[ \t]*$/) {
+                      sub(/^  /, "", line)
+                      sub(/:[ \t]*$/, "", line)
+                      print "job " line
+                      next
+                  }
+                  print "unreadable " $0
+              }
+          ' "$WORKFLOW_FILE")"
+          unreadable="$(grep '^unreadable ' <<<"$jobs_seen" || true)"
+          if [ -n "$unreadable" ]; then
+            echo "::error file=$WORKFLOW_FILE::this check cannot classify every line under 'jobs:' where a job could be defined, so it cannot say which jobs this file defines and will not report on a file it only partly read: $unreadable"
+            exit 1
+          fi
+          defined="$(sed -n 's/^job //p' <<<"$jobs_seen" | sort -u)"
           if [ -z "$defined" ]; then
             echo "::error file=$WORKFLOW_FILE::no job names were parsed out of this file, so this check cannot report on the jobs it is supposed to cover"
             exit 1

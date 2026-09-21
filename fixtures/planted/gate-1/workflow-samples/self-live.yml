@@ -1,0 +1,36 @@
+# LIVE, and the subject is the harness itself rather than the gate it proves.
+#
+# prove.sh asks the job that runs prove.sh the same six structural questions it
+# asks the `fmt` and `clippy` jobs: no `if:` on the job, no `continue-on-error:`
+# on the job, none on the step, the job in the aggregate's `needs:`, an
+# unfiltered `pull_request` trigger, and no `continue-on-error:` on the
+# aggregate. It did not always ask them, and one line was enough to switch the
+# whole demonstration off while every check on the pull request stayed green.
+# This file is the shape that answers all six.
+#
+# The `run:` below is the command `.github/workflows/ci.yml` writes to invoke
+# this fixture. prove.sh builds the same string from its own path relative to
+# the repository root, so moving this fixture without moving that line makes
+# this sample stop matching and prove.sh refuse. That is deliberate: the two
+# move together or neither moves.
+name: sample-self-live
+on:
+  pull_request:
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+  gate-1-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: prove gate 1
+        run: bash fixtures/planted/gate-1/prove.sh
+  ci:
+    needs: [fmt, gate-1-proof]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

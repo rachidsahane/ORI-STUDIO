@@ -1,0 +1,25 @@
+# DEAD: the job runs the gate command and is not in the aggregate's `needs:`.
+# It runs, it can fail, and its failure blocks no merge, because the required
+# check is the aggregate and the aggregate never waited for it. This is the
+# construction the lead asked for by name.
+name: sample-dead-job-not-in-needs
+on:
+  pull_request:
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - name: something
+        run: echo something
+  ci:
+    needs: [other]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate

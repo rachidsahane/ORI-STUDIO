@@ -1,0 +1,22 @@
+# DEAD: `continue-on-error: true` on the job. The gate command still runs and
+# still fails; GitHub records the job's conclusion as success, the aggregate
+# reads `success`, and the pull request is green with gate 1 failing in the
+# log. The command string is untouched, which is what makes this the cheapest
+# weakening of all.
+name: sample-dead-job-continue-on-error
+on:
+  pull_request:
+jobs:
+  fmt:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+  ci:
+    needs: [fmt]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: aggregate
+        run: echo aggregate
