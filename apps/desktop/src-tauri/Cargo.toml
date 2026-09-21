@@ -1,0 +1,9 @@
+[package]
+name = "ori-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop backend: hosts the engine and forwards the webview's calls to it."
+
+[dependencies]
+ori-engine = { workspace = true }
