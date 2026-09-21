@@ -68,6 +68,7 @@
 //! written against this document's actual structure and uses nothing outside
 //! `std`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -184,8 +185,13 @@ pub struct Entry {
 pub struct Index {
     /// The document the index was built from, as a repository-relative path.
     pub source: String,
-    /// The document's length in bytes, so a human can tell a stale index from a
-    /// current one with `wc -c`.
+    /// The document's length in bytes once its line endings are LF, so a human
+    /// can tell a stale index from a current one with `wc -c`.
+    ///
+    /// Normalized rather than raw. A CRLF checkout of the document is the same
+    /// document and must produce the same index, so this counts the bytes the
+    /// repository stores, not the bytes a particular checkout wrote to disk.
+    /// See [`lf_line_endings`].
     pub source_bytes: usize,
     /// The document's length in lines, so a human can tell a stale index from a
     /// current one with `wc -l`.
@@ -200,6 +206,10 @@ impl Index {
     /// `source` is recorded in the output verbatim, so callers pass the
     /// repository-relative path whatever path they actually read.
     ///
+    /// The text's line endings are folded to LF before anything is read from
+    /// it, so one document produces one index whatever platform it arrived on.
+    /// [`lf_line_endings`] says why that fold lives here and nowhere else.
+    ///
     /// # Errors
     ///
     /// Refuses any document whose numbered headings it cannot account for: an
@@ -208,6 +218,12 @@ impl Index {
     /// partial index would resolve some citations and silently fail others,
     /// which is the defect class AICD §39 names.
     pub fn parse(source: &str, html: &str) -> Result<Self, SectionsError> {
+        // The single point at which line endings are decided. Everything below
+        // reads `html` and nothing reads the argument again, so no later step
+        // can disagree about what a line ending is.
+        let document = lf_line_endings(html);
+        let html: &str = &document;
+
         let census = id_census(html);
         let headings = headings(html)?;
 
@@ -661,6 +677,42 @@ impl Error for SectionsError {
 // Headings never nest and never carry a nested heading, which is what makes a
 // scan for the opening tag and its matching close sufficient.
 // ---------------------------------------------------------------------------
+
+/// The document with its CRLF line endings folded to LF: AICD §39.
+///
+/// The one place this module handles line endings. Everything [`Index::parse`]
+/// derives is derived from the value returned here, so the index a document
+/// produces does not depend on the platform the document was checked out on.
+///
+/// # Why here and not at read time
+///
+/// [`Index::parse`] is public and takes text, so the fold has to be inside it
+/// to cover a caller that did not get the document from [`Index::from_file`]:
+/// an editor buffer, a fixture, a document fetched from elsewhere. Folding in
+/// [`Index::from_file`] would leave the parser itself platform-sensitive and
+/// would make the regression test write a file to prove anything. Folding in
+/// the line handling instead would be worse still: this parser scans bytes
+/// rather than lines, so it has no single line handler, and the field that
+/// actually differed across platforms was [`Index::source_bytes`], which no
+/// amount of care inside the scan would have fixed.
+///
+/// # Why only CRLF
+///
+/// `core.autocrlf` rewrites LF to CRLF on checkout and back on commit, and
+/// leaves a lone CR untouched. Folding `\r\n` is therefore the exact inverse of
+/// what the checkout did and nothing more. A lone CR is the same byte on every
+/// platform, so it is content rather than a line ending, and rewriting it would
+/// change a title the document really carries.
+///
+/// Borrows when there is nothing to fold, which is every run on a repository
+/// checked out with LF.
+fn lf_line_endings(html: &str) -> Cow<'_, str> {
+    if html.contains('\r') {
+        Cow::Owned(html.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(html)
+    }
+}
 
 /// One heading tag as the document carries it.
 struct Heading<'a> {
@@ -1359,6 +1411,61 @@ mod tests {
         assert_eq!(decode_entities("&amp;lt;"), "&lt;");
         assert_eq!(decode_entities("&unknown; stays"), "&unknown; stays");
         assert_eq!(decode_entities("no entity"), "no entity");
+    }
+
+    /// The same document indexes identically whether it arrives with LF or with
+    /// CRLF line endings: AICD §39.
+    ///
+    /// The regression test for ORI-T-0082. GitHub's Windows runners check out
+    /// with `core.autocrlf=true`, so before the fix the methodology arrived
+    /// there with 1519 carriage returns the committed bytes do not have,
+    /// [`Index::source_bytes`] counted them, and the same commit produced one
+    /// index on Linux and a different one on Windows. An index that varies by
+    /// platform is a citation gate that passes on one runner and fails on
+    /// another for the same code, which is how the fabricated references AICD
+    /// §39 records get back in.
+    ///
+    /// Both documents are built here in memory, from a base whose line endings
+    /// are folded first, so the test fails on every platform rather than only
+    /// on the one that has the problem, and it does not care how the checkout
+    /// that is running it wrote the file to disk.
+    #[test]
+    fn a_crlf_document_indexes_identically_to_the_same_document_with_lf() {
+        let on_disk = fs::read_to_string(repo_root().join(SOURCE_PATH))
+            .expect("the shipped methodology reads");
+        let lf = on_disk.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        assert!(
+            crlf.len() > lf.len(),
+            "the CRLF document is not actually CRLF, so this test would check nothing"
+        );
+
+        let from_lf = Index::parse(SOURCE_PATH, &lf).expect("the LF document parses");
+        let from_crlf = Index::parse(SOURCE_PATH, &crlf).expect("the CRLF document parses");
+
+        // Named separately because this is the field that differed: every
+        // other field of the index was already carriage-return tolerant, and an
+        // equality failure alone would not say so.
+        assert_eq!(
+            from_lf.source_bytes, from_crlf.source_bytes,
+            "source_bytes counts the carriage returns the checkout added"
+        );
+        assert_eq!(from_lf, from_crlf, "the two indexes are not the same index");
+        assert_eq!(
+            from_lf.to_json(),
+            from_crlf.to_json(),
+            "the two indexes do not serialize to the same bytes"
+        );
+
+        // And on the fragment the rest of the parser tests use, so a heading,
+        // a title and an anchor read across a folded line ending are checked
+        // too rather than only the whole-document totals.
+        let fragment = SYNTHETIC.replace('\n', "\r\n");
+        assert_eq!(
+            Index::parse("synthetic", &fragment).expect("the CRLF fragment parses"),
+            synthetic(),
+            "the synthetic fragment indexes differently with CRLF"
+        );
     }
     // -----------------------------------------------------------------------
     // The ticket's central check: does every citation in the repository
