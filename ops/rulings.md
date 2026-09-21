@@ -32,6 +32,7 @@ Decisions the lead made under the operator's standing rule 5: anything the speci
 | R26 | 1 | How CI obtains `cargo-audit` and `cargo-deny` is an implementation choice, not a new dependency |
 | R27 | 1 | "Unreadable" is a parser verdict, not a YAML validity claim. The lead was wrong |
 | R28 | 1 | A gate's implementation does not live in a fixture directory |
+| R29 | 1 | AICD §28 stands for `ori-cli`, and the methodology is thin here |
 
 ## R1. `sections.json` granularity, and what gate 9 accepts
 
@@ -202,3 +203,26 @@ ORI-T-0016 put `deny.toml`, the repository's dependency policy, and `secret-scan
 It is wrong, and the cause is the lead's declared scope, which granted only `ci.yml` and `fixtures/planted/gate-7/**`. A fixture directory holds planted defects: inputs a gate is run against. A policy the whole repository is judged by, and a scanner the gate invokes, are neither.
 
 `deny.toml` belongs at the repository root, which is where `cargo-deny` looks by default and where a reader expects a dependency policy. The scanner belongs with the other scripts a gate runs, beside `scripts/gates.sh`. The scope is extended to `deny.toml` and `scripts/secret-scan.sh`; neither is claimed by another in-flight ticket.
+
+
+## R29. AICD §28 stands for `ori-cli`, and the thinness goes upstream
+
+Ruling R14 accepted `ori-cli`'s citation of AICD §28 as thin but defensible, and did not address the one sentence that most looks like it disqualifies a command-line client. ORI-T-0018's coder found it and refused to leave it unaddressed:
+
+> Humans supervise through a dashboard, not through terminals.
+
+That is §28's opening sentence, verified in the methodology text.
+
+**The citation stands**, on the coder's reading: the contrast §28 is drawing is between a designed supervision surface and watching an agent think, which §28 then hides from *every* surface, not between a dashboard and a command line. It does not reserve supervision to one renderer. The coder searched for a better section and there is none: "command line", "command-line" and "scripting" return zero hits in the whole methodology, and "terminal" appears exactly twice in 1519 lines, in §12's pairing mode and in that sentence. A methodology with no section about a command-line client leaves §28 as the only one about the surface this crate is.
+
+**What was actually wrong is now fixed, and it was not the number.** The old comment derived §28 at two removes: ARCHITECTURE section 2's table, to `ori-rpc`'s row, to `ori-cli`. That is exactly the propagation path this file already blames for R10, R12 and R13. It was also wrong on its own terms, because **`ori-cli` does not depend on `ori-rpc`**: LLD section 2's graph and `Cargo.toml` both give it `ori-engine` only. And its conclusion, that the CLI "adds nothing of its own", understated the crate: because ARCHITECTURE section 9 makes the CLI capability-equal with the UI, §28's deliberately-not-shown list binds `ori` too, which is a real and checkable constraint.
+
+**The thinness goes upstream.** ROADMAP phase 1 ships the CLI as the entire human surface with no UI at all, a state §28's prose does not contemplate. That joins R24's finding, that §28's prose says "the four human functions" while its own table has five rows, in the report the operator carries to the methodology repository. Two defects in one section is a section worth revisiting.
+
+## A blind spot in gate 9, found by reading rather than running
+
+The same coder's first draft used bare `§28` as a back-reference three times. CONVENTIONS requires every methodology reference to be `AICD §<n>`, and the citation checker deliberately collects only `AICD §n`, because the repository uses bare `§n` for its own documents.
+
+So **a bare `§28` is a methodology reference that no gate checks and no test catches**, and it would have shipped green. It was caught by reading CONVENTIONS, not by running anything.
+
+This is the second known blind spot in gate 9's rule set, alongside internal `Rn` ruling references. Both belong in ORI-T-0047 when the gate acquires a mechanical definition.

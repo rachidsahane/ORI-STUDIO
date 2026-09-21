@@ -5,7 +5,7 @@
 | Gate | CI_CD section 1, item 2 |
 | Command | `cargo test --workspace --locked` |
 | Ticket | ORI-T-0014 |
-| **State** | **Proven, not Installed** |
+| **State** | **Installed** |
 | Written by | The lead, from the coder's verified evidence (ruling R25) |
 
 Gate 2's `test` job already ran on three platforms and had only ever been seen passing, so under AICD §14 it was not installed. This records the demonstration. What is owed for Installed is at the end.
@@ -55,11 +55,18 @@ Eight packages in total, each its own workspace root so the repository build nev
 
 `workflow-facts.awk` is a deliberate copy of gate 1's rather than a shared file. Factoring it would couple the two gates so that breaking one breaks the other, and a proof that fails when an unrelated gate is edited is a proof nobody will trust.
 
+## The failure is visible where a human would look
+
+AICD §14's third condition, established by observation.
+
+**Run 35598542173**, this ticket's own pull request: thirteen jobs green including `gate-2-proof`.
+
+**Run 35609765474**, a throwaway branch carrying one deliberately failing test in `crates/ori-gates`, opened as a pull request and closed without merging: **`test` failed on ubuntu, macos and windows, and the `ci` aggregate failed.** What a human sees on the pull request is three red `test` checks and a red `ci`, each linking to the assertion that failed. The branch was deleted; the run persists.
+
 ## What is not established
 
-1. **The visibility clause of §14.** No local run can watch the pull request check it writes to. Owed: a green `gate-2-proof` on a real run, and an observed red `test` job on a real failing test.
-2. **That a red `ci` blocks anything.** `main` still has no required status checks. Gate 1's proof already records this as owed to the operator; gate 2 makes it owed twice.
-3. **That the four blind inputs are the only ones.** They are the four the ticket looked for. `cargo test` may be blind in ways nobody has planted for yet.
+1. **That a red `ci` blocks anything.** `main` still has no required status checks. Gate 1's proof already records this as owed to the operator; gate 2 makes it owed twice.
+2. **That the four blind inputs are the only ones.** They are the four the ticket looked for. `cargo test` may be blind in ways nobody has planted for yet.
 
 ## Rollback
 
