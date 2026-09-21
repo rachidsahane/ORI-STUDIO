@@ -18,6 +18,16 @@ Decisions the lead made under the operator's standing rule 5: anything the speci
 | R12 | 1 | `ori-notify` cites AICD §12 and §16, not §28 |
 | R13 | 1 | `ori-mcp` cites AICD §8 and §25 |
 | R14 | 1 | Two weaker citations accepted with a note, to be settled when gate 9 is installed |
+| R15 | 1 | ENV_SETUP section 1 overstates the forbidden-action requirement |
+| R16 | 1 | **Corrected.** Where the forbidden-action test lives and how shell callers reach it |
+| R17 | 1 | `target/` belongs to ORI-T-0003 |
+| R18 | 1 | Gate 13 is not checkable from a coder worktree |
+| R19 | 1 | The unresolvable citations in the design mockup are reported, not corrected |
+| R20 | 1 | `thiserror` deferred to batch 2, alongside gate 7 |
+| R21 | 1 | `Cargo.lock` is an in-scope consequence of a workspace members entry |
+| R22 | 1 | The UI tree is `ui/src/` |
+| R23 | 1 | LLD governs directory layout; DESIGN governs the phase 3 screen set |
+| R24 | 1 | AICD section 28 is internally inconsistent; upstream, not ours |
 
 ## R1. `sections.json` granularity, and what gate 9 accepts
 
@@ -97,3 +107,56 @@ Both are recorded here rather than changed, because a thin citation that is defe
 All three are the same defect class, found in the same ticket, in doc comments written faithfully from ARCHITECTURE section 2's component table. The table is the common cause: it cites bare section numbers with no prose tying each to what the component does, so an error in it propagates silently into every crate that reads it. Two of the three errors originate in the table itself.
 
 The coder found R12 and R13 by auditing all sixteen citations unprompted after being corrected once on R10. That is worth recording as evidence for the calibration note in CR-001: the correction generalised without being told to generalise.
+
+
+## How R15 to R24 were nearly lost, and what it cost
+
+**This section records a process failure by the lead.** R15 to R24 were issued inside the prompts of a workflow and were never written here. Four coders cited them faithfully in code and documentation, producing six references to rulings that did not exist in the repository: `setup-dev.sh` cited R16, and `sections.rs` cited R19 four times and R20 once.
+
+That is the fabricated-reference defect class of AICD §39, authored by the lead. It is the second occurrence. The first was R8, which the ORI-T-0001 reviewer caught with the finding that the ruling authorizing a deviation from LLD existed nowhere in the tree. R8 was then recorded, and the same mistake was repeated at ten times the scale in the next wave.
+
+The rule, now explicit: **a ruling exists when it is written in this file, not when the lead states it.** A ruling communicated only in a prompt is unauditable, uncheckable by the citation gate, and invisible to anyone reading the repository afterwards. No ticket may be dispatched citing a ruling number that is not already committed here.
+
+Both occurrences were caught by review, not by the lead. Neither would have been caught by gate 9 as currently specified, since `R16` is not an `AICD §n` citation and resolves against nothing. That is an argument for widening the citation gate's rule set at ORI-T-0047 to cover internal ruling references as well as methodology ones.
+
+## R15. ENV_SETUP section 1 overstates the forbidden-action requirement
+
+ENV_SETUP section 1 states that `scripts/setup-dev.sh` "runs the forbidden-action test against a fixture product; a fresh clone must pass it before any work." That is unsatisfiable today: the harness (ORI-T-0029) and the fixtures (ORI-T-0073 to ORI-T-0076) do not exist. Reporting it as not yet available, naming the tickets, is correct and is what the script must do. ENV_SETUP is amended in a specification PR so the requirement binds when those tickets land, rather than reading as a rule a fresh clone already violates.
+
+## R16. Where the forbidden-action test lives, corrected
+
+**The version of this ruling issued in the wave 2 prompt was wrong**, and the review caught it. It accepted `scripts/forbidden-action-test.sh` as the harness path. `ops/phase-1-backlog.md` assigns ORI-T-0029 the declared scope `crates/ori-broker/src/forbidden.rs`, tier 2, so the harness is a Rust module in the broker, not a shell script, and wiring the project's most important control to a path no ticket produces would have left it permanently reporting "not yet available".
+
+Corrected: the harness is `crates/ori-broker/src/forbidden.rs` (ORI-T-0029). ORI-T-0029's declared scope is extended now, before it is planned, to add a thin wrapper at `scripts/forbidden-action-test.sh` that invokes the Rust harness and exits with its status, so that shell-level callers (`scripts/setup-dev.sh`, and CI_CD gate 8) have one stable entry point. The wrapper is in ORI-T-0029's scope and nothing else claims it.
+
+## R17. `target/` belongs to ORI-T-0003
+
+`.gitignore` is ORI-T-0003's declared scope. No other ticket edits it; the lead stages explicitly until it merges.
+
+## R18. Gate 13 is not checkable from a coder worktree
+
+The commit-trailer gate checks commits on a pull request, and in this fleet the lead makes the commits, so a coder worktree has no commits to check. `scripts/gates.sh` reports it as not available and states that as the reason.
+
+## R19. The unresolvable citations in the design mockup are reported, not corrected
+
+ORI-T-0005 found that of the distinct methodology citations in the repository, twelve do not resolve, all inside `spec/design/Ori Studio.html`, a design artifact whose text is display copy in a visual mockup. Whether gate 9's scope covers non-markdown files under `spec/` is an open question with the operator, recorded as open escalation 4 in the backlog. The index reports them; nothing is corrected until that is answered.
+
+## R20. `thiserror` deferred to batch 2
+
+CONVENTIONS names `thiserror` as the house error convention, so adopting it implements the specification rather than adding an unsanctioned dependency. But the first external crate this project takes on should land alongside the dependency audit that watches it, CI_CD gate 7, which arrives with ORI-T-0016. Until then a hand-written `Display` and `std::error::Error` implementation stands, with a comment naming the conversion.
+
+## R21. `Cargo.lock` is an in-scope consequence of a workspace members entry
+
+A ticket that adds a workspace member necessarily changes `Cargo.lock`. This is accepted as in scope on the same basis as R9, and does not require a re-declaration.
+
+## R22. The UI tree is `ui/src/`
+
+`spec/design/DESIGN.md` section 2 names `ui/src/tokens.css` as a concrete path, which settles where LLD section 3's unqualified names sit.
+
+## R23. LLD governs directory layout; DESIGN governs the phase 3 screen set
+
+Three documents name different screen sets: LLD section 3 lists twelve, PRD section 6 fifteen, DESIGN section 1 eighteen. For scaffolding directories, LLD governs, because LLD is the authority on layout. The authoritative screen set for phase 3 is DESIGN's. The three-way divergence is real and is recorded for a specification PR.
+
+## R24. AICD section 28 is internally inconsistent
+
+Its prose says "the four human functions" while its own table has five rows, the fifth being Reliability and governance, which AICD §18 lists as a seat rather than one of the four functions. This is a defect in the methodology, not in this repository. It joins the anchor defects in the report the operator carries upstream.
