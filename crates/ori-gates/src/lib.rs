@@ -6,6 +6,10 @@
 //!
 //! Must not: report a gate installed without a proof (`spec/LLD.md` section 2).
 
+/// The coverage matrix: criteria to tests, gate 4 of `spec/CI_CD.md` section 1
+/// (AICD §14).
+pub mod coverage;
+
 /// The methodology's machine-readable section index and its generator (AICD §39).
 pub mod sections;
 

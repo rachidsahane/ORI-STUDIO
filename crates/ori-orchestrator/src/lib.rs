@@ -6,3 +6,8 @@
 //!
 //! Must not: call adapters directly except `VcsHost::merge` through `MergeQueue`
 //! (`spec/LLD.md` section 2).
+
+pub mod budgets;
+pub mod closing;
+pub mod escalation;
+pub mod lock_table;

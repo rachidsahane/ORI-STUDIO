@@ -95,6 +95,7 @@ dependencies = [
 name = "ori-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "ori-core",
  "ori-gates",
  "ori-memory",
  "ori-runtime",
