@@ -2820,4 +2820,624 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0091: doc comments that name a test function in prose.
+    //
+    // `crates/ori-core/src/error.rs` explains where the check on its own
+    // restatement lives by naming test functions of this file, in prose, in
+    // backticks. Nothing tied those names to the tests. Renaming or deleting
+    // any of them left that doc comment false with every test in the workspace
+    // green, which is the "present but reporting nothing" class AICD §39 names,
+    // and it is the class the first of those tests was written to remove.
+    // ORI-T-0086 corrected a doc comment in that file and the correction
+    // created this instance of the defect it was correcting.
+    //
+    // Rustdoc resolves an intra-doc link and refuses to build when it cannot.
+    // It does not look inside a bare backticked span. The bare span is
+    // therefore the whole of the gap, and it is what this check reads.
+    //
+    // # Which backticked strings are claims, and which are prose
+    //
+    // A doc comment is full of backticks. Paths, commands, types, attributes,
+    // crate names and ordinary emphasis all wear them. A checker that tried to
+    // resolve all of them would drown in false positives and be deleted; one
+    // that resolved too few would be the defect it was built to remove.
+    //
+    // The line below was measured, not guessed. Across every Rust file in the
+    // workspace there are exactly seven distinct bare backticked spans shaped
+    // like a snake_case identifier: three name test functions, one names a
+    // method, and three name things that are not Rust at all. A population
+    // that size can be registered by hand and argued with, so the rule is:
+    //
+    //   A bare backticked span in a `///` or `//!` comment is a claim about
+    //   this repository's Rust source when its text matches
+    //   `[a-z][a-z0-9]*(_[a-z0-9]+)+`, and only then.
+    //
+    // Deliberately outside it, each for a reason that would otherwise produce
+    // noise no reader could act on:
+    //
+    //   - Intra-doc links. Rustdoc already resolves them, and a second
+    //     resolver would be a second way to be wrong. Four of them were broken
+    //     on `main` when this ticket opened and rustdoc is what found them.
+    //   - Any span carrying `/`, `.`, `::`, `-`, a space or an upper-case
+    //     letter: paths, commands, types, constants, qualified names. None is
+    //     a bare function name and each class would need its own resolver.
+    //   - A lower-case word with no underscore, such as `std` or `id`. Not
+    //     distinguishable from English or from a crate name, so the false
+    //     positive rate would be total.
+    //   - Anything inside a fenced code block. Samples are illustrations, not
+    //     claims about what this repository declares.
+    //
+    // # Why a register and a sweep, and not either alone
+    //
+    // The register is what fails when a cited test is renamed or deleted: the
+    // registered name stops resolving. The sweep is what fails when a citation
+    // appears that nobody registered. A register alone goes stale, which is the
+    // failure this repository keeps finding in its own hand-kept lists. A sweep
+    // alone can never fail, because a name that resolves to nothing is
+    // indistinguishable from prose until a human has said it is a citation.
+    // -----------------------------------------------------------------------
+
+    /// The roots whose Rust source this check reads, each with why it is in.
+    ///
+    /// `fixtures/` is deliberately out. The crates under it carry planted
+    /// defects and exist to be compiled and refused by the gate harness, so a
+    /// cited test name that resolved only against a fixture would be a false
+    /// pass on a file that is an input to a check rather than part of this
+    /// repository's own suite. The test below asserts each root was actually
+    /// reached, so an exclusion cannot quietly become a scan of nothing.
+    const DOC_SCAN_ROOTS: [(&str, &str); 2] = [
+        ("crates/", "the workspace's own crates"),
+        ("apps/", "the desktop shell, which is workspace source too"),
+    ];
+
+    /// Every doc comment in the workspace that names a test function in prose.
+    ///
+    /// The four fields are the file whose doc comment says it, the name it
+    /// says, the file the test is declared in, and why the name appears as
+    /// prose rather than as an intra-doc link that rustdoc would resolve.
+    ///
+    /// A registered name that no `#[test] fn` answers to is a failure and not
+    /// a skip, for the reason [`RESTATEMENTS`] gives: a check that passes when
+    /// its subject is missing reports nothing, and would go on reporting
+    /// nothing after the subject came back under a name the register no longer
+    /// matched. Renaming a cited test is therefore a three-part edit, the
+    /// test, the prose and this register, and the failure message says so.
+    const CITED_TESTS: [(&str, &str, &str, &str); 5] = [
+        (
+            "crates/ori-core/src/error.rs",
+            "ori_p1_033_every_restatement_of_the_index_agrees_with_the_index",
+            "crates/ori-gates/src/sections.rs",
+            "`ori-core` may not import a workspace crate (`spec/LLD.md` section 2), and the test \
+             is a `#[cfg(test)]` item in another crate, so no intra-doc link written from here \
+             could resolve however it were spelled",
+        ),
+        (
+            "crates/ori-core/src/error.rs",
+            "committed_sections_json_matches_a_fresh_parse_of_the_methodology",
+            "crates/ori-gates/src/sections.rs",
+            "the same bar: a `#[cfg(test)]` item in a crate `ori-core` may not import",
+        ),
+        (
+            "crates/ori-core/src/error.rs",
+            "citations_resolve_everywhere_but_the_recorded_design_artifact",
+            "crates/ori-gates/src/sections.rs",
+            "the same bar again. ORI-T-0091's ticket named two citations in this file and there \
+             are three, which is why the sweep below exists and the register is not trusted to \
+             be complete on its own",
+        ),
+        (
+            "crates/ori-gates/src/sections.rs",
+            "committed_sections_json_matches_a_fresh_parse_of_the_methodology",
+            "crates/ori-gates/src/sections.rs",
+            "rustdoc does not document `#[cfg(test)]` items, so a link to this test cannot \
+             resolve even from the file that declares it",
+        ),
+        (
+            "crates/ori-gates/src/sections.rs",
+            "citations_resolve_everywhere_but_the_recorded_design_artifact",
+            "crates/ori-gates/src/sections.rs",
+            "the same bar: a `#[cfg(test)]` item rustdoc will not document",
+        ),
+    ];
+
+    /// Bare snake_case spans in a citing file that name no Rust function.
+    ///
+    /// Checked, not trusted, on the pattern [`NOT_A_RESTATEMENT`] sets: the
+    /// test asserts each of these is still written in the file it exempts, so
+    /// an exemption that has outlived its reason is a failure rather than a
+    /// permanent blind spot.
+    const NOT_AN_IDENTIFIER: [(&str, &str, &str); 2] = [
+        (
+            "crates/ori-core/src/error.rs",
+            "aicd_plan_submit",
+            "a tool of this product's own MCP surface, specified in `spec/API_SPEC.md` and not \
+             built by phase 1. Escalation E-0005 records that it does not exist. It names a tool \
+             a human or agent calls, never a Rust function",
+        ),
+        (
+            "crates/ori-core/src/error.rs",
+            "contract_change",
+            "an escalation trigger from CLAUDE.md's list, a string passed to a tool, never a \
+             Rust function",
+        ),
+    ];
+
+    /// One bare backticked span from a doc comment, and where it is written.
+    #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+    struct DocSpan {
+        /// The file, relative to the repository root, with `/` separators.
+        file: String,
+        /// The 1-based line the span sits on.
+        line: usize,
+        /// The text between the backticks.
+        text: String,
+    }
+
+    /// Whether `text` is a plain snake_case identifier.
+    ///
+    /// The whole of the rule stated above, in one place: lower-case ASCII and
+    /// digits, at least one interior underscore, no leading or trailing
+    /// underscore and no doubled one. Everything a doc comment backticks that
+    /// is not this shape is prose as far as this check is concerned.
+    fn is_snake_case_identifier(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() || !bytes[0].is_ascii_lowercase() {
+            return false;
+        }
+        let mut underscores = 0usize;
+        let mut after_underscore = false;
+        for &byte in &bytes[1..] {
+            if byte == b'_' {
+                if after_underscore {
+                    return false;
+                }
+                underscores += 1;
+                after_underscore = true;
+            } else if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+                after_underscore = false;
+            } else {
+                return false;
+            }
+        }
+        underscores >= 1 && !after_underscore
+    }
+
+    /// Every bare backticked snake_case span in one file's doc comments.
+    ///
+    /// Intra-doc links are stepped over rather than collected: rustdoc
+    /// resolves those and this check must not become a second answer to a
+    /// question already answered. Fenced blocks are stepped over because a
+    /// sample is an illustration and not a claim.
+    fn doc_spans(source: &str, file: &str) -> Vec<DocSpan> {
+        let mut found = Vec::new();
+        let mut fenced = false;
+
+        for (offset, raw) in source.lines().enumerate() {
+            let trimmed = raw.trim_start();
+            let body = match trimmed
+                .strip_prefix("///")
+                .or_else(|| trimmed.strip_prefix("//!"))
+            {
+                Some(body) => body.trim_start(),
+                None => continue,
+            };
+            if body.starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                continue;
+            }
+
+            let bytes = body.as_bytes();
+            let mut at = 0usize;
+            while at < bytes.len() {
+                if bytes[at] == b'[' && bytes.get(at + 1) == Some(&b'`') {
+                    match body[at + 2..].find("`]") {
+                        Some(end) => at += 2 + end + 2,
+                        None => at += 1,
+                    }
+                    continue;
+                }
+                if bytes[at] == b'`' {
+                    let Some(end) = body[at + 1..].find('`') else {
+                        break;
+                    };
+                    let text = &body[at + 1..at + 1 + end];
+                    if is_snake_case_identifier(text) {
+                        found.push(DocSpan {
+                            file: file.to_string(),
+                            line: offset + 1,
+                            text: text.to_string(),
+                        });
+                    }
+                    at += 1 + end + 1;
+                    continue;
+                }
+                at += 1;
+            }
+        }
+
+        found
+    }
+
+    /// The words Rust allows between the start of a declaration line and `fn`.
+    ///
+    /// The reader below admits a line as a declaration only when everything
+    /// before `fn` is drawn from this set. That is what keeps it from reading
+    /// the `fn` in a sentence or the `fn` inside a quoted source fixture, both
+    /// of which this file is full of: the fixtures that prove these readers
+    /// are themselves Rust source written as string literals.
+    const DECLARATION_PREFIX: [&str; 8] = [
+        "pub",
+        "pub(crate)",
+        "pub(super)",
+        "const",
+        "async",
+        "unsafe",
+        "extern",
+        "\"C\"",
+    ];
+
+    /// Every `fn` one file declares, as (1-based line, name).
+    ///
+    /// A text scan, for the reason [`read_restatement`] gives: this crate
+    /// cannot import the crates it reads, so it reads their source as text.
+    ///
+    /// Line-based and prefix-checked rather than a bare search for the token
+    /// `fn`. A search found `in` in the doc comment "mentioning fn in prose"
+    /// and `thing` in a quoted fixture, and every phantom it adds is a name
+    /// that would let a citation of something that does not exist resolve.
+    fn function_declarations(source: &str) -> Vec<(usize, &str)> {
+        let mut out = Vec::new();
+
+        for (offset, raw) in source.lines().enumerate() {
+            let line = raw.trim();
+            let mut at = 0usize;
+            let bytes = line.as_bytes();
+            while at + 2 <= bytes.len() {
+                let boundary_before = at == 0 || !is_ident_byte(bytes[at - 1]);
+                let boundary_after = match bytes.get(at + 2) {
+                    None => true,
+                    Some(byte) => !is_ident_byte(*byte),
+                };
+                if &bytes[at..at + 2] == b"fn" && boundary_before && boundary_after {
+                    break;
+                }
+                at += 1;
+            }
+            if at + 2 > bytes.len() {
+                continue;
+            }
+            if !line[..at]
+                .split_whitespace()
+                .all(|word| DECLARATION_PREFIX.contains(&word))
+            {
+                continue;
+            }
+
+            let mut cursor = at + 2;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            let start = cursor;
+            while cursor < bytes.len() && is_ident_byte(bytes[cursor]) {
+                cursor += 1;
+            }
+            // A declaration's name is followed by its parameters or its
+            // generics. Anything else is a word that happened to follow `fn`.
+            if cursor > start && matches!(bytes.get(cursor), Some(b'(') | Some(b'<')) {
+                out.push((offset + 1, &line[start..cursor]));
+            }
+        }
+
+        out
+    }
+
+    /// The names of the `#[test]` functions one file declares.
+    ///
+    /// A test function is the first `fn` declared after a line that is exactly
+    /// `#[test]`, which is what lets the reader step over any attribute
+    /// written between the two without knowing what those attributes are.
+    ///
+    /// Exactly, so that the `"#[test]\n"` of a quoted fixture is not read as
+    /// an attribute of this file. A phantom test here would mask the deletion
+    /// of a real one that happened to share its name.
+    fn test_function_names(source: &str) -> Vec<&str> {
+        let declarations = function_declarations(source);
+        let mut names = Vec::new();
+
+        for (offset, raw) in source.lines().enumerate() {
+            if raw.trim() != "#[test]" {
+                continue;
+            }
+            if let Some((_, name)) = declarations.iter().find(|(line, _)| *line > offset + 1) {
+                names.push(*name);
+            }
+        }
+
+        names
+    }
+
+    /// Every doc comment that names a test function names one that exists.
+    ///
+    /// No acceptance criterion in `spec/criteria/` covers this check, for the
+    /// reason the note at the top of this module gives, so the name is
+    /// descriptive and no criterion identifier is invented for it.
+    ///
+    /// Derived from AICD §39, "references are checked mechanically", and from
+    /// AICD §14, which is why the failure paths are planted and proved rather
+    /// than assumed. The references AICD §39 is written about are references to
+    /// the methodology; this applies the same rule to a reference one file
+    /// makes to another file's test, which is the form the defect took here.
+    #[test]
+    fn a_doc_comment_naming_a_test_names_a_test_that_exists() {
+        let root = repo_root();
+        let (files, _) = scan_repository();
+        assert!(
+            !files.is_empty(),
+            "the scan visited no file under {}, so nothing below stands for anything",
+            root.display()
+        );
+
+        let sources: Vec<&String> = files
+            .iter()
+            .filter(|file| file.ends_with(".rs"))
+            .filter(|file| {
+                DOC_SCAN_ROOTS
+                    .iter()
+                    .any(|(prefix, _)| file.starts_with(prefix))
+            })
+            .collect();
+
+        // The floors. Every one of these is a way for this check to find
+        // nothing and report a pass, which AICD §14 and AICD §39 both forbid,
+        // so each is a failure with the reason named instead.
+        for (prefix, why) in DOC_SCAN_ROOTS {
+            assert!(
+                sources.iter().any(|file| file.starts_with(prefix)),
+                "no Rust source was found under {prefix}, which this check reads because it is \
+                 {why}. Either the tree moved or the scan is broken, and in both cases the \
+                 checks below would pass over the files they exist to read."
+            );
+        }
+
+        let mut spans: Vec<DocSpan> = Vec::new();
+        let mut tests: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut functions: BTreeSet<&str> = BTreeSet::new();
+        let mut texts: Vec<String> = Vec::with_capacity(sources.len());
+
+        for file in &sources {
+            texts.push(
+                fs::read_to_string(root.join(file))
+                    .unwrap_or_else(|error| panic!("cannot read {file}: {error}")),
+            );
+        }
+        for (file, text) in sources.iter().zip(texts.iter()) {
+            spans.extend(doc_spans(text, file));
+            for name in test_function_names(text) {
+                tests.entry(name).or_default().insert(file.as_str());
+            }
+            functions.extend(
+                function_declarations(text)
+                    .into_iter()
+                    .map(|(_, name)| name),
+            );
+        }
+
+        assert!(
+            !tests.is_empty(),
+            "the reader found no `#[test]` function in {}, which means it is broken rather than \
+             the workspace untested. Every check below resolves a cited name against this set, \
+             so an empty one would pass everything.",
+            count(sources.len(), "Rust file")
+        );
+        assert!(
+            tests.contains_key("a_doc_comment_naming_a_test_names_a_test_that_exists"),
+            "the reader did not find this test's own name among the {} it collected, so it is \
+             not reading `#[test]` functions the way they are actually written and every \
+             resolution below is worthless.",
+            count(tests.len(), "test")
+        );
+        assert!(
+            !spans.is_empty(),
+            "the reader found no bare backticked span in any doc comment under {}, so the doc \
+             comment parse is broken. A citation it cannot see is a citation it reports nothing \
+             about.",
+            root.display()
+        );
+        assert!(
+            functions.contains("lf_line_endings"),
+            "the reader did not find `lf_line_endings`, a function this very file declares, so \
+             it is not reading declarations correctly."
+        );
+
+        let mut defects: Vec<String> = Vec::new();
+        let registered: BTreeSet<(&str, &str)> = CITED_TESTS
+            .iter()
+            .map(|(citing, name, _, _)| (*citing, *name))
+            .collect();
+
+        // The register. A cited name that no test answers to, or that the
+        // citing file no longer writes, is the drift this check exists for.
+        for (citing, name, home, why) in CITED_TESTS {
+            match tests.get(name) {
+                None => defects.push(format!(
+                    "{citing} names `{name}` in prose as a test of this repository, and no \
+                     `#[test] fn {name}` exists anywhere under {}. If the test was renamed, the \
+                     repair is three edits and not one: the test, the prose in {citing}, and \
+                     this register. It is registered because {why}.",
+                    DOC_SCAN_ROOTS.map(|(prefix, _)| prefix).join(" or ")
+                )),
+                Some(declared) if !declared.contains(home) => defects.push(format!(
+                    "{citing} names `{name}` and says it is declared in {home}. It is declared \
+                     in {} instead, so the prose sends a reader to the wrong file.",
+                    at_most(
+                        &declared
+                            .iter()
+                            .map(|f| (*f).to_string())
+                            .collect::<Vec<_>>(),
+                        3
+                    )
+                )),
+                Some(_) => {}
+            }
+            if !spans
+                .iter()
+                .any(|span| span.file == citing && span.text == name)
+            {
+                defects.push(format!(
+                    "`{name}` is registered as cited by {citing} and {citing} no longer writes \
+                     it in a doc comment. Either the citation went away, in which case drop this \
+                     entry, or it was reworded past what the reader recognises, in which case \
+                     the reader is now blind to it."
+                ));
+            }
+        }
+
+        // The sweep. A citation nobody registered is a citation nobody checks,
+        // and the register is hand-kept, which is the thing this repository
+        // keeps finding to have gone quietly stale. ORI-T-0091 was briefed with
+        // two of the three citations in `error.rs`; this is what would have
+        // caught the third.
+        for span in &spans {
+            if tests.contains_key(span.text.as_str())
+                && !registered.contains(&(span.file.as_str(), span.text.as_str()))
+            {
+                defects.push(format!(
+                    "{}:{} names `{}` in a doc comment, which is a `#[test]` function, and \
+                     CITED_TESTS does not register it. An unregistered citation is one nothing \
+                     ties to the test, which is the defect this check removes.",
+                    span.file, span.line, span.text
+                ));
+            }
+        }
+
+        // Inside a file already known to cite tests, every bare snake_case span
+        // must be something. This is what catches a citation of a test that
+        // never existed, which neither the register nor the sweep can see: the
+        // register does not list it and the sweep cannot resolve it.
+        let citing_files: BTreeSet<&str> = CITED_TESTS.iter().map(|(citing, ..)| *citing).collect();
+        let exempt: BTreeSet<(&str, &str)> = NOT_AN_IDENTIFIER
+            .iter()
+            .map(|(file, text, _)| (*file, *text))
+            .collect();
+        for span in &spans {
+            let file = span.file.as_str();
+            let text = span.text.as_str();
+            if !citing_files.contains(file)
+                || registered.contains(&(file, text))
+                || functions.contains(text)
+                || exempt.contains(&(file, text))
+            {
+                continue;
+            }
+            defects.push(format!(
+                "{}:{} names `{text}` in a doc comment. {file} is a file that cites tests, and \
+                 `{text}` is neither a function declared anywhere in this workspace nor listed \
+                 in NOT_AN_IDENTIFIER. Either it is a citation of something that does not exist, \
+                 or it is prose that needs registering as prose.",
+                span.file, span.line
+            ));
+        }
+
+        // The exemptions, checked rather than trusted.
+        for (file, text, why) in NOT_AN_IDENTIFIER {
+            if !spans
+                .iter()
+                .any(|span| span.file == file && span.text == text)
+            {
+                defects.push(format!(
+                    "`{text}` is exempt in {file} because it is {why}, and {file} no longer \
+                     writes it. The exemption has outlived its reason and is a blind spot until \
+                     it is removed."
+                ));
+            }
+        }
+
+        assert!(
+            defects.is_empty(),
+            "{} between the doc comments of this workspace and the tests they name:\n  {}",
+            count(defects.len(), "disagreement"),
+            defects.join("\n  ")
+        );
+    }
+
+    // ---- the readers, on fixtures written for the purpose (AICD §14) ----
+
+    /// A doc comment carrying one span of every kind the rule has to separate.
+    const DOC_COMMENT_FIXTURE: &str = concat!(
+        "//! A module. [`linked_name`] is rustdoc's to resolve, not ours.\n",
+        "//!\n",
+        "//! Bare `a_cited_test` is ours. So is `two_words`.\n",
+        "//! Not ours: `std`, `id`, `Cow`, `SECTION_COUNT`, `spec/LLD.md`,\n",
+        "//! `cargo fmt`, `core.autocrlf`, `self::thing`, `kebab-case`, `_lead`,\n",
+        "//! `trail_`, `double__bar`.\n",
+        "//!\n",
+        "//! ```text\n",
+        "//! `fenced_sample` is an illustration\n",
+        "//! ```\n",
+        "\n",
+        "/// An item, citing `another_test`.\n",
+        "pub fn thing() {}\n",
+        "\n",
+        "// a plain comment naming `not_a_doc_comment`\n",
+    );
+
+    #[test]
+    fn the_doc_reader_takes_bare_identifiers_and_leaves_everything_else() {
+        let spans = doc_spans(DOC_COMMENT_FIXTURE, "fixture");
+        let found: Vec<&str> = spans.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(
+            found,
+            ["a_cited_test", "two_words", "another_test"],
+            "the reader took a span it should have left, or left one it should have taken"
+        );
+    }
+
+    #[test]
+    fn the_doc_reader_reports_the_line_a_citation_is_written_on() {
+        let spans = doc_spans(DOC_COMMENT_FIXTURE, "fixture");
+        assert_eq!(spans[0].line, 3, "`a_cited_test` is on line 3");
+        assert_eq!(spans[2].line, 12, "`another_test` is on line 12");
+        assert_eq!(spans[0].file, "fixture", "the file is carried through");
+    }
+
+    #[test]
+    fn the_function_reader_separates_test_functions_from_plain_ones() {
+        let source = concat!(
+            "fn plain() {}\n",
+            "#[test]\n",
+            "fn a_test() {}\n",
+            "#[test]\n",
+            "#[should_panic]\n",
+            "fn a_test_with_another_attribute() {}\n",
+            "/// A doc comment mentioning fn in prose.\n",
+            "pub fn documented() {}\n",
+            "const NOT_FN: &str = \"confn fnord\";\n",
+            "    \"#[test]\\n\",\n",
+            "    \"pub fn quoted_fixture() {}\\n\",\n",
+        );
+        assert_eq!(
+            function_declarations(source)
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect::<Vec<_>>(),
+            [
+                "plain",
+                "a_test",
+                "a_test_with_another_attribute",
+                "documented"
+            ],
+            "the reader took a `fn` from prose, from a quoted fixture, or from `confn fnord`"
+        );
+        assert_eq!(
+            test_function_names(source),
+            ["a_test", "a_test_with_another_attribute"],
+            "an attribute between `#[test]` and the function hid it, or a quoted `#[test]` \
+             counted as one"
+        );
+    }
 }
