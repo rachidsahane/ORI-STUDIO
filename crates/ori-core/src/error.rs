@@ -490,65 +490,156 @@ impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
-    /// One value of every [`RefusalKind`], which is what the tests below are
-    /// run over.
+    /// One value per [`RefusalKind`] variant, written once and read out twice.
     ///
-    /// [`refusal_tag`] is what keeps this list honest: it matches without a
-    /// wildcard, so a variant added to [`RefusalKind`] and not added here stops
-    /// the build rather than escaping the tests.
-    fn every_refusal() -> Vec<RefusalKind> {
-        vec![
-            RefusalKind::TicketTransition {
-                from: TicketState::Merged,
-                to: TicketState::Queued,
-            },
-            RefusalKind::CategoryDowngrade {
-                from: Category::Decisional,
-                to: Category::Auto,
-            },
-            RefusalKind::TierDowngrade {
-                from: Tier::Two,
-                to: Tier::One,
-            },
-            RefusalKind::SpecUpdateMissing,
-            RefusalKind::CriterionMissing,
-            RefusalKind::ScopeLocked {
-                module: "crates/ori-core/src/types.rs".to_owned(),
-            },
-            RefusalKind::TestModifiedWithoutEscalation,
-            RefusalKind::DocumentTransition {
-                from: DocumentState::Missing,
-                to: DocumentState::Approved,
-            },
-            RefusalKind::DocumentSeatMismatch {
-                owner: Seat::Architect,
-                signer: Seat::ProductOwner,
-            },
-        ]
+    /// No methodology section applies: this is a local device for tying a
+    /// coverage list to a completeness check the compiler already performs,
+    /// not an implementation of a methodology rule. `wire_enum!` in
+    /// `crates/ori-core/src/types.rs` does the same job for the fieldless
+    /// enumerations, where naming a variant is naming its value; this does it
+    /// for an enumeration whose variants carry fields, where a value has to be
+    /// written out.
+    ///
+    /// Each arm is a pattern and the value that stands for the variant the
+    /// pattern matches. The expansion is [`every_refusal`], the list of those
+    /// values, and [`canonical_sample`], a match on those patterns returning
+    /// those values.
+    ///
+    /// # What this forces, and what it does not
+    ///
+    /// The generated match carries no wildcard, and the arm grammar admits
+    /// only `Variant` and `Variant { pattern }`, so `_` is not a well-formed
+    /// arm and the match cannot stop being exhaustive. A variant added to
+    /// [`RefusalKind`] therefore stops the build until an arm is written here,
+    /// and an arm written here is a value written into [`every_refusal`]. That
+    /// is the tie the coverage test below rests on.
+    ///
+    /// What the grammar cannot force is that an arm's value belongs to the
+    /// variant its pattern matches. `NewKind { .. } => RefusalKind::CriterionMissing`
+    /// compiles and adds no coverage. The coverage test below is what refuses
+    /// that, in its first two assertions, and both are planted and proved
+    /// under ORI-T-0093 rather than assumed (AICD §14).
+    macro_rules! refusal_samples {
+        (
+            $( $variant:ident $({ $($pattern:tt)* })? => $sample:expr , )+
+        ) => {
+            /// One value of every [`RefusalKind`], which is what the tests
+            /// below are run over.
+            ///
+            /// Expanded from `refusal_samples!` below, which is what keeps the
+            /// list complete: a variant with no arm there is a variant the
+            /// crate does not build with.
+            fn every_refusal() -> Vec<RefusalKind> {
+                vec![ $( $sample, )+ ]
+            }
+
+            /// The value `refusal_samples!` pairs with the variant `kind`
+            /// belongs to.
+            ///
+            /// Exhaustive and wildcard-free, which is the completeness check
+            /// the compiler performs on behalf of [`every_refusal`]. It
+            /// returns the value rather than a number so that the coverage
+            /// test can ask whether a listed value is the value its own arm
+            /// names, which is the one way an arm can be written without
+            /// adding coverage.
+            fn canonical_sample(kind: &RefusalKind) -> RefusalKind {
+                match kind {
+                    $( RefusalKind::$variant $({ $($pattern)* })? => $sample, )+
+                }
+            }
+        };
     }
 
-    /// A number per variant, matched without a wildcard so that adding a
-    /// variant to [`RefusalKind`] fails to compile until it is listed in
-    /// [`every_refusal`] too.
+    refusal_samples! {
+        TicketTransition { .. } => RefusalKind::TicketTransition {
+            from: TicketState::Merged,
+            to: TicketState::Queued,
+        },
+        CategoryDowngrade { .. } => RefusalKind::CategoryDowngrade {
+            from: Category::Decisional,
+            to: Category::Auto,
+        },
+        TierDowngrade { .. } => RefusalKind::TierDowngrade {
+            from: Tier::Two,
+            to: Tier::One,
+        },
+        SpecUpdateMissing => RefusalKind::SpecUpdateMissing,
+        CriterionMissing => RefusalKind::CriterionMissing,
+        ScopeLocked { .. } => RefusalKind::ScopeLocked {
+            module: "crates/ori-core/src/types.rs".to_owned(),
+        },
+        TestModifiedWithoutEscalation => RefusalKind::TestModifiedWithoutEscalation,
+        DocumentTransition { .. } => RefusalKind::DocumentTransition {
+            from: DocumentState::Missing,
+            to: DocumentState::Approved,
+        },
+        DocumentSeatMismatch { .. } => RefusalKind::DocumentSeatMismatch {
+            owner: Seat::Architect,
+            signer: Seat::ProductOwner,
+        },
+    }
+
+    /// A number per variant: where [`every_refusal`] lists `kind`'s variant.
+    ///
+    /// Derived from [`canonical_sample`] rather than written out, so the
+    /// numbering cannot drift from the list it indexes. Until ORI-T-0093 this
+    /// was a hand-numbered exhaustive match, and its doc comment claimed that
+    /// adding a variant failed to compile until the variant was listed in
+    /// [`every_refusal`]. It failed to compile until an arm was added *here*,
+    /// which a developer satisfies alongside the arms `reason` and `Display`
+    /// demand, and nothing then carried the variant into the coverage list.
     fn refusal_tag(kind: &RefusalKind) -> usize {
-        match kind {
-            RefusalKind::TicketTransition { .. } => 0,
-            RefusalKind::CategoryDowngrade { .. } => 1,
-            RefusalKind::TierDowngrade { .. } => 2,
-            RefusalKind::SpecUpdateMissing => 3,
-            RefusalKind::CriterionMissing => 4,
-            RefusalKind::ScopeLocked { .. } => 5,
-            RefusalKind::TestModifiedWithoutEscalation => 6,
-            RefusalKind::DocumentTransition { .. } => 7,
-            RefusalKind::DocumentSeatMismatch { .. } => 8,
-        }
+        let sample = canonical_sample(kind);
+        every_refusal()
+            .iter()
+            .position(|listed| *listed == sample)
+            .expect("refusal_samples! writes every arm's value into every_refusal")
     }
 
+    /// Every variant of [`RefusalKind`] has a value in [`every_refusal`], which
+    /// is what the tests below iterate.
+    ///
+    /// Criterion ORI-P1-033 is about any refusal the engine makes, so a test
+    /// over a list that can silently omit a refusal reports nothing about the
+    /// criterion for the refusal it omits. The completeness half is the
+    /// compiler's: `refusal_samples!` cannot be satisfied for a new variant
+    /// without writing a value into the list. The two assertions here are the
+    /// half the compiler cannot make, that each arm's value belongs to the
+    /// variant its pattern matches and that no two arms name the same value.
+    /// Together they mean the list holds exactly one value per variant.
     #[test]
     fn ori_p1_033_every_refusal_this_crate_can_make_is_covered_by_these_tests() {
         let refusals = every_refusal();
+
+        // An arm whose value belongs to another variant leaves its own variant
+        // out of the list while the length still looks right.
+        for sample in &refusals {
+            assert_eq!(
+                canonical_sample(sample),
+                *sample,
+                "every_refusal lists {sample:?}, and the refusal_samples! arm matching that \
+                 value names a different one, so the arm's pattern and its value are about \
+                 two different variants and one of them has no value in the list"
+            );
+        }
+
+        // The other way an arm adds none: naming a value another arm already
+        // names. The list then has the right length and one variant short.
+        let distinct: HashSet<&RefusalKind> = refusals.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            refusals.len(),
+            "every_refusal lists {} values and only {} of them are distinct, so a \
+             refusal_samples! arm names a value another arm already names and its own \
+             variant has none",
+            refusals.len(),
+            distinct.len()
+        );
+
         let mut tags: Vec<usize> = refusals.iter().map(refusal_tag).collect();
         tags.sort_unstable();
         tags.dedup();
