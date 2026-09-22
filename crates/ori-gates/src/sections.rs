@@ -5,9 +5,42 @@
 //! removed a required check") and the rule adopted from it: "References are
 //! checked mechanically. The methodology's section index is machine-readable, a
 //! checker validates every reference in specification, operational memory and
-//! instruction files." This module builds that index. The citation gate
-//! (`spec/LLD.md` section 2, installed under AICD §14) resolves every `AICD §<n>`
-//! reference in the repository against it.
+//! instruction files." This module builds that index. Nothing in this
+//! repository yet resolves the repository's references against it the way that
+//! rule describes: that is gate 9, and gate 9 does not exist.
+//!
+//! # This module is not gate 9, and gate 9 is not installed
+//!
+//! `spec/CI_CD.md` section 1 item 9 specifies the citation gate as "every
+//! `AICD §n` resolves", and `spec/LLD.md` section 2 lists a citation runner among
+//! this crate's responsibilities. Neither is built, and every fact below that
+//! says so is one command, so this is checkable rather than merely current:
+//!
+//! - `crates/ori-gates/src/citation_gate.rs`, the runner
+//!   `ops/phase-1-backlog.md` names, is not in the tree.
+//! - `ops/gates/gate-9.md`, the proof `spec/TESTING.md` section 4 requires
+//!   before a gate is cited as protection in any document, is not in the tree.
+//! - `scripts/gates.sh` reports gate 9 as not available, and the comment above
+//!   that line is the fuller account of why. This one must not contradict it.
+//! - `ops/phase-1-backlog.md` carries the ticket that builds it, ORI-T-0047 in
+//!   batch 7, and records its precondition as unverified.
+//!
+//! Two things hold it open and they differ in kind. The operator's ruling: gate
+//! 9 stays `Defined` and not `Installed` until the methodology HTML's anchors
+//! are corrected and this index is regenerated from the corrected document. And
+//! AICD §14: a gate enters service only after it has been seen to pass on a
+//! clean tree and fail on a planted defect, and no such demonstration exists for
+//! gate 9. Generating the index satisfies half of the first and none of the
+//! second.
+//!
+//! What does run is the test
+//! `citations_resolve_everywhere_but_the_recorded_design_artifact` below, under
+//! gate 2, on the terms the section on citations sets out further down. It is
+//! strictly narrower than the gate, it refuses no build of its own, and deleting
+//! it would not change gate 9's line in `scripts/gates.sh`. So a citation here
+//! is checked and is not gated, and this module may not be cited as the second:
+//! `spec/LLD.md` section 2 puts "report a gate installed without a proof" in
+//! this crate's must-not column, and a doc comment claiming one is that report.
 //!
 //! What the index contains is fixed by the lead's ruling R1 in `ops/rulings.md`:
 //! the 40 numbered sections, the 3 appendices, the 8 numbered subsections of
@@ -1050,10 +1083,19 @@ mod tests {
     // ORI-T-0085 adds the exception, and only because the exception is real.
     // The tests named `ori_p1_033_*` at the end of this module exist for
     // criterion ORI-P1-033 and for nothing else: one compares the repository's
-    // restatements of the index with the index, and three prove the reader that
-    // one depends on. Naming the criterion there is a report of what they cover,
-    // not an invention. The three that prove the reader prove the instrument
-    // rather than the criterion, and say so.
+    // restatements of the index with the index, and the rest, every one of them
+    // named `ori_p1_033_reader_*`, prove the reader that one depends on. Naming
+    // the criterion there is a report of what they cover, not an invention. The
+    // ones that prove the reader prove the instrument rather than the criterion,
+    // and say so.
+    //
+    // How many there are is deliberately not written here or below. It was
+    // written, as "three", and it was wrong from the day a fourth reader test
+    // was added until ORI-T-0094, with every test in the workspace green. The
+    // check at the end of this module resolves a backticked identifier in a doc
+    // comment against the tests that exist; a numeral is not an identifier, and
+    // neither is the glob `ori_p1_033_reader_*`, so nothing read either claim. A
+    // grep for the prefix answers in one command what a count only froze.
 
     /// The repository root, two levels above `crates/ori-gates`.
     fn repo_root() -> PathBuf {
@@ -2554,9 +2596,10 @@ mod tests {
     /// is the missing half, the one that checks the restatement against the
     /// index, without which the criterion can be false with every test green.
     ///
-    /// The three other tests named `ori_p1_033_reader_*` prove the reader this
-    /// one depends on, on fixtures carrying planted defects (AICD §14). They
-    /// prove the instrument, not the criterion.
+    /// The other tests named `ori_p1_033_reader_*` prove the reader this one
+    /// depends on, on fixtures carrying planted defects (AICD §14). They prove
+    /// the instrument, not the criterion. Their number is left unwritten on
+    /// purpose, for the reason the note at the top of this test module gives.
     #[test]
     fn ori_p1_033_every_restatement_of_the_index_agrees_with_the_index() {
         let index = methodology();
