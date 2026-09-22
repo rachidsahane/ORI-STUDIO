@@ -1162,6 +1162,24 @@ mod tests {
             "AICD §18 names three seats plus a product owner"
         );
         assert_eq!(
+            ProductOrigin::ALL.len(),
+            2,
+            "ProductOrigin::ALL: DATA_MODEL section 2 gives Product the field as \
+             \"origin (new, migrated)\", which is two values"
+        );
+        assert_eq!(
+            TicketKind::ALL.len(),
+            3,
+            "TicketKind::ALL: DATA_MODEL section 2 gives Ticket the field as \
+             \"kind (defect, feature, chore)\", which is three values"
+        );
+        assert_eq!(
+            DocumentSet::ALL.len(),
+            3,
+            "DocumentSet::ALL: DATA_MODEL section 2 gives Document the field as \
+             \"set (foundation, phase, migration)\", which is three values"
+        );
+        assert_eq!(
             TicketState::ALL.len(),
             12,
             "DATA_MODEL section 3 draws twelve ticket states"
