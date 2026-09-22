@@ -1090,12 +1090,16 @@ mod tests {
     // and say so.
     //
     // How many there are is deliberately not written here or below. It was
-    // written, as "three", and it was wrong from the day a fourth reader test
-    // was added until ORI-T-0094, with every test in the workspace green. The
-    // check at the end of this module resolves a backticked identifier in a doc
-    // comment against the tests that exist; a numeral is not an identifier, and
-    // neither is the glob `ori_p1_033_reader_*`, so nothing read either claim. A
-    // grep for the prefix answers in one command what a count only froze.
+    // written, as "three", and it was never right: 478173e added the four
+    // reader tests and the word "three" in the same commit, so the file
+    // miscounted itself from the line it was born on until ORI-T-0094, with
+    // every test in the workspace green throughout. The check at the end of
+    // this module resolves a backticked identifier in a doc comment against the
+    // tests that exist; a numeral is not an identifier, and neither is the glob
+    // `ori_p1_033_reader_*`, whose trailing character fails the identifier rule
+    // before the prefix is ever looked at. So nothing read either claim, and
+    // nothing would have. A grep for the prefix answers in one command what a
+    // count only froze.
 
     /// The repository root, two levels above `crates/ori-gates`.
     fn repo_root() -> PathBuf {
