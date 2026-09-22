@@ -10,4 +10,6 @@
 pub mod budgets;
 pub mod closing;
 pub mod escalation;
+pub mod lifecycle;
 pub mod lock_table;
+pub mod merge_queue;
