@@ -46,11 +46,18 @@ CREATE TABLE _ori_product (
 -- again here so a row inserted by any future code path that is not
 -- `ori_core::types::Actor` still cannot violate it.
 --
--- `payload` is `CHECK (json_valid(payload))`, a format check (every payload
--- is well-formed JSON), not a business rule (this crate owns no opinion on
--- what a payload contains): `spec/LLD.md` section 2's "Must not: contain
--- business rules" is about what a kind of event means, which stays in
--- `ori-core` and the sibling `event_log.rs`.
+-- `payload` carries no `json_valid` check, even though `spec/DATA_MODEL.md`
+-- section 2 calls the column "payload (json)": a first draft of this
+-- migration added one, and reading the sibling `event_log.rs` (its own
+-- module doc, "What this module deliberately does not enforce") showed that
+-- module stores and hashes `payload` as whatever non-empty text its caller
+-- gives it, deliberately not validating JSON, "interpreting JSON would need
+-- a parser this crate does not have [...] and a grammar `spec/DATA_MODEL.md`
+-- does not draw". A `CHECK` here would have silently refused an insert that
+-- module's own Rust-level check already allowed, which is exactly the kind
+-- of disagreement this reconciliation exists to catch before it becomes a
+-- production refusal neither crate's tests would reproduce. The column stays
+-- `TEXT NOT NULL`, nothing stronger.
 --
 -- `hash_prev` is `NOT NULL`: this migration fixes that the column exists and
 -- is always populated; what a first event's "previous" hash is (a fixed
@@ -64,7 +71,7 @@ CREATE TABLE events (
     actor_id TEXT,
     kind TEXT NOT NULL,
     ticket_id TEXT,
-    payload TEXT NOT NULL CHECK (json_valid(payload)),
+    payload TEXT NOT NULL,
     hash_prev TEXT NOT NULL,
     CHECK (
         (actor_kind = 'system' AND actor_id IS NULL)

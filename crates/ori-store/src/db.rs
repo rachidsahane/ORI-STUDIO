@@ -164,9 +164,13 @@
 //! statement of the same rule is what a coder's own crate rests on being
 //! true.
 //!
-//! Must not: contain business rules (`spec/LLD.md` section 2). `payload`'s
-//! `json_valid` check is a format constraint, not an opinion on what any
-//! `kind` of event means; nothing here reads or interprets a payload.
+//! Must not: contain business rules (`spec/LLD.md` section 2). Nothing here
+//! reads or interprets a payload; `migrations/0001_init.sql` explains why
+//! `payload` carries no `json_valid` check either, even though
+//! `spec/DATA_MODEL.md` section 2 calls the column "payload (json)": the
+//! sibling `event_log.rs` deliberately stores it as opaque, non-empty text,
+//! and a `CHECK` here would have silently disagreed with an insert that
+//! module's own Rust-level validation already allows.
 
 use std::fmt;
 use std::fs;
