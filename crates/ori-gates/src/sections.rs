@@ -24,13 +24,15 @@
 //! "present but reporting nothing".
 //!
 //! Each entry still carries the anchor as the document has it, with
-//! [`AnchorState`] marking the anchors that are absent or duplicated, so the
+//! [`crate::sections::AnchorState`] marking the anchors that are absent or
+//! duplicated, so the
 //! ticket that repairs them can work from this index rather than deriving the
 //! same facts again.
 //!
 //! # Regenerating `methodology/sections.json`
 //!
-//! [`REGENERATE_COMMAND`] rewrites the committed index from the document. The
+//! [`crate::sections::REGENERATE_COMMAND`] rewrites the committed index from
+//! the document. The
 //! test `committed_sections_json_matches_a_fresh_parse_of_the_methodology` fails
 //! whenever the committed file and the document disagree, so a stale index is a
 //! test failure rather than a silent wrong answer. Regeneration itself also
@@ -63,6 +65,26 @@
 //!
 //! to print the current inventory: distinct citations, occurrences, files
 //! scanned, what was excluded and every unresolved citation with its line.
+//!
+//! # Why the links above are written `crate::sections::`
+//!
+//! `lib.rs` carries a `///` doc comment on `pub mod sections;`. When a module
+//! is documented from both its declaration site and its own `//!` block,
+//! rustdoc resolves the merged result in one scope, and that scope is the
+//! declaring module, here the crate root. So an unqualified link to
+//! `AnchorState` does not resolve from inside this file even though the item
+//! is declared in it, and a `self::`-qualified one does not either. Both were
+//! broken on `main` under
+//! `RUSTDOCFLAGS="-D warnings"` while the default `cargo doc` stayed green,
+//! which is the "present but reporting nothing" class AICD §39 names, applied
+//! to the documentation build.
+//!
+//! A `sections::`-qualified link would also resolve today, and is shorter,
+//! and is the wrong choice: it depends on the crate-root scope that the `///` in
+//! `lib.rs` happens to impose, so deleting that `///` (the narrowest real fix,
+//! and out of ORI-T-0091's declared scope) would break it. The
+//! `crate::`-absolute form resolves under both scopes and is what is written
+//! here. Do not shorten it.
 //!
 //! Must not: add a dependency (`CLAUDE.md` absolute rule 6). The parser is
 //! written against this document's actual structure and uses nothing outside
@@ -191,7 +213,9 @@ pub struct Index {
     /// Normalized rather than raw. A CRLF checkout of the document is the same
     /// document and must produce the same index, so this counts the bytes the
     /// repository stores, not the bytes a particular checkout wrote to disk.
-    /// See [`lf_line_endings`].
+    /// [`Index::parse`] folds CRLF to LF once, before anything here is counted.
+    /// The private `lf_line_endings` performs that fold and carries the full
+    /// reasoning; `cargo doc --document-private-items` renders it.
     pub source_bytes: usize,
     /// The document's length in lines, so a human can tell a stale index from a
     /// current one with `wc -l`.
@@ -208,7 +232,13 @@ impl Index {
     ///
     /// The text's line endings are folded to LF before anything is read from
     /// it, so one document produces one index whatever platform it arrived on.
-    /// [`lf_line_endings`] says why that fold lives here and nowhere else.
+    /// The fold lives here rather than in [`Index::from_file`] because this
+    /// function is public and takes text: a caller that never touched the
+    /// filesystem, such as an editor buffer or a fixture, must get the same
+    /// index as one that did. The private `lf_line_endings` performs it and
+    /// carries the rest of the reasoning, including why a lone CR is content
+    /// rather than a line ending; `cargo doc --document-private-items` renders
+    /// it.
     ///
     /// # Errors
     ///
