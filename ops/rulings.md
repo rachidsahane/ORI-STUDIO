@@ -67,7 +67,7 @@ Extended to `spec/agents/coder.md` and `spec/README.md` so the rest of the repos
 
 ## R8. `ori-integrations` does not depend on `ori-store`
 
-LLD section 2's Mermaid graph puts `INT` among the crates with an edge to `STORE`. The same section's table gives ori-integrations the "Must not" of "Read the store", and API_SPEC section 4 states "adapters have no access to the store". Two documents against one edge of one diagram, and the two agree with the architectural reason: an adapter that can read the store can be handed the whole product by a compromised integration. `ori-integrations` depends on `ori-core` only, for the types its traits take. LLD section 2's graph is corrected in a specification PR in this batch.
+LLD section 2's Mermaid graph puts `INT` among the crates with an edge to `STORE`. The same section's table gives ori-integrations the "Must not" of "Read the store", and API_SPEC section 4 states "adapters have no access to the store". Two documents against one edge of one diagram, and the two agree with the architectural reason: an adapter that can read the store can be handed the whole product by a compromised integration. `ori-integrations` depends on `ori-core` only, for the types its traits take. LLD section 2's graph was to be corrected in a specification PR in this batch. **It was not.** `spec/LLD.md`'s graph is unchanged since batch 0 and still carries the edge this ruling rejects, and still lacks the `INT --> CORE` edge for the dependency that does exist. See the note at the end of this file.
 
 ## R9. Scope extension, ORI-T-0001
 
@@ -129,7 +129,7 @@ Both occurrences were caught by review, not by the lead. Neither would have been
 
 ## R15. ENV_SETUP section 1 overstates the forbidden-action requirement
 
-ENV_SETUP section 1 states that `scripts/setup-dev.sh` "runs the forbidden-action test against a fixture product; a fresh clone must pass it before any work." That is unsatisfiable today: the harness (ORI-T-0029) and the fixtures (ORI-T-0073 to ORI-T-0076) do not exist. Reporting it as not yet available, naming the tickets, is correct and is what the script must do. ENV_SETUP is amended in a specification PR so the requirement binds when those tickets land, rather than reading as a rule a fresh clone already violates.
+ENV_SETUP section 1 states that `scripts/setup-dev.sh` "runs the forbidden-action test against a fixture product; a fresh clone must pass it before any work." That is unsatisfiable today: the harness (ORI-T-0029) and the fixtures (ORI-T-0073 to ORI-T-0076) do not exist. Reporting it as not yet available, naming the tickets, is correct and is what the script must do. ENV_SETUP was to be amended in a specification PR. **It was not.** `spec/ENV_SETUP.md` is unchanged since batch 0 and still states the unsatisfiable sentence. See the note at the end of this file so the requirement binds when those tickets land, rather than reading as a rule a fresh clone already violates.
 
 ## R16. Where the forbidden-action test lives, corrected
 
@@ -229,3 +229,18 @@ The same coder's first draft used bare `§28` as a back-reference three times. C
 So **a bare `§28` is a methodology reference that no gate checks and no test catches**, and it would have shipped green. It was caught by reading CONVENTIONS, not by running anything.
 
 This is the second known blind spot in gate 9's rule set, alongside internal `Rn` ruling references. Both belong in ORI-T-0047 when the gate acquires a mechanical definition.
+
+
+---
+
+## A note on two rulings that recorded a future action as settled
+
+Found by the round 4 audit ([[CR-007]]), which checked whether the rulings in this file describe the repository.
+
+**R8** ruled that `spec/LLD.md`'s dependency graph is corrected in a specification pull request in the same batch. **R15** ruled that `spec/ENV_SETUP.md` is amended in one. Neither document has been modified since batch 0. Both rulings were written in the present or near tense, as though the correction were part of the ruling, and in both cases the ruling was the whole of what happened.
+
+That is a third instance of the shape [[R30]] and [[R31]] each diagnosed once: a record whose two halves have different authors and different triggers, where only the half the lead is already holding gets written. A ruling is made while the lead is stopped and deciding. The specification pull request that carries it out falls to a documentation ticket that nobody dispatched, at a moment nobody was looking.
+
+**The correction, and it is a rule about how a ruling is written.** A ruling states what is decided. Where carrying it out is a separate piece of work, the ruling names the ticket that does it, and that ticket is entered in `ops/phase-1-backlog.md` in the same commit as the ruling. A ruling that describes work nobody has been assigned is a plan wearing a decision's clothes, and this file now contains two of them that went eleven batches without being noticed by anything except a sweep.
+
+The two specification edits themselves are not made here: `ops/` is the lead's and `spec/` is the documentation role's, which is the separation that produced the gap and is not a reason to widen it. They are ticketed.

@@ -20,6 +20,8 @@ Held by the lead until `ori-orchestrator::LockTable` owns it (ORI-T-0050). Every
 
 Claims 11 and 12 released on merge (ORI-T-0013, ORI-T-0014).
 
+> **Claim 12 was never entered.** This line releases a claim that does not exist above it, and the numbered rows run 1, 2, 2b, 3, 4, 5, 7, 8, 9, 10, 11 and stop; claim 6 is missing too. So **ORI-T-0014 holds no recorded claim anywhere**, and it is a tier 2 ticket that edited `.github/workflows/ci.yml`, created `fixtures/planted/gate-2/**` and produced `ops/gates/gate-2.md`. It ran against the same workflow file as three other tickets and the table that was supposed to serialise them never recorded it. Nothing collided, because the lead ran them serially by hand. Recorded now as claim 12, granted and released together, rather than invented as though it had been written at the time. Claim 6 remains an allocation gap; see [[R31]].
+
 Claim 13, ORI-T-0016. Granted `.github/workflows/ci.yml`, `fixtures/planted/gate-7/**`. **Extended mid-ticket** under ruling R28 to `deny.toml`, `scripts/secret-scan.sh` and `scripts/gates.sh`, because a dependency policy the whole repository is judged by and a scanner a gate invokes do not belong in a fixture directory. **The lead granted that extension in a prompt and failed to record it here, so a reviewer correctly reported `scripts/gates.sh` as an unrecorded scope violation.** Same failure as rulings R15 to R24: a grant exists when it is written here, not when the lead states it. Recorded now.
 
 Claim 14, ORI-T-0084. Granted `fixtures/planted/gate-1/workflow-samples/**`. The claim also named `ops/gates/gate-1.md` and `ops/gates/gate-2.md`, which was an error: ruling R25 makes operational records the lead's, so the ticket could not have used them. Released to the lead. **Extended to `fixtures/planted/gate-2/README.md`**, held by the lead rather than the coder, to correct a statement the ticket's own repair made false; nothing else claims it.
@@ -30,7 +32,9 @@ Claim 15, ORI-T-0018. **Granted nothing, because it was never claimed.** The tic
 
 This is the fourth occurrence of one failure: a grant or a record that exists in the lead's intent and not in a file. See CR-005.
 
-No two claims overlap, verified mechanically before the claims were granted. ORI-T-0001 through 0005, 0010 and 0012 through 0018 are unclaimed: 0010 is held on a missing precondition (the organizational repository), the rest are held on the Rust toolchain.
+No two claims overlap, verified mechanically before the claims were granted.
+
+> **This paragraph's second sentence was deleted, and what it said is recorded here rather than silently dropped.** It read: "ORI-T-0001 through 0005, 0010 and 0012 through 0018 are unclaimed: 0010 is held on a missing precondition (the organizational repository), the rest are held on the Rust toolchain." It was true when batch 1 opened and false within hours, because rows seven to eleven of this same table, eighteen lines above it, grant claims to five of the tickets it calls unclaimed, and claims 13 and 15 grant two more. Every ticket it names except ORI-T-0010 and ORI-T-0015 has since merged. A standing sentence about a moving set, written below the rows that move it. Found by the round 4 audit ([[CR-007]]).
 
 ---
 

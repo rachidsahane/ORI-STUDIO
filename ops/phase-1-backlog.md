@@ -192,8 +192,11 @@ Whole crate is tier 2 (`RISK_MAP`: `crates/ori-broker | 2 | Credentials`).
 | ORI-T-0044 | Significance labeler (gate 12) | 1 | `crates/ori-gates/src/significance.rs` | AICD §15; PRD Q-02, Q-03 | ORI-P1-027 |
 | ORI-T-0045 | **Prover: the planted-defect demonstration** | **2** | `crates/ori-gates/src/prover.rs` | AICD §14; runbooks/prove-gate.md | ORI-P1-013 |
 | ORI-T-0046 | **Liveness definition** | **2** | `crates/ori-gates/src/liveness.rs` | PRD Z-02, O-06; CI_CD §1 | none in phase 1 (asserted in phase 4) |
-| ORI-T-0047 | Citation gate (gate 9), installed only after your HTML fix | 1 | `crates/ori-gates/src/citation_gate.rs`, `.github/workflows/ci.yml` (gate 9 job), `fixtures/planted/gate-9/**`, `ops/gates/gate-9.md` | CI_CD §1.9; PRD Z-03 | ORI-P1-012 |
-| ORI-T-0048 | Diagram gate (gate 14) | 1 | `crates/ori-gates/src/diagram.rs`, `.github/workflows/ci.yml` (gate 14 job), `fixtures/planted/gate-14/**`, `ops/gates/gate-14.md` | CI_CD §1.14; CONVENTIONS "Diagrams" | ORI-P1-041 |
+| ORI-T-0047 | Citation gate (gate 9), installed only after your HTML fix | **2** | `crates/ori-gates/src/citation_gate.rs`, `.github/workflows/ci.yml` (gate 9 job), `fixtures/planted/gate-9/**`, `ops/gates/gate-9.md` | CI_CD §1.9; PRD Z-03 | ORI-P1-012 |
+| ORI-T-0048 | Diagram gate (gate 14) | **2** | `crates/ori-gates/src/diagram.rs`, `.github/workflows/ci.yml` (gate 14 job), `fixtures/planted/gate-14/**`, `ops/gates/gate-14.md` | CI_CD §1.14; CONVENTIONS "Diagrams" | ORI-P1-041 |
+
+
+**Tier correction for ORI-T-0047 and ORI-T-0048, recorded rather than silently changed.** Both rows carried tier **1** while their declared scope includes `.github/workflows/ci.yml`, which `spec/RISK_MAP.md` tiers **2** for supply chain. This document states the rule that decides it, at the head of the phase: "Where a ticket's declared scope touches a path `RISK_MAP` tiers 2, the ticket is tier 2 whatever its size and whatever its content." So the backlog contradicted its own stated rule, in the same file, for two tickets that build gates. Corrected to 2. Found by the round 4 audit ([[CR-007]]).
 
 **Order.** ORI-T-0041 first. Then 0042 to 0046 in parallel. Then ORI-T-0047 and ORI-T-0048 **serially**: both declare `.github/workflows/ci.yml`.
 
