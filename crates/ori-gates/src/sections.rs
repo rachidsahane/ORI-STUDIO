@@ -2005,13 +2005,24 @@ mod tests {
     /// check that reports nothing is what this test exists to remove; it would
     /// also go on reporting nothing after the subject came back under a name
     /// the list no longer matched.
+    ///
+    /// A reason here names the standing constraint that forces the
+    /// restatement, and nothing else. It does not name a pull request, a
+    /// branch or a ticket whose state can change after this line is written.
+    /// The reason is handed to a human as the explanation of a live failure,
+    /// so a clause that has since stopped being true does not merely age: it
+    /// misdirects the one reader who is already looking at something broken.
+    /// The previous text here said pull request 27 was "open and unmerged"; it
+    /// had merged before that sentence reached `main`, so it was false on
+    /// arrival and stayed false. Merge state is knowable from the history at
+    /// any time and belongs to whoever is asking, never to a constant.
     const RESTATEMENTS: [(&str, &str); 1] = [(
         "crates/ori-core/src/error.rs",
         "`ori-core` may not do IO and may not import a workspace crate \
          (`spec/LLD.md` section 2, and CLAUDE.md's load-bearing facts), so it \
-         restates the index rather than reading it. The file arrives with pull \
-         request 27, ORI-T-0019, which is open and unmerged, so this test is \
-         red until that merges and this branch merges after it",
+         restates the index rather than reading it. If the file moved rather \
+         than went away, the repair is to correct this entry and not to drop \
+         it: a restatement nobody registered is a restatement nobody checks",
     )];
 
     /// Files that carry the text of a restatement without being one.
