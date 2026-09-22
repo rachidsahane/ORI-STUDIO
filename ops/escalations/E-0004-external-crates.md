@@ -5,7 +5,7 @@
 | Trigger | `new_dependency` |
 | Raised by | Lead, at batch 2 planning, before any ticket that needs one is started |
 | Blocks | ORI-T-0020, ORI-T-0021 and ORI-T-0022 (property tests). ORI-T-0019 is unaffected and starts now |
-| State | Open, with the operator |
+| State | **Answered.** All four approved, pinned |
 
 ## Why this is raised at all
 
@@ -44,3 +44,18 @@ It does not ask to relax CLAUDE.md rule 6. Every crate after these still escalat
 ## If the answer is no, or is delayed
 
 ORI-T-0019 (domain types and the error enum) needs none of them and starts now. ORI-T-0020, ORI-T-0021 and ORI-T-0022 are the ones that stop, and they stop on the property tests specifically: their state machines could be written and unit-tested without `proptest`, but `spec/ROADMAP.md` phase 1 item 2 says "state machines with property tests" and shipping them without would be the ticket deciding to do less than the specification asks. The lead will not do that silently.
+
+
+---
+
+## Answered: all four approved, pinned
+
+The operator approved `proptest`, `rusqlite`, a hashing crate and `keyring`, on the terms this escalation recommended: pinned versions, `Cargo.lock` committed, and covered by gate 7's `cargo-audit` and `cargo-deny` checks, which run on every pull request today and are proven on planted defects.
+
+**What it unblocks, which is most of the engine.** `ori-store` is the append-only, hash-chained event log that `spec/LLD.md` section 2 makes the spine of the product, and nothing above it could persist anything without it. `ori-core` decides, `ori-orchestrator` assembles evidence and `ori-runtime` records teardown, and until now all three wrote to nowhere. `ori-broker` needs the keychain to hold a credential at all.
+
+**The one that was not a confirmation.** This escalation recorded that the specification names `proptest`, `keyring`, `tantivy` and `tree-sitter` by name and **chooses SQLite while naming no Rust binding**, so `rusqlite` was a real decision rather than a rubber stamp. The operator took it deliberately rather than deferring it to batch 3, so the deferral this escalation recommended is withdrawn and `rusqlite` is the binding.
+
+**`proptest` enters as a dev-dependency only**, as recommended. It is a test-time tool and must never appear in a shipped binary's dependency graph, which is mechanically checkable and which the lead checks on the first pull request that adds it.
+
+Every crate after these four still escalates. CLAUDE.md rule 6 is unchanged.
