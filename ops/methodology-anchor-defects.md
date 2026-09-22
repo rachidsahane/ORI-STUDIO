@@ -134,7 +134,7 @@ The fix changes no methodology content. AICD §29 gives no version increment to 
 
 **The index.** ORI-T-0005 generates `methodology/sections.json`. Under the lead's ruling R1 it indexes the forty numbered sections, the three appendices, the subsections §24.1 to §24.8 and the templates A.1 to A.5. Those are every numbered heading the document carries: section 24 is the only section with numbered subsections, appendix A the only appendix with numbered items. The generator reads the numbers and the titles, not the `id` attributes, so no defect in table 3.1 enters the index.
 
-At the time of writing, `methodology/` contains one file, `AICD_Methodology_v0.3.html`. `sections.json` does not exist yet; ORI-T-0005 builds it in batch 1 (`ops/phase-1-backlog.md` line 60).
+When this report was written, `methodology/` contained one file, `AICD_Methodology_v0.3.html`, and `sections.json` did not exist. **It does now**: ORI-T-0005 built it in batch 1 (`ops/phase-1-backlog.md`, batch 1's ORI-T-0005 row).
 
 **What gate 9 accepts.** Per R1: a section (`AICD §<n>`), an appendix (`AICD appendix A`, `B`, `C`), a subsection of section 24 (`AICD §24.1` to `§24.8`) and a template of appendix A (`A.1` to `A.5`, spelled either `AICD appendix A.5` or `AICD A.1`, both of which occur). A reference to a subsection that carries no numbered heading fails the gate. `spec/CONVENTIONS.md` line 37 states the requirement that every reference resolve; it does not state that it currently does, and this report does not either.
 
@@ -148,13 +148,13 @@ At the time of writing, `methodology/` contains one file, `AICD_Methodology_v0.3
 | `AICD appendix <A\|B\|C>`, appendix as a whole | 3 | `spec/README.md`:21; `ops/phase-1-backlog.md`:64, :87 |
 | Anchor or URL fragment | 0 | none anywhere, established by searching every `.md` and `spec/design/Ori Studio.html` for `#s<n>` and for the file name followed by `#` |
 
-Ten of those references are finer than section granularity. All ten name a heading that exists, so all ten are inside the set R1 puts in the index. Two spellings of the template form are in use, and one reference is a range (`AICD A.1 to A.5`, `ops/phase-1-backlog.md` line 64).
+Ten of those references are finer than section granularity. All ten name a heading that exists, so all ten are inside the set R1 puts in the index. Two spellings of the template form are in use, and one reference is a range (`AICD A.1 to A.5`, `ops/phase-1-backlog.md`, batch 1's ORI-T-0009 row).
 
 **Gate 9 status.** CI_CD gate 9 stays `Defined` and is not `Installed`. Two things hold it there, and they are different in kind:
 
 | What holds it | Kind |
 |---|---|
-| The operator's ruling recorded at `ops/phase-1-backlog.md` line 75: the gate waits on the methodology HTML anchor fix and a regenerated `sections.json`. The ticket is ORI-T-0047 in batch 7, and line 191 records its precondition as unverified. | A decision, not a technical fact. The index does not read `id` attributes, so the defects in table 3.1 do not reach it. If gate 9 is later extended to check anchors or fragments, they reach it directly. |
+| The operator's ruling recorded at `ops/phase-1-backlog.md`, the paragraph headed "Gate 9 (citation) is deliberately absent from batch 1": the gate waits on the methodology HTML anchor fix and a regenerated `sections.json`. The ticket is ORI-T-0047 in batch 7, and line 191 records its precondition as unverified. | A decision, not a technical fact. The index does not read `id` attributes, so the defects in table 3.1 do not reach it. If gate 9 is later extended to check anchors or fragments, they reach it directly. |
 | AICD §14: a gate enters service only after a demonstration on a planted defect, passing on a clean tree and failing on the planted defect, recorded in the ticket that installed it. | A methodology rule. It applies to gate 9 whatever the state of the anchors. |
 
 AICD §39 names the defect class this avoids, "present but reporting nothing": a checker that exits successfully on every input reads as protection in every document that cites it while protecting nothing. A gate 9 marked `Installed` before its planted-defect demonstration would be exactly that.
@@ -163,10 +163,21 @@ AICD §39 names the defect class this avoids, "present but reporting nothing": a
 
 | Open | What would settle it |
 |---|---|
-| Whether gate 9 reads HTML under `spec/`, or markdown only. It decides whether the twelve references in section 6 are gate failures or out of scope. | Open escalation 4, `ops/phase-1-backlog.md` line 337. The operator's ruling on it. |
-| Whether gate 9 parses range citations (`AICD A.1 to A.5`, and any `§24.1 to §24.8` written later) or reads them as two separate references. | ORI-T-0047's rule set, which `ops/phase-1-backlog.md` line 172 records as undecided. |
+| Whether gate 9 reads HTML under `spec/`, or markdown only. It decides whether the twelve references in section 6 are gate failures or out of scope. | Open escalation 4, `ops/phase-1-backlog.md`, open escalation 4 in the escalations table. The operator's ruling on it. |
+| Whether gate 9 parses range citations (`AICD A.1 to A.5`, and any `§24.1 to §24.8` written later) or reads them as two separate references. | ORI-T-0047's rule set, which `ops/phase-1-backlog.md`, batch 7's ORI-T-0047 row records as undecided. |
 | Whether the methodology's author accepts the renumbering in section 4, and when. Every date in ORI-T-0047's chain depends on it. | A reply on this report. Until then the precondition is unverified, and AICD §39 requires a precondition to be verified at approval time, not assumed. |
 
 ## 6. Known issue, out of scope for this report
 
 `spec/design/Ori Studio.html` contains twelve distinct fabricated AICD subsection references, fourteen occurrences (§11.7, §12.3, §17.3 twice, §17.4, §17.9, §23.1, §23.4, §23.5, §26.1, §27.2, §39.1 twice, §39.3), inside display copy in a visual mockup. None of the sections they name has numbered subsections, so under R1 none resolves and each would fail gate 9 if the gate's scope includes HTML under `spec/`, which is the undecided question above. They are defects in this project's own design artifact rather than methodology anchor defects, and they are tracked as open escalation 4 in `ops/phase-1-backlog.md`.
+
+
+---
+
+## A correction to this report's own references
+
+Found by the round 4 audit ([[CR-007]]). Five references in this file pointed into `ops/phase-1-backlog.md` **by line number**. Every one was correct when this report merged. A later commit inserted twelve lines above them, and the reference that mattered most, the operator's gate 9 ruling, then landed on an unrelated paragraph about ORI-T-0018.
+
+Nothing moved and nothing was deleted. **A line number is a reference to a position, and a position is not a fact about the thing being referenced.** All five now cite by the row or heading they mean, which survives an insertion.
+
+ORI-T-0086 reached the same conclusion from the other direction and its ticket said so in as many words: "Do not name a line number: line numbers rot, and this ticket exists because a record rotted." That instruction was given to a coder for a doc comment, and this file, written by the lead, was rotting the same way at the same time.
