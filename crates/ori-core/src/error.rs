@@ -327,7 +327,7 @@ impl RefusalKind {
     /// The error code the client API returns for this refusal, where
     /// `spec/API_SPEC.md` names one.
     ///
-    /// `spec/API_SPEC.md` names exactly two, `E_UPGRADE_ONLY` (section 2,
+    /// `spec/API_SPEC.md` names exactly two, `E_UPGRADE_ONLY` (section 1,
     /// `tickets.setCategory`) and `E_SCOPE_LOCKED` (section 3,
     /// `aicd_plan_submit`). The rest return `None`. Inventing a third here would
     /// add a value to the client API, which CLAUDE.md makes an escalation with
