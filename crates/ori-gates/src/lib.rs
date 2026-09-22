@@ -10,9 +10,20 @@
 /// (AICD §14).
 pub mod coverage;
 
+/// The `Gate` entity, [`crate::gate::GateDef`], [`crate::gate::GateProof`] and
+/// the two-value [`crate::gate::DefinitionState`] a definition alone can
+/// honestly report (`spec/DATA_MODEL.md` section 2).
+pub mod gate;
+
 /// The methodology's machine-readable section index and its generator (AICD §39).
 /// The detector that makes CLAUDE.md's never-modify-a-test rule real (AICD §14).
 pub mod modified_tests;
+
+/// The [`crate::runner::Runner`] trait and [`crate::runner::Registry`], which
+/// pairs a [`crate::gate::GateDef`] with an optional runner and is the only
+/// place [`crate::runner::GateState::Installed`] is produced
+/// (`spec/LLD.md` section 2).
+pub mod runner;
 
 pub mod sections;
 
