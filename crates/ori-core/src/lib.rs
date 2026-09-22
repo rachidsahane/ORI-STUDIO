@@ -13,5 +13,9 @@
 //!
 //! Must not: do IO, or import any other workspace crate (`spec/LLD.md` section 2).
 
+pub mod document;
 pub mod error;
+pub mod permission;
+pub mod phase;
+pub mod ticket;
 pub mod types;
