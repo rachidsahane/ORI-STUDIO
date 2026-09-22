@@ -1,5 +1,8 @@
 # Lead rulings
 
+> **This file is closed to new entries.** Ruling [[R30]] moved serially numbered records to one file each, because a shared numbered series edited on parallel branches produced a merge conflict and then cost an entire branch. R1 to R29 stay here, unmoved: an operational log is not rewritten to tidy it. **R30 onward live in `ops/rulings/`, one file per ruling.** Code and documents that cite `ops/rulings.md` for R1 to R29 are still correct and were not touched.
+
+
 Decisions the lead made under the operator's standing rule 5: anything the specification already decides, the lead decides. Each names the document that decides it. A ruling that authorizes a deviation from a specification document is recorded here **and** the document is corrected in a specification PR in the same batch, under standing rule 6. A ruling is not a specification change; it is the record of how an existing specification was read.
 
 | # | Batch | Subject |
