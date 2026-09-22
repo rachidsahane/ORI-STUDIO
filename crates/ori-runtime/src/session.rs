@@ -1027,6 +1027,8 @@ impl Error for SessionError {}
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Component;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering;
@@ -1045,12 +1047,50 @@ mod tests {
         Id::parse(&format!("01ARZ3NDEKTSV4RRFFQ69{tail}")).expect("a ULID")
     }
 
-    /// A session in a worktree that is nowhere near a real filesystem.
+    /// An absolute path, on every platform, that names nothing on disk.
+    ///
+    /// The session fixtures used to be written `/nowhere/...`. That is
+    /// absolute on unix and not on Windows, where [`std::path::Path::is_absolute`]
+    /// wants a prefix (`C:`) as well as a root, so `Worktree::new` refused
+    /// every fixture and a dozen tests in this module panicked in their first
+    /// line on one of the three platforms this product ships to. The rule was
+    /// right and the fixture was not.
+    ///
+    /// Two properties matter and both are asserted here rather than assumed.
+    /// It is absolute, or `Worktree::new` refuses it. It does not exist, or
+    /// `Session::outstanding` would report the worktree of an ended session as
+    /// residue and the assertions that depend on a clean teardown would flip.
+    /// Nothing creates it: the name carries the process identifier and a
+    /// counter so that no other test, run or thread can have made it, and the
+    /// assertion says so out loud instead of letting a collision turn into a
+    /// confusing failure somewhere else.
+    fn absent(label: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir();
+        assert!(
+            root.is_absolute(),
+            "the temporary directory is absolute on every platform this runs on: {}",
+            root.display()
+        );
+        let path = root.join(format!(
+            "ori-t-0030-absent-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        assert!(
+            !path.exists(),
+            "this fixture names nothing on disk: {}",
+            path.display()
+        );
+        path
+    }
+
+    /// A session whose worktree is absolute and is not on disk.
     fn spawning() -> Session {
         let session = id("G5FAV");
         let worktree = Worktree::new(
             session.clone(),
-            "/nowhere/ori-t-0030/01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            absent("spawning").join(session.as_str()),
             "feat/ORI-T-0030",
         )
         .expect("a valid worktree");
@@ -1087,8 +1127,35 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("the temporary directory is writable");
-            let path = path.canonicalize().expect("just created");
-            Self { path }
+            Self {
+                path: usable(&path),
+            }
+        }
+    }
+
+    /// The canonical form of a directory that exists, unless canonicalising it
+    /// would produce a path the tools this module drives cannot use.
+    ///
+    /// Canonicalising matters on macOS, where the temporary directory is
+    /// reached through a symbolic link (`/var` to `/private/var`) and two
+    /// spellings of one directory would otherwise appear in one test. On
+    /// Windows [`std::fs::canonicalize`] returns a verbatim path (`\\?\C:\...`),
+    /// and git is the tool two tests here hand that path to: the verbatim form
+    /// is exactly the one it is known to handle badly. So the canonical form is
+    /// taken when it is usable and the original is kept when it is not, and the
+    /// question is asked of the path rather than of the operating system name,
+    /// because it is a fact about the path.
+    fn usable(path: &Path) -> PathBuf {
+        let Ok(canonical) = path.canonicalize() else {
+            return path.to_path_buf();
+        };
+        let verbatim = canonical.components().next().is_some_and(
+            |part| matches!(part, Component::Prefix(prefix) if prefix.kind().is_verbatim()),
+        );
+        if verbatim {
+            path.to_path_buf()
+        } else {
+            canonical
         }
     }
 
@@ -1708,7 +1775,7 @@ mod tests {
     fn ori_t_0030_a_worktree_belonging_to_another_session_is_refused() {
         let mine = id("G5FAV");
         let theirs = id("G5FAW");
-        let worktree = Worktree::new(theirs.clone(), "/nowhere/theirs", "feat/a").expect("valid");
+        let worktree = Worktree::new(theirs.clone(), absent("theirs"), "feat/a").expect("valid");
         let refusal = Session::spawning(mine.clone(), id("G5FAX"), None, worktree, START)
             .expect_err("a worktree is one session's");
         assert_eq!(
@@ -1727,7 +1794,7 @@ mod tests {
     #[test]
     fn ori_t_0030_an_unattended_session_has_no_ticket_and_a_container_is_optional() {
         let session = id("G5FAV");
-        let worktree = Worktree::new(session.clone(), "/nowhere/one", "feat/a").expect("valid");
+        let worktree = Worktree::new(session.clone(), absent("one"), "feat/a").expect("valid");
         let unattended = Session::spawning(session, id("G5FAW"), None, worktree, START)
             .expect("spec/DATA_MODEL.md section 2 makes the ticket nullable");
         assert!(unattended.ticket().is_none());

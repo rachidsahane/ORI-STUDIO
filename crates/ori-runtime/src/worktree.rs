@@ -109,6 +109,21 @@ impl Worktree {
     /// whether a component is a symbolic link. The rule is therefore exactly as
     /// wide as the thing it protects, and the test below asserts the folding
     /// rather than trusting it.
+    ///
+    /// # What "absolute" and "root" mean on each platform
+    ///
+    /// Both questions are asked of [`Path`] rather than answered here, because
+    /// the answer differs by platform and the platform knows it. On Windows a
+    /// path is absolute only with a prefix as well as a root: `\w\one` has a
+    /// root and is still drive relative, so it names a different directory
+    /// depending on which drive the process is on, which is the hazard this
+    /// rule exists for and not an exception to it.
+    ///
+    /// The root check counts named components rather than components. `C:\`
+    /// carries two components on Windows, a prefix and a root, and names no
+    /// directory; `/` carries one and names none either. Counting components
+    /// would have admitted `C:\` as a worktree, and every other path on that
+    /// drive would then sit inside an admitted worktree.
     pub fn new(session: Id, path: impl Into<PathBuf>, branch: &str) -> Result<Self, WorktreeError> {
         let path = path.into();
         if !path.is_absolute() {
@@ -120,7 +135,10 @@ impl Worktree {
         {
             return Err(WorktreeError::PathNotPlain { path });
         }
-        if path.components().count() < 2 {
+        if !path
+            .components()
+            .any(|part| matches!(part, Component::Normal(_)))
+        {
             return Err(WorktreeError::PathIsRoot { path });
         }
         Ok(Self {
@@ -416,8 +434,8 @@ pub enum WorktreeError {
         /// The path as given.
         path: PathBuf,
     },
-    /// The path is a filesystem root, which would put every worktree inside
-    /// this one.
+    /// The path names no directory of its own, which would put every worktree
+    /// on the volume inside this one. `/` and `C:\` are both this.
     PathIsRoot {
         /// The path as given.
         path: PathBuf,
@@ -601,6 +619,45 @@ mod tests {
         Id::parse(&text).expect("the fixture identifier is a ULID")
     }
 
+    /// An absolute path on every platform the product ships to, naming
+    /// nothing, built from the parts given.
+    ///
+    /// The fixtures used to be written `/w/one`. That is absolute on unix and
+    /// not on Windows, where [`Path::is_absolute`] wants a prefix (`C:`) as
+    /// well as a root, so every fixture built one refused at construction and
+    /// the suite went red on one of the three platforms this product ships to.
+    /// The rule was right and the fixture was not, which is the distinction
+    /// this helper exists to keep: it roots the parts at
+    /// [`std::env::temp_dir`], which is absolute on both, and asserts that
+    /// rather than assuming it.
+    ///
+    /// Nothing here is created on disk. These are values, and the only test in
+    /// this module that asks the filesystem anything uses [`Scratch`].
+    fn absolute(parts: &[&str]) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        assert!(
+            path.is_absolute(),
+            "the temporary directory is absolute on every platform this runs on: {}",
+            path.display()
+        );
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
+    /// The root of the volume the temporary directory is on: `/` or `C:\`.
+    ///
+    /// Written as the last ancestor rather than as a literal, for the same
+    /// reason as [`absolute`]: the spelling is the platform's.
+    fn filesystem_root() -> PathBuf {
+        std::env::temp_dir()
+            .ancestors()
+            .last()
+            .expect("every path has at least one ancestor")
+            .to_path_buf()
+    }
+
     /// A directory under the temporary directory that removes itself, whatever
     /// the test does.
     ///
@@ -625,8 +682,35 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("the temporary directory is writable");
-            let path = path.canonicalize().expect("the directory just created");
-            Self { path }
+            Self {
+                path: usable(&path),
+            }
+        }
+    }
+
+    /// The canonical form of a directory that exists, unless canonicalising it
+    /// would produce a path the tools this module drives cannot use.
+    ///
+    /// Canonicalising matters on macOS, where the temporary directory is
+    /// reached through a symbolic link (`/var` to `/private/var`) and two
+    /// spellings of one directory would otherwise appear in one test. On
+    /// Windows [`std::fs::canonicalize`] returns a verbatim path (`\\?\C:\...`),
+    /// and git is the tool two tests here hand that path to: the verbatim form
+    /// is exactly the one it is known to handle badly. So the canonical form is
+    /// taken when it is usable and the original is kept when it is not, and the
+    /// question is asked of the path rather than of the operating system name,
+    /// because it is a fact about the path.
+    fn usable(path: &Path) -> PathBuf {
+        let Ok(canonical) = path.canonicalize() else {
+            return path.to_path_buf();
+        };
+        let verbatim = canonical.components().next().is_some_and(
+            |part| matches!(part, Component::Prefix(prefix) if prefix.kind().is_verbatim()),
+        );
+        if verbatim {
+            path.to_path_buf()
+        } else {
+            canonical
         }
     }
 
@@ -642,8 +726,9 @@ mod tests {
     #[test]
     fn ori_p1_031_a_second_session_is_refused_a_worktree_path_a_live_one_holds() {
         let mut set = WorktreeSet::new();
-        let first = Worktree::new(session("G5FAV"), "/w/one", "feat/a").expect("a valid worktree");
-        let second = Worktree::new(session("G5FAW"), "/w/one", "feat/b").expect("a valid worktree");
+        let one = absolute(&["w", "one"]);
+        let first = Worktree::new(session("G5FAV"), &one, "feat/a").expect("a valid worktree");
+        let second = Worktree::new(session("G5FAW"), &one, "feat/b").expect("a valid worktree");
 
         set.admit(first).expect("the first session is admitted");
         let refusal = set.admit(second).expect_err("the second must be refused");
@@ -656,7 +741,7 @@ mod tests {
         );
         assert_eq!(set.len(), 1, "the refused session holds nothing");
         assert_eq!(
-            set.holder(Path::new("/w/one")),
+            set.holder(&one),
             Some(&session("G5FAV")),
             "the path is still the first session's"
         );
@@ -664,11 +749,13 @@ mod tests {
 
     #[test]
     fn ori_t_0030_a_worktree_inside_another_worktree_is_the_same_checkout_and_is_refused() {
+        let outer = absolute(&["w", "one"]);
+        let inner = absolute(&["w", "one", "inner"]);
         let mut set = WorktreeSet::new();
-        set.admit(Worktree::new(session("G5FAV"), "/w/one", "feat/a").expect("valid"))
+        set.admit(Worktree::new(session("G5FAV"), &outer, "feat/a").expect("valid"))
             .expect("admitted");
 
-        let inside = Worktree::new(session("G5FAW"), "/w/one/inner", "feat/b").expect("valid");
+        let inside = Worktree::new(session("G5FAW"), &inner, "feat/b").expect("valid");
         let refusal = set.admit(inside).expect_err("a nested path is refused");
         assert!(refusal.is_refusal(), "{refusal}");
 
@@ -677,11 +764,11 @@ mod tests {
         // would miss.
         let mut other = WorktreeSet::new();
         other
-            .admit(Worktree::new(session("G5FAW"), "/w/one/inner", "feat/b").expect("valid"))
+            .admit(Worktree::new(session("G5FAW"), &inner, "feat/b").expect("valid"))
             .expect("admitted");
         assert!(
             other
-                .admit(Worktree::new(session("G5FAV"), "/w/one", "feat/a").expect("valid"))
+                .admit(Worktree::new(session("G5FAV"), &outer, "feat/a").expect("valid"))
                 .is_err(),
             "the containing path is refused too"
         );
@@ -690,23 +777,29 @@ mod tests {
     #[test]
     fn ori_t_0030_a_sibling_whose_name_extends_another_is_not_nested() {
         let mut set = WorktreeSet::new();
-        set.admit(Worktree::new(session("G5FAV"), "/w/session-1", "feat/a").expect("valid"))
-            .expect("admitted");
+        set.admit(
+            Worktree::new(session("G5FAV"), absolute(&["w", "session-1"]), "feat/a")
+                .expect("valid"),
+        )
+        .expect("admitted");
 
-        // /w/session-10 starts with the string /w/session-1 and is a different
+        // session-10 starts with the string session-1 and is a different
         // directory. A component comparison is what tells them apart.
-        set.admit(Worktree::new(session("G5FAW"), "/w/session-10", "feat/b").expect("valid"))
-            .expect("a sibling is admitted");
+        set.admit(
+            Worktree::new(session("G5FAW"), absolute(&["w", "session-10"]), "feat/b")
+                .expect("valid"),
+        )
+        .expect("a sibling is admitted");
         assert_eq!(set.len(), 2);
     }
 
     #[test]
     fn ori_t_0030_a_derived_path_is_the_session_identifier_so_two_sessions_cannot_collide() {
-        let root = Path::new("/w");
-        let first = Worktree::derive(root, session("G5FAV"), "feat/a").expect("valid");
-        let second = Worktree::derive(root, session("G5FAW"), "feat/b").expect("valid");
+        let root = absolute(&["w"]);
+        let first = Worktree::derive(&root, session("G5FAV"), "feat/a").expect("valid");
+        let second = Worktree::derive(&root, session("G5FAW"), "feat/b").expect("valid");
 
-        assert_eq!(first.path(), Path::new("/w/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert_eq!(first.path(), absolute(&["w", "01ARZ3NDEKTSV4RRFFQ69G5FAV"]));
         assert!(!first.overlaps(&second), "two ULIDs are two directories");
 
         let mut set = WorktreeSet::new();
@@ -718,9 +811,12 @@ mod tests {
     #[test]
     fn ori_t_0030_one_session_is_refused_a_second_worktree() {
         let mut set = WorktreeSet::new();
-        set.admit(Worktree::new(session("G5FAV"), "/w/one", "feat/a").expect("valid"))
-            .expect("admitted");
-        let again = Worktree::new(session("G5FAV"), "/w/two", "feat/a").expect("valid");
+        set.admit(
+            Worktree::new(session("G5FAV"), absolute(&["w", "one"]), "feat/a").expect("valid"),
+        )
+        .expect("admitted");
+        let again =
+            Worktree::new(session("G5FAV"), absolute(&["w", "two"]), "feat/a").expect("valid");
         assert!(
             set.admit(again).is_err(),
             "a session with two worktrees is the engine having lost one"
@@ -729,17 +825,18 @@ mod tests {
 
     #[test]
     fn ori_t_0030_a_released_path_is_free_for_the_next_session() {
+        let one = absolute(&["w", "one"]);
         let mut set = WorktreeSet::new();
-        set.admit(Worktree::new(session("G5FAV"), "/w/one", "feat/a").expect("valid"))
+        set.admit(Worktree::new(session("G5FAV"), &one, "feat/a").expect("valid"))
             .expect("admitted");
         let released = set
             .release(&session("G5FAV"))
             .expect("the worktree is returned");
-        assert_eq!(released.path(), Path::new("/w/one"));
+        assert_eq!(released.path(), one);
         assert!(set.is_empty(), "nothing is held after the release");
-        set.admit(Worktree::new(session("G5FAW"), "/w/one", "feat/b").expect("valid"))
+        set.admit(Worktree::new(session("G5FAW"), &one, "feat/b").expect("valid"))
             .expect("the next session takes the path");
-        assert_eq!(set.holder(Path::new("/w/one")), Some(&session("G5FAW")));
+        assert_eq!(set.holder(&one), Some(&session("G5FAW")));
         assert!(set.release(&session("G5FAV")).is_none(), "released once");
     }
 
@@ -750,8 +847,10 @@ mod tests {
         // assumed: the refusal above is written as narrowly as it is because of
         // it, and a standard library that stopped folding would make that
         // narrowness wrong.
-        let dotted = Worktree::new(session("G5FAV"), "/w/./one", "feat/a").expect("not refused");
-        let plain = Worktree::new(session("G5FAW"), "/w/one", "feat/b").expect("valid");
+        let dotted = Worktree::new(session("G5FAV"), absolute(&["w", ".", "one"]), "feat/a")
+            .expect("not refused");
+        let plain =
+            Worktree::new(session("G5FAW"), absolute(&["w", "one"]), "feat/b").expect("valid");
         assert!(
             dotted.overlaps(&plain),
             "two spellings of one directory overlap"
@@ -766,14 +865,40 @@ mod tests {
 
     #[test]
     fn ori_t_0030_a_path_that_could_be_spelled_two_ways_is_refused_at_construction() {
-        let refused = [
-            ("w/one", "relative"),
-            ("/w/../one", "a parent-directory component"),
-            ("/", "the filesystem root"),
+        // Each case asserts WHICH refusal it got, not merely that it got one.
+        // Written the loose way, this test passed on Windows for the wrong
+        // reason: `/w/../one` and `/` are both non-absolute there, so
+        // PathNotAbsolute answered every case and the parent-directory rule and
+        // the root rule were checked by nobody on that platform while the test
+        // stayed green. A refusal test that does not name the refusal cannot
+        // tell "the rule I am testing fired" from "some earlier rule fired".
+        let cases = [
+            (
+                PathBuf::from("w/one"),
+                WorktreeError::PathNotAbsolute {
+                    path: PathBuf::from("w/one"),
+                },
+                "relative on every platform",
+            ),
+            (
+                absolute(&["w", "..", "one"]),
+                WorktreeError::PathNotPlain {
+                    path: absolute(&["w", "..", "one"]),
+                },
+                "a parent-directory component",
+            ),
+            (
+                filesystem_root(),
+                WorktreeError::PathIsRoot {
+                    path: filesystem_root(),
+                },
+                "names no directory of its own",
+            ),
         ];
-        for (path, why) in refused {
-            let error = Worktree::new(session("G5FAV"), path, "feat/a")
-                .expect_err(&format!("{path} is refused: {why}"));
+        for (path, expected, why) in cases {
+            let error = Worktree::new(session("G5FAV"), &path, "feat/a")
+                .expect_err(&format!("{} is refused: {why}", path.display()));
+            assert_eq!(error, expected, "{} is refused for {why}", path.display());
             assert!(
                 !error.is_refusal(),
                 "a path that did not parse is not a control refusing an action: {error}"
@@ -787,46 +912,60 @@ mod tests {
 
     #[test]
     fn ori_t_0030_a_branch_or_start_point_git_would_read_as_an_option_is_refused() {
+        // The variant is asserted for the same reason as in the test above: a
+        // path fixture that refused first would make this test pass while the
+        // branch rule was never reached.
+        let one = absolute(&["w", "one"]);
         for name in ["", "--force", "-b", "two words"] {
-            assert!(
-                Worktree::new(session("G5FAV"), "/w/one", name).is_err(),
-                "branch {name:?} is refused"
+            assert_eq!(
+                Worktree::new(session("G5FAV"), &one, name),
+                Err(WorktreeError::BranchName {
+                    name: name.to_owned()
+                }),
+                "branch {name:?} is refused as a branch name"
             );
-            let worktree = Worktree::new(session("G5FAV"), "/w/one", "feat/a").expect("valid");
-            assert!(
-                worktree.add_argv(Path::new("/repo"), name).is_err(),
-                "start point {name:?} is refused"
+            let worktree = Worktree::new(session("G5FAV"), &one, "feat/a").expect("valid");
+            assert_eq!(
+                worktree.add_argv(&absolute(&["repo"]), name),
+                Err(WorktreeError::BranchName {
+                    name: name.to_owned()
+                }),
+                "start point {name:?} is refused as a start point"
             );
         }
     }
 
     #[test]
     fn ori_t_0030_the_argv_names_the_repository_the_branch_and_the_path_and_no_force() {
-        let worktree = Worktree::new(session("G5FAV"), "/w/one", "feat/a").expect("valid");
+        // The two paths are whatever this platform spells them, and the
+        // assertion reads them back through display_path rather than through a
+        // literal, so the shape of the argv is what is checked here and not the
+        // separator the platform uses.
+        let repo = absolute(&["repo"]);
+        let one = absolute(&["w", "one"]);
+        let worktree = Worktree::new(session("G5FAV"), &one, "feat/a").expect("valid");
         assert_eq!(
-            worktree
-                .add_argv(Path::new("/repo"), "main")
-                .expect("valid start point"),
+            worktree.add_argv(&repo, "main").expect("valid start point"),
             vec![
                 "-C".to_owned(),
-                "/repo".to_owned(),
+                display_path(&repo),
                 "worktree".to_owned(),
                 "add".to_owned(),
                 "-b".to_owned(),
                 "feat/a".to_owned(),
-                "/w/one".to_owned(),
+                display_path(&one),
                 "main".to_owned(),
             ]
         );
-        let remove = worktree.remove_argv(Path::new("/repo"));
+        let remove = worktree.remove_argv(&repo);
         assert_eq!(
             remove,
             vec![
                 "-C".to_owned(),
-                "/repo".to_owned(),
+                display_path(&repo),
                 "worktree".to_owned(),
                 "remove".to_owned(),
-                "/w/one".to_owned(),
+                display_path(&one),
             ]
         );
         assert!(
@@ -922,6 +1061,9 @@ mod tests {
 
     #[test]
     fn ori_t_0030_every_refusal_this_module_makes_carries_a_reason_that_resolves() {
+        // The paths below are payloads of error values, never arguments to
+        // Worktree::new, so they are inert strings on every platform and the
+        // absolute-path rule has nothing to say about them.
         let errors = [
             WorktreeError::PathHeld {
                 path: PathBuf::from("/w/one"),
@@ -973,6 +1115,20 @@ mod tests {
         let worktree =
             Worktree::new(session("G5FAV"), scratch.path.join("gone"), "feat/a").expect("valid");
         assert!(!worktree.exists(), "nothing there");
+
+        // Every platform: a real directory is seen.
+        fs::create_dir_all(worktree.path()).expect("the scratch directory is writable");
+        assert!(worktree.exists(), "a directory that is there is residue");
+        fs::remove_dir_all(worktree.path()).expect("removable");
+        assert!(!worktree.exists(), "and one that is gone is not");
+
+        // The dangling link half is unix only, and this is the one place in
+        // these two files where a platform difference is real rather than a
+        // fixture being lazy: creating a symbolic link on Windows needs a
+        // privilege a test runner may not hold, so a Windows run would report a
+        // missing privilege as a failure of this module. The assertions above
+        // run everywhere, so this test checks something on every platform
+        // rather than quietly checking nothing on one.
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(scratch.path.join("nowhere"), worktree.path())
@@ -982,6 +1138,40 @@ mod tests {
                 "a link to nothing is residue; Path::exists would follow it and say no"
             );
         }
+    }
+
+    // The fixtures are the thing that went red on Windows, so the property
+    // they have to have is a test of its own rather than an assumption inside
+    // two helpers. Every assertion here is about the path this platform built,
+    // so it is the same test everywhere and it is not the same input anywhere.
+    #[test]
+    fn ori_t_0030_the_fixture_paths_are_absolute_wherever_the_suite_runs() {
+        let path = absolute(&["w", "one"]);
+        assert!(
+            path.is_absolute(),
+            "a fixture path this platform refuses is a red suite and not a finding: {}",
+            path.display()
+        );
+        assert!(
+            Worktree::new(session("G5FAV"), &path, "feat/a").is_ok(),
+            "and the rule accepts it: {}",
+            path.display()
+        );
+
+        let root = filesystem_root();
+        assert!(root.is_absolute(), "{} is absolute", root.display());
+        assert!(
+            !root
+                .components()
+                .any(|part| matches!(part, Component::Normal(_))),
+            "{} names no directory of its own, which is what makes it the root",
+            root.display()
+        );
+        assert_eq!(
+            Worktree::new(session("G5FAV"), &root, "feat/a"),
+            Err(WorktreeError::PathIsRoot { path: root.clone() }),
+            "and the rule refuses it as a root rather than as anything else"
+        );
     }
 
     #[test]
