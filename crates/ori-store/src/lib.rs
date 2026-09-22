@@ -7,4 +7,5 @@
 //!
 //! Must not: contain business rules (`spec/LLD.md` section 2).
 
+pub mod db;
 pub mod event_log;
