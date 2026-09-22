@@ -26,7 +26,7 @@ Test strategy per level, thresholds, and how the coverage matrix works for this 
 
 ## 3. Thresholds
 
-Set from baselines at the end of phase 1 by the calibration procedure, recorded in `ops/calibration.md`, and only ever raised: coverage matrix completeness (target 100 percent of accepted criteria), mutation score, performance budgets per benchmark.
+Set from baselines at the end of phase 1 by the calibration procedure, recorded in `ops/calibration/` as one file per record, and only ever raised: coverage matrix completeness (target 100 percent of accepted criteria), mutation score, performance budgets per benchmark. `ops/calibration.md` is closed to new entries and keeps CR-001 to CR-005 unmoved, so it is where those five are read and never where a new measurement is written (`ops/rulings/R30-one-file-per-record.md`).
 
 ## 4. Gate proving
 
