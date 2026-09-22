@@ -1,5 +1,8 @@
 # Calibration records: Ori Studio
 
+> **This file is closed to new entries.** Ruling [[R30]] moved serially numbered records to one file each. CR-001 to CR-005 stay here, unmoved. **CR-006 onward live in `ops/calibration/`, one file per record.**
+
+
 Measurements taken under AICD §21 (performance-relative thresholds) and §30 (calibration procedures). Every threshold in this product is expressed relative to a measurement recorded here, never as an absolute number.
 
 ## CR-001: cross-model review of the specification set, 2026-09-20
