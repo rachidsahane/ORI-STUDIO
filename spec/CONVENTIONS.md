@@ -25,7 +25,7 @@ Rules every agent and every human follows in this repository. Enforced by gates 
 ## Tests
 - Test names embed the criterion identifier they cover. A test without a criterion is flagged by the coverage matrix gate.
 - Existing tests are never modified or deleted by an agent without an escalation.
-- Fixtures are products under `fixtures/`, each with a README stating what it is for.
+- `fixtures/` holds planted-defect harnesses, not AICD products: one directory under `fixtures/planted/` per proven gate, each with a README stating what it is for. The AICD product fixtures the end-to-end suite runs against are `spec/TESTING.md` section 5's requirement and live directly under `fixtures/`; a planted harness is not an AICD product and satisfies nothing in that section, so a count of the one never satisfies a requirement for the other.
 - Mutation testing with `cargo-mutants`; the threshold only moves up.
 
 ## Diagrams

@@ -31,7 +31,8 @@ ori-studio/
   ops/                       # operational memory as structured files
   templates/                 # methodology templates shipped with Ori Studio (documents, roles, tickets, ACP)
   profiles/                  # methodology profiles as configuration
-  fixtures/                  # sample products for tests (new product, migrated with drift, inert gate, looping agent)
+  fixtures/                  # AICD product fixtures for the end-to-end suite, one repository each (TESTING section 5)
+    planted/                 # planted-defect harnesses, one directory per proven gate, not AICD products (TESTING section 4)
   scripts/                   # dev and release scripts
   .github/workflows/         # CI and release
 ```
