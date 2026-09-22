@@ -7,4 +7,5 @@ description = "Agent sessions: worktrees, containers, ACP client, headless adapt
 
 [dependencies]
 ori-broker = { workspace = true }
+ori-core = { workspace = true }
 ori-store = { workspace = true }
