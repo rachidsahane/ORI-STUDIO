@@ -1196,6 +1196,405 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // ORI-T-0098: the spellings, and not only how many there are.
+    //
+    // Every assertion above pins a length and none pins a spelling. ORI-T-0093
+    // planted the consequence rather than arguing it: respelling
+    // ProductOrigin's second value from "migrated" to "moved" leaves this crate
+    // and spec/DATA_MODEL.md section 2 disagreeing with the whole workspace
+    // green, at exit 0. The round-trip test above cannot see it, because it
+    // leaves through as_str and returns through FromStr and a rename moves
+    // both. ORI-T-0093 left the gap open for all ten lists rather than close it
+    // for three, on the grounds that an asymmetric repair to a test about
+    // checks that look like checks invites the next reader to guess which shape
+    // is meant. This closes it for every list the document spells.
+    //
+    // # What is restated here, and what holds the restatement
+    //
+    // This crate may not do IO and may not import a workspace crate
+    // (spec/LLD.md section 2, and CLAUDE.md's load-bearing facts), so no test
+    // here can read spec/DATA_MODEL.md. The document's own sentences are
+    // restated below instead, which is the bar that makes error.rs restate the
+    // methodology index rather than read it.
+    //
+    // Nothing holds these sentences against spec/DATA_MODEL.md. error.rs's
+    // restatement is held against the methodology by a test in
+    // crates/ori-gates that reads error.rs as text and compares it with the
+    // parsed document; the same machinery is what this restatement wants, and
+    // crates/ori-gates is outside this ticket's declared scope, so this ticket
+    // reports the need and does not build it. Until it exists, a restatement
+    // altered in both halves at once, the sentence and the list under it, would
+    // certify a spelling the document does not carry. Altering one half alone
+    // fails here.
+    //
+    // # Six lists and not ten
+    //
+    // Section 2 writes six of this crate's ten lists out as values: Product's
+    // origin, Seat's seat, AgentIdentity's role, Ticket's kind, Document's set
+    // and Document's kind. For the other four it writes the field bare, and
+    // section 3 draws two of them as state machines whose node names are not
+    // wire spellings. Where the document states no spelling there is nothing to
+    // assert against, and an assertion written anyway would take its
+    // expectation from the code, which is a check certifying its own subject.
+    // The four are recorded in NOT_SPELLED_BY_SECTION_2 so that the silence is
+    // stated rather than left for a reader to rediscover.
+    // -----------------------------------------------------------------------
+
+    /// One value list as `spec/DATA_MODEL.md` section 2 writes it.
+    ///
+    /// The row and the quote are the document's, copied. The spellings are what
+    /// the quote lists, written out so that a reader sees the list without
+    /// parsing a sentence; the test below checks the two halves against each
+    /// other, so the pair is not a second thing to keep in step by hand.
+    #[derive(Clone, Copy)]
+    struct Stated {
+        /// The list, written as this crate names it.
+        list: &'static str,
+        /// The entity row of section 2 whose field carries the list.
+        row: &'static str,
+        /// That field, in the document's words, verbatim.
+        quote: &'static str,
+        /// The spellings the quote lists, in the order it lists them.
+        spellings: &'static [&'static str],
+        /// The pattern the quote ends with where it writes one in place of a
+        /// value. Only `Document.kind` has one: the document writes the
+        /// as-built family as `as_built_*`, and this crate carries it as
+        /// `DocumentKind::AsBuilt` rather than as an entry of
+        /// `DocumentKind::FIXED`. The as-built family has a test of its own
+        /// further down this module, which is where that pattern is checked.
+        pattern: Option<&'static str>,
+    }
+
+    /// Every value list of this crate whose spellings `spec/DATA_MODEL.md`
+    /// section 2 states, with the sentence that states them.
+    const SPELLED_BY_SECTION_2: [Stated; 6] = [
+        Stated {
+            list: "ProductOrigin::ALL",
+            row: "Product",
+            quote: "origin (new, migrated)",
+            spellings: &["new", "migrated"],
+            pattern: None,
+        },
+        Stated {
+            list: "Seat::ALL",
+            row: "Seat",
+            quote: "seat (architect, verification_lead, reliability_governance, product_owner)",
+            spellings: &[
+                "architect",
+                "verification_lead",
+                "reliability_governance",
+                "product_owner",
+            ],
+            pattern: None,
+        },
+        Stated {
+            list: "Role::ALL",
+            row: "AgentIdentity",
+            quote: "role (coder, lead, qa, operations, documentation, product_signal, assistant)",
+            spellings: &[
+                "coder",
+                "lead",
+                "qa",
+                "operations",
+                "documentation",
+                "product_signal",
+                "assistant",
+            ],
+            pattern: None,
+        },
+        Stated {
+            list: "TicketKind::ALL",
+            row: "Ticket",
+            quote: "kind (defect, feature, chore)",
+            spellings: &["defect", "feature", "chore"],
+            pattern: None,
+        },
+        Stated {
+            list: "DocumentSet::ALL",
+            row: "Document",
+            quote: "set (foundation, phase, migration)",
+            spellings: &["foundation", "phase", "migration"],
+            pattern: None,
+        },
+        Stated {
+            list: "DocumentKind::FIXED",
+            row: "Document",
+            quote: "kind (brief, prd, architecture, adr, data_model, api_spec, lld, conventions, \
+                    security_notes, env_setup, permissions, testing, observability, ci_cd, \
+                    roadmap, runbook, agent_instructions, risk_map, criteria, as_built_*)",
+            spellings: &[
+                "brief",
+                "prd",
+                "architecture",
+                "adr",
+                "data_model",
+                "api_spec",
+                "lld",
+                "conventions",
+                "security_notes",
+                "env_setup",
+                "permissions",
+                "testing",
+                "observability",
+                "ci_cd",
+                "roadmap",
+                "runbook",
+                "agent_instructions",
+                "risk_map",
+                "criteria",
+            ],
+            pattern: Some("as_built_*"),
+        },
+    ];
+
+    /// Every value list of this crate that `spec/DATA_MODEL.md` section 2
+    /// spells nowhere, with what the document does write and where the crate's
+    /// spellings come from instead.
+    ///
+    /// Nothing is asserted against these four. The reason is written in the
+    /// block above: an expectation taken from the code certifies the code. Each
+    /// length is pinned by the test above this one; no spelling of theirs is
+    /// pinned by anything, here or elsewhere in this crate.
+    const NOT_SPELLED_BY_SECTION_2: [(&str, &str); 4] = [
+        (
+            "Category::ALL",
+            "section 2 writes the Ticket row's field as bare \"category\". Section 3's Ticket \
+             diagram writes \"auto (Auto, Behavioral) or human (Decisional)\" as a transition \
+             condition, which names three of the four in prose and spells none of them. The \
+             four spellings are AICD §11's category table as this crate renders it",
+        ),
+        (
+            "Tier::ALL",
+            "section 2 writes the field as bare \"tier\" in the Ticket, Criterion and \
+             PullRequest rows. The three values are AICD §13's merge policy table, and the \
+             spellings \"0\", \"1\" and \"2\" are the numbers that table and spec/RISK_MAP.md \
+             write them as",
+        ),
+        (
+            "TicketState::ALL",
+            "section 2 writes the Ticket row's field as bare \"state\" and points at \"State \
+             machine below\". Section 3's Ticket diagram draws twelve states, in node names \
+             such as InProgress, which are not the wire spellings this crate carries",
+        ),
+        (
+            "DocumentState::ALL",
+            "section 2 writes the Document row's field as bare \"state\". Section 3's Document \
+             diagram draws five states, in node names such as UnderReview, which are not the \
+             wire spellings this crate carries",
+        ),
+    ];
+
+    /// The section 2 sentence registered for one list.
+    fn stated(list: &str) -> Stated {
+        for entry in SPELLED_BY_SECTION_2 {
+            if entry.list == list {
+                return entry;
+            }
+        }
+        panic!(
+            "{list} is being checked against spec/DATA_MODEL.md section 2 and \
+             SPELLED_BY_SECTION_2 registers no sentence for it"
+        );
+    }
+
+    /// The values one section 2 field lists, in the order it writes them.
+    ///
+    /// Section 2 writes a closed field as a name and one parenthesis: "origin
+    /// (new, migrated)". This reads what that parenthesis holds and splits it
+    /// on commas. A quote it cannot read yields nothing, which is a failure at
+    /// the caller and never a pass.
+    fn values_in(quote: &str) -> Vec<&str> {
+        let (Some(open), Some(close)) = (quote.find('('), quote.rfind(')')) else {
+            return Vec::new();
+        };
+        if close < open {
+            return Vec::new();
+        }
+        quote[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+
+    /// Checks one list against the sentence of `spec/DATA_MODEL.md` section 2
+    /// that states it, and returns the list it checked.
+    ///
+    /// Two things are checked. The spellings the crate carries are the
+    /// document's, in the document's order; and each spelling the document
+    /// writes, handed to `FromStr` as the document writes it, reads back as the
+    /// value that sits in that position. The second is what a rename cannot
+    /// hide: it starts from the document's text rather than from the crate's.
+    fn assert_spelled_as_stated<T>(
+        list: &'static str,
+        values: &[T],
+        spelling: impl Fn(&T) -> String,
+    ) -> &'static str
+    where
+        T: FromStr + PartialEq + fmt::Debug,
+        <T as FromStr>::Err: fmt::Display,
+    {
+        let entry = stated(list);
+        let expected = entry.spellings;
+        let found: Vec<String> = values.iter().map(spelling).collect();
+
+        let mut defects: Vec<String> = Vec::new();
+        for index in 0..expected.len().max(found.len()) {
+            match (expected.get(index), found.get(index)) {
+                (Some(want), Some(have)) if *want != have.as_str() => defects.push(format!(
+                    "value {} of {}: the document spells it \"{want}\" and the crate spells it \
+                     \"{have}\"",
+                    index + 1,
+                    expected.len()
+                )),
+                (Some(want), None) => defects.push(format!(
+                    "the document lists \"{want}\" as value {} of {} and the crate's list ends \
+                     at {}",
+                    index + 1,
+                    expected.len(),
+                    found.len()
+                )),
+                (None, Some(have)) => defects.push(format!(
+                    "the crate has \"{have}\" as value {} and the document's list ends at {}",
+                    index + 1,
+                    expected.len()
+                )),
+                _ => {}
+            }
+        }
+        if !defects.is_empty() {
+            let stated_set: BTreeSet<&str> = expected.iter().copied().collect();
+            let found_set: BTreeSet<&str> = found.iter().map(String::as_str).collect();
+            if stated_set == found_set {
+                defects.push(
+                    "every value the document spells is spelled by the crate and the order is \
+                     not the document's. The order is part of what is pinned here: ALL is \
+                     documented as the order the specification lists the values in, and Tier \
+                     derives Ord from its declaration order, where AICD §13's merge ladder is \
+                     what that order means"
+                        .to_owned(),
+                );
+            }
+        }
+        assert!(
+            defects.is_empty(),
+            "{list} and spec/DATA_MODEL.md section 2 disagree. The document's {} row writes the \
+             field as \"{}\".\n  document: {expected:?}\n  crate:    {found:?}\n  {}",
+            entry.row,
+            entry.quote,
+            defects.join("\n  ")
+        );
+
+        for (index, want) in expected.iter().enumerate() {
+            match want.parse::<T>() {
+                Ok(parsed) => assert_eq!(
+                    &parsed,
+                    &values[index],
+                    "{list}: spec/DATA_MODEL.md section 2 spells value {} of the {} row's field \
+                     \"{want}\", and reading that spelling back gives another value",
+                    index + 1,
+                    entry.row
+                ),
+                Err(error) => panic!(
+                    "{list}: spec/DATA_MODEL.md section 2 spells value {} of the {} row's field \
+                     \"{want}\" and this crate refuses to read it: {error}",
+                    index + 1,
+                    entry.row
+                ),
+            }
+        }
+
+        list
+    }
+
+    #[test]
+    fn ori_t_0019_the_value_lists_the_data_model_spells_carry_its_spellings() {
+        // The floors. Each is a way for what follows to run over nothing and
+        // report a pass, which is the class of defect this test was written to
+        // remove, so each is a failure with its reason named instead.
+        assert_eq!(
+            SPELLED_BY_SECTION_2.len() + NOT_SPELLED_BY_SECTION_2.len(),
+            10,
+            "this crate declares ten value lists, nine wire_enum! invocations and \
+             DocumentKind::FIXED, and each is either registered as spelled by \
+             spec/DATA_MODEL.md section 2 or registered as not spelled by it. The ten are \
+             counted by hand: a crate that may not do IO cannot read its own source to count \
+             them, and nothing outside it counts them either"
+        );
+        assert_eq!(
+            SPELLED_BY_SECTION_2.len(),
+            6,
+            "spec/DATA_MODEL.md section 2 writes six of this crate's ten value lists out as \
+             values"
+        );
+        let pinned: usize = SPELLED_BY_SECTION_2
+            .iter()
+            .map(|entry| entry.spellings.len())
+            .sum();
+        assert_eq!(
+            pinned, 38,
+            "those six lists are thirty-eight spellings: 2 origins, 4 seats, 7 roles, 3 ticket \
+             kinds, 3 document sets and 19 named document kinds"
+        );
+        let registered: BTreeSet<&str> = SPELLED_BY_SECTION_2
+            .iter()
+            .map(|entry| entry.list)
+            .chain(NOT_SPELLED_BY_SECTION_2.iter().map(|(list, _)| *list))
+            .collect();
+        assert_eq!(
+            registered.len(),
+            10,
+            "one list is registered twice, so the ten above stand for fewer than ten lists"
+        );
+
+        // The sentence and the list written under it are one restatement in two
+        // halves. A half that drifts from the other is a restatement that has
+        // stopped saying one thing, and it is caught here rather than carried
+        // into the comparisons below.
+        for entry in SPELLED_BY_SECTION_2 {
+            let mut written: Vec<&str> = entry.spellings.to_vec();
+            written.extend(entry.pattern);
+            assert_eq!(
+                values_in(entry.quote),
+                written,
+                "{}: the sentence restated from spec/DATA_MODEL.md section 2's {} row, \"{}\", \
+                 and the spellings restated under it are not the same list",
+                entry.list,
+                entry.row,
+                entry.quote
+            );
+        }
+
+        let checked: BTreeSet<&str> = [
+            assert_spelled_as_stated("ProductOrigin::ALL", ProductOrigin::ALL, |value| {
+                value.as_str().to_owned()
+            }),
+            assert_spelled_as_stated("Seat::ALL", Seat::ALL, |value| value.as_str().to_owned()),
+            assert_spelled_as_stated("Role::ALL", Role::ALL, |value| value.as_str().to_owned()),
+            assert_spelled_as_stated("TicketKind::ALL", TicketKind::ALL, |value| {
+                value.as_str().to_owned()
+            }),
+            assert_spelled_as_stated("DocumentSet::ALL", DocumentSet::ALL, |value| {
+                value.as_str().to_owned()
+            }),
+            assert_spelled_as_stated("DocumentKind::FIXED", DocumentKind::FIXED, |value| {
+                value.as_str().into_owned()
+            }),
+        ]
+        .into_iter()
+        .collect();
+        let spelled: BTreeSet<&str> = SPELLED_BY_SECTION_2
+            .iter()
+            .map(|entry| entry.list)
+            .collect();
+        assert_eq!(
+            checked, spelled,
+            "a list registered as spelled by spec/DATA_MODEL.md section 2 that nothing above \
+             compares with this crate is a sentence checked against nothing"
+        );
+    }
+
     #[test]
     fn ori_t_0019_the_as_built_family_carries_its_suffix() {
         let kind: DocumentKind = "as_built_architecture".parse().expect("the family parses");
