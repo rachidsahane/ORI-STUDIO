@@ -101,3 +101,33 @@ Claims 21 and 22 are disjoint: `spec/` against `crates/`, `scripts/` and `fixtur
 | ORI-T-0091 | Resolve backticked function-name citations in doc comments against the test names actually declared, so a doc naming a test cannot outlive it | claim 22 releasing |
 | ORI-T-0092 | The `CLAUDE.md` pair byte-comparison test, as a tier 1 test riding gate 2 rather than a fifteenth gate | claim 21 releasing, because it needs `spec/README.md` to define the header first |
 | ORI-T-0088 | Gate 13 resolves the `Spec:` anchor | tier 2, with the operator |
+
+---
+
+## Round 4
+
+Claim 23, **ORI-T-0091**, coder role, recorded before dispatch. Modules: `crates/ori-gates/src/sections.rs`.
+
+Two pieces of one problem, which is why they are one ticket rather than two.
+
+**The repository has four broken intra-doc links on `main` right now**, and every one of the eighteen pull request checks is green:
+
+```
+$ git status --porcelain            (clean)
+$ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   exit 101
+error: unresolved link to `AnchorState`
+error: unresolved link to `REGENERATE_COMMAND`
+error: public documentation for `source_bytes` links to private item `lf_line_endings`
+error: public documentation for `parse` links to private item `lf_line_endings`
+$ cargo doc --workspace --no-deps                              exit 0
+```
+
+All four are in this one file. ORI-T-0090's coder root-caused the first two empirically rather than guessing: `AnchorState` and `REGENERATE_COMMAND` are both `pub` in that same module, and rustdoc still cannot resolve them, because a module's inner `//!` docs resolve in **crate root** scope. It tested the repair instead of asserting it: `crate::sections::AnchorState` resolves, `self::AnchorState` does not.
+
+**The second piece is what lets them exist.** ORI-T-0086's remedy left `crates/ori-core/src/error.rs` naming two tests in `crates/ori-gates` in prose, with nothing tying the names to the tests. Rename either and that doc is false again with every test green, which is the exact failure mode the named test was written to stop. ORI-T-0086's coder reported it as the highest-value follow-up it found and named the machinery: the sweep in this file already walks every file and already resolves `AICD §<n>` citations.
+
+So the ticket fixes the four links and builds the check that makes the class visible, in the file that owns both.
+
+**Not in scope, and deliberately:** a documentation gate. `spec/CI_CD.md` section 1 lists fourteen gates and none builds docs, so nothing in CI runs the strict form. That is `.github/workflows`, tier 2 under `spec/RISK_MAP.md`, and it needs a planted-defect proof under AICD §14. It goes to the operator alongside ORI-T-0088.
+
+**Also running, and read only:** a repository-wide audit for the defect class this project keeps finding two or three at a time. It writes nothing and claims nothing. If it reports anything in `crates/ori-gates/src/sections.rs`, that report is against the tree as it was when the audit started, and this claim wins.
