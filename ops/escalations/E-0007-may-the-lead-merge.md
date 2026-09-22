@@ -47,3 +47,30 @@ ORI-T-0022 found these while transcribing the matrix. None blocks anything today
 **`spec/ENV_SETUP.md` is wider in five places**, so the function refuses things the manifest issues credentials for: coder `Read` on CI, qa `Run` on CI, lead escalate on tickets, assistant create on tickets, coder plan and report.
 
 **AICD §7 contradicts AICD §17 inside the methodology**, twice: §7 gives documentation "Reads: Specification, merged diffs, code" while §17's Specification cell is "Propose via pull request" with no read; and §7 gives the assistant "broad read access" while §17 gives it None on CI, Staging and Production. Implementing §17 with no implied privileges therefore refuses the documentation role read access to the specification, which is plainly odd for the role whose job is the specification. That one is a methodology-level decision and changes cells, not code.
+
+---
+
+## A second, unrelated gap found the same way, recorded here so it is not lost
+
+ORI-T-0034 checked ORI-P1-031 clause by clause rather than in outline, and found that **the criterion asks the ticket machine for a move it refuses.**
+
+ORI-P1-031's fifth clause is "ticket Queued", after an engine kill while a coder session was `Running`. A session is `Running` while its ticket is `InProgress`. But `spec/DATA_MODEL.md` section 3's Ticket diagram draws exactly two edges into `Queued`, verified directly:
+
+```
+  Validated --> Queued
+  Blocked --> Queued: re-planned
+```
+
+There is no `InProgress --> Queued`, and `crates/ori-core/src/ticket.rs`'s table, which transcribes the diagram edge for edge, carries none either (zero matches for that pair).
+
+So `Ticket::apply` as specified refuses the exact transition the criterion requires of a restart.
+
+**The coder did not route around it**, and its reasoning is the part worth keeping: the available workaround is to move the ticket through `Blocked` first, which would satisfy the letter and **misrepresent why the ticket actually stopped**. A ticket that was interrupted by an engine failure did not exhaust a budget. `RestartActions::requeue_ticket` returns a `Result`, a refusal propagates as `RecoveryError::ActionFailed`, and the session is then **not** reported recovered.
+
+Three answers are available and they are not equivalent:
+
+1. **Add the edge** `InProgress --> Queued` to `spec/DATA_MODEL.md` section 3, labelled for recovery. It is the transition a restart actually performs, and drawing it makes the criterion satisfiable as written.
+2. **Reword ORI-P1-031** to name the state the machine can reach.
+3. **Route recovery through `Blocked`**, which the coder rejected and so do I.
+
+This is a documentation-role change either way. It is recorded on this escalation rather than raised as its own because it was found in the same clause-by-clause reading, and because the operator is already holding one open question about this machine.
