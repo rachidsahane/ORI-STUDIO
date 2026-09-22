@@ -6,4 +6,5 @@ license.workspace = true
 description = "Gate definitions, runners, planted-defect proving, coverage matrix, significance and liveness."
 
 [dependencies]
+ori-core = { workspace = true }
 ori-store = { workspace = true }
