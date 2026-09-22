@@ -6,6 +6,7 @@ license.workspace = true
 description = "Ticket lifecycle, lock table, merge queue, escalation, budgets and closing rules."
 
 [dependencies]
+ori-core = { workspace = true }
 ori-gates = { workspace = true }
 ori-memory = { workspace = true }
 ori-runtime = { workspace = true }
