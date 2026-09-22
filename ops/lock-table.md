@@ -99,7 +99,7 @@ Claims 21 and 22 are disjoint: `spec/` against `crates/`, `scripts/` and `fixtur
 | Ticket | Work | Waits on |
 |---|---|---|
 | ORI-T-0091 | Resolve backticked function-name citations in doc comments against the test names actually declared, so a doc naming a test cannot outlive it | claim 22 releasing |
-| ORI-T-0092 | The `CLAUDE.md` pair byte-comparison test, as a tier 1 test riding gate 2 rather than a fifteenth gate | claim 21 releasing, because it needs `spec/README.md` to define the header first |
+| **ORI-T-0095** | The `CLAUDE.md` pair byte-comparison test, as a tier 1 test riding gate 2 rather than a fifteenth gate. **Renumbered from ORI-T-0092 by [[R31]]**, which the lead allocated twice. Claim 21 is released by R31, and `spec/README.md` now defines the header boundary, so this is unblocked | nothing |
 | ORI-T-0088 | Gate 13 resolves the `Spec:` anchor | tier 2, with the operator |
 
 ---
@@ -162,3 +162,12 @@ The three claims are disjoint: `spec/`, `crates/ori-core/`, and `README.md` with
 | Gate 13's pull-request cross-check is skipped when the payload carries no commit count | `scripts/gates.sh` | gate integrity, and it changes a gate's verdict |
 | Three `prove.sh` self-descriptions disagree with their own tables | `fixtures/planted/gate-1`, `gate-7` | gate integrity |
 | Eight defects in `ops/` records | `ops/` | ruling R25 makes these the lead's, and the lead is writing them |
+
+
+---
+
+## Releases
+
+Ruling [[R31]] writes the releases this table always said it recorded and never did: twenty-three claims and four partial releases. The full table is in `ops/rulings/R31-identifiers-and-releases.md` rather than duplicated here, because two copies of one record is the defect [[CR-007]] spent six lenses looking for.
+
+As of R31 the only claims still **held** are 20 (ORI-T-0088, tier 2 with the operator), 24, 25 and 26. Everything numbered 1 to 23 is released.
