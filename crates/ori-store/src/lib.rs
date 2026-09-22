@@ -6,3 +6,5 @@
 //! projection is derived from the log.
 //!
 //! Must not: contain business rules (`spec/LLD.md` section 2).
+
+pub mod event_log;
