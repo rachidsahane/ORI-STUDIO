@@ -114,6 +114,7 @@ name = "ori-runtime"
 version = "0.1.0"
 dependencies = [
  "ori-broker",
+ "ori-core",
  "ori-store",
 ]
 
