@@ -45,4 +45,9 @@ sha2 = { version = "=0.11.0", default-features = false }
 # "property tests over generated event sequences", which is what
 # `EventLog`'s hash-chain invariants need over arbitrary sequences of appends
 # rather than a hand-rolled generator loop.
-proptest = "=1.11.0"
+# Narrowed to `["std"]` during the integration of ORI-T-0023 and ORI-T-0024:
+# the two tickets pinned the same version independently but not the same
+# feature set, and this is the smaller of the two. proptest's default
+# features add `fork` and `timeout`, which spawn a subprocess per test case;
+# neither ticket's properties need them, and neither wants them in CI.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
