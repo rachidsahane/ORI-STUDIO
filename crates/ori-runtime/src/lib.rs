@@ -7,5 +7,8 @@
 //! Must not: merge, write `spec/` or `ops/`, or hold credentials beyond a session
 //! (`spec/LLD.md` section 2).
 
+pub mod budget;
+pub mod recovery;
 pub mod session;
+pub mod transcript;
 pub mod worktree;
