@@ -11,6 +11,9 @@
 pub mod coverage;
 
 /// The methodology's machine-readable section index and its generator (AICD §39).
+/// The detector that makes CLAUDE.md's never-modify-a-test rule real (AICD §14).
+pub mod modified_tests;
+
 pub mod sections;
 
 /// The index of this repository's own specification and the reader that
