@@ -67,12 +67,19 @@ Nothing else starts until this merges: every later PR depends on these gates bei
 | ORI-T-0012 | **CI workflow skeleton and the three-platform build** | **2** | `.github/workflows/ci.yml` | CI_CD §1 | none |
 | ORI-T-0013 | **Gate 1 (`fmt`, `clippy`) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 1 job), `fixtures/planted/fmt-clippy/**`, `ops/gates/fmt-clippy.md` | CI_CD §1.1, AICD §14 | none |
 | ORI-T-0014 | **Gate 2 (`cargo test`) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 2 job), `fixtures/planted/tests/**`, `ops/gates/tests.md` | CI_CD §1.2, AICD §14 | none |
-| ORI-T-0015 | **Gate 3 (contract tests) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 3 job), `fixtures/planted/contract/**`, `ops/gates/contract.md` | CI_CD §1.3, AICD §14 | none |
+| ORI-T-0015 | **Gate 3 (contract tests) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 3 job), `fixtures/planted/gate-3/**`, `ops/gates/gate-3.md` | CI_CD §1.3, AICD §14 | none |
 | ORI-T-0016 | **Gate 7 (audit, deny, secret scan) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 7 job), `deny.toml`, `fixtures/planted/supply-chain/**`, `ops/gates/supply-chain.md` | CI_CD §1.7, AICD §14 | none |
 | ORI-T-0017 | **Gate 13 (commit trailers) with planted defect and proof** | **2** | `.github/workflows/ci.yml` (gate 13 job), `fixtures/planted/trailers/**`, `ops/gates/trailers.md` | CI_CD §1.13, PRD G-02 | none |
 | ORI-T-0018 | Smoke ticket: a doc comment change travels the full path | 0 | ~~`crates/ori-core/src/lib.rs`~~ **`crates/ori-cli/src/main.rs`** (doc comment only) | AICD §23 G4 | none |
 
 **Correction, recorded after the fact.** ORI-T-0018 landed in `crates/ori-cli/src/main.rs`, not the path this row named, and it entered no claim in `ops/lock-table.md` before it ran. Both are recorded in the lock table and in CR-005 of `ops/calibration.md`. The row is corrected here rather than left to disagree with the commit.
+
+**Correction to the declared scopes above, recorded rather than rewritten.** Every gate ticket in this table named its planted fixtures and its proof record by a descriptive name (`fixtures/planted/fmt-clippy/**`, `ops/gates/tests.md`, and so on). **Not one of those paths exists.** What shipped, in every case, is numbered after the gate: `fixtures/planted/gate-1`, `gate-2`, `gate-7`, `gate-13`, and `ops/gates/gate-1.md` through `gate-13.md`.
+
+The rows for tickets that have already merged are left as they were written, because an operational log is not tidied after the fact ([[R30]]). The rows for tickets that have not started, ORI-T-0015, ORI-T-0047 and ORI-T-0048, are corrected in place to the convention that actually shipped, because a coder declares its scope from this table and would otherwise claim a path that has never existed.
+
+Found by ORI-T-0087's coder, which reported the fixture half. The `ops/gates/` half is wider than it reported and was found on verification: the backlog is wrong about both names for all seven gate tickets. The convention now has a second home in `CLAUDE.md`, which since ORI-T-0087 states "one directory per gate that has been proven" and names them, so the two records can now disagree loudly instead of quietly.
+
 
 **Gate 9 (citation) is deliberately absent from batch 1.** Your ruling: it stays `Defined`, not `Installed`, until the methodology HTML anchors are fixed and `sections.json` is regenerated. ORI-T-0005 builds the generator and ORI-T-0006 produces the defect list you carry to the methodology repository; the gate itself is ticketed in batch 7 as ORI-T-0047, gated on your fix.
 
@@ -185,8 +192,8 @@ Whole crate is tier 2 (`RISK_MAP`: `crates/ori-broker | 2 | Credentials`).
 | ORI-T-0044 | Significance labeler (gate 12) | 1 | `crates/ori-gates/src/significance.rs` | AICD §15; PRD Q-02, Q-03 | ORI-P1-027 |
 | ORI-T-0045 | **Prover: the planted-defect demonstration** | **2** | `crates/ori-gates/src/prover.rs` | AICD §14; runbooks/prove-gate.md | ORI-P1-013 |
 | ORI-T-0046 | **Liveness definition** | **2** | `crates/ori-gates/src/liveness.rs` | PRD Z-02, O-06; CI_CD §1 | none in phase 1 (asserted in phase 4) |
-| ORI-T-0047 | Citation gate (gate 9), installed only after your HTML fix | 1 | `crates/ori-gates/src/citation_gate.rs`, `.github/workflows/ci.yml` (gate 9 job), `fixtures/planted/citation/**`, `ops/gates/citation.md` | CI_CD §1.9; PRD Z-03 | ORI-P1-012 |
-| ORI-T-0048 | Diagram gate (gate 14) | 1 | `crates/ori-gates/src/diagram.rs`, `.github/workflows/ci.yml` (gate 14 job), `fixtures/planted/diagram/**`, `ops/gates/diagram.md` | CI_CD §1.14; CONVENTIONS "Diagrams" | ORI-P1-041 |
+| ORI-T-0047 | Citation gate (gate 9), installed only after your HTML fix | 1 | `crates/ori-gates/src/citation_gate.rs`, `.github/workflows/ci.yml` (gate 9 job), `fixtures/planted/gate-9/**`, `ops/gates/gate-9.md` | CI_CD §1.9; PRD Z-03 | ORI-P1-012 |
+| ORI-T-0048 | Diagram gate (gate 14) | 1 | `crates/ori-gates/src/diagram.rs`, `.github/workflows/ci.yml` (gate 14 job), `fixtures/planted/gate-14/**`, `ops/gates/gate-14.md` | CI_CD §1.14; CONVENTIONS "Diagrams" | ORI-P1-041 |
 
 **Order.** ORI-T-0041 first. Then 0042 to 0046 in parallel. Then ORI-T-0047 and ORI-T-0048 **serially**: both declare `.github/workflows/ci.yml`.
 

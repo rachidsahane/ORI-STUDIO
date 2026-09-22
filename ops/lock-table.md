@@ -69,3 +69,35 @@ Claim 20, **ORI-T-0088**, **not granted yet**. Intended modules: `.github/workfl
 Gate 13 does not resolve the `Spec:` trailer's anchor, and says so itself in `scripts/gates.sh`: "NOT ESTABLISHED: that the Spec: anchor resolves. The document half is printed above as an observation and is never judged". The lead put a fabricated anchor into ORI-T-0085's ticket, `TESTING.md#1-test-types`, which resolves against nothing; the coder caught it by reading the file, and gate 13 would have passed it. A ticket about fabricated references would have committed a fabricated reference through a gate documented not to look.
 
 No two claims overlap: `crates/ori-core/src/error.rs`, the two instruction files, and the gate 13 paths are disjoint, and nothing else is in flight.
+
+---
+
+## Round 3, after the defect batch merged
+
+Claims recorded before dispatch, as CR-005 requires. Both tickets below are corrections of records that outlived their subject, which is the defect class ORI-T-0086 was raised about and which its own coder then found twice more.
+
+Claim 21, **ORI-T-0089**, documentation role. Modules: `spec/TESTING.md` and `spec/README.md`.
+
+`spec/TESTING.md` section 5 says "the fixtures **are** AICD products" and names four directories that do not exist. That is the upstream of the claim ORI-T-0087 just corrected in `CLAUDE.md`: batch 0 added `inert-gate` to this sentence and changed `CLAUDE.md`'s count to match, so `CLAUDE.md` was a correct restatement of a specification that was itself in the wrong tense. Anyone re-deriving the instruction file from the specification would reintroduce the defect ORI-T-0087 removed.
+
+`spec/README.md` is in the same claim for a second reason: it fixes the root `CLAUDE.md` as "the same bytes, with a header naming the source" and **never says where the header ends**. ORI-T-0087's coder had to choose a definition to run its byte check. Until the specification pins it, any test comparing the pair encodes a convention no document states, so this blocks the pair-comparison ticket rather than merely annoying it.
+
+Claim 22, **ORI-T-0090**, coder role. Modules: `crates/ori-gates/src/sections.rs`, `scripts/gates.sh`, `fixtures/planted/gate-13/README.md`.
+
+Three records that report something other than the truth:
+
+1. `crates/ori-gates/src/sections.rs` carries a register reason saying `crates/ori-core/src/error.rs` "arrives with pull request 27, ORI-T-0019, which is open and unmerged, so this test is red until that merges". Pull request 27 merged at `0974dd1`, before the commit carrying that sentence reached `main`. It is the text a reader is handed when the register fires.
+2. `scripts/gates.sh` tells every run that gate 9 "stays defined and not installed until the index is generated". `methodology/sections.json` exists and is 11,961 bytes, and a test ties it to a fresh parse of the methodology. The real reason is recorded in three other places and is the operator's ruling pending the anchor fix. A reader following the runner would go generate an index that already exists.
+3. `fixtures/planted/gate-13/` has no `README.md` while `gate-1`, `gate-2` and `gate-7` each do. The harness the commit-trailer gate depends on is the one with no explanation of what it holds.
+
+`ops/gates/gate-13.md` is excluded from the claim: under ruling R25 the coder produces evidence and the lead records it.
+
+Claims 21 and 22 are disjoint: `spec/` against `crates/`, `scripts/` and `fixtures/`. Nothing else is in flight.
+
+**Not claimed, and queued behind claim 22 because both want `crates/ori-gates/src/sections.rs`:**
+
+| Ticket | Work | Waits on |
+|---|---|---|
+| ORI-T-0091 | Resolve backticked function-name citations in doc comments against the test names actually declared, so a doc naming a test cannot outlive it | claim 22 releasing |
+| ORI-T-0092 | The `CLAUDE.md` pair byte-comparison test, as a tier 1 test riding gate 2 rather than a fifteenth gate | claim 21 releasing, because it needs `spec/README.md` to define the header first |
+| ORI-T-0088 | Gate 13 resolves the `Spec:` anchor | tier 2, with the operator |
