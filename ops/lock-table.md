@@ -131,3 +131,34 @@ So the ticket fixes the four links and builds the check that makes the class vis
 **Not in scope, and deliberately:** a documentation gate. `spec/CI_CD.md` section 1 lists fourteen gates and none builds docs, so nothing in CI runs the strict form. That is `.github/workflows`, tier 2 under `spec/RISK_MAP.md`, and it needs a planted-defect proof under AICD §14. It goes to the operator alongside ORI-T-0088.
 
 **Also running, and read only:** a repository-wide audit for the defect class this project keeps finding two or three at a time. It writes nothing and claims nothing. If it reports anything in `crates/ori-gates/src/sections.rs`, that report is against the tree as it was when the audit started, and this claim wins.
+
+---
+
+## Round 5: working the audit's queue
+
+Thirty of [[CR-007]]'s thirty-two findings remain. They are dispatched by owner and by tier, not in one pull request. Every claim below was recorded before its agent was launched.
+
+Claim 24, **ORI-T-0092**, documentation role. Modules: `spec/CONVENTIONS.md`, `spec/LLD.md`, `spec/TESTING.md`, `spec/README.md`. Tier 1; none of these four is in `spec/RISK_MAP.md`'s tier 2 list.
+
+Three records that outlived their subject, all of them the same shape round 4 corrected elsewhere. `spec/CONVENTIONS.md` and `spec/LLD.md` still describe `fixtures/` as holding AICD products, which is the exact claim ORI-T-0087 and ORI-T-0089 removed from `CLAUDE.md` and `spec/TESTING.md` section 5, so the specification now contradicts itself in two directions. `spec/TESTING.md` section 3 sends phase 1's thresholds to `ops/calibration.md`, a file ruling [[R30]] closed to new entries. `spec/README.md`'s registry still reports `methodology/sections.json` as Missing; it is committed and three other records treat it as present.
+
+Claim 25, **ORI-T-0093**, coder role. Modules: `crates/ori-core/src/error.rs`, `crates/ori-core/src/types.rs`. Tier 1: `spec/RISK_MAP.md` tiers this crate by content, and neither the state machines nor the permission function exists yet.
+
+Two vacuous checks and one wrong citation. The first is the one the lead endorsed in public and should not have: `ori_p1_033_every_refusal_this_crate_can_make_is_covered_by_these_tests` asserts only that its own list has no duplicates. The exhaustive match lives in `refusal_tag`, so adding a variant breaks the build until an arm is added there, and nothing then ties the variant to `every_refusal()`. The second: three of the ten `wire_enum!` value lists, `ProductOrigin::ALL`, `TicketKind::ALL` and `DocumentSet::ALL`, are outside the count test, and the only other test that touches them loops over `ALL`, so emptying one passes everything. The third: `E_UPGRADE_ONLY` is cited to API_SPEC section 2; it is in section 1, and section 2 is the event stream.
+
+Claim 26, **ORI-T-0094**, coder role. Modules: `README.md`, `crates/ori-gates/src/sections.rs`. **Tier 2**, inherited from `sections.rs`, which ORI-T-0091's coder raised to 2 as gate substrate and which `spec/RISK_MAP.md` still does not tier at all.
+
+Four self-descriptions that are wrong. The root README says every test in the repository is in `ori-gates` and covers the section index generator; `ori-core` holds 27 that do not. Its Status table undercounts installed gates and local runners. `sections.rs` opens by saying the citation gate resolves every `AICD §<n>` reference in the repository, and **there is no citation gate**: gate 9 is Defined, `citation_gate.rs` does not exist, and `ops/gates/gate-9.md` does not exist. The same file says three times that there are three `ori_p1_033_reader_*` tests; there are four.
+
+The three claims are disjoint: `spec/`, `crates/ori-core/`, and `README.md` with `crates/ori-gates/`.
+
+**Held for the operator, because they are tier 2 or they are the lead's own records:**
+
+| Finding | Where | Why it waits |
+|---|---|---|
+| ADR-0002 undercounts batch 1's tier 2 tickets and claims a merge order that did not happen | `spec/adr/ADR-0002-single-operator.md` | ADRs are tier 2 in `spec/RISK_MAP.md`, and this is the ADR that governs every tier 2 merge |
+| `spec/RISK_MAP.md` claims to tier every module and does not | `spec/RISK_MAP.md` | tier 2 by its own table |
+| `ci.yml`'s header is stale in four places and contradicts `ops/gates/gate-2.md` | `.github/workflows/ci.yml` | tier 2, supply chain |
+| Gate 13's pull-request cross-check is skipped when the payload carries no commit count | `scripts/gates.sh` | gate integrity, and it changes a gate's verdict |
+| Three `prove.sh` self-descriptions disagree with their own tables | `fixtures/planted/gate-1`, `gate-7` | gate integrity |
+| Eight defects in `ops/` records | `ops/` | ruling R25 makes these the lead's, and the lead is writing them |
