@@ -175,3 +175,37 @@ The three claims are disjoint: `spec/`, `crates/ori-core/`, and `README.md` with
 Ruling [[R31]] writes the releases this table always said it recorded and never did: twenty-three claims and four partial releases. The full table is in `ops/rulings/R31-identifiers-and-releases.md` rather than duplicated here, because two copies of one record is the defect [[CR-007]] spent six lenses looking for.
 
 As of R31 the only claims still **held** are 20 (ORI-T-0088, tier 2 with the operator), 24, 25 and 26. Everything numbered 1 to 23 is released.
+
+---
+
+## Round 6 corrections and releases
+
+**Claim 27's recorded scope was wrong when it was written, and the error is the lead's.** It read "`crates/ori-gates/` (any file under it, including a new module and the `mod` line in `lib.rs`)". Claim 26 was **held** on `crates/ori-gates/src/sections.rs` at that moment, for ORI-T-0094. So the lead wrote a claim that overlapped a claim the lead had recorded itself, one round earlier, in this file.
+
+`aicd_plan_submit` is what returns `E_SCOPE_LOCKED`. It does not exist ([[E-0005]]), so nothing checked it, and [[R31]] exists because this class keeps recurring. The coder found the overlap by reading this table, narrowed its own footprint below it without being asked, never read-modified `sections.rs`, and delivered one new file plus four added lines in `lib.rs`, which claim 26 does not hold.
+
+**Claim 27 is narrowed to what was actually worked:** `crates/ori-gates/src/spec_refs.rs`, and the `mod` line in `crates/ori-gates/src/lib.rs`. The `mod` line follows the precedent this table already records: a file every parallel ticket must edit is not a lock, it is a queue.
+
+### Releases owed since R31
+
+| Claim | Ticket | Released |
+|---|---|---|
+| 24 | ORI-T-0092 | merged, pull request 41 |
+| 25 | ORI-T-0093 | merged, pull request 43 |
+| 26 | ORI-T-0094 | merged, pull request 42 |
+| 28 | ORI-T-0098 | **held**, pull request 46 open |
+| 27 | ORI-T-0097 | **held**, pull request 47 open |
+
+Claim 20 (ORI-T-0088) is still held and still the operator's.
+
+### Allocated by this round, none of them started
+
+| Ticket | Work | Why it is not running |
+|---|---|---|
+| ORI-T-0099 | `RefusalKind::code` calls `E_SCOPE_LOCKED` a code the client API returns; `spec/API_SPEC.md` puts it on the agent-facing MCP server | queued behind claim 28 |
+| ORI-T-0100 | Globs are an undocumented blind spot of ORI-T-0091's citation check | queued behind claim 27 |
+| **ORI-T-0101** | **`spec/runbooks/rotate-credentials.md` does not exist and is cited three times in the text a human reads after the secret scan finds a credential.** `scripts/gates.sh` twice and `scripts/secret-scan.sh` once. Either write the runbook or change the three sentences | ready; `scripts/` is not tiered by `spec/RISK_MAP.md` except as `scripts/release*`, so the operator sets the tier |
+| ORI-T-0102 | Pin `TicketState` and `DocumentState` identifiers against `spec/DATA_MODEL.md` section 3's diagrams. Today only their counts, 12 and 5, are pinned | queued behind claim 28 |
+| ORI-T-0103 | Hold `crates/ori-core/src/types.rs`'s restatement of the value spellings against `spec/DATA_MODEL.md` the way `RESTATEMENTS` holds `error.rs` against the methodology. ORI-T-0098 proved the gap and left the register entry ready | queued behind claim 27 |
+| ORI-T-0104 | `spec/CONVENTIONS.md` fixes the `Spec:` trailer as `<document>#<section>` and the repository uses both `#1` and `#1-pipeline-on-every-pull-request`. One of the two should be named | documentation role |
+| ORI-T-0105 | A coder scoped to one file cannot write a cross-reference to a test: any backticked `#[test]` name in a doc comment under `crates/` fails ORI-T-0091's check unless `CITED_TESTS` in another crate registers it. Worth a line in `spec/CONVENTIONS.md` | documentation role |
