@@ -29,4 +29,7 @@ pub mod sections;
 
 /// The index of this repository's own specification and the reader that
 /// resolves prose references to it (AICD §39).
+/// Gate 12: the significance labeler (AICD §15).
+pub mod significance;
+
 pub mod spec_refs;

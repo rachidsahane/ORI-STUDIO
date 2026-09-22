@@ -59,6 +59,7 @@ dependencies = [
 name = "ori-gates"
 version = "0.1.0"
 dependencies = [
+ "ori-core",
  "ori-store",
 ]
 

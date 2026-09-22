@@ -45,3 +45,16 @@ Gate 13 refused it for both coders on their first commit (`TICKET_UNPARSED`, `SP
 ## What is not damaged
 
 `main`'s committed tree was never touched. No commit was made from the primary checkout by either coder. Both incidents were working-tree only, and every byte of ORI-T-0044's work was preserved before the lead cleaned it.
+
+
+## Two standing facts of the lead's that were wrong, found by the same wave
+
+ORI-T-0044 corrected both. They are recorded here because every ticket of the wave carried them.
+
+**Trap 1 undersold its own failure mode.** The lead's ticket said an intra-doc link in a module's `//!` header resolves in the crate root's scope, which reads as "re-qualify it with `crate::<module>::<Item>` and it works". **For a private item that is false.** From that resolution context a private item is not mis-scoped, it is invisible: rustdoc reports "no item named X in module significance", not "private", and a fully qualified path fails too. There is a second, harsher rule underneath, `rustdoc::private_intra_doc_links`, which is deny-level under `-D warnings` and fires for a link from **any public item's documentation** to a private item, not only from the header. The fix for a private item is not to bracket-link it at all.
+
+**A fifth trap the lead never documented.** `crates/ori-gates/src/sections.rs` carries a check that fails the whole workspace suite when a doc comment anywhere contains a bare snake_case span matching a declared `#[test]` function that is not registered in that file's own table. The lead's standing facts named only the narrower case of deliberately backticking a test name.
+
+The register is in `sections.rs`, which was outside ORI-T-0044's declared scope and claimed by a sibling in the same wave, so it could not register anything. Its repair is the useful part: write the citation with a `tests::` or `ori_core::...::tests::` prefix, because the check's own grammar excludes any span carrying `::`. That is a fix available to a coder who may not touch the register, and it should be in the standing facts rather than rediscovered.
+
+Both corrections have the same shape as everything else this wave found: a rule stated once in a header, never exercised, and wrong in a way only contact reveals.
