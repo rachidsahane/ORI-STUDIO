@@ -8,3 +8,7 @@
 
 /// The methodology's machine-readable section index and its generator (AICD §39).
 pub mod sections;
+
+/// The index of this repository's own specification and the reader that
+/// resolves prose references to it (AICD §39).
+pub mod spec_refs;
