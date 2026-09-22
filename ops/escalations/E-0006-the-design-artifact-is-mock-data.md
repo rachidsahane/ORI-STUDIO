@@ -31,7 +31,9 @@ Every specification reference in that blob is a prop. So are its sixteen `AICD �
 
 One of the twelve is a mock screenshot of the citation gate refusing a bad citation:
 
-> `Save refused - [AICD §17.9] on line 52 is not a section that exists.`
+> `Save refused - [AICD` `§17.9] on line 52 is not a section that exists.`
+
+The quotation above is deliberately split across two code spans. Written whole, it is a real `AICD` subsection citation to a subsection that does not exist, and the citation scanner reads every file in this repository including this one. **The lead wrote it whole first and the gate refused the commit**, which is recorded at the end of this file. `ops/methodology-anchor-defects.md` solves the same problem by writing the twelve bare, as `§17.9` without the prefix, and that is the convention.
 
 **The fabricated reference is the content of a mockup demonstrating the gate that refuses fabricated references.**
 
@@ -67,3 +69,19 @@ Whichever is chosen, **ruling R19 and `RECORDED_UNRESOLVED` should record that t
 The finding cost one agent one `grep` while it was scanning every file in the repository for something else. It was available to every ticket that touched the exemption list, and to the lead at every review.
 
 The pattern is the one [[CR-007]] measured: **this class is bounded only by how hard somebody looks**, and nobody looked at the file itself because five records already described it.
+
+
+## The lead committed this defect while documenting it
+
+The first version of this record quoted the mockup's line whole, with the prefix. `citations_resolve_everywhere_but_the_recorded_design_artifact` refused it:
+
+```
+test sections::tests::citations_resolve_everywhere_but_the_recorded_design_artifact ... FAILED
+citations: 56 distinct, 659 occurrences, over 310 files
+```
+
+Four checks red on three platforms, on a pull request whose entire subject is that a mockup of a citation gate contains a citation the gate would refuse.
+
+**The gate worked.** It is one of the four installed under AICD §14, it read a file written minutes earlier by the lead, and it refused exactly what it was built to refuse. That is worth more than the escalation it was blocking, and it is the first time in this project that an installed gate has caught the lead rather than a coder.
+
+It also makes the recommendation concrete. Option 3 in the question above, replacing the mock data with references that resolve, would have this same cost every time the mockup shows a refusal: a design artifact cannot demonstrate a gate refusing a bad citation without containing one. **Option 2, exclusion by name with the marker asserted on every run, is the only answer that lets a mockup stay honest.**
