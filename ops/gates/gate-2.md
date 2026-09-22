@@ -59,7 +59,11 @@ Eight packages in total, each its own workspace root so the repository build nev
 
 AICD §14's third condition, established by observation.
 
-**Run 35598542173**, this ticket's own pull request: thirteen jobs green including `gate-2-proof`.
+**Run 35608800130**, this ticket's own pull request: thirteen jobs green including `gate-2-proof`.
+
+> **Corrected.** This line first cited run **35598542173**, which is ORI-T-0013's pull request: twelve jobs, `gate-1-proof`, and **no `gate-2-proof` at all**. `ops/gates/gate-1.md` cites that run correctly; the lead copied its identifier into this file and paired it with this gate's own, accurate description. So the description was written from a real observation and the citation pointed at a run that contradicts it, and gate 2 was moved to **Installed** on that pairing.
+> The evidence itself was never in doubt: run 35608800130 is green with `gate-2-proof` among thirteen jobs, and the red run below is correct. Both were re-verified against the version control host before this correction was written. The state line stands; the citation did not.
+> Found by the round 4 audit ([[CR-007]]). It is the sharpest instance of the class yet recorded, because a reader who followed the citation would have found a run that disproves the sentence citing it.
 
 **Run 35609765474**, a throwaway branch carrying one deliberately failing test in `crates/ori-gates`, opened as a pull request and closed without merging: **`test` failed on ubuntu, macos and windows, and the `ci` aggregate failed.** What a human sees on the pull request is three red `test` checks and a red `ci`, each linking to the assertion that failed. The branch was deleted; the run persists.
 

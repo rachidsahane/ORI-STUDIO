@@ -70,7 +70,10 @@ Escalation **E-0003**. CI_CD says "secret scan (tree and history)" and names no 
 
 ## What is not established
 
-1. **The visibility clause of AICD §14.** No local run watches the pull request check it writes to. Established by the run of this pull request, recorded in a follow-up commit.
+1. **The visibility clause of AICD §14.** No local run watches the pull request check it writes to, and **this gate has no cited visibility run of either kind.**
+   This line previously read "Established by the run of this pull request, recorded in a follow-up commit." **No such commit was ever made**, and no run identifier for gate 7 appears anywhere under `ops/`. The sentence claimed evidence in a place that does not exist, inside the list of things the gate has *not* established, which is the one list where a false entry is most expensive.
+   What is true: `gate-7` and `gate-7-proof` have been seen green on real runs, for example 35654836919. What has never been observed is `gate-7` **red** on a planted defect in a real run, which is what AICD §14's third condition asks for. Gates 1, 2 and 13 each have such a run recorded; gate 7 does not. Until one exists this clause stays open on its own terms, and the gate stays at two checks of three for the separate reason recorded in escalation E-0003.
+   Found by the round 4 audit ([[CR-007]]).
 2. **That a red `ci` blocks anything.** `main` still has no required status checks. Three proofs now record this as owed.
 3. **That the two installed checks are exhaustive of their own domains.** `cargo-audit` is as good as the RustSec database on the day it runs; `cargo-deny` enforces the policy written in `deny.toml` and no more. Neither is a claim about dependencies nobody has published an advisory for.
 
