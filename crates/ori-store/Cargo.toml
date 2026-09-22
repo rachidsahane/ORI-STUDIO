@@ -7,3 +7,42 @@ description = "SQLite durable state for one product: append-only event log, proj
 
 [dependencies]
 ori-core = { workspace = true }
+# Approved by ops/escalations/E-0004-external-crates.md ("Answered: all four
+# approved, pinned"). Exact versions pinned here, on top of the `Cargo.lock`
+# pin CONVENTIONS.md already requires, because the escalation's terms and this
+# ticket both say "pin exact versions".
+#
+# rusqlite: the Rust binding to SQLite. `spec/PROJECT_BRIEF.md` chooses SQLite
+# ("Embedded storage only... No database server, no external index service")
+# and names no binding; E-0004 records that choice as a real decision, not a
+# rubber stamp, and the operator took it. `default-features = false` plus
+# `bundled` compiles SQLite's own C amalgamation into this binary rather than
+# linking a system library, which is what "embedded storage only" and "no
+# external index service" ask for: the three-platform build in CI_CD gate 11
+# does not depend on a `libsqlite3-dev` package being present on the runner or
+# the developer's machine, and the product ships one self-contained binary.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+# sha2: the digest the event log's hash chain runs on (`spec/DATA_MODEL.md`
+# section 2, "hash-chained"; the document names no algorithm). SHA-256 is
+# chosen because it is the RustCrypto project's most widely used, most
+# reviewed hash implementation (the crates.io API reports it at nine hundred
+# million-plus downloads today), pure Rust, `no_std`-capable, and Apache-2.0 OR
+# MIT like the rest of this dependency tree, so `deny.toml`'s license allow
+# list does not need a new entry. `default-features = false` because
+# `EventLog` only calls `Sha256::new()`, `update()` and `finalize()` over
+# borrowed bytes into a fixed-size output; it never needs the `alloc` feature's
+# owned buffers or the `oid` feature's ASN.1 object identifiers, so neither is
+# pulled into the graph gate 7 audits.
+sha2 = { version = "=0.11.0", default-features = false }
+
+[dev-dependencies]
+# proptest: approved by E-0004 as a dev-dependency only, "a test-time tool
+# [that] must never appear in a shipped binary's dependency graph". It is not
+# under `[dependencies]` above for exactly that reason; `cargo tree
+# --package ori-store -e normal` after this change carries no `proptest` line,
+# which is the mechanical check the escalation says the lead runs on the first
+# pull request that adds it. `spec/TESTING.md` section 1 names it for
+# "property tests over generated event sequences", which is what
+# `EventLog`'s hash-chain invariants need over arbitrary sequences of appends
+# rather than a hand-rolled generator loop.
+proptest = "=1.11.0"
