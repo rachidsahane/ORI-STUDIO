@@ -175,3 +175,44 @@ The three claims are disjoint: `spec/`, `crates/ori-core/`, and `README.md` with
 Ruling [[R31]] writes the releases this table always said it recorded and never did: twenty-three claims and four partial releases. The full table is in `ops/rulings/R31-identifiers-and-releases.md` rather than duplicated here, because two copies of one record is the defect [[CR-007]] spent six lenses looking for.
 
 As of R31 the only claims still **held** are 20 (ORI-T-0088, tier 2 with the operator), 24, 25 and 26. Everything numbered 1 to 23 is released.
+
+---
+
+## Round 6
+
+Claim 27, **ORI-T-0097**, coder role. Modules: `crates/ori-gates/`. Tier assessed by the coder; `spec/RISK_MAP.md` still has no row for `sections.rs`, which four tickets have reported, and none for a new module beside it.
+
+**Resolve prose references to this repository's own specification.** `AICD §<n>` is checked mechanically against `methodology/sections.json`. A reference to this project's own documents is checked by nobody, and the population is not small:
+
+```
+$ grep -rhoE "spec/[A-Z_]+\.md[^0-9a-z]{0,12}section [0-9]+|[A-Z_]{3,}\.md section [0-9]+" crates/ ops/ spec/ | wc -l
+123
+```
+
+**One hundred and twenty three references, zero checked.** Every defect below went through that hole and every one shipped green:
+
+| Defect | Found by |
+|---|---|
+| `crates/ori-core/src/error.rs` cited `E_UPGRADE_ONLY` to API_SPEC section 2; it is in section 1, and section 2 is the event stream | round 4 audit |
+| The lead wrote `Spec: TESTING.md#1-test-types`; no heading slugs to it | ORI-T-0085's coder |
+| The lead wrote `Spec: TESTING.md#3-coverage-and-thresholds`, welding two separate sections | ORI-T-0092's coder |
+| The lead attributed a rule to `spec/TESTING.md` that the document does not contain | ORI-T-0094's coder |
+| Five references into `ops/phase-1-backlog.md` by line number, broken by a later insertion | round 4 audit |
+
+The commit trailer half of this is ORI-T-0088, tier 2, with the operator. This ticket is the prose half, which is larger and which nothing has ever looked at.
+
+Claim 28, **ORI-T-0098**, coder role. Module: `crates/ori-core/src/types.rs`. Tier 1 under `spec/RISK_MAP.md`'s "other types" row.
+
+**Pin the wire spellings, not only the lengths.** ORI-T-0093 added the three missing length assertions and then proved its own repair vacuous: respelling `ProductOrigin::Migrated` as `"moved"` leaves the crate and `spec/DATA_MODEL.md` section 2 disagreeing with the full suite green, because the round-trip test round-trips through the same pair that was renamed. **None of the ten assertions, including the seven that predate this round, reads a wire spelling.** It declined to close it for three of ten on the grounds that asymmetry in a test whose subject is "checks that look like they check" invites the next reader to wonder which shape is real. This closes all ten.
+
+The two claims are disjoint: `crates/ori-gates/` against `crates/ori-core/src/types.rs`.
+
+**Queued, and why each waits:**
+
+| Ticket | Work | Waits on |
+|---|---|---|
+| ORI-T-0095 | The `CLAUDE.md` pair byte-comparison test, tier 1 riding gate 2 | claim 27, same crate |
+| ORI-T-0099 | `RefusalKind::code` calls `E_SCOPE_LOCKED` a code the client API returns; API_SPEC puts it on the agent-facing MCP server | claim 27 would check it mechanically first |
+| ORI-T-0100 | Globs are an undocumented blind spot of ORI-T-0091's citation check, and the one citation form the file uses for a set of tests | claim 27, same crate |
+
+**Held for the operator, unchanged:** ADR-0002's undercount and false merge order, `spec/RISK_MAP.md`'s coverage, `ci.yml`'s stale header, gate 13's skipped cross-check, three `prove.sh` self-descriptions, and `spec/CONVENTIONS.md` against `gates.sh`'s `CT_TYPES`.
