@@ -1626,10 +1626,42 @@ gate_8() {
 }
 
 gate_9() {
-    # Held open deliberately: the section index is not generated yet, and the
-    # methodology HTML's anchors are being corrected first.
+    # Held open deliberately, and NOT for want of an index. `methodology/
+    # sections.json` is generated, is committed, and is tied to a fresh parse
+    # of the methodology by the ori-gates test
+    # `committed_sections_json_matches_a_fresh_parse_of_the_methodology`. The
+    # note this line used to print sent its reader off to generate a file that
+    # was already there.
+    #
+    # Two different things hold this gate open, and they are different in kind.
+    # `ops/methodology-anchor-defects.md` "Gate 9 status" states both, and
+    # `ops/phase-1-backlog.md` carries the first:
+    #
+    #   - A decision. The operator's ruling: gate 9 stays Defined and not
+    #     Installed until the methodology HTML's anchors are corrected and the
+    #     index is regenerated from the corrected document. The gate itself is
+    #     ORI-T-0047 in batch 7, and the backlog records its precondition as
+    #     UNVERIFIED. The index being generated satisfies half of that ruling;
+    #     the anchor correction it is to be regenerated from has not happened.
+    #   - A methodology rule. AICD §14: a gate enters service only after it has
+    #     been seen to pass on a clean tree and fail on a planted defect. That
+    #     holds whatever the anchors do, and no such demonstration exists for
+    #     gate 9.
+    #
+    # ORI-T-0085 reported the other half of this line's defect: a reader was
+    # told gate 9 has no local runner and concluded that no citation is checked
+    # here, which is false. Gate 9 as CI_CD section 1 specifies it does refuse a
+    # build on an unresolved citation and is genuinely absent; a narrower check
+    # is not. The note now names the narrower one. Wiring gate 9's line to that
+    # test is deliberately NOT done here: the test is strictly narrower than the
+    # gate (it exempts the twelve citations ruling R19 records, and open
+    # escalation 4 has not settled whether gate 9's scope even reaches that
+    # file), so reporting it as gate 9 would claim an installed gate on an
+    # undecided scope with no planted-defect demonstration. That is the shape
+    # AICD §39 calls "present but reporting nothing", and it would be a worse
+    # record than the one being repaired. It belongs to ORI-T-0047.
     probe_unavailable 9 'section index' path:methodology/sections.json
-    append_note 9 'this gate stays defined and not installed until the index is generated'
+    append_note 9 'the index IS generated and is checked against a fresh parse of the methodology, so that is not what holds this gate: gate 9 is ORI-T-0047, held by the operator ruling in ops/phase-1-backlog.md until the methodology HTML anchors are corrected and the index regenerated from the corrected document, and held by AICD §14 until it has been seen to fail on a planted defect. Citations are not unchecked here: citations_resolve_everywhere_but_the_recorded_design_artifact in crates/ori-gates/src/sections.rs runs under gate 2 and resolves every AICD citation in the tree except the twelve in the design artifact that ruling R19 records. That test is not gate 9, refuses no build, and deleting it would not change this line'
 }
 
 gate_10() {
