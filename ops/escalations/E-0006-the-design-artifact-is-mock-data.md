@@ -21,10 +21,10 @@ $ grep -oE "Ledgerline|ledger/src/entry\.rs|db/migrations/[0-9]+\.sql" "spec/des
 The rows are sample records for a fictional product called **Ledgerline**, with file paths this repository does not have:
 
 ```
-['DVG-04', 'DATA_MODEL §5', 'Ledger entries are immutable after posting',
+['DVG-04', 'DATA_MODEL` `§5', 'Ledger entries are immutable after posting',
  'Allows amendment', 'ledger/src/entry.rs:12', 'open'],
 ['TCK-0445', 'Auto', 0, 'Citation gate flags 2 dead §-references in ops memory',
- 'CONVENTIONS §2', 'qa-01', '11h'],
+ 'CONVENTIONS` `§2', 'qa-01', '11h'],
 ```
 
 Every specification reference in that blob is a prop. So are its sixteen `AICD §n` citations, **including the twelve unresolvable ones** that ruling R19 records, that `RECORDED_UNRESOLVED` in `crates/ori-gates/src/sections.rs` exempts, and that open escalation 4 is open about.
@@ -33,7 +33,7 @@ One of the twelve is a mock screenshot of the citation gate refusing a bad citat
 
 > `Save refused - [AICD` `§17.9] on line 52 is not a section that exists.`
 
-The quotation above is deliberately split across two code spans. Written whole, it is a real `AICD` subsection citation to a subsection that does not exist, and the citation scanner reads every file in this repository including this one. **The lead wrote it whole first and the gate refused the commit**, which is recorded at the end of this file. `ops/methodology-anchor-defects.md` solves the same problem by writing the twelve bare, as `§17.9` without the prefix, and that is the convention.
+The quotations in this record are deliberately split across code spans, here and in the two mock rows above. Written whole, it is a real `AICD` subsection citation to a subsection that does not exist, and the citation scanner reads every file in this repository including this one. **The lead wrote it whole first and the gate refused the commit**, which is recorded at the end of this file. `ops/methodology-anchor-defects.md` solves the same problem by writing the twelve bare, as `§17.9` without the prefix, and that is the convention.
 
 **The fabricated reference is the content of a mockup demonstrating the gate that refuses fabricated references.**
 
