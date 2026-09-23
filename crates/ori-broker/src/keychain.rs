@@ -1125,22 +1125,17 @@ mod tests {
             assert!(payload.contains(app_key_ref.as_str()) || payload.contains(b_key_ref.as_str()));
         }
 
-        // ...then the raw bytes of the durable file itself: "any event or
-        // log" read literally, not only the Event this process just built.
+        // ...then the raw bytes of every file this flow could possibly have
+        // touched: "any event or log" read literally, not only the Event
+        // this process just built and not only the two product.sqlite paths
+        // this test happens to know about. drive_the_test_scan_whole_tree
+        // walks scratch.path recursively, so a defect that wrote the secret
+        // to some other file under the product directory (a debug log, a
+        // stray temp file) is caught the same way a leak into product.sqlite
+        // itself is, rather than only the file this test predicted.
         drop(db_a);
         drop(db_b);
-        let mut on_disk = Vec::new();
-        for product in [product_a.as_str(), product_b.as_str()] {
-            for suffix in ["", "-wal", "-shm"] {
-                let path = scratch
-                    .path
-                    .join(product)
-                    .join(format!("product.sqlite{suffix}"));
-                if let Ok(bytes) = fs::read(&path) {
-                    on_disk.extend(bytes);
-                }
-            }
-        }
+        let on_disk = read_every_file_under(&scratch.path);
         assert!(
             !on_disk.is_empty(),
             "the durable log files must have actually been written to"
@@ -1148,11 +1143,45 @@ mod tests {
         let haystack = String::from_utf8_lossy(&on_disk);
         assert!(
             !haystack.contains(APP_SECRET),
-            "the application key leaked into the on-disk log"
+            "the application key leaked into a file on disk under the products root"
         );
         assert!(
             !haystack.contains(PROJECT_B_SECRET),
-            "project B's key leaked into the on-disk log"
+            "project B's key leaked into a file on disk under the products root"
         );
+    }
+
+    /// Every byte of every regular file under `root`, concatenated,
+    /// recursing into subdirectories. Used only by the leak test above, to
+    /// scan the whole products root rather than only the specific
+    /// `product.sqlite` paths this test happens to already know about: a
+    /// defect that wrote a secret to any other file under `root` (not only
+    /// the event log) is what this makes catchable. A directory entry this
+    /// function cannot read (a permissions error, a symlink cycle) is
+    /// skipped rather than panicking the test on an unrelated filesystem
+    /// condition; the assertion that `root` produced *some* bytes at all is
+    /// what stands in for "the walk actually visited real files".
+    fn read_every_file_under(root: &std::path::Path) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    stack.push(path);
+                } else if file_type.is_file()
+                    && let Ok(bytes) = fs::read(&path)
+                {
+                    out.extend(bytes);
+                }
+            }
+        }
+        out
     }
 }
