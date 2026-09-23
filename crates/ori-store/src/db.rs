@@ -209,11 +209,18 @@ pub struct Migration {
 /// that this entry's `sql` reads with [`include_str!`]. Removing or
 /// reordering an entry here is editing a migration that may already have run
 /// somewhere, which `apply_pending` exists to refuse.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../migrations/0001_init.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "init",
+        sql: include_str!("../migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "projections",
+        sql: include_str!("../migrations/0002_projections.sql"),
+    },
+];
 
 /// A refusal from this module: `ProductDb::open` failing to become a
 /// [`ProductDb`], or a step inside it.
@@ -890,6 +897,39 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // ORI-T-0107: the registry's own size is pinned, not only implied
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0107_migrations_pins_exactly_two_entries_versions_one_and_two() {
+        // Every other test in this file that used to hardcode `1` now reads
+        // `MIGRATIONS.len()` instead, which makes each of them agree with
+        // MIGRATIONS automatically but makes none of them assert what the
+        // count itself should be: a MIGRATIONS entry silently added or
+        // removed would still leave every one of those tests passing,
+        // agreeing with a registry that has quietly grown or shrunk. This
+        // test is the independent check, the same role
+        // `crate::projections::PROJECTION_COUNT` plays for the projection
+        // registry: declared here, away from MIGRATIONS's own body, so
+        // deleting or duplicating an entry fails this test rather than only
+        // being implied by tests that read the count dynamically.
+        assert_eq!(MIGRATIONS.len(), 2);
+        assert_eq!(MIGRATIONS[0].version, 1);
+        assert_eq!(MIGRATIONS[1].version, 2);
+
+        let scratch = Scratch::new("migrations-pinned");
+        let mut db = ProductDb::open(&scratch.path, "PRODUCT-A", at(1_000))
+            .expect("a fresh product opens and applies every migration");
+        let recorded = recorded_migrations(db.connection()).expect("read _ori_migrations back");
+        let versions: Vec<u32> = recorded.iter().map(|(version, _, _)| *version).collect();
+        assert_eq!(
+            versions,
+            vec![1, 2],
+            "a fresh product's _ori_migrations must record exactly the versions MIGRATIONS carries"
+        );
+    }
+
+    // -------------------------------------------------------------------
     // ORI-T-0024: the happy path (planted-defect 9, "unchanged, must pass",
     // read as "the ordinary case must still work")
     // -------------------------------------------------------------------
@@ -901,7 +941,10 @@ mod tests {
             ProductDb::open(&scratch.path, "PRODUCT-A", at(1_000)).expect("a fresh product opens");
 
         assert_eq!(db.product_id(), "PRODUCT-A");
-        assert_eq!(db.schema_version().expect("read schema version"), 1);
+        assert_eq!(
+            db.schema_version().expect("read schema version"),
+            MIGRATIONS.len() as u32
+        );
         for sub in ["index", "sessions", "evidence"] {
             assert!(
                 db.dir().join(sub).is_dir(),
@@ -982,7 +1025,10 @@ mod tests {
         for round in 0..5 {
             let db = ProductDb::open(&scratch.path, "PRODUCT-A", at(1_000 + round))
                 .unwrap_or_else(|e| panic!("open round {round} must succeed: {e}"));
-            assert_eq!(db.schema_version().expect("schema version"), 1);
+            assert_eq!(
+                db.schema_version().expect("schema version"),
+                MIGRATIONS.len() as u32
+            );
             drop(db);
         }
     }
@@ -1050,13 +1096,17 @@ mod tests {
             drop(db);
         }
 
-        // Simulate a future binary having run migration 2 here, which this
-        // binary's MIGRATIONS (still length 1) does not carry.
+        // Simulate a future binary having run one migration beyond what this
+        // binary's MIGRATIONS carries: the version is derived from
+        // MIGRATIONS.len(), never hardcoded, so a third migration does not
+        // reopen this test the way it reopened the other three that used to
+        // hardcode the count (ORI-T-0107).
+        let future_version = MIGRATIONS.len() as u32 + 1;
         let db_path = scratch.path.join("PRODUCT-A").join("product.sqlite");
         let conn = open_connection(&db_path).expect("open the underlying file directly");
         conn.execute(
-            "INSERT INTO _ori_migrations (version, name, sql, applied_at) VALUES (2, 'from_the_future', '-- x', 1500)",
-            [],
+            "INSERT INTO _ori_migrations (version, name, sql, applied_at) VALUES (?1, 'from_the_future', '-- x', 1500)",
+            params![future_version],
         )
         .expect("insert the future row");
         drop(conn);
@@ -1066,8 +1116,8 @@ mod tests {
                 database_version,
                 binary_version,
             }) => {
-                assert_eq!(database_version, 2);
-                assert_eq!(binary_version, 1);
+                assert_eq!(database_version, future_version);
+                assert_eq!(binary_version, MIGRATIONS.len() as u32);
             }
             other => panic!("expected DbError::SchemaTooNew, got {other:?}"),
         }
@@ -1294,7 +1344,10 @@ mod tests {
                 for round in 0..rounds {
                     let db = ProductDb::open(&scratch.path, "PRODUCT-A", at(1_000 + i64::from(round)))
                         .unwrap_or_else(|e| panic!("round {round} must open: {e}"));
-                    prop_assert_eq!(db.schema_version().expect("schema version"), 1);
+                    prop_assert_eq!(
+                        db.schema_version().expect("schema version"),
+                        MIGRATIONS.len() as u32
+                    );
                 }
             }
 
