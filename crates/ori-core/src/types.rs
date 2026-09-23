@@ -967,6 +967,70 @@ pub struct Document {
     pub verified_against_code_at: Option<Timestamp>,
 }
 
+/// A declared model family: ADR-0001 "Model family", AICD §7, "the provider's
+/// own grouping of models sharing a lineage; stable across version changes,
+/// and the coarsest unit at which two reviewers are genuinely different."
+///
+/// ORI-T-0108 moves this value type here from `ori-broker`'s `family.rs`
+/// (ORI-T-0028), per the operator's ruling on escalation 6 recorded in
+/// `ops/phase-1-backlog.md`: `ori-broker` cannot call `ori-runtime` to ask a
+/// `RuntimeCaps` for the family (the dependency runs the other way), so the
+/// family is declared by the runtime adapter and passed down to identity
+/// creation as a value the engine already holds. A value type with no IO
+/// belongs in `ori-core`, which `spec/LLD.md` section 2 gives no IO and no
+/// workspace dependency, the same reasoning [`SpecAnchor`] and [`Id`] follow
+/// for themselves.
+///
+/// Built only by [`ModelFamily::parse`], never inferred from a model id
+/// string (a prefix before a dash, a lookup table of known names): ADR-0001
+/// rejected exact model ids for this exact check ("a version bump or a
+/// renamed snapshot of the same model reads as a different model, and the
+/// separation is lost without anyone noticing"), and a family guessed from
+/// the id string is the same defect wearing a disguise. Holding this as a
+/// typed newtype rather than a bare [`String`] is part of that: a function
+/// that takes `&str` can be handed an unvalidated value at any call site,
+/// while one that takes `&ModelFamily` can only be handed one that passed
+/// [`ModelFamily::parse`]'s refusal of an empty or whitespace-only value.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ModelFamily(String);
+
+impl ModelFamily {
+    /// Declares a model family, refusing one that is empty or only
+    /// whitespace, the same shape [`SpecAnchor::parse`] uses for its own
+    /// text.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Malformed`] when `family` is empty or only whitespace.
+    pub fn parse(family: &str) -> Result<Self> {
+        let trimmed = family.trim();
+        if trimmed.is_empty() {
+            return Err(Error::malformed("model family", family));
+        }
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    /// The family as declared text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ModelFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for ModelFamily {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1630,5 +1694,42 @@ mod tests {
             assert!(!error.is_refusal());
             assert!(error.methodology_ref().is_none());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ModelFamily (ORI-T-0108, moved here from ori-broker's family.rs)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0108_model_family_parse_refuses_empty_or_whitespace() {
+        for bad in ["", "   ", "\t\n"] {
+            let error = ModelFamily::parse(bad).expect_err("an empty family is refused");
+            assert!(
+                !error.is_refusal(),
+                "{bad:?} is bad input, not a control refusing an action"
+            );
+            assert!(matches!(
+                error,
+                Error::Malformed {
+                    what: "model family",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn ori_t_0108_model_family_parse_trims_and_compares_by_value() {
+        let a = ModelFamily::parse("  claude-3  ").expect("a padded family parses");
+        let b = ModelFamily::parse("claude-3").expect("the trimmed equivalent parses");
+        assert_eq!(a.as_str(), "claude-3");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn ori_t_0108_model_family_round_trips_through_from_str() {
+        let family: ModelFamily = "anthropic-claude-3".parse().expect("a valid family parses");
+        assert_eq!(family.as_str(), "anthropic-claude-3");
+        assert_eq!(family.to_string(), "anthropic-claude-3");
     }
 }
