@@ -1539,4 +1539,35 @@ mod tests {
             "a killed process does not report a successful exit"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // A structural guard against a second kill path: no runtime assertion
+    // above can tell "revoke then kill, both fast" apart from "kill then
+    // revoke, both fast" by timing alone, both take microseconds regardless
+    // of order, and `crate::session::Teardown::record` checks the
+    // timestamps a caller supplies, not when the operating system call
+    // actually ran; a rewrite of `Injector::end` that physically kills
+    // first and then writes the same, correct-looking timestamps afterward
+    // would pass every assertion above. What such a rewrite cannot do
+    // without being visible here is add a second place in this file that
+    // reaches `Child::kill`: `SpawnedSession::stop` is the only one, its
+    // signature requires a `RevocationReceipt`, and this test reads this
+    // file's own source, at build time, to prove that stays true.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0032_exactly_one_place_in_this_file_ever_calls_child_kill() {
+        let source = include_str!("injector.rs");
+        // Built from two pieces rather than written as one string literal,
+        // so the search text does not match its own occurrence on this
+        // line, which would otherwise count as a second hit.
+        let needle = [".ki", "ll()"].concat();
+        let occurrences = source.matches(needle.as_str()).count();
+        assert_eq!(
+            occurrences, 1,
+            "SpawnedSession::stop must be the only function in this file that ever calls \
+             Child::kill; a second call site is a bypass around the RevocationReceipt this \
+             module's own doc comment says makes killing before revoking impossible to reach"
+        );
+    }
 }
