@@ -8,6 +8,7 @@
 //! (`spec/LLD.md` section 2).
 
 pub mod budget;
+pub mod container;
 pub mod recovery;
 pub mod session;
 pub mod transcript;
