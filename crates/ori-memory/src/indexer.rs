@@ -226,20 +226,49 @@
 //! resulting error folded into [`IndexerError::InvalidQuery`], which blamed
 //! a perfectly ordinary, valid query for damage that had nothing to do with
 //! it, and left `documents_covered` and `all_documents` reporting the old,
-//! stale count as if nothing were wrong. `search`, `all_documents` and
-//! `total_indexed` now all classify a `rusqlite` failure by its SQLite error
-//! code (`classify_error`, `search_error`) before choosing a variant:
+//! stale count as if nothing were wrong. `search`, `full_rebuild` and
+//! `incremental_sync` now all classify a `rusqlite` failure by its SQLite
+//! error code (`classify_error`, `search_error`) before choosing a variant:
 //! [`IndexerError::Corrupt`] for `SQLITE_CORRUPT`, [`IndexerError::Locked`]
 //! for a busy write lock, and only a bare, query-specific `SQLITE_ERROR`
-//! becomes [`IndexerError::InvalidQuery`]. Recovery is
-//! [`Indexer::full_rebuild`]'s job, and only its: the index is derived data
-//! ("The index is derived" above), so on [`IndexerError::Corrupt`] it
-//! deletes `fts.sqlite` and its `-wal`/`-shm` side files, recreates a fresh
-//! schema at the same path, and retries the rebuild once
-//! (`Indexer::recreate_on_disk`). `search` and `incremental_sync` do not
-//! self-heal; they report [`IndexerError::Corrupt`] so a caller can choose
-//! to call `full_rebuild`, rather than a read or a diff silently triggering
-//! a rebuild neither asked for.
+//! becomes [`IndexerError::InvalidQuery`].
+//!
+//! A later re-verification workflow found that classification incomplete: a
+//! corrupted structural record whose length prefix happens to decode to an
+//! implausible size can make SQLite report `ErrorCode::OutOfMemory`
+//! (`SQLITE_NOMEM`, the allocator refusing an implausible request, not an
+//! actual low-memory condition) for the exact same underlying damage, and
+//! neither `classify_error` nor `search_error` recognized it, so it fell
+//! into the generic [`IndexerError::Sqlite`] and gave a caller no signal to
+//! rebuild -- the same "damage reported as something else" class, one level
+//! deeper. Rather than adding `OutOfMemory` to the list of codes read as
+//! corruption (a genuine out-of-memory condition is not corruption, and
+//! guessing from the error code alone would misreport one as the other),
+//! `search`'s and `incremental_sync`'s own reads now settle an error that is
+//! neither a clean lock nor an already-recognized `SQLITE_CORRUPT` by asking
+//! FTS5 directly, on the same connection: `INSERT INTO documents(documents)
+//! VALUES('integrity-check')`, the internal command FTS5 exposes for this
+//! exact purpose (`diagnose_ambiguous_read_error`). Only when that check
+//! also fails is the original error reported as [`IndexerError::Corrupt`];
+//! when it passes, the original error is reported unchanged, so a real
+//! out-of-memory condition is never relabeled as corruption it is not.
+//!
+//! Recovery is [`Indexer::full_rebuild`]'s job, and only its: the index is
+//! derived data ("The index is derived" above), so on
+//! [`IndexerError::Corrupt`] it drops and recreates the FTS5 virtual table
+//! in place, inside its own write transaction, and never deletes
+//! `fts.sqlite` itself. An earlier version did (delete the file and its
+//! `-wal`/`-shm` side files, recreate at the same path); a re-verification
+//! workflow found that deleting the file out from under every *other* open
+//! connection to it silently lost that connection's acknowledged writes and
+//! defeated this module's own "Concurrency" guarantee between them, so the
+//! file is now repaired in place instead. `search` and `incremental_sync` do
+//! not self-heal; they report [`IndexerError::Corrupt`] so a caller can
+//! choose to call `full_rebuild`, rather than a read or a diff silently
+//! triggering a rebuild neither asked for. Corruption found while merely
+//! opening the file ([`Indexer::open`]) is classified and reported the same
+//! way, but is never self-healed either: destroying a file this module was
+//! only handed a path to is `ProductDb`'s decision, not `Indexer`'s.
 //!
 //! # Reads and writes share one transaction
 //!
@@ -487,15 +516,22 @@ pub enum IndexerError {
         /// The database file that was already locked.
         path: PathBuf,
     },
-    /// SQLite reported `path` corrupt (`ErrorCode::DatabaseCorrupt`): a
-    /// disagreement between this and [`IndexerError::Sqlite`] an
-    /// adversarial review found and this module's own tests now cover.
-    /// [`Indexer::full_rebuild`] recovers from this automatically (delete
-    /// `path` and its `-wal`/`-shm` side files, recreate, retry once; the
-    /// module doc's "The index is derived"); [`Indexer::search`] and
+    /// `path` is damaged: either SQLite itself reported
+    /// `ErrorCode::DatabaseCorrupt` directly, or a read got some other
+    /// ambiguous error (round 4's own finding: a corrupted length prefix
+    /// can make SQLite report `ErrorCode::OutOfMemory` instead) and FTS5's
+    /// own `integrity-check` command, asked directly, agreed
+    /// (`diagnose_ambiguous_read_error`). [`Indexer::full_rebuild`]
+    /// recovers from this by dropping and recreating the FTS5 virtual
+    /// table in place, inside its own write transaction (the module doc's
+    /// "A corrupt index is reported honestly, and `full_rebuild` repairs
+    /// it"); `path` is never deleted. [`Indexer::search`] and
     /// [`Indexer::incremental_sync`] report it rather than silently
     /// widening or narrowing what they return, since neither is the
-    /// reconstruction step.
+    /// reconstruction step; corruption found while opening the file at all
+    /// ([`Indexer::open`]) is reported the same way but is never
+    /// self-healed, since destroying a file the caller handed a path to is
+    /// `ProductDb`'s decision, not this module's.
     Corrupt {
         /// The database file SQLite reported corrupt.
         path: PathBuf,
@@ -700,8 +736,16 @@ fn classify_error(path: &Path, context: &str, source: rusqlite::Error) -> Indexe
 /// would fold into [`IndexerError::Sqlite`]. Checked in this order because a
 /// lock or a corrupt page can itself present as a generic `SQLITE_ERROR` in
 /// some SQLite versions, and a real lock or real corruption must never be
-/// misreported as the caller's query being unsafe.
-fn search_error(path: &Path, query: &str, source: rusqlite::Error) -> IndexerError {
+/// misreported as the caller's query being unsafe. Falls back to
+/// [`diagnose_ambiguous_read_error`], not directly to [`IndexerError::Sqlite`],
+/// for the same reason `total_indexed_on` and `current_paths_and_checksums_on`
+/// do: see that function's doc.
+fn search_error(
+    conn: &Connection,
+    path: &Path,
+    query: &str,
+    source: rusqlite::Error,
+) -> IndexerError {
     if is_locked(&source) {
         return IndexerError::Locked {
             path: path.to_owned(),
@@ -718,7 +762,62 @@ fn search_error(path: &Path, query: &str, source: rusqlite::Error) -> IndexerErr
             query: query.to_owned(),
         };
     }
-    IndexerError::sqlite("search", source)
+    diagnose_ambiguous_read_error(conn, path, "search", source)
+}
+
+/// Runs FTS5's own consistency check (`INSERT INTO documents(documents)
+/// VALUES('integrity-check')`, the internal command FTS5 exposes for
+/// exactly this) to settle a read failure that is neither a lock
+/// ([`is_locked`]) nor something [`is_corrupt`] already recognized, rather
+/// than guessing from the error code alone: a re-verification workflow
+/// found that a structural record whose length prefix happens to decode to
+/// an implausible size can make SQLite report `ErrorCode::OutOfMemory`
+/// (`SQLITE_NOMEM`, the allocator refusing an implausible request, not an
+/// actual low-memory condition) instead of `ErrorCode::DatabaseCorrupt` for
+/// the exact same underlying damage; `classify_error` and `search_error`
+/// alone would fold that into [`IndexerError::Sqlite`] and give a caller no
+/// signal to rebuild, the "damage reported as something else" class an
+/// earlier adversarial review already found and fixed once for
+/// [`IndexerError::InvalidQuery`] (round 2, finding 5).
+///
+/// This never infers corruption from the error code alone: a genuine
+/// out-of-memory condition is not corruption and must not be treated as
+/// one, so this asks FTS5 directly, on the same connection (or the same
+/// transaction, which derefs to one) the failing read itself used, and
+/// reports [`IndexerError::Corrupt`] only when FTS5's own check also
+/// fails, keeping the original `source` -- not the integrity check's own
+/// error -- as the diagnostic either way. Checks [`is_locked`] and
+/// [`is_corrupt`] first, the same as [`classify_error`], so this is a
+/// complete drop-in classifier for a read, not just the ambiguous-error
+/// tail of one; [`Indexer::total_indexed_on`] (search's first read) and
+/// [`Indexer::current_paths_and_checksums_on`] (`incremental_sync`'s diff
+/// read) both call this directly, and `search_error` above falls back to
+/// it only after its own query-syntax check, so the two checks this
+/// repeats there are redundant but harmless.
+fn diagnose_ambiguous_read_error(
+    conn: &Connection,
+    path: &Path,
+    context: &str,
+    source: rusqlite::Error,
+) -> IndexerError {
+    if is_locked(&source) {
+        return IndexerError::Locked {
+            path: path.to_owned(),
+        };
+    }
+    if is_corrupt(&source) {
+        return IndexerError::Corrupt {
+            path: path.to_owned(),
+            source,
+        };
+    }
+    match conn.execute_batch("INSERT INTO documents(documents) VALUES('integrity-check');") {
+        Ok(()) => IndexerError::sqlite(context, source),
+        Err(_) => IndexerError::Corrupt {
+            path: path.to_owned(),
+            source,
+        },
+    }
 }
 
 /// Refuses `documents` if any two elements share a `path`: the identity
@@ -1015,7 +1114,9 @@ impl Indexer {
     fn total_indexed_on(conn: &Connection, display_path: &Path) -> Result<usize, IndexerError> {
         let total: i64 = conn
             .query_row("SELECT count(*) FROM documents", [], |row| row.get(0))
-            .map_err(|source| classify_error(display_path, "count documents", source))?;
+            .map_err(|source| {
+                diagnose_ambiguous_read_error(conn, display_path, "count documents", source)
+            })?;
         Ok(total as usize)
     }
 
@@ -1212,7 +1313,8 @@ impl Indexer {
         let mut statement = conn
             .prepare("SELECT path, checksum FROM documents")
             .map_err(|source| {
-                classify_error(
+                diagnose_ambiguous_read_error(
+                    conn,
                     display_path,
                     "prepare a read of paths and checksums",
                     source,
@@ -1224,11 +1326,23 @@ impl Indexer {
                 let checksum: i64 = row.get(1)?;
                 Ok((path, checksum as u64))
             })
-            .map_err(|source| classify_error(display_path, "read paths and checksums", source))?;
+            .map_err(|source| {
+                diagnose_ambiguous_read_error(
+                    conn,
+                    display_path,
+                    "read paths and checksums",
+                    source,
+                )
+            })?;
         let mut out = BTreeMap::new();
         for row in rows {
             let (path, checksum) = row.map_err(|source| {
-                classify_error(display_path, "read one path/checksum row", source)
+                diagnose_ambiguous_read_error(
+                    conn,
+                    display_path,
+                    "read one path/checksum row",
+                    source,
+                )
             })?;
             out.insert(path, checksum);
         }
@@ -1342,12 +1456,12 @@ impl Indexer {
                 let score: f64 = row.get(3)?;
                 Ok((path, kind_text, title, score))
             })
-            .map_err(|source| search_error(&path, query, source))?;
+            .map_err(|source| search_error(&tx, &path, query, source))?;
 
         let mut hits = Vec::new();
         for row in rows {
             let (path_hit, kind_text, title, score) =
-                row.map_err(|source| search_error(&path, query, source))?;
+                row.map_err(|source| search_error(&tx, &path, query, source))?;
             if let Some(kind) = DocumentKind::parse(&kind_text) {
                 hits.push(SearchHit {
                     path: path_hit,
@@ -2631,13 +2745,29 @@ mod tests {
 
     /// Damages every row of the FTS5 shadow table `documents_data` through a
     /// second, independent connection to the same on-disk file: the
-    /// reviewers' own technique, reproduced here.
+    /// reviewers' own technique, reproduced here, with one change from the
+    /// original round-2 version. That version filled each row with
+    /// `randomblob(length(block))`, fresh random bytes on every call; a
+    /// re-verification workflow measured this as reporting
+    /// `ErrorCode::OutOfMemory` (`SQLITE_NOMEM`) instead of
+    /// `ErrorCode::DatabaseCorrupt` roughly 1.3% of the time (random bytes
+    /// occasionally decode as a record claiming an implausible size, which
+    /// SQLite's allocator refuses rather than a plain "this is corrupt"), so
+    /// every test built on this helper was flaky at that same rate. Each
+    /// byte is now fixed at `0xFF` instead, the same length as the row it
+    /// replaces: empirically, and confirmed over hundreds of fresh runs
+    /// during this fix, this always yields `ErrorCode::DatabaseCorrupt`, on
+    /// every corpus shape this module's tests seed, never `OutOfMemory`.
+    /// [`corrupt_fts5_averages_row_with_an_oversized_length_prefix`] below
+    /// is the companion helper for the `OutOfMemory` case specifically:
+    /// this one is deliberately not it.
     fn corrupt_fts5_shadow_table(path: &Path) {
         let raw =
             rusqlite::Connection::open(path).expect("open a second, raw connection to the file");
         let changed = raw
             .execute(
-                "UPDATE documents_data SET block = randomblob(length(block)) \
+                "UPDATE documents_data SET block = \
+                 unhex(replace(hex(zeroblob(length(block))), '00', 'ff')) \
                  WHERE block IS NOT NULL",
                 [],
             )
@@ -2646,6 +2776,54 @@ mod tests {
             changed > 0,
             "the corruption update must actually touch at least one row, or this test proves \
              nothing"
+        );
+    }
+
+    /// The pinned 26-byte replacement this module's own probing found for
+    /// `documents_data`'s row 10 (FTS5's averages record) that makes the
+    /// bundled SQLite report `ErrorCode::OutOfMemory` (`SQLITE_NOMEM`)
+    /// while reading this exact module's 80-document, single-shared-term
+    /// corpus (the same shape
+    /// `tests::ori_t_0035_a_corrupt_index_is_reported_as_corrupt_not_invalid_query`
+    /// seeds): confirmed deterministic over 20 independent fresh runs
+    /// before being pinned here, and stable for the reason
+    /// `diagnose_ambiguous_read_error`'s doc gives (a length prefix
+    /// decoding to an implausible size), not a property of any particular
+    /// corpus content beyond its exact shape. Not a general-purpose
+    /// corruption pattern the way [`corrupt_fts5_shadow_table`] is: it is
+    /// specific to row 10 at this exact length, found empirically rather
+    /// than derived from FTS5's on-disk format, and exists only to prove
+    /// [`diagnose_ambiguous_read_error`] catches the `OutOfMemory` case
+    /// deterministically, not to stand in for corruption generally.
+    const AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX: &str =
+        "556f784c090469b211bcb0a1cc943696ddceafb6a695cb1485d7";
+
+    /// Replaces `documents_data`'s row 10 with
+    /// [`AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX`] through a second,
+    /// independent connection: see that constant's doc for what it is and
+    /// why, and the module doc's "A corrupt index is reported honestly" for
+    /// why this exists as its own helper rather than folded into
+    /// [`corrupt_fts5_shadow_table`].
+    fn corrupt_fts5_averages_row_with_an_oversized_length_prefix(path: &Path) {
+        let raw =
+            rusqlite::Connection::open(path).expect("open a second, raw connection to the file");
+        let bytes: Vec<u8> = (0..AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX[i..i + 2], 16)
+                    .expect("the pinned pattern is valid hex")
+            })
+            .collect();
+        let changed = raw
+            .execute(
+                "UPDATE documents_data SET block = ?1 WHERE rowid = 10",
+                params![bytes],
+            )
+            .expect("replace the averages row directly");
+        assert_eq!(
+            changed, 1,
+            "row 10 must exist and be the one row this replaces, or this test proves nothing \
+             (a schema or FTS5 version change may have moved the averages record)"
         );
     }
 
@@ -2675,10 +2853,65 @@ mod tests {
         corrupt_fts5_shadow_table(&scratch.path.join("fts.sqlite"));
 
         match indexer.search("alpha", 10) {
-            Err(IndexerError::Corrupt { .. }) => {}
+            Err(IndexerError::Corrupt { source, .. }) => {
+                assert!(
+                    matches!(
+                        &source,
+                        rusqlite::Error::SqliteFailure(inner, _)
+                            if inner.code == rusqlite::ErrorCode::DatabaseCorrupt
+                    ),
+                    "corrupt_fts5_shadow_table's fixed pattern must deterministically report \
+                     DatabaseCorrupt, not {source:?}"
+                );
+            }
             other => panic!(
                 "a corrupt index must be reported as IndexerError::Corrupt, with the query \
                  blameless, not {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn ori_t_0035_a_corrupt_index_is_reported_as_corrupt_even_when_sqlite_calls_it_out_of_memory() {
+        // The exact gap a re-verification workflow found: classify_error and
+        // search_error alone treated ErrorCode::OutOfMemory as an ordinary
+        // IndexerError::Sqlite, so a corrupted index that happened to
+        // surface that particular SQLite error code gave a caller no signal
+        // to rebuild. diagnose_ambiguous_read_error closes it by asking
+        // FTS5's own integrity-check rather than guessing from the error
+        // code.
+        let scratch = Scratch::new("corrupt-out-of-memory");
+        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let seed: Vec<IndexableDocument> = (0..80)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "D",
+                    "alpha content shared by every document so the term has a real doclist",
+                )
+            })
+            .collect();
+        indexer.full_rebuild(&seed).expect("seed a real corpus");
+
+        corrupt_fts5_averages_row_with_an_oversized_length_prefix(&scratch.path.join("fts.sqlite"));
+
+        match indexer.search("alpha", 10) {
+            Err(IndexerError::Corrupt { source, .. }) => {
+                assert!(
+                    matches!(
+                        &source,
+                        rusqlite::Error::SqliteFailure(inner, _)
+                            if inner.code == rusqlite::ErrorCode::OutOfMemory
+                    ),
+                    "this test's own pinned pattern must deterministically make SQLite report \
+                     OutOfMemory, or it is not exercising diagnose_ambiguous_read_error's \
+                     reason for existing; got {source:?}"
+                );
+            }
+            other => panic!(
+                "a corrupted index that SQLite itself reports as OutOfMemory must still be \
+                 IndexerError::Corrupt, with the query blameless, not {other:?}"
             ),
         }
     }
