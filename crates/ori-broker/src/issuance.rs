@@ -930,8 +930,16 @@ mod tests {
             "fake-test-model",
             IdentityRuntime::Headless,
             MemoryScopes::default(),
+            family("fake-test-family"),
         )
         .expect("a valid identity is created")
+    }
+
+    /// A declared model family for a test that does not care which, added by
+    /// ORI-T-0108 alongside `AgentIdentity::create`'s new required
+    /// parameter.
+    fn family(text: &str) -> ori_core::types::ModelFamily {
+        ori_core::types::ModelFamily::parse(text).expect("a non-empty family parses")
     }
 
     fn open_db(scratch: &Scratch, product_id: &Id) -> ProductDb {

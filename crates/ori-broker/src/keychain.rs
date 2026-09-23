@@ -758,11 +758,19 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use ori_core::types::Actor;
+    use ori_core::types::ModelFamily;
 
     use super::*;
     use crate::identity::AgentIdentity;
     use crate::identity::IdentityRuntime;
     use crate::identity::MemoryScopes;
+
+    /// A declared model family for a test that does not care which, added by
+    /// ORI-T-0108 alongside `AgentIdentity::create`'s new required
+    /// parameter.
+    fn family(text: &str) -> ModelFamily {
+        ModelFamily::parse(text).expect("a non-empty family parses")
+    }
 
     // -----------------------------------------------------------------------
     // Scratch layout, the same shape crates/ori-store/src/db.rs's own tests
@@ -1024,6 +1032,7 @@ mod tests {
             "fake-test-model",
             IdentityRuntime::Headless,
             MemoryScopes::default(),
+            family("fake-test-family"),
         )
         .expect("identity A is created");
         let identity_b = AgentIdentity::create(
@@ -1033,6 +1042,7 @@ mod tests {
             "fake-test-model",
             IdentityRuntime::Headless,
             MemoryScopes::default(),
+            family("fake-test-family"),
         )
         .expect("identity B is created");
 
