@@ -1597,6 +1597,33 @@ mod tests {
         }
     }
 
+    /// The single clearest falsifiable case for the module doc's "FTS5 query
+    /// safety": `OR` is FTS5's boolean operator when unquoted, so an
+    /// unquoted `"alpha OR beta"` would match every document containing
+    /// either word. Quoted as one literal three-token phrase, it must match
+    /// only a document that actually contains that exact adjacent phrase,
+    /// which neither of these two does, so it must match neither.
+    #[test]
+    fn ori_t_0035_boolean_looking_query_text_is_a_literal_phrase_not_an_operator() {
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer
+            .full_rebuild(&[
+                doc("a.md", DocumentKind::Section, "A", "alpha content"),
+                doc("b.md", DocumentKind::Section, "B", "beta content"),
+            ])
+            .expect("full rebuild");
+
+        let hits = indexer
+            .search("alpha OR beta", 10)
+            .expect("search runs")
+            .hits;
+        assert!(
+            hits.is_empty(),
+            "quoting must stop OR from being read as FTS5's boolean operator, which would \
+             otherwise match both documents: {hits:?}"
+        );
+    }
+
     #[test]
     fn ori_t_0035_search_ranks_more_relevant_documents_first_deterministically() {
         let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
