@@ -136,20 +136,67 @@
 //! degradation is a property of one launch's own detection, not a latched
 //! state a caller would otherwise have to remember to clear.
 //!
+//! # Network egress: the ruling, and why there is no default here
+//!
+//! An earlier draft of this module hard-coded `--network none` on every
+//! container and justified it by CLAUDE.md rule 6, "never add a network call
+//! outside `ori-integrations`, `ori-runtime` and `ori-mcp`." That citation
+//! was wrong: rule 6 restricts which crates *in this repository* may call the
+//! network. It says nothing about the agent process a container runs, and a
+//! real agent runtime, a headless CLI or an ACP agent, calls its own model
+//! provider over the network to do its job at all. With no network, no real
+//! agent can run in container mode, so every session would fall back to
+//! worktree-only, which has the host's network *and* the host's filesystem:
+//! strictly less isolated than a container with egress. An operator ruling
+//! corrected this after the fact: **egress now, provider-only later.**
+//!
+//! [`NetworkPolicy`] is the value this module now makes a caller choose,
+//! explicitly and every time: it carries no [`Default`] impl, and
+//! [`ContainerSpec::new`] and [`ContainerSpec::for_session`] both take it as
+//! a required parameter, so a caller that does not choose does not compile.
+//! [`NetworkPolicy::Isolated`] is `--network none`, still real and still
+//! available for a container with no reason to reach a network at all.
+//! [`NetworkPolicy::Egress`] is Docker's ordinary default bridge network,
+//! stated explicitly in the argv as `--network bridge` rather than left to
+//! Docker's own default by omitting the flag, so the choice is legible in the
+//! argv itself rather than implied by its absence.
+//!
+//! [`ContainerSpec::for_launch`] is the one path a real session launch uses,
+//! and it is always [`NetworkPolicy::Egress`]: a coder's session needs to
+//! reach its configured model provider, and, as of this ticket, there is no
+//! engine-side control standing between a container and the open internet.
+//! **Said plainly, so an operator reading "container mode" does not assume
+//! network isolation**: until ORI-T-0110 (tier 2, an engine-side proxy that
+//! restricts a container's egress to the operator's configured provider
+//! endpoints) exists, a session in container mode has ordinary outbound
+//! network access, the same as any other process on this machine reaches the
+//! internet. What container mode still guarantees over worktree-only, with
+//! every other flag in [`ContainerSpec::run_argv`] held constant regardless
+//! of `network`, is filesystem isolation (`--read-only` root, the worktree as
+//! the only writable mount), capability isolation (`--cap-drop ALL
+//! --security-opt no-new-privileges`) and privilege isolation (a non-root
+//! `--user`). It is not, today, network isolation.
+//!
+//! The Unix-domain-socket idea in that earlier draft ("the session reaches
+//! the engine without a network namespace at all") described a plan, not
+//! something this module builds: [`ContainerSpec::run_argv`] mounts exactly
+//! one path, the worktree (`--volume <worktree>:<workdir>:rw`); no socket
+//! mount exists here, under either [`NetworkPolicy`]. Whether and how the
+//! engine's own RPC socket is exposed to a container is unbuilt, and belongs
+//! to whichever ticket wires ACP or MCP inside a container, not to this one.
+//!
 //! # The isolation flags [`ContainerSpec::run_argv`] chooses, and why
 //!
-//! - **Network: `--network none`.** ADR-0001 fixes the engine's own
-//!   inter-process interface as "JSON-RPC 2.0 over Unix domain socket or
-//!   Windows named pipe," and `spec/SECURITY_NOTES.md`'s trust boundary 2
-//!   says a session "talks to the engine only through the MCP server and
-//!   ACP." Neither needs an IP network: a Unix domain socket is a filesystem
-//!   path, mountable into the container the same way the worktree is, so the
-//!   session reaches the engine without a network namespace at all. CLAUDE.md
-//!   rule 6 forbids a network call from any crate but `ori-integrations`,
-//!   `ori-runtime` and `ori-mcp`; the *container* is not one of those crates,
-//!   it is a coder's own process, so the flag that removes its network access
-//!   entirely is the same rule enforced at the isolation boundary rather than
-//!   only in review.
+//! - **Network: [`NetworkPolicy`], chosen per call, never defaulted.** See
+//!   "Network egress: the ruling, and why there is no default here," above,
+//!   for the full reasoning and the citation this corrects. In short: a real
+//!   agent needs egress to reach its provider, so the real launch path
+//!   ([`ContainerSpec::for_launch`]) is always [`NetworkPolicy::Egress`];
+//!   [`NetworkPolicy::Isolated`] (`--network none`) stays available for a
+//!   container that does not need one. Network is the one flag among the
+//!   four in this list that is not fixed by this module for every container;
+//!   the other three are unconditional under both policies
+//!   (`tests::ori_t_0031_every_other_isolation_flag_is_present_under_both_policies`).
 //! - **User: `--user <uid>:<gid>`.** AICD §17's own principle, "No agent
 //!   ever holds a credential with more rights than its role requires,"
 //!   applies to the OS user a process runs as and not only to the tokens the
@@ -192,6 +239,12 @@
 //!
 //! # What is deliberately not here
 //!
+//! - **Egress restricted to the configured provider.** ORI-T-0110 (tier 2):
+//!   an engine-side proxy limiting a container's outbound reach to the
+//!   operator's own configured provider endpoints. Until it exists,
+//!   [`NetworkPolicy::Egress`] is ordinary outbound access, not a scoped
+//!   allowlist; see "Network egress: the ruling, and why there is no default
+//!   here," above.
 //! - **Execution.** [`ContainerSpec::run_argv`] builds a `Vec<String>` and
 //!   runs nothing; CLAUDE.md's load-bearing fact "Only `ori-runtime` spawns
 //!   processes" names the crate, not this module, and no test in this file
@@ -862,6 +915,42 @@ pub fn resolve_launch(
 }
 
 // ---------------------------------------------------------------------------
+// NetworkPolicy
+// ---------------------------------------------------------------------------
+
+/// Whether a session's container has network egress: an operator ruling
+/// following this ticket, not a default this module reaches for on its own.
+/// See the module doc comment, "Network egress: the ruling, and why there is
+/// no default here," for the reasoning in full.
+///
+/// Deliberately carries no [`Default`] impl: [`ContainerSpec::new`] and
+/// [`ContainerSpec::for_session`] both take it as a required parameter, so a
+/// caller that does not choose does not compile, rather than silently
+/// inheriting whichever variant happened to be listed first.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum NetworkPolicy {
+    /// No network namespace at all (`--network none`). The strongest
+    /// isolation this module offers, and unusable by a real agent runtime,
+    /// which must reach its model provider to do its job.
+    Isolated,
+    /// Ordinary outbound egress: Docker's default bridge network, named
+    /// explicitly in the argv (`--network bridge`) rather than left to
+    /// Docker's own default by omitting the flag.
+    Egress,
+}
+
+impl NetworkPolicy {
+    /// The two argv elements naming this policy: `--network` and its value.
+    #[must_use]
+    pub const fn argv(self) -> [&'static str; 2] {
+        match self {
+            Self::Isolated => ["--network", "none"],
+            Self::Egress => ["--network", "bridge"],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ContainerSpec: the docker run argv
 // ---------------------------------------------------------------------------
 
@@ -878,6 +967,7 @@ pub struct ContainerSpec {
     workdir: String,
     uid: u32,
     gid: u32,
+    network: NetworkPolicy,
 }
 
 impl ContainerSpec {
@@ -897,13 +987,15 @@ impl ContainerSpec {
     ///
     /// The container's name is `ori-session-<session_id>`, the same prefix
     /// `crate::session::Session::in_container`'s own doc comment and test
-    /// fixture use for a container id.
+    /// fixture use for a container id. `network` has no default here; see
+    /// [`NetworkPolicy`]'s own doc comment.
     pub fn new(
         session_id: &Id,
         image: impl Into<String>,
         worktree: impl Into<PathBuf>,
         uid: u32,
         gid: u32,
+        network: NetworkPolicy,
     ) -> Result<Self, ContainerError> {
         let image = image.into();
         if image.trim().is_empty() {
@@ -923,16 +1015,18 @@ impl ContainerSpec {
             workdir: Self::WORKDIR.to_owned(),
             uid,
             gid,
+            network,
         })
     }
 
     /// [`ContainerSpec::new`] with [`Self::UNPRIVILEGED_UID`] and
     /// [`Self::UNPRIVILEGED_GID`], for a caller with no host identity to
-    /// supply yet.
+    /// supply yet. `network` is still required: see [`NetworkPolicy`].
     pub fn for_session(
         session_id: &Id,
         image: impl Into<String>,
         worktree: impl Into<PathBuf>,
+        network: NetworkPolicy,
     ) -> Result<Self, ContainerError> {
         Self::new(
             session_id,
@@ -940,7 +1034,25 @@ impl ContainerSpec {
             worktree,
             Self::UNPRIVILEGED_UID,
             Self::UNPRIVILEGED_GID,
+            network,
         )
+    }
+
+    /// The `ContainerSpec` a real session launch builds: always
+    /// [`NetworkPolicy::Egress`], the operator's ruling (module doc comment,
+    /// "Network egress: the ruling, and why there is no default here"). Not a
+    /// caller choice here, unlike [`ContainerSpec::new`] and
+    /// [`ContainerSpec::for_session`]: a real agent cannot do its job without
+    /// reaching its model provider, so the launch path does not offer
+    /// [`NetworkPolicy::Isolated`] as an option.
+    pub fn for_launch(
+        session_id: &Id,
+        image: impl Into<String>,
+        worktree: impl Into<PathBuf>,
+        uid: u32,
+        gid: u32,
+    ) -> Result<Self, ContainerError> {
+        Self::new(session_id, image, worktree, uid, gid, NetworkPolicy::Egress)
     }
 
     /// The container's name, the same opaque string
@@ -956,6 +1068,12 @@ impl ContainerSpec {
         &self.worktree
     }
 
+    /// The network policy this container was built with.
+    #[must_use]
+    pub const fn network(&self) -> NetworkPolicy {
+        self.network
+    }
+
     /// The `docker run` argv for this session, without the leading `docker`.
     ///
     /// See the module doc comment, "The isolation flags `ContainerSpec::run_argv`
@@ -966,12 +1084,13 @@ impl ContainerSpec {
     /// of this ticket's declared scope regardless.
     #[must_use]
     pub fn run_argv(&self) -> Vec<String> {
+        let [network_flag, network_value] = self.network.argv();
         vec![
             "run".to_owned(),
             "--name".to_owned(),
             self.name.clone(),
-            "--network".to_owned(),
-            "none".to_owned(),
+            network_flag.to_owned(),
+            network_value.to_owned(),
             "--read-only".to_owned(),
             "--cap-drop".to_owned(),
             "ALL".to_owned(),
@@ -1579,21 +1698,12 @@ mod tests {
     // ContainerSpec: the docker run argv
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn ori_p1_032_the_run_argv_mounts_the_worktree_and_carries_no_rm_no_secret() {
-        let worktree = std::env::temp_dir().join("ori-t-0031-worktree");
-        let spec = ContainerSpec::for_session(&id("SESSION"), "ori/coder:latest", &worktree)
-            .expect("a valid spec");
-        assert_eq!(
-            spec.name(),
-            format!("ori-session-{}", id("SESSION").as_str())
-        );
-        assert_eq!(spec.worktree(), worktree);
-
-        let argv = spec.run_argv();
+    /// Every isolation flag but network, present regardless of `network`:
+    /// `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
+    /// `--user <uid>:<gid>`, the worktree volume, `--workdir`, the image
+    /// last, no `--rm`, no `--env`.
+    fn assert_flags_other_than_network(argv: &[String], worktree: &Path) {
         assert_eq!(argv[0], "run");
-        assert!(argv.contains(&"--network".to_owned()));
-        assert!(argv.contains(&"none".to_owned()));
         assert!(argv.contains(&"--read-only".to_owned()));
         assert!(argv.contains(&"--cap-drop".to_owned()));
         assert!(argv.contains(&"ALL".to_owned()));
@@ -1623,9 +1733,92 @@ mod tests {
     }
 
     #[test]
+    fn ori_p1_032_the_launch_path_uses_egress_and_keeps_every_other_isolation_flag() {
+        // Operator ruling, following this ticket: a real session launch
+        // needs egress to reach its model provider, so ContainerSpec::for_launch
+        // is always NetworkPolicy::Egress, never NetworkPolicy::Isolated.
+        let worktree = std::env::temp_dir().join("ori-t-0031-worktree-launch");
+        let spec = ContainerSpec::for_launch(
+            &id("SESSION"),
+            "ori/coder:latest",
+            &worktree,
+            ContainerSpec::UNPRIVILEGED_UID,
+            ContainerSpec::UNPRIVILEGED_GID,
+        )
+        .expect("a valid spec");
+        assert_eq!(spec.network(), NetworkPolicy::Egress);
+        assert_eq!(
+            spec.name(),
+            format!("ori-session-{}", id("SESSION").as_str())
+        );
+        assert_eq!(spec.worktree(), worktree);
+
+        let argv = spec.run_argv();
+        assert!(argv.contains(&"--network".to_owned()));
+        assert!(
+            argv.contains(&"bridge".to_owned()),
+            "egress is stated explicitly as bridge, not omitted: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|arg| arg == "none"),
+            "the launch path never emits the isolated policy: {argv:?}"
+        );
+        assert_flags_other_than_network(&argv, &worktree);
+    }
+
+    #[test]
+    fn ori_t_0031_the_isolated_policy_emits_network_none() {
+        let worktree = std::env::temp_dir().join("ori-t-0031-worktree-isolated");
+        let spec = ContainerSpec::for_session(
+            &id("SESSION"),
+            "ori/coder:latest",
+            &worktree,
+            NetworkPolicy::Isolated,
+        )
+        .expect("a valid spec");
+        assert_eq!(spec.network(), NetworkPolicy::Isolated);
+
+        let argv = spec.run_argv();
+        assert!(argv.contains(&"--network".to_owned()));
+        assert!(argv.contains(&"none".to_owned()));
+        assert!(
+            !argv.iter().any(|arg| arg == "bridge"),
+            "the isolated policy never emits egress: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn ori_t_0031_every_other_isolation_flag_is_present_under_both_policies() {
+        // Trap: an egress-capable container is easy to accidentally build
+        // with a dropped flag along the way, since network is now the one
+        // choice that varies. This is what AICD §14's own ruling-triggered
+        // plant, "an isolation flag is dropped when egress is chosen,"
+        // catches directly.
+        let worktree = std::env::temp_dir().join("ori-t-0031-worktree-both");
+        for network in [NetworkPolicy::Isolated, NetworkPolicy::Egress] {
+            let spec = ContainerSpec::new(
+                &id("SESSION"),
+                "ori/coder:latest",
+                &worktree,
+                ContainerSpec::UNPRIVILEGED_UID,
+                ContainerSpec::UNPRIVILEGED_GID,
+                network,
+            )
+            .expect("a valid spec");
+            let argv = spec.run_argv();
+            assert_flags_other_than_network(&argv, &worktree);
+        }
+    }
+
+    #[test]
     fn ori_t_0031_a_relative_worktree_is_refused() {
-        let error = ContainerSpec::for_session(&id("SESSION"), "img", "relative/path")
-            .expect_err("a relative path is refused");
+        let error = ContainerSpec::for_session(
+            &id("SESSION"),
+            "img",
+            "relative/path",
+            NetworkPolicy::Egress,
+        )
+        .expect_err("a relative path is refused");
         assert!(matches!(
             error,
             ContainerError::Malformed {
@@ -1640,8 +1833,9 @@ mod tests {
     #[test]
     fn ori_t_0031_an_empty_image_is_refused() {
         let worktree = std::env::temp_dir().join("ori-t-0031-worktree-2");
-        let error = ContainerSpec::for_session(&id("SESSION"), "   ", &worktree)
-            .expect_err("an empty image is refused");
+        let error =
+            ContainerSpec::for_session(&id("SESSION"), "   ", &worktree, NetworkPolicy::Egress)
+                .expect_err("an empty image is refused");
         assert!(matches!(
             error,
             ContainerError::Malformed { what: "image", .. }
