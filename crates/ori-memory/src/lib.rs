@@ -6,3 +6,5 @@
 //!
 //! Must not: return unsanitized production content in a package
 //! (`spec/LLD.md` section 2).
+
+pub mod barrier;

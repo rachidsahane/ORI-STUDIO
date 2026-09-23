@@ -289,7 +289,10 @@ dependencies = [
 name = "ori-memory"
 version = "0.1.0"
 dependencies = [
+ "ori-core",
  "ori-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
