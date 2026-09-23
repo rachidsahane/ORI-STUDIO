@@ -5,7 +5,7 @@
 | Trigger | `new_dependency` |
 | Raised by | Lead, at batch 2 planning, before any ticket that needs one is started |
 | Blocks | ORI-T-0020, ORI-T-0021 and ORI-T-0022 (property tests). ORI-T-0019 is unaffected and starts now |
-| State | Open, with the operator |
+| State | Answered by the operator in session on 2026-09-22: `proptest`, `rusqlite`, a hashing crate (`sha2` was taken) and `keyring` approved, each pinned to an exact version with `Cargo.lock` committed. `tantivy` and `tree-sitter` were not part of that answer and remain open for batch 6. Recorded here on 2026-09-23, after ORI-T-0026's coder found this line still read "Open" while four crates had been added on the answer |
 
 ## Why this is raised at all
 
