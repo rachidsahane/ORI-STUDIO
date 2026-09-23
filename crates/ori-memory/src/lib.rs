@@ -9,3 +9,4 @@
 
 pub mod barrier;
 pub mod code_map;
+pub mod indexer;
