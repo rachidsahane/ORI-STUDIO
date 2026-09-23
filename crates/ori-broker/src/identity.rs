@@ -13,7 +13,8 @@
 //! `spec/DATA_MODEL.md` section 2: "**AgentIdentity** | id, product_id, role
 //! (coder, lead, qa, operations, documentation, product_signal, assistant),
 //! model, runtime (acp, headless), scopes (memory), permissions (json), state
-//! (active, suspended) |". Seven fields, seven below:
+//! (active, suspended) |". Seven fields there; eight below, `family` being
+//! the one the row does not yet name.
 //!
 //! - `id`, `product_id`: [`ori_core::types::Id`], the same identifier type
 //!   every other entity in this workspace uses. This module never generates
@@ -26,11 +27,23 @@
 //!   would be a second copy of a seven-way enumeration with no way to keep
 //!   the two in step, and `permissions_snapshot` below would have to guess
 //!   which one AICD §17 was talking about.
-//! - `model`: a plain string naming the model this identity runs on. This
-//!   ticket's declared scope is `identity.rs` and `keychain.rs`; the
-//!   cross-model refusal at creation time (ADR-0001 "model family", AICD §7,
-//!   criterion ORI-P1-035) is `family.rs`, ORI-T-0028's file. Refused here
-//!   only if empty, which no cross-model rule needs to know about.
+//! - `model`: a plain string naming the model this identity runs on. Refused
+//!   here only if empty, which no cross-model rule needs to know about.
+//! - `family`: [`ori_core::types::ModelFamily`], required, never optional.
+//!   ORI-T-0108, implementing the operator's ruling on escalation 6
+//!   (`ops/phase-1-backlog.md`): ADR-0001 "Model family" originally recorded
+//!   the family on `ProviderBinding`, which the ruling replaced with this
+//!   field, because `ProviderBinding` (`keychain.rs`) carries no `model` and
+//!   cannot tell apart two identities on the same provider but different
+//!   models. A runtime adapter declares the family; the caller that has one
+//!   (a flow, `ori-runtime`'s spawn path) passes it here already validated
+//!   ([`ori_core::types::ModelFamily::parse`] refused anything malformed
+//!   before this function ever saw it), so [`AgentIdentity::create`] itself
+//!   does no further validation of it, only stores it. This function does
+//!   not enforce ADR-0001's cross-model refusal itself (see "What 'the
+//!   creation path' is, here" below); [`crate::registration::register_identity`]
+//!   does, using `family.rs`'s [`crate::family::refuse_lead_sharing_family_with_coders`]
+//!   and [`crate::family::refuse_coder_sharing_family_with_leads`].
 //! - `runtime`: [`IdentityRuntime`], the wire values `spec/DATA_MODEL.md`
 //!   section 2 states, "acp, headless".
 //! - `scopes`: [`MemoryScopes`], the memory layers and filters
@@ -56,13 +69,22 @@
 //! # What "the creation path" is, here
 //!
 //! [`AgentIdentity::create`], a pure constructor: it validates `model` and
-//! `scopes`, derives `permissions` from `role`, and returns an
-//! [`IdentityState::Active`] value. It does no IO and holds no connection,
-//! matching this crate's dependency-only need for `ori-store`'s *types*
-//! (`ori_core::types::Id`) here; the event this identity's creation is
-//! recorded under, and the full `CredentialIssuance` lifecycle a session
-//! needs, are `keychain.rs`'s `keychain::record_binding_resolved`
-//! and ORI-T-0027's `issuance.rs` respectively, not this function.
+//! `scopes`, derives `permissions` from `role`, stores `family` as given, and
+//! returns an [`IdentityState::Active`] value. It does no IO and holds no
+//! connection, matching this crate's dependency-only need for `ori-store`'s
+//! *types* (`ori_core::types::Id`) here; the event this identity's creation
+//! is recorded under, and the full `CredentialIssuance` lifecycle a session
+//! needs, are `keychain.rs`'s `keychain::record_binding_resolved`,
+//! ORI-T-0027's `issuance.rs`, and ORI-T-0108's
+//! `crate::registration::register_identity` respectively, not this function.
+//! This function staying pure is deliberate, not an oversight: ADR-0001's
+//! cross-model refusal needs to compare against every other identity already
+//! known for the product, which needs a read of the event log, which is IO;
+//! putting that read here would make every existing caller of `create` (a
+//! pure, in-memory constructor today, including this module's own tests)
+//! suddenly need a database connection it has no reason to hold. See
+//! [`crate::registration`]'s own doc comment for where that comparison
+//! actually happens instead, and why a caller cannot silently skip it there.
 //!
 //! Must not: persist secrets anywhere but the keychain (`spec/LLD.md`
 //! section 2, inherited from the crate). Nothing here reads or writes a
@@ -74,6 +96,7 @@ use std::collections::BTreeSet;
 
 use ori_core::permission;
 use ori_core::types::Id;
+use ori_core::types::ModelFamily;
 use ori_core::types::Role;
 
 // ---------------------------------------------------------------------------
@@ -354,20 +377,29 @@ pub struct AgentIdentity {
     scopes: MemoryScopes,
     permissions: String,
     state: IdentityState,
+    family: ModelFamily,
 }
 
 impl AgentIdentity {
     /// The creation path: `spec/DATA_MODEL.md` section 2's `AgentIdentity`
-    /// row, in the shape ORI-T-0026 asks for.
+    /// row, in the shape ORI-T-0026 asks for, plus `family`
+    /// (ORI-T-0108, the operator's ruling on escalation 6).
     ///
     /// Refuses ([`IdentityError::Malformed`]) an empty or whitespace-only
     /// `model`; `scopes` is already validated by [`MemoryScopes::new`], so a
     /// caller cannot construct one holding an empty label to begin with.
-    /// `permissions` is not a parameter: it is `permissions_snapshot` of
-    /// `role`, always, so it can never disagree with `role`. The identity
-    /// this returns always holds [`IdentityState::Active`]; there is no
-    /// parameter to start one suspended, matching this module's doc comment,
-    /// "What 'the creation path' is, here".
+    /// `family` is already validated by [`ModelFamily::parse`] before it
+    /// reaches here, the same way `scopes` is; there is no way to construct a
+    /// [`ModelFamily`] this function would need to re-refuse, and no way to
+    /// omit it; `family` is a required parameter, not `Option<ModelFamily>`,
+    /// because an identity with no family is the fail-open case ORI-T-0028's
+    /// checks exist to prevent (see the module doc comment, "Fields, and
+    /// where each one comes from"). `permissions` is not a parameter: it is
+    /// `permissions_snapshot` of `role`, always, so it can never disagree
+    /// with `role`. The identity this returns always holds
+    /// [`IdentityState::Active`]; there is no parameter to start one
+    /// suspended, matching this module's doc comment, "What 'the creation
+    /// path' is, here".
     pub fn create(
         id: Id,
         product_id: Id,
@@ -375,6 +407,7 @@ impl AgentIdentity {
         model: impl Into<String>,
         runtime: IdentityRuntime,
         scopes: MemoryScopes,
+        family: ModelFamily,
     ) -> Result<Self, IdentityError> {
         let model = model.into();
         let trimmed = model.trim();
@@ -391,6 +424,7 @@ impl AgentIdentity {
             scopes,
             permissions,
             state: IdentityState::Active,
+            family,
         })
     }
 
@@ -416,6 +450,15 @@ impl AgentIdentity {
     #[must_use]
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// The declared model family this identity runs on: ADR-0001 "Model
+    /// family", AICD §7. Required, never absent; see
+    /// [`AgentIdentity::create`]'s own doc comment for why this is not
+    /// `Option<&ModelFamily>`.
+    #[must_use]
+    pub const fn family(&self) -> &ModelFamily {
+        &self.family
     }
 
     /// Which runtime this identity's sessions launch through.
@@ -463,6 +506,13 @@ mod tests {
         MemoryScopes::new(["canonical", "code_map"]).expect("two non-empty scope names")
     }
 
+    /// A declared model family for a test that does not care which, added by
+    /// ORI-T-0108 alongside `AgentIdentity::create`'s new required
+    /// parameter.
+    fn family(text: &str) -> ModelFamily {
+        ModelFamily::parse(text).expect("a non-empty family parses")
+    }
+
     #[test]
     fn ori_t_0026_create_reads_every_field_of_the_data_model_row() {
         let identity = AgentIdentity::create(
@@ -472,6 +522,7 @@ mod tests {
             "claude-test-model",
             IdentityRuntime::Headless,
             scopes(),
+            family("claude-3"),
         )
         .expect("a valid identity is created");
 
@@ -494,6 +545,7 @@ mod tests {
                 "m",
                 IdentityRuntime::Acp,
                 MemoryScopes::default(),
+                family("m-family"),
             )
             .expect("a minimal identity is created");
             assert_eq!(identity.state(), IdentityState::Active);
@@ -510,6 +562,7 @@ mod tests {
                 bad,
                 IdentityRuntime::Acp,
                 MemoryScopes::default(),
+                family("m-family"),
             )
             .expect_err("an empty model is refused");
             assert!(matches!(
@@ -528,6 +581,7 @@ mod tests {
             "  claude  ",
             IdentityRuntime::Acp,
             MemoryScopes::default(),
+            family("claude-3"),
         )
         .expect("a model with surrounding whitespace is created");
         assert_eq!(identity.model(), "claude");
@@ -596,6 +650,7 @@ mod tests {
             "m",
             IdentityRuntime::Acp,
             MemoryScopes::default(),
+            family("m-family"),
         )
         .expect("identity created");
         let snapshot = identity.permissions();
@@ -627,6 +682,7 @@ mod tests {
             "m",
             IdentityRuntime::Acp,
             MemoryScopes::default(),
+            family("m-family"),
         )
         .expect("identity created");
         let qa = AgentIdentity::create(
@@ -636,6 +692,7 @@ mod tests {
             "m",
             IdentityRuntime::Acp,
             MemoryScopes::default(),
+            family("m-family"),
         )
         .expect("identity created");
         assert_ne!(coder.permissions(), qa.permissions());
@@ -650,6 +707,7 @@ mod tests {
             "m",
             IdentityRuntime::Acp,
             scopes(),
+            family("m-family"),
         )
         .expect("identity a");
         let b = AgentIdentity::create(
@@ -659,6 +717,7 @@ mod tests {
             "m",
             IdentityRuntime::Acp,
             scopes(),
+            family("m-family"),
         )
         .expect("identity b");
         assert_eq!(a, b);
