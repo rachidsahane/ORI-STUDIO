@@ -9,6 +9,7 @@
 
 pub mod budget;
 pub mod container;
+pub mod injector;
 pub mod recovery;
 pub mod session;
 pub mod transcript;
