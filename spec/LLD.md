@@ -66,7 +66,7 @@ flowchart TB
 |---|---|---|
 | ori-core | `Product`, `Ticket`, `Document`, state machines as pure functions (`Ticket::apply(event) -> Result<Ticket>`), `Category`, `Tier`, `Role`, `Scope`, error enum with methodology-section reasons | Do IO, import any other workspace crate |
 | ori-store | `EventLog` (append, hash chain, read range), projections, migrations, `ProductDb` open/lock | Contain business rules |
-| ori-memory | `Layer`, `Indexer` (tantivy), `CodeMap` (tree-sitter), `Barrier` (sanitize), `ScopeEnforcer`, `Retrieval` (context package), `Freshness`, `DriftAudit`, `CitationChecker` | Return unsanitized production content in a package |
+| ori-memory | `Layer`, `Indexer` (SQLite FTS5, ADR-0003), `CodeMap` (tree-sitter), `Barrier` (sanitize), `ScopeEnforcer`, `Retrieval` (context package), `Freshness`, `DriftAudit`, `CitationChecker` | Return unsanitized production content in a package |
 | ori-broker | `Identity`, `Issuance`, `Keychain` (keyring), `ForbiddenActionTest` | Persist secrets anywhere but the keychain |
 | ori-runtime | `Session`, `Worktree`, `Container` (docker or podman CLI), `AcpClient`, `HeadlessAdapter` trait and implementations, `Budget` meter, `Transcript`, `Injector` (env or file at spawn) | Merge, write `spec/` or `ops/`, hold credentials beyond a session |
 | ori-gates | `GateDef`, `Runner` trait, built-in runners (coverage matrix, modified tests, significance, citation, liveness), `Prover` (planted defect) | Report a gate installed without a proof |
@@ -110,7 +110,7 @@ Tokio runtime in the engine. The event log is written by a single writer task; a
   app.toml                 # application-level config (non-secret): host connection, defaults, org repo path
   products/<product_id>/
     product.sqlite           # event log + projections
-    index/                   # tantivy segments, vectors
+    index/                   # SQLite FTS5 tables (ADR-0003); vectors planned, sqlite-vec, phase 2 (ADR-0001), not yet built
     sessions/<session_id>/   # transcripts, logs
     evidence/<blob_id>       # raw evidence, never indexed
     lock                     # single-writer lock

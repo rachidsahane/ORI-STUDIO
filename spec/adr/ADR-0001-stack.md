@@ -58,7 +58,7 @@ Ori Studio is an open-source, local-first desktop application with an engine tha
 | Desktop shell | Tauri 2, engine linked in-process, engine also runnable as a daemon with the same API |
 | UI | SolidJS with TypeScript, Vite; Monaco (read-only except `spec/`) for files and diffs; xterm.js for the terminal |
 | Durable state | SQLite (per product, one file), WAL mode, schema migrations versioned |
-| Full-text index | tantivy |
+| Full-text index | SQLite FTS5, supersedes tantivy; see ADR-0003 |
 | Vector index | sqlite-vec (phase 2), embeddings through the user's own provider |
 | Code map | tree-sitter with per-language grammars loaded on demand |
 | Event log | Append-only table in SQLite; every state change is an event; state is a projection |
