@@ -58,6 +58,15 @@ CREATE TABLE proj_locks (
     acquired_at INTEGER NOT NULL
 );
 
+-- The query pattern `lock.released` runs today
+-- (`DELETE FROM proj_locks WHERE ticket_id = ?1`,
+-- `crates/ori-store/src/projections/lock.rs`'s own doc, "Why release is by
+-- ticket and never by module"): without this index, releasing one ticket's
+-- modules scans every row this table holds. Not partial, unlike
+-- `migrations/0001_init.sql`'s `events_ticket_id_idx`: `ticket_id` is
+-- `NOT NULL` on every row of this table, so there is no absence to exclude.
+CREATE INDEX proj_locks_ticket_id_idx ON proj_locks (ticket_id);
+
 -- `proj_escalations`: `spec/DATA_MODEL.md` section 2's Escalation row, "id,
 -- ticket_id, trigger, question, recommendation, context_package_ref, state
 -- (open, answered), answered_by, answer, answered_at". Keyed by the
@@ -81,3 +90,14 @@ CREATE TABLE proj_escalations (
     last_seq       INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
 );
+
+-- No query in this crate reads by ticket_id yet: this projection only ever
+-- writes and reads by `escalation_id`. Added ahead of that caller anyway,
+-- for the query pattern `spec/DATA_MODEL.md` section 1's
+-- `Ticket ||--o{ Escalation : raises` implies is coming, "every escalation
+-- one ticket raised", and because this table's text freezes the moment
+-- migration 2 first runs anywhere (`crates/ori-store/src/db.rs`'s own rule,
+-- "a migration may never be edited after it has run anywhere"): an index a
+-- later caller needs is free to add now and impossible to add later without
+-- a new migration.
+CREATE INDEX proj_escalations_ticket_id_idx ON proj_escalations (ticket_id);
