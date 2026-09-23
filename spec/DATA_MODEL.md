@@ -50,7 +50,7 @@ Identifiers are ULIDs unless stated. Timestamps are UTC. "Immutable" means the r
 | **PullRequest** | id, ticket_id, remote_ref, branch, tier, state (open, ready, changes_requested, approved, merged, closed), approvals (json: identity or human, time), rollback_plan | |
 | **Escalation** | id, ticket_id, trigger (enum from methodology 12), question, recommendation, context_package_ref, state (open, answered), answered_by, answer, answered_at | Answers are audited decisions |
 | **Report** | id, ticket_id, kind (closing, blocked, qa_run, drift_audit, incident, post_mortem), content, session_id | Immutable; also written to ops/ |
-| **AgentIdentity** | id, product_id, role (coder, lead, qa, operations, documentation, product_signal, assistant), model, runtime (acp, headless), scopes (memory), permissions (json), state (active, suspended) | |
+| **AgentIdentity** | id, product_id, role (coder, lead, qa, operations, documentation, product_signal, assistant), model, family, runtime (acp, headless), scopes (memory), permissions (json), state (active, suspended) | |
 | **AgentSession** | id, identity_id, ticket_id (nullable for unattended), worktree, container_id, started_at, ended_at, budget_used (attempts, seconds, tokens), outcome (completed, blocked, escalated, killed) | Transcript stored as a file, referenced |
 | **CredentialIssuance** | id, identity_id, session_id, scope, issued_at, expires_at, revoked_at | Never stores the secret |
 | **Gate** | id, product_id, kind (lint, types, tests, coverage_matrix, mutation, dependency_audit, secret_scan, build, modified_tests, significance, liveness, citation, commit_trailers, diagram, forbidden_action), definition (json), state (defined, proven, installed, inert) | `installed` requires a GateProof |

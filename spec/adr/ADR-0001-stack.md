@@ -64,7 +64,7 @@ Ori Studio is an open-source, local-first desktop application with an engine tha
 | Event log | Append-only table in SQLite; every state change is an event; state is a projection |
 | Agent isolation | git worktrees always; containers by default for coder agents (Docker or Podman, user's choice); worktree-only as a documented downgrade |
 | Agent protocol | ACP client; headless CLI adapter trait for runtimes without ACP |
-| Model family | The unit of cross-model separation: the provider's model family identifier, declared by each runtime adapter through its `RuntimeCaps` and recorded on the `ProviderBinding`; `broker.identity.create` refuses a lead identity whose family equals that of the coders it reviews |
+| Model family | The unit of cross-model separation: the provider's model family identifier, declared by each runtime adapter through its `RuntimeCaps`, passed by the engine to `broker.identity.create` as a `ModelFamily` value type in `ori-core`, and recorded on `AgentIdentity`; `broker.identity.create` refuses a lead identity whose family equals that of the coders it reviews |
 | Credentials | OS keychain through a Rust keyring library; per-agent short-lived tokens; version control host through app installation tokens |
 | Inter-process interface | JSON-RPC 2.0 over Unix domain socket or Windows named pipe; WebSocket transport for headless remote (phase 4) |
 | MCP | Official MCP semantics: the engine is an MCP host for the user's servers and an MCP server toward agents |
