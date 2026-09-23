@@ -64,7 +64,7 @@ Ticket batches in dependency order. Each becomes several tickets with declared s
 3. ori-store: event log with hash chain, projections, migrations, rebuild.
 4. ori-broker: identities, keychain, forbidden-action test harness.
 5. ori-runtime: worktrees, ACP client, one headless adapter, credential injection at spawn, budgets, transcripts, session recovery.
-6. ori-memory: repository indexer (tantivy), code map (tree-sitter, initial languages: Rust, TypeScript, Python, Go), operational log, sanitization barrier with planted injection tests, scope enforcer, retrieval package, citation checker, drift audit.
+6. ori-memory: repository indexer (SQLite FTS5, ADR-0003), code map (tree-sitter, initial languages: Rust, TypeScript, Python, Go), operational log, sanitization barrier with planted injection tests, scope enforcer, retrieval package, citation checker, drift audit.
 7. ori-gates: coverage matrix, modified tests, significance, prover, liveness definition.
 8. ori-orchestrator: lifecycle, lock table, escalation triggers, budgets, closing rules, merge queue (tier 0 and 1).
 9. ori-watch: tree watcher, git hooks, attribution, unattributed changes, merge block.
