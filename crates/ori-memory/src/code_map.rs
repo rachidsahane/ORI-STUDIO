@@ -4623,6 +4623,39 @@ mod tests {
         );
     }
 
+    /// Item 2 (HIGH), the internal deadline check directly, not by timing: on
+    /// this chain, only the single leaf node at the very end of the walk is
+    /// marked resolved, every ancestor along the way is not, so a walk that
+    /// stops early (deadline already past) can only return `None`, never the
+    /// correct answer. This is a functional, non-flaky way to prove
+    /// `longest_prefix`'s own periodic deadline check actually stops the
+    /// walk, independent of how fast the trie itself is at any given depth.
+    #[test]
+    fn ori_t_0036_rust_module_index_longest_prefix_respects_an_expired_deadline() {
+        let depth = 10_000;
+        let mut known: HashSet<String> = HashSet::new();
+        let mut path = String::from("src");
+        for _ in 0..depth {
+            path.push_str("/a");
+        }
+        path.push_str(".rs");
+        known.insert(path.clone());
+        known.insert("src/lib.rs".to_owned());
+        let index = RustModuleIndex::build(&known);
+
+        let segments: Vec<String> = (0..depth).map(|_| "a".to_owned()).collect();
+        let segment_refs: Vec<&str> = segments.iter().map(String::as_str).collect();
+
+        let already_past = Instant::now() - Duration::from_secs(1);
+        let resolved = index.longest_prefix("src", segment_refs.into_iter(), already_past);
+        assert_ne!(
+            resolved.as_deref(),
+            Some(path.as_str()),
+            "an already-expired deadline must stop the walk before it reaches the one node \
+             (at the very end of this chain) that would resolve correctly"
+        );
+    }
+
     /// Item 4 (mutant survival): removing the `interfaces` sort passes every
     /// existing test because every existing fixture's pub items are already
     /// in ascending line order (tree-sitter visits source in document
