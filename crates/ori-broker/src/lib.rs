@@ -20,4 +20,5 @@
 
 pub mod family;
 pub mod identity;
+pub mod issuance;
 pub mod keychain;
