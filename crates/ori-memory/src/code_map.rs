@@ -2572,6 +2572,40 @@ mod tests {
         drop(guard);
     }
 
+    /// Defect 1 and 8 (the `take(cap + 1)` bound) from this ticket's
+    /// adversarial review: the test above checks the returned `SkipReason`,
+    /// not what was actually read, so a mutant that replaced the bounded
+    /// `Read::take` with a `stat`-then-`fs::read` (reporting the file's real
+    /// size in `bytes`) survives it undetected. A file far larger than the
+    /// cap is used here, and `bytes` is asserted close to the cap, never
+    /// close to the file's real size, which only a bounded read can report.
+    #[test]
+    fn ori_t_0036_the_size_cap_bounds_bytes_actually_read_not_a_stated_size() {
+        let dir = temp_dir("too-large-bounded");
+        let guard = DropGuard(dir.clone());
+        let big = vec![b'a'; 10_000_000];
+        fs::write(dir.join("big.rs"), &big).expect("write big fixture file");
+        let options = CodeMapOptions {
+            max_file_bytes: 100,
+            ..CodeMapOptions::default()
+        };
+        let map = build_code_map_with_options(&dir, &options).expect("maps");
+        assert_eq!(map.coverage.files_skipped.len(), 1);
+        match &map.coverage.files_skipped[0].reason {
+            SkipReason::TooLarge { cap, bytes } => {
+                assert_eq!(*cap, 100);
+                assert!(
+                    *bytes <= 101,
+                    "bytes reported ({bytes}) must be bounded near the cap (101), not the \
+                     file's real size ({}), which is what a bounded read means",
+                    big.len()
+                );
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+        drop(guard);
+    }
+
     #[test]
     fn ori_t_0036_a_binary_file_with_a_supported_extension_is_skipped_as_binary() {
         let dir = temp_dir("binary");
