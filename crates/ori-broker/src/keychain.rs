@@ -168,7 +168,7 @@ use crate::identity::AgentIdentity;
 ///    dependency, which is itself CLAUDE.md rule 6's `new_dependency`
 ///    escalation, not a decision this ticket makes. So the absence is not
 ///    "nobody got around to it" but "the trait this type would need to
-///    implement is not nameable from this crate's source at all" — structural,
+///    implement is not nameable from this crate's source at all": structural,
 ///    not a missing `impl` block a future edit could add without first
 ///    crossing an escalation.
 /// 4. **No path out into an owned `String` except through
@@ -389,8 +389,8 @@ pub struct KeyringBackedKeychain {
     /// keychain service the way `spec/SECURITY_NOTES.md` "Configuration
     /// scopes and trust" describes ("held once in the OS keychain and used by
     /// every project's engine through the broker; project-level overrides are
-    /// separate keychain entries" — the separateness comes from `user`, this
-    /// module's `KeyRef`, not from a second service name).
+    /// separate keychain entries", and the separateness comes from `user`,
+    /// this module's `KeyRef`, not from a second service name).
     service: String,
 }
 
@@ -471,7 +471,7 @@ impl Keychain for KeyringBackedKeychain {
 /// `#[cfg(test)]`: this crate's own `#[cfg(test)] mod tests` blocks are what
 /// need it, and a `#[cfg(test)]` item is visible only within the crate that
 /// declares it under that configuration, at the configuration the *user* of
-/// the item was compiled under — an external crate's own `#[cfg(test)]`
+/// the item was compiled under: an external crate's own `#[cfg(test)]`
 /// integration tests cannot see an item another crate marked `#[cfg(test)]`
 /// even when both are compiled as tests, so gating this would leave a future
 /// sibling crate's tests with no fake to depend on and one more reason to
@@ -683,8 +683,8 @@ pub fn resolve_provider_binding<'a>(
 /// say who or what that was.
 ///
 /// This is the resolution-event half of `CredentialIssuance`
-/// (`spec/DATA_MODEL.md` section 2) ORI-P1-037 exercises. The full entity —
-/// `scope`, `expires_at`, `revoked_at`, one row bound to one session — is
+/// (`spec/DATA_MODEL.md` section 2) ORI-P1-037 exercises. The full entity,
+/// `scope`, `expires_at`, `revoked_at`, one row bound to one session, is
 /// ORI-T-0027's `issuance.rs`, outside this ticket's declared scope
 /// (`crates/ori-broker/src/identity.rs`, `keychain.rs`).
 ///
