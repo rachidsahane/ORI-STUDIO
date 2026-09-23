@@ -6,4 +6,83 @@ license.workspace = true
 description = "Agent identities, credential issuance, keychain access and the forbidden-action test."
 
 [dependencies]
+# Already a workspace member and already in this crate's dependency graph
+# transitively through ori-store; added here directly because identity.rs
+# names ori_core::types::Role and ori_core::permission, and Rust does not let
+# a crate name a transitive dependency's items without declaring it itself.
+# Not a new crate entering the trust boundary (CLAUDE.md rule 6 is about
+# that), only this crate's own manifest catching up to what it already uses.
+ori-core = { workspace = true }
 ori-store = { workspace = true }
+# keyring: approved by ops/escalations/E-0004-external-crates.md, which names
+# it explicitly ("Yes, spec/LLD.md section 2 (ori-broker) and ADR-0001 | The
+# OS keychain, the only place ori-broker may persist a secret") among the four
+# the specification already names as decisions, not open questions.
+#
+# ops/phase-1-backlog.md's row for this ticket still reads "keyring is a new
+# dependency: escalation new_dependency required" for this batch; that line
+# predates E-0004's answer and is stale. It is flagged in this ticket's report
+# rather than edited here, per CLAUDE.md absolute rule 5 (ops/ is not this
+# ticket's to write) and per this ticket's own instructions.
+#
+# Pinned to an exact version (=3.6.3), per E-0004's terms ("Pinned to an exact
+# version in Cargo.toml, with Cargo.lock committed") and CONVENTIONS.md's
+# general rule. 3.6.3, not the newer 4.x line: 4.x reshapes the crate around a
+# separate keyring-core trait crate and per-store companion crates, which is a
+# larger surface to vet for a ticket that needs exactly one thing from it (an
+# <service, user> credential entry with set/get/delete); 3.6.3 is the last
+# release of the simpler, single-crate shape, is still actively documented on
+# crates.io, and carries the same MIT OR Apache-2.0 license deny.toml already
+# allows.
+#
+# default-features = false: this crate has no default features (see its own
+# doc comment, "There are no default features in this crate: you must specify
+# explicitly which platform-specific credential stores you intend to use"),
+# so the line is written for clarity, not because a default would otherwise
+# leak in.
+#
+# One real backend per platform, chosen per-target so the three-platform
+# build (CI_CD gate 11) gets the store a shipped binary on that OS actually
+# has, not a lowest-common-denominator stand-in:
+#   - macOS: apple-native, the Keychain.
+#   - Windows: windows-native, the Windows Credential Store.
+#   - Linux: linux-native, the kernel keyutils facility, not
+#     sync-secret-service (the D-Bus Secret Service, gnome-keyring/kwallet),
+#     which was tried first and reverted. Recorded here because the reason is
+#     not obvious from the feature name alone: sync-secret-service pulls in
+#     dbus-secret-service -> dbus, and dbus's own Cargo.toml carries an
+#     unconditional (not cfg(windows)-only at the *lock* level, since
+#     Cargo.lock resolves every declared target regardless of host)
+#     dependency on windows-sys "0.61", which collides with keyring's own
+#     windows-native feature's windows-sys "0.60" (a different, incompatible
+#     0.x minor line) the moment both are anywhere in one Cargo.lock, which
+#     they are, because this manifest declares both target-specific sections
+#     in the same file. `cargo deny check` (gate 7, deny.toml's
+#     `multiple-versions = "deny"`) failed on exactly this, loudly and
+#     correctly, and is why linux-native is what ships instead. The trade
+#     made: keyutils is the kernel's in-memory secure store, not the
+#     freedesktop Secret Service; keyring's own module doc for it is explicit
+#     that it "will not persist across reboots" the way a desktop keyring
+#     does, and that callers should "plan for `Entry::get_password` to fail
+#     and have a fallback to re-load the credential into memory". That is a
+#     real, user-visible difference from macOS and Windows behavior, noted
+#     here rather than discovered later, and it is this ticket's report's
+#     FRICTION section as well: a later ticket that needs Linux desktop
+#     persistence across reboots (linux-native-sync-persistent, the "combo"
+#     store) reopens this exact version conflict and has to resolve it then,
+#     by pinning windows-sys itself, moving to keyring 4.x, or another means.
+#   - Every one of these is also why crates/ori-broker/src/keychain.rs's test
+#     suite must never exercise the real backend regardless of which Linux
+#     feature is chosen: keyring's own doc comment states "There are no
+#     default features... if no specified credential store features apply to
+#     a given platform, this crate will use the (platform-independent) mock
+#     credential store", and ubuntu-latest, the Linux CI runner, has no D-Bus
+#     Secret Service either way.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["linux-native"] }
