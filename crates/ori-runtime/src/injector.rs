@@ -101,6 +101,42 @@
 //!    comment); this module passes it `request.scope`, never anything read
 //!    from the keychain.
 //!
+//! # An injected child never inherits the engine's stdio
+//!
+//! [`Injector::spawn`] gives every child three explicit [`Stdio`] values,
+//! never [`std::process::Command`]'s own default (inherit the parent's
+//! stdin, stdout and stderr; for this module's own process, the engine's
+//! own): standard input is always [`Stdio::null`], whatever
+//! [`SpawnRequest::capture_stdout`] is set to; standard output is
+//! [`Stdio::piped`] only when that field asks for it, [`Stdio::null`]
+//! otherwise, never inherited either way; standard error is always
+//! [`Stdio::null`], because nothing in this module ever reads a piped one,
+//! and an unread pipe fills and blocks the child once its OS buffer is
+//! full, which `null` cannot do. `spec/SECURITY_NOTES.md` trust boundary 2
+//! is the property this closes: sessions "talk to the engine only through
+//! the MCP server and ACP"; an inherited stdin or stdout would give an
+//! injected child a third, unaccounted channel straight into the engine's
+//! own process, bypassing both. [`crate::headless`]'s own module doc
+//! comment states the same shape of property for its adapter, "standard
+//! input closed so that no question it tries to ask can ever be answered,
+//! or even received" (ORI-T-0033); this module did not carry it for its own
+//! child until this ticket, ORI-T-0111, which closes it here for all three
+//! streams, not stdin alone.
+//!
+//! `tests::ori_t_0111_an_injected_child_never_inherits_this_processs_own_stdin`,
+//! `tests::ori_t_0111_a_child_spawned_with_capture_stdout_false_never_inherits_this_processs_own_stdout`
+//! and `tests::ori_t_0111_a_child_never_inherits_this_processs_own_stderr_either`
+//! each prove one stream, over a real grandchild of a real wrapper process
+//! (itself spawned through [`Injector::spawn`], so the property is checked
+//! against this module's own real code path, not trusted from the source
+//! above), never by inspecting a [`std::process::Command`] alone: a
+//! `Command` never told to change a stream from its default reports nothing
+//! about that stream either way through
+//! [`std::process::Command::get_args`] or
+//! [`std::process::Command::get_envs`], which is exactly how this defect
+//! went unnoticed until a real run of this module's own test suite printed
+//! a grandchild's report straight into its own libtest summary.
+//!
 //! # Kill cannot be reached without a receipt: what makes it impossible, and
 //! # what still bypasses it
 //!
@@ -175,7 +211,9 @@
 //! [`SpawnedSession`] holds a [`ori_core::types::Id`], never a
 //! [`ori_broker::keychain::Secret`]; once [`Injector::end`] consumes it, no
 //! value in this crate names that session's secret at all, because none ever
-//! did outside `build_command`'s own stack frame.
+//! did outside `build_command`'s own stack frame. Must not: let a child
+//! inherit this process's own stdio; see "An injected child never inherits
+//! the engine's stdio" above.
 
 use core::fmt;
 use std::ffi::OsStr;
@@ -285,10 +323,14 @@ pub struct SpawnRequest<'a> {
     /// The arguments to run it with. Never the secret; see this module's
     /// own doc comment.
     pub args: Vec<OsString>,
-    /// Whether to pipe the child's standard output back to this process
-    /// rather than inherit the engine's own, so a caller (in production, the
-    /// transcript writer; in this module's own tests,
-    /// [`SpawnedSession::take_stdout`]) can read it.
+    /// Whether to pipe the child's standard output back to this process, so
+    /// a caller (in production, the transcript writer; in this module's own
+    /// tests, [`SpawnedSession::take_stdout`]) can read it. `false` closes
+    /// it ([`Stdio::null`]); it never inherits the engine's own stdout
+    /// either way. See this module's own doc comment, "An injected child
+    /// never inherits the engine's stdio": the child's standard input and
+    /// standard error are not caller-controlled at all, and are always
+    /// closed the same way, whatever this field is set to.
     pub capture_stdout: bool,
 }
 
@@ -452,9 +494,23 @@ impl Injector {
 
         let env_var = credential_env_var_name(request.provider);
         let mut command = build_command(&request.program, &request.args, &env_var, &secret);
-        if request.capture_stdout {
-            command.stdout(Stdio::piped());
-        }
+        // An injected child never inherits the engine's own stdio: see this
+        // module's own doc comment, "An injected child never inherits the
+        // engine's stdio". Standard input is always closed, whatever
+        // request.capture_stdout is: nothing here gives an agent the
+        // engine's own standard input.
+        command.stdin(Stdio::null());
+        command.stdout(if request.capture_stdout {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+        // Standard error is always closed too: never inherited, and never
+        // piped either, because nothing in this module ever reads a piped
+        // stderr, and an unread pipe fills and blocks the child once its OS
+        // buffer is full. A caller that needs the child's stderr captured
+        // is a later, explicit ticket's choice, not this one's default.
+        command.stderr(Stdio::null());
         let child = command.spawn().map_err(InjectorError::Spawn)?;
 
         Ok(SpawnedSession {
@@ -642,6 +698,7 @@ mod tests {
     use std::fs;
     use std::hash::Hash;
     use std::hash::Hasher;
+    use std::io::BufRead;
     use std::io::Read;
     use std::path::Path;
     use std::path::PathBuf;
@@ -660,6 +717,7 @@ mod tests {
     use ori_store::event_log::EventLog;
 
     use super::*;
+    use crate::acp::wait_with_timeout;
     use crate::session::Disposition;
     use crate::session::Outcome;
     use crate::session::StepKind;
@@ -1588,6 +1646,436 @@ mod tests {
             "SpawnedSession::stop must be the only function in this file that ever calls \
              Child::kill; a second call site is a bypass around the RevocationReceipt this \
              module's own doc comment says makes killing before revoking impossible to reach"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0111: an injected child never inherits the engine's stdio. Each
+    // stream below gets a wrapper-based test in the shape ORI-T-0033's own
+    // `crate::headless` tests use for stdin: a re-exec'd wrapper process
+    // whose own stdio this test controls directly, so "did the grandchild's
+    // output land in the wrapper's own stream" is observed over real file
+    // descriptors, never inferred from `Command`'s own getters (which say
+    // nothing about a stream `Command` was never told to change from its
+    // default; see this module's own doc comment).
+    // -----------------------------------------------------------------------
+
+    /// Polls `spawned`'s child for exit without ever calling `Child::kill`
+    /// itself, bounded by `timeout`. Used to observe, before this module's
+    /// own single kill path ([`Injector::end`]) tears the child down either
+    /// way, whether a grandchild exited on its own (its stdin genuinely
+    /// closed, so a blocking read returns at once) or is still running (its
+    /// stdin wrongly inherited a pipe a test holds open and never writes
+    /// to, so the read blocks).
+    ///
+    /// Reaches [`SpawnedSession`]'s private `child` field directly: `tests`
+    /// is a descendant of the module that field is private to, so this
+    /// compiles without adding any method to [`SpawnedSession`] itself,
+    /// public or otherwise, and without ever touching `Child::kill`, so it
+    /// is not a second call site
+    /// `tests::ori_t_0032_exactly_one_place_in_this_file_ever_calls_child_kill`
+    /// polices.
+    fn exited_within(spawned: &mut SpawnedSession, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if matches!(spawned.child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream 1: stdin.
+    // -----------------------------------------------------------------------
+
+    /// The exact line `tests::ori_t_0111_child_stdin_reporter` prints when
+    /// its own blocking read of one line from stdin returned end-of-file at
+    /// once. Never printed if it actually read data.
+    const STDIN_REPORT_EOF: &str = "ORI_T_0111_STDIN_REPORT eof";
+    const STDIN_WRAPPER_MODE_VAR: &str = "ORI_T_0111_STDIN_WRAPPER";
+    const STDIN_WRAPPER_TEST_PATH: &str =
+        "injector::tests::ori_t_0111_stdin_wrapper_entrypoint_do_not_call_directly";
+
+    /// Reports, on one line, whether a blocking read of one line from this
+    /// process's own stdin returned end-of-file at once or actually read
+    /// data. Never prints what it read, only whether it read anything: this
+    /// fixture is a probe of the stream's own state, not of any content on
+    /// it.
+    ///
+    /// `#[ignore]`d for the same reason as `tests::ori_t_0032_child_reporter`:
+    /// a normal `cargo test` run must never execute this fixture directly,
+    /// only through a parent test's re-exec.
+    #[test]
+    #[ignore = "child-process fixture: run only by re-exec from its parent test"]
+    fn ori_t_0111_child_stdin_reporter() {
+        let mut line = String::new();
+        let read = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+        if read == 0 {
+            println!("{STDIN_REPORT_EOF}");
+        } else {
+            println!("ORI_T_0111_STDIN_REPORT data bytes={read}");
+        }
+    }
+
+    /// Spawns `tests::ori_t_0111_child_stdin_reporter` through the real
+    /// [`Injector::spawn`] and reports, on its own stdout, whether that
+    /// grandchild saw its stdin closed. Gated behind
+    /// [`STDIN_WRAPPER_MODE_VAR`] the same way
+    /// `crate::headless`'s own inherit-wrapper fixture is gated in that
+    /// module, so a broad `cargo test -- --ignored` run never executes this
+    /// heavier, nested-spawn logic outside a deliberate re-exec.
+    #[test]
+    #[ignore = "child-process fixture: run only by re-exec from its parent test"]
+    fn ori_t_0111_stdin_wrapper_entrypoint_do_not_call_directly() {
+        if std::env::var(STDIN_WRAPPER_MODE_VAR).is_err() {
+            // A normal `cargo test` run: not a re-exec, do nothing.
+            return;
+        }
+        let scratch = Scratch::new("stdin-wrapper");
+        let product_id = id("PRODUCT-STDINWRAP");
+        let identity = coder_identity(product_id.clone(), id("IDENTITY-STDINWRAP"));
+        let session_id = id("SESSION-STDINWRAP");
+        let keychain = InMemoryKeychain::new();
+        let key_ref = KeyRef::parse("ori/application/provider/openai").expect("a key ref");
+        keychain
+            .set(&key_ref, Secret::new("fake-stdinwrap-key-for-tests"))
+            .expect("the key is stored");
+        let bindings = vec![app_binding("openai", key_ref.as_str())];
+        let mut db = open_db(&scratch, &product_id);
+        let request = SpawnRequest {
+            bindings: &bindings,
+            provider: "openai",
+            identity: &identity,
+            session_id: session_id.clone(),
+            issuance_id: id("ISSUANCE-STDINWRAP"),
+            scope: scope("provider:openai"),
+            expires_at: None,
+            program: current_test_binary().into_os_string(),
+            args: reexec_args("injector::tests::ori_t_0111_child_stdin_reporter"),
+            capture_stdout: true,
+        };
+        let mut spawned = Injector::spawn(&keychain, &mut db, at(2_000), Actor::System, request)
+            .expect("the grandchild spawns");
+
+        // Bounded, kill-free: did it exit on its own (stdin genuinely
+        // closed) within a generous window, or is it still running (stdin
+        // wrongly inherited this wrapper's own, held-open, never-written
+        // pipe, so its read blocks)?
+        let exited_on_its_own = exited_within(&mut spawned, Duration::from_secs(5));
+        let report = if exited_on_its_own {
+            let mut stdout = String::new();
+            if let Some(mut out) = spawned.take_stdout() {
+                let _ = out.read_to_string(&mut stdout);
+            }
+            if stdout.contains(STDIN_REPORT_EOF) {
+                "eof"
+            } else {
+                "other"
+            }
+        } else {
+            "blocked"
+        };
+
+        let session = running_session(session_id);
+        let _ended = Injector::end(
+            spawned,
+            session,
+            &mut db,
+            at(3_000),
+            at(3_100),
+            Actor::System,
+        )
+        .expect("teardown always succeeds, whether the child exited or had to be killed");
+
+        println!("WRAPPER_RESULT:{report}");
+    }
+
+    /// ORI-T-0111: a child [`Injector::spawn`] starts never inherits this
+    /// process's own stdin, whatever `request.capture_stdout` is set to.
+    ///
+    /// Proved independently of the machine's own ambient stdin, the same
+    /// way `crate::headless`'s own equivalent test does for
+    /// `HeadlessAdapter::spawn`: this test re-execs this binary as a
+    /// wrapper process and pins *that* wrapper's own stdin to a pipe it
+    /// opens and never writes to or closes. The wrapper then calls the real
+    /// [`Injector::spawn`], exactly as
+    /// `tests::ori_t_0111_stdin_wrapper_entrypoint_do_not_call_directly`
+    /// does, and reports what the grandchild two levels down actually saw.
+    /// If [`Injector::spawn`] ever gave that grandchild anything other than
+    /// a genuinely null stdin, the only stdin available to inherit is the
+    /// wrapper's own, which is this held-open pipe, so the grandchild would
+    /// block reading it and the wrapper's own bounded check
+    /// (`exited_within`) would report `"blocked"` rather than hang forever,
+    /// because [`Injector::end`] tears the grandchild down either way.
+    /// Whether this test's own ambient stdin happens to be a terminal,
+    /// closed, or already at end-of-file makes no difference: the pipe held
+    /// below is this test's own.
+    #[test]
+    fn ori_t_0111_an_injected_child_never_inherits_this_processs_own_stdin() {
+        let exe = current_test_binary();
+        let mut command = Command::new(&exe);
+        command
+            .args(reexec_args(STDIN_WRAPPER_TEST_PATH))
+            .env(STDIN_WRAPPER_MODE_VAR, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("the wrapper binary spawns");
+        // Held open deliberately: never written to, never closed, for the
+        // life of `held_stdin`. See this test's own doc comment.
+        let held_stdin = child.stdin.take();
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+
+        let status = wait_with_timeout(&mut child, Duration::from_secs(30))
+            .expect("the wrapper always exits, win or lose, within its own bounded wait");
+        drop(held_stdin);
+
+        let mut output = String::new();
+        let _ = stdout.read_to_string(&mut output);
+        assert!(
+            status.success(),
+            "the wrapper itself must not panic: {output}"
+        );
+        assert!(
+            output.contains("WRAPPER_RESULT:eof"),
+            "the grandchild must see end-of-file on its own stdin, never this wrapper's own, \
+             held-open pipe: {output}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream 2: stdout when capture_stdout is false. Reuses
+    // tests::ori_t_0032_child_reporter as the grandchild fixture: it
+    // already prints one line and exits without touching stdin, exactly
+    // what this stream's own probe needs.
+    // -----------------------------------------------------------------------
+
+    const STDOUT_WRAPPER_MODE_VAR: &str = "ORI_T_0111_STDOUT_WRAPPER";
+    const STDOUT_WRAPPER_TEST_PATH: &str =
+        "injector::tests::ori_t_0111_stdout_wrapper_entrypoint_do_not_call_directly";
+    const STDOUT_WRAPPER_DONE: &str = "ORI_T_0111_STDOUT_WRAPPER_DONE";
+
+    /// Spawns `tests::ori_t_0032_child_reporter` through the real
+    /// [`Injector::spawn`] with `capture_stdout: false`, the exact flag
+    /// value this ticket's own defect report names
+    /// (`tests::ori_p1_020_every_outcome_revokes_before_the_process_is_recorded_stopped`
+    /// already spawns with this same flag, silently, on every run before
+    /// this ticket's fix). Reports its own completion on its own stdout,
+    /// after the grandchild has already run and exited.
+    #[test]
+    #[ignore = "child-process fixture: run only by re-exec from its parent test"]
+    fn ori_t_0111_stdout_wrapper_entrypoint_do_not_call_directly() {
+        if std::env::var(STDOUT_WRAPPER_MODE_VAR).is_err() {
+            // A normal `cargo test` run: not a re-exec, do nothing.
+            return;
+        }
+        let scratch = Scratch::new("stdout-wrapper");
+        let product_id = id("PRODUCT-STDOUTWRAP");
+        let identity = coder_identity(product_id.clone(), id("IDENTITY-STDOUTWRAP"));
+        let session_id = id("SESSION-STDOUTWRAP");
+        let keychain = InMemoryKeychain::new();
+        let key_ref = KeyRef::parse("ori/application/provider/openai").expect("a key ref");
+        keychain
+            .set(&key_ref, Secret::new("fake-stdoutwrap-key-for-tests"))
+            .expect("the key is stored");
+        let bindings = vec![app_binding("openai", key_ref.as_str())];
+        let mut db = open_db(&scratch, &product_id);
+        let request = SpawnRequest {
+            bindings: &bindings,
+            provider: "openai",
+            identity: &identity,
+            session_id: session_id.clone(),
+            issuance_id: id("ISSUANCE-STDOUTWRAP"),
+            scope: scope("provider:openai"),
+            expires_at: None,
+            program: current_test_binary().into_os_string(),
+            args: reexec_args("injector::tests::ori_t_0032_child_reporter"),
+            capture_stdout: false,
+        };
+        let mut spawned = Injector::spawn(&keychain, &mut db, at(2_000), Actor::System, request)
+            .expect("the grandchild spawns");
+
+        // The reporter fixture never touches stdin and never sleeps, so it
+        // always exits almost at once; this bound only guards against the
+        // OS itself being slow to schedule it.
+        let _ = exited_within(&mut spawned, Duration::from_secs(5));
+
+        let session = running_session(session_id);
+        let _ended = Injector::end(
+            spawned,
+            session,
+            &mut db,
+            at(3_000),
+            at(3_100),
+            Actor::System,
+        )
+        .expect("teardown always succeeds");
+
+        println!("{STDOUT_WRAPPER_DONE}");
+    }
+
+    /// ORI-T-0111: a child spawned with `capture_stdout: false` never
+    /// inherits this process's own stdout either, the defect this ticket
+    /// fixes (`Injector::spawn` used to call `command.stdout(Stdio::piped())`
+    /// only when `capture_stdout` was true, leaving the default, inherited,
+    /// otherwise).
+    ///
+    /// The wrapper's own stdout is piped by this test, never inherited from
+    /// this test's own process: if `Injector::spawn` ever let the
+    /// grandchild inherit *its* stdout, the grandchild's own report would
+    /// land directly in that same pipe, interleaved with the wrapper's own
+    /// completion line. `Command::get_args`/`get_envs`-style inspection
+    /// (`tests::ori_t_0032_the_secret_never_appears_in_the_built_commands_argv`'s
+    /// own style) cannot observe this: a `Command` never told to change a
+    /// stream from its default reports nothing about it either way, which
+    /// is exactly how this defect went unnoticed.
+    #[test]
+    fn ori_t_0111_a_child_spawned_with_capture_stdout_false_never_inherits_this_processs_own_stdout()
+     {
+        let exe = current_test_binary();
+        let mut command = Command::new(&exe);
+        command
+            .args(reexec_args(STDOUT_WRAPPER_TEST_PATH))
+            .env(STDOUT_WRAPPER_MODE_VAR, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("the wrapper binary spawns");
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+
+        let status = wait_with_timeout(&mut child, Duration::from_secs(30))
+            .expect("the wrapper always exits within its own bounded wait");
+
+        let mut output = String::new();
+        let _ = stdout.read_to_string(&mut output);
+        assert!(
+            status.success(),
+            "the wrapper itself must not panic: {output}"
+        );
+        assert!(
+            output.contains(STDOUT_WRAPPER_DONE),
+            "the wrapper must complete its own sequence: {output}"
+        );
+        assert!(
+            !output.contains(CHILD_REPORT_PREFIX),
+            "a child spawned with capture_stdout: false must never write into this wrapper's \
+             own stdout: {output}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream 3: stderr, never inherited and never piped either (this module
+    // reads no piped stderr anywhere, so `null` is the only choice that
+    // cannot deadlock a child on a full, unread pipe).
+    // -----------------------------------------------------------------------
+
+    const STDERR_REPORT_MARKER: &str = "ORI_T_0111_STDERR_REPORT present";
+    const STDERR_WRAPPER_MODE_VAR: &str = "ORI_T_0111_STDERR_WRAPPER";
+    const STDERR_WRAPPER_TEST_PATH: &str =
+        "injector::tests::ori_t_0111_stderr_wrapper_entrypoint_do_not_call_directly";
+    const STDERR_WRAPPER_DONE: &str = "ORI_T_0111_STDERR_WRAPPER_DONE";
+
+    /// Writes one line to this process's own stderr, never stdout, and
+    /// exits. `#[ignore]`d for the same reason as every other fixture in
+    /// this module: only ever run by a parent test's re-exec.
+    #[test]
+    #[ignore = "child-process fixture: run only by re-exec from its parent test"]
+    fn ori_t_0111_child_stderr_reporter() {
+        eprintln!("{STDERR_REPORT_MARKER}");
+    }
+
+    /// Spawns `tests::ori_t_0111_child_stderr_reporter` through the real
+    /// [`Injector::spawn`] and reports its own completion on its own
+    /// stderr, never its own stdout, so the outer test can pin exactly the
+    /// stream under test.
+    #[test]
+    #[ignore = "child-process fixture: run only by re-exec from its parent test"]
+    fn ori_t_0111_stderr_wrapper_entrypoint_do_not_call_directly() {
+        if std::env::var(STDERR_WRAPPER_MODE_VAR).is_err() {
+            // A normal `cargo test` run: not a re-exec, do nothing.
+            return;
+        }
+        let scratch = Scratch::new("stderr-wrapper");
+        let product_id = id("PRODUCT-STDERRWRAP");
+        let identity = coder_identity(product_id.clone(), id("IDENTITY-STDERRWRAP"));
+        let session_id = id("SESSION-STDERRWRAP");
+        let keychain = InMemoryKeychain::new();
+        let key_ref = KeyRef::parse("ori/application/provider/openai").expect("a key ref");
+        keychain
+            .set(&key_ref, Secret::new("fake-stderrwrap-key-for-tests"))
+            .expect("the key is stored");
+        let bindings = vec![app_binding("openai", key_ref.as_str())];
+        let mut db = open_db(&scratch, &product_id);
+        let request = SpawnRequest {
+            bindings: &bindings,
+            provider: "openai",
+            identity: &identity,
+            session_id: session_id.clone(),
+            issuance_id: id("ISSUANCE-STDERRWRAP"),
+            scope: scope("provider:openai"),
+            expires_at: None,
+            program: current_test_binary().into_os_string(),
+            args: reexec_args("injector::tests::ori_t_0111_child_stderr_reporter"),
+            capture_stdout: false,
+        };
+        let mut spawned = Injector::spawn(&keychain, &mut db, at(2_000), Actor::System, request)
+            .expect("the grandchild spawns");
+
+        let _ = exited_within(&mut spawned, Duration::from_secs(5));
+
+        let session = running_session(session_id);
+        let _ended = Injector::end(
+            spawned,
+            session,
+            &mut db,
+            at(3_000),
+            at(3_100),
+            Actor::System,
+        )
+        .expect("teardown always succeeds");
+
+        eprintln!("{STDERR_WRAPPER_DONE}");
+    }
+
+    /// ORI-T-0111: an injected child never inherits this process's own
+    /// stderr either. Same wrapper shape as the stdout test above, pinned
+    /// to the wrapper's own stderr pipe instead of its stdout, with the
+    /// wrapper itself reporting completion on stderr too so a plant that
+    /// inherited stderr and a wrapper that simply never ran are both
+    /// distinguishable from the pass case.
+    #[test]
+    fn ori_t_0111_a_child_never_inherits_this_processs_own_stderr_either() {
+        let exe = current_test_binary();
+        let mut command = Command::new(&exe);
+        command
+            .args(reexec_args(STDERR_WRAPPER_TEST_PATH))
+            .env(STDERR_WRAPPER_MODE_VAR, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("the wrapper binary spawns");
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+
+        let status = wait_with_timeout(&mut child, Duration::from_secs(30))
+            .expect("the wrapper always exits within its own bounded wait");
+
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output);
+        assert!(
+            status.success(),
+            "the wrapper itself must not panic: {output}"
+        );
+        assert!(
+            output.contains(STDERR_WRAPPER_DONE),
+            "the wrapper must complete its own sequence: {output}"
+        );
+        assert!(
+            !output.contains(STDERR_REPORT_MARKER),
+            "an injected child must never write into this wrapper's own stderr: {output}"
         );
     }
 }
