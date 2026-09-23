@@ -322,6 +322,7 @@ version = "0.1.0"
 dependencies = [
  "ori-core",
  "ori-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tree-sitter",
