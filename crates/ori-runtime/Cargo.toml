@@ -9,3 +9,30 @@ description = "Agent sessions: worktrees, containers, ACP client, headless adapt
 ori-broker = { workspace = true }
 ori-core = { workspace = true }
 ori-store = { workspace = true }
+# Approved by the operator on 2026-09-23 (escalation E-0008, PR #61,
+# workspace-wide, pinned). ORI-T-0033's own instructions: "Add them to
+# ori-runtime only, pinned to exact versions, default-features as narrow as
+# works, Cargo.lock committed. ... Add nothing else." No other crate is added
+# by this ticket; `rusqlite` (already a dependency of `ori-store`, which this
+# crate already depends on) is deliberately not added here even though
+# `acp.rs` calls into `ori_store::event_log::EventLog::append` conceptually,
+# because that call needs a `&mut rusqlite::Connection` this crate would then
+# have to name; the pull request report explains the caller-supplied-closure
+# seam that avoids it instead.
+#
+# serde: the (de)serialization framework the ACP JSON-RPC messages are built
+# and read through. `default-features = false` plus `features = ["std",
+# "derive"]`: `std` because this crate is not `no_std` and every message type
+# here holds an owned `String`/`Vec`; `derive` because `acp.rs`'s message
+# structs use `#[derive(Serialize, Deserialize)]` rather than a hand-written
+# implementation, which `spec/CONVENTIONS.md`'s "no unsafe without a reason"
+# spirit favors over reimplementing a well-tested derive by hand. No other
+# optional feature (`rc`, `unstable`, `alloc`) is pulled in.
+serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
+# serde_json: the JSON-RPC 2.0 wire format ACP and the headless adapter's own
+# launch-configuration rendering are built on. `default-features = false` plus
+# `features = ["std"]` is exactly the crate's own default feature set, written
+# out rather than left implicit so a reader does not have to look up what the
+# default is; none of `arbitrary_precision`, `raw_value`, `preserve_order` or
+# `float_roundtrip` is needed by anything `acp.rs` or `headless.rs` does.
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }

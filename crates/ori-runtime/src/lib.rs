@@ -7,8 +7,10 @@
 //! Must not: merge, write `spec/` or `ops/`, or hold credentials beyond a session
 //! (`spec/LLD.md` section 2).
 
+pub mod acp;
 pub mod budget;
 pub mod container;
+pub mod headless;
 pub mod injector;
 pub mod recovery;
 pub mod session;
