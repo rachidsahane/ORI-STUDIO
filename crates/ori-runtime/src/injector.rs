@@ -804,9 +804,19 @@ mod tests {
 
     /// The argv (without the leading program) that re-runs exactly one test
     /// of this same binary, with output uncaptured.
+    ///
+    /// `--ignored` is required because both child fixtures below carry
+    /// `#[ignore]`: an ordinary `cargo test` run must never execute either
+    /// of them on its own (one sleeps 20 seconds unconditionally, and
+    /// neither asserts anything, so left un-ignored they would cost every
+    /// suite run real wall time on all three CI platforms while verifying
+    /// nothing, AICD §39's defect class in miniature). `--exact` still
+    /// selects only the one named test even with `--ignored` set, so this
+    /// re-exec runs the fixture and only the fixture.
     fn reexec_args(test_path: &str) -> Vec<OsString> {
         vec![
             OsString::from(test_path),
+            OsString::from("--ignored"),
             OsString::from("--exact"),
             OsString::from("--nocapture"),
             OsString::from("--test-threads=1"),
@@ -868,12 +878,16 @@ mod tests {
 
     /// Reports, on one line, whether `credential_env_var_name("openai")` is
     /// present in this process's own environment and, if so, its length and
-    /// a hash, never the value. A silent no-op (asserts nothing) when its
-    /// own report line would say "absent", so running this test the
-    /// ordinary way, as part of this crate's own suite, is harmless; it only
-    /// does anything interesting when re-exec'd by this module's own tests
-    /// below with the variable actually set.
+    /// a hash, never the value.
+    ///
+    /// `#[ignore]`d: this asserts nothing on its own (it is a fixture, not a
+    /// criterion or property this crate owns), so an ordinary `cargo test`
+    /// run must never count it as a passing test that verified something.
+    /// It runs only when a parent test re-execs this same binary with
+    /// `reexec_args`, which passes `--ignored --exact` for exactly this
+    /// test's path.
     #[test]
+    #[ignore = "child-process fixture: run only by re-exec from its parent test"]
     fn ori_t_0032_child_reporter() {
         let var = credential_env_var_name("openai");
         match std::env::var(&var) {
@@ -889,7 +903,13 @@ mod tests {
     /// used only by `tests::ori_t_0032_stop_actually_terminates_a_still_running_child`
     /// to prove `SpawnedSession::stop` really signals the process rather
     /// than waiting for it to finish on its own.
+    ///
+    /// `#[ignore]`d for the same reason as `tests::ori_t_0032_child_reporter`
+    /// above, and doubly so here: left un-ignored, every ordinary `cargo
+    /// test` run on every CI platform would pay this fixture's full 20
+    /// second sleep for no assertion at all.
     #[test]
+    #[ignore = "child-process fixture: run only by re-exec from its parent test"]
     fn ori_t_0032_child_long_running() {
         std::thread::sleep(Duration::from_secs(20));
     }
