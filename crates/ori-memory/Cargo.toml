@@ -6,4 +6,37 @@ license.workspace = true
 description = "The four memory layers, repository indexer, code map, sanitization barrier, scopes and retrieval."
 
 [dependencies]
+# Already a workspace member and already in this crate's dependency graph
+# transitively through ori-store; added here directly because barrier.rs
+# names ori_core::types::Actor, Id and Timestamp, and Rust does not let a
+# crate name a transitive dependency's items without declaring it itself.
+# Not a new crate entering the trust boundary (CLAUDE.md rule 6 is about
+# that), only this crate's own manifest catching up to what it already uses,
+# the same catch-up `crates/ori-broker/Cargo.toml` documents for itself.
+ori-core = { workspace = true }
 ori-store = { workspace = true }
+# Approved workspace-wide by escalation E-0008 ("serde and serde_json
+# approved for the workspace, pinned"). This ticket's own instructions name
+# it directly: "serde/serde_json (E-0008) if you need JSON, pinned exactly
+# as ori-runtime pins them." barrier.rs needs it for the reason E-0008's own
+# rejected-option table gives for not hand-writing a JSON reader: "A
+# hand-written parser for input from an external agent process is itself a
+# security surface." `MemoryRecord.structured` (`spec/DATA_MODEL.md` section
+# 2, "structured (json, sanitized)") is built and read as one typed Rust
+# struct (`RecordWire`, in barrier.rs) rather than by string concatenation
+# or a hand-rolled scanner: serde_json's parser is what guarantees a
+# sanitized field's own quotes, braces or commas can never be re-read as
+# this record's structure, which is exactly the "field-boundary breakout"
+# case barrier.rs's tests plant. Pinned to the exact versions and features
+# `crates/ori-runtime/Cargo.toml` already pins, per this ticket's own
+# instruction to match them rather than choose independently.
+#
+# FRICTION (see the pull request report): E-0008's own text scopes its
+# recommendation to "every crate that speaks JSON-RPC" (ori-runtime,
+# ori-rpc, ori-mcp); ori-memory's event-log payload is not JSON-RPC. This
+# ticket's instructions name E-0008 directly for this crate regardless, so
+# that direction is followed here; a reviewer who reads E-0008's own scope
+# narrower than that may want to record a short follow-up ruling rather than
+# leave the mismatch implicit.
+serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
