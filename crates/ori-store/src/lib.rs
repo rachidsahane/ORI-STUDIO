@@ -10,3 +10,4 @@
 pub mod db;
 pub mod event_log;
 pub mod projections;
+pub mod rebuild;
