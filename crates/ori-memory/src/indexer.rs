@@ -125,6 +125,39 @@
 //!   UPSERT --> COMMIT
 //! ```
 //!
+//! # Document identity is repository-relative, never checkout-dependent
+//!
+//! [`IndexableDocument::path`]'s own doc calls it "repository relative", and
+//! [`Indexer::incremental_sync`] trusts that literally: two calls to
+//! [`Indexer::collect_from_repo`] against the same repository content, from
+//! any two checkouts (a worktree, a clone under a different directory
+//! name), must produce the same paths, or an unchanged repository looks
+//! changed. An adversarial review found `walk_markdown` breaking this by
+//! stripping each file's path relative to whichever directory the recursion
+//! was currently walking rather than `repo_root`; the fix (`repo_root`
+//! threaded through every recursive call, `path.strip_prefix(repo_root)`,
+//! refused rather than defaulted to an absolute path on failure) and the
+//! full account of the defect are in that function's own doc.
+//!
+//! # Duplicate paths are refused, not silently resolved
+//!
+//! [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] both call
+//! `refuse_duplicate_paths` before writing anything: a target set holding
+//! two [`IndexableDocument`]s at one `path` is refused with
+//! [`IndexerError::DuplicatePath`], not written with whichever one happens
+//! to survive. An adversarial review found that, without this, the two
+//! methods disagreed on such input (`full_rebuild` kept every row;
+//! `incremental_sync` kept exactly one and, because its own diff runs
+//! against a `BTreeMap` that already dropped the duplicate, never settled:
+//! it deleted and re-inserted a different one of the two documents on every
+//! call against the same unchanged target). [`Indexer::collect_from_repo`]'s
+//! own walk is also fixed so it does not normally produce this: fenced code
+//! is never read as a heading, and repeated headings get GitHub's
+//! disambiguating suffix (`section_documents`'s own doc has the detail);
+//! the refusal stands as the guard for every other caller, and for a
+//! criteria table's genuinely repeated ID, which this module does not
+//! silently rename.
+//!
 //! # FTS5 query safety: quoting is not optional
 //!
 //! Binding `query` as a parameter (never string-formatted into the SQL text)
@@ -146,6 +179,19 @@
 //! `NUL` case does reach SQLite's own parser, which reports "unterminated
 //! string" because FTS5's parser stops scanning at a `NUL`; that raw report
 //! is discarded and mapped to [`IndexerError::InvalidQuery`], not returned).
+//!
+//! # Unbounded query cost is refused before FTS5 ever sees it
+//!
+//! Quoting stops `query` from being read as FTS5 syntax; it does nothing
+//! about `query`'s *cost*. An adversarial review measured one search of a
+//! common word repeated to fill 1 MB costing 4.5 seconds and 2.18 GB of
+//! resident memory, because FTS5 opens one index iterator per phrase term
+//! and does not deduplicate repeated tokens, so cost grows with (repeated
+//! terms) x (how many documents contain each). [`Indexer::search`] now
+//! refuses `query` outright, before it is quoted or bound, if it exceeds
+//! `MAX_QUERY_BYTES` or `count_tokens` finds more than
+//! `MAX_QUERY_TOKENS`; both constants name the review's numbers and why
+//! their limits hold.
 //!
 //! # Tokenizer
 //!
@@ -172,6 +218,51 @@
 //! without a timeout-dependent, potentially flaky test. A caller that wants
 //! to wait instead retries on [`IndexerError::Locked`] itself; this module
 //! does not hide that choice inside an implicit, undocumented wait.
+//!
+//! # A corrupt index is reported honestly, and `full_rebuild` repairs it
+//!
+//! An adversarial review damaged an on-disk index directly (writing garbage
+//! into its FTS5 segment pages through a second connection) and found every
+//! resulting error folded into [`IndexerError::InvalidQuery`], which blamed
+//! a perfectly ordinary, valid query for damage that had nothing to do with
+//! it, and left `documents_covered` and `all_documents` reporting the old,
+//! stale count as if nothing were wrong. `search`, `all_documents` and
+//! `total_indexed` now all classify a `rusqlite` failure by its SQLite error
+//! code (`classify_error`, `search_error`) before choosing a variant:
+//! [`IndexerError::Corrupt`] for `SQLITE_CORRUPT`, [`IndexerError::Locked`]
+//! for a busy write lock, and only a bare, query-specific `SQLITE_ERROR`
+//! becomes [`IndexerError::InvalidQuery`]. Recovery is
+//! [`Indexer::full_rebuild`]'s job, and only its: the index is derived data
+//! ("The index is derived" above), so on [`IndexerError::Corrupt`] it
+//! deletes `fts.sqlite` and its `-wal`/`-shm` side files, recreates a fresh
+//! schema at the same path, and retries the rebuild once
+//! (`Indexer::recreate_on_disk`). `search` and `incremental_sync` do not
+//! self-heal; they report [`IndexerError::Corrupt`] so a caller can choose
+//! to call `full_rebuild`, rather than a read or a diff silently triggering
+//! a rebuild neither asked for.
+//!
+//! # Reads and writes share one transaction
+//!
+//! An adversarial review ran a concurrent writer against [`Indexer::search`]
+//! and found `documents_covered` (from a `count(*)` statement) and the
+//! `MATCH` hits (from a second, later statement) occasionally describing two
+//! different committed states of the index: a "400 documents, 0 matched"
+//! report when no committed state ever had that shape, exactly the false
+//! clean absence the vacuity trap above exists to prevent. It found the
+//! matching defect in [`Indexer::incremental_sync`]: its diff was read with
+//! a separate `all_documents()` call *before* the write transaction opened,
+//! so a writer that committed in that gap was neither deleted nor reported
+//! as [`IndexerError::Locked`], just silently missing from the result.
+//! `search` now reads its count and its hits inside one
+//! `Connection::unchecked_transaction` (a read-only transaction on `&self`,
+//! not `&mut self`, so concurrent reads are still unblocked from each
+//! other); `incremental_sync` now reads its diff basis as the first
+//! statement inside the same write transaction its deletes and upserts run
+//! in, so a concurrent writer's commit either lands entirely before that
+//! snapshot (seen and diffed against correctly) or entirely after (this
+//! transaction's own commit orders before or after it, and SQLite's own
+//! `SQLITE_BUSY_SNAPSHOT` refuses the ambiguous case as
+//! [`IndexerError::Locked`]), never split across the two.
 //!
 //! # The vacuity trap
 //!
@@ -298,10 +389,22 @@ impl IndexableDocument {
         }
     }
 
-    /// A checksum of `title` and `body` together, for change detection only.
+    /// A checksum of `kind`, `title` and `body` together, for change
+    /// detection only.
+    ///
+    /// Every field [`Indexer::incremental_sync`] must notice a change in is
+    /// hashed, `kind` included: an adversarial review (recorded in the pull
+    /// request report) found that hashing only `title` and `body` let a
+    /// document whose `kind` changed at a fixed path keep its old, wrong
+    /// `kind` forever under `incremental_sync`, while `full_rebuild` stored
+    /// the new one, breaking the one property this module exists to prove.
+    /// `path` is deliberately not hashed: it is the row's identity
+    /// (`IndexableDocument::path`'s own doc), not one of its changeable
+    /// fields, and hashing it would make a rename look like a same-path edit
+    /// to no useful effect since callers already diff by `path` directly.
     ///
     /// `std::hash::Hasher`, not a cryptographic digest: nothing here needs a
-    /// security property (this is "did the text change", not an integrity
+    /// security property (this is "did the row change", not an integrity
     /// check against a hostile actor), and a hashing crate of its own is
     /// outside this ticket's approved dependency (`rusqlite`, already
     /// pinned by `ori-store`; see `crates/ori-memory/Cargo.toml`'s comment).
@@ -311,6 +414,7 @@ impl IndexableDocument {
     /// `checksum() as i64` / `.. as u64` uses at every call site below).
     fn checksum(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
+        self.kind.as_str().hash(&mut hasher);
         self.title.hash(&mut hasher);
         self.body.hash(&mut hasher);
         hasher.finish()
@@ -383,6 +487,21 @@ pub enum IndexerError {
         /// The database file that was already locked.
         path: PathBuf,
     },
+    /// SQLite reported `path` corrupt (`ErrorCode::DatabaseCorrupt`): a
+    /// disagreement between this and [`IndexerError::Sqlite`] an
+    /// adversarial review found and this module's own tests now cover.
+    /// [`Indexer::full_rebuild`] recovers from this automatically (delete
+    /// `path` and its `-wal`/`-shm` side files, recreate, retry once; the
+    /// module doc's "The index is derived"); [`Indexer::search`] and
+    /// [`Indexer::incremental_sync`] report it rather than silently
+    /// widening or narrowing what they return, since neither is the
+    /// reconstruction step.
+    Corrupt {
+        /// The database file SQLite reported corrupt.
+        path: PathBuf,
+        /// The underlying error.
+        source: rusqlite::Error,
+    },
     /// A `rusqlite` call failed in a way none of the above names more
     /// specifically.
     Sqlite {
@@ -396,10 +515,37 @@ pub enum IndexerError {
     /// safety"; an embedded `NUL` is the one case this module's own tests
     /// reach). Carries only the query text a caller already had, never the
     /// underlying SQLite message, so nothing from inside the query engine
-    /// is echoed back to whoever sent the query.
+    /// is echoed back to whoever sent the query. Distinct from
+    /// [`IndexerError::Corrupt`] and [`IndexerError::Locked`]: an
+    /// adversarial review found an earlier version of this module folding
+    /// every failure while a `MATCH` ran into this variant, which blamed a
+    /// perfectly valid query for a corrupt index; `search_error` now
+    /// checks the SQLite error code before choosing a variant.
     InvalidQuery {
         /// The text that could not be searched safely.
         query: String,
+    },
+    /// `query`'s byte length exceeds `MAX_QUERY_BYTES`, or it tokenizes to
+    /// more than `MAX_QUERY_TOKENS` terms: the module doc's "Unbounded
+    /// query cost". Refused before FTS5 ever sees it, so the cost this
+    /// guards against is never paid.
+    QueryTooLarge {
+        /// `query`'s length in bytes.
+        byte_len: usize,
+        /// How many alphanumeric runs (this module's own coarse token
+        /// count, `count_tokens`) `query` has.
+        token_count: usize,
+    },
+    /// `documents` (the target set given to [`Indexer::full_rebuild`] or
+    /// [`Indexer::incremental_sync`]) held the same `path` more than once.
+    /// Refused rather than silently keeping whichever of the two happened
+    /// to be written last: an adversarial review found that
+    /// `full_rebuild` and `incremental_sync` disagreed on such a set (the
+    /// former kept every row, the latter kept one and never settled on
+    /// repeated syncs of the same unchanged target).
+    DuplicatePath {
+        /// The path that appeared more than once.
+        path: String,
     },
 }
 
@@ -446,8 +592,27 @@ impl fmt::Display for IndexerError {
                 "{} is held by another writer; refusing to wait (retry is safe)",
                 path.display()
             ),
+            Self::Corrupt { path, source } => write!(
+                f,
+                "{} is corrupt: {source}; the index is derived data, rebuild it with \
+                 Indexer::full_rebuild",
+                path.display()
+            ),
             Self::Sqlite { context, source } => write!(f, "{context}: {source}"),
             Self::InvalidQuery { query } => write!(f, "invalid query: {query}"),
+            Self::QueryTooLarge {
+                byte_len,
+                token_count,
+            } => write!(
+                f,
+                "query is too large: {byte_len} bytes (max {MAX_QUERY_BYTES}), {token_count} \
+                 tokens (max {MAX_QUERY_TOKENS})"
+            ),
+            Self::DuplicatePath { path } => write!(
+                f,
+                "{path} appears more than once in the target set; full_rebuild and \
+                 incremental_sync both refuse rather than guess which one should win"
+            ),
         }
     }
 }
@@ -456,8 +621,11 @@ impl std::error::Error for IndexerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Directory { source, .. } | Self::Io { source, .. } => Some(source),
-            Self::Sqlite { source, .. } => Some(source),
-            Self::Locked { .. } | Self::InvalidQuery { .. } => None,
+            Self::Corrupt { source, .. } | Self::Sqlite { source, .. } => Some(source),
+            Self::Locked { .. }
+            | Self::InvalidQuery { .. }
+            | Self::QueryTooLarge { .. }
+            | Self::DuplicatePath { .. } => None,
         }
     }
 }
@@ -474,12 +642,154 @@ fn is_locked(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// Whether a `rusqlite` failure is SQLite reporting `ErrorCode::DatabaseCorrupt`
+/// (`SQLITE_CORRUPT`): the check that routes a damaged index to
+/// [`IndexerError::Corrupt`] instead of [`IndexerError::Sqlite`] or (worse,
+/// the defect an adversarial review found) [`IndexerError::InvalidQuery`].
+fn is_corrupt(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _) if inner.code == ErrorCode::DatabaseCorrupt
+    )
+}
+
+/// Whether a `rusqlite` failure is SQLite reporting a bare `SQLITE_ERROR`
+/// (`ErrorCode::Unknown`, primary result code 1: rusqlite's own `ErrorCode`
+/// maps every primary code it does not otherwise name to this one variant,
+/// and `SQLITE_ERROR` is one of those). [`Indexer::search`] runs exactly one
+/// fixed, already-tested SQL statement whose only caller-influenced part is
+/// the `MATCH` argument, so a bare `SQLITE_ERROR` surfacing from that one
+/// statement is FTS5's own query-syntax parser refusing the (quoted, but
+/// still occasionally invalid, the embedded-`NUL` case) phrase, not a schema
+/// or connection problem; those come back with a more specific `ErrorCode`
+/// and are handled before this check runs (see `search_error`).
+fn is_query_syntax_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _) if inner.code == ErrorCode::Unknown
+    )
+}
+
+/// Maps any `rusqlite` failure to the named refusal it belongs to: a locked
+/// file to [`IndexerError::Locked`], a damaged one to
+/// [`IndexerError::Corrupt`], everything else to [`IndexerError::Sqlite`].
+/// Used for every read and every write this module makes, so the same
+/// failure is classified the same way wherever it happens: an adversarial
+/// review found the previous version reaching this decision differently in
+/// different call sites (`search` folded corruption into
+/// [`IndexerError::InvalidQuery`], `total_indexed` did not check for a lock
+/// at all).
+fn classify_error(path: &Path, context: &str, source: rusqlite::Error) -> IndexerError {
+    if is_locked(&source) {
+        IndexerError::Locked {
+            path: path.to_owned(),
+        }
+    } else if is_corrupt(&source) {
+        IndexerError::Corrupt {
+            path: path.to_owned(),
+            source,
+        }
+    } else {
+        IndexerError::sqlite(context, source)
+    }
+}
+
+/// [`Indexer::search`]'s own classifier: the same three cases
+/// [`classify_error`] names, plus [`IndexerError::InvalidQuery`] for a bare
+/// `SQLITE_ERROR` ([`is_query_syntax_error`]), which `classify_error` alone
+/// would fold into [`IndexerError::Sqlite`]. Checked in this order because a
+/// lock or a corrupt page can itself present as a generic `SQLITE_ERROR` in
+/// some SQLite versions, and a real lock or real corruption must never be
+/// misreported as the caller's query being unsafe.
+fn search_error(path: &Path, query: &str, source: rusqlite::Error) -> IndexerError {
+    if is_locked(&source) {
+        return IndexerError::Locked {
+            path: path.to_owned(),
+        };
+    }
+    if is_corrupt(&source) {
+        return IndexerError::Corrupt {
+            path: path.to_owned(),
+            source,
+        };
+    }
+    if is_query_syntax_error(&source) {
+        return IndexerError::InvalidQuery {
+            query: query.to_owned(),
+        };
+    }
+    IndexerError::sqlite("search", source)
+}
+
+/// Refuses `documents` if any two elements share a `path`: the identity
+/// [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] both key on.
+/// Checked before either does any write, so a caller sees the refusal
+/// before any partial effect.
+///
+/// # Errors
+///
+/// [`IndexerError::DuplicatePath`] naming the first path seen twice, in
+/// `documents`' own order.
+fn refuse_duplicate_paths(documents: &[IndexableDocument]) -> Result<(), IndexerError> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for document in documents {
+        if !seen.insert(document.path.as_str()) {
+            return Err(IndexerError::DuplicatePath {
+                path: document.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Quotes `text` as one FTS5 string literal, doubling any embedded `"`
 /// (SQLite's own escaping rule for a quoted string): the module doc's "FTS5
 /// query safety". Turns arbitrary caller text into a single literal phrase
 /// token, never FTS5's own query syntax.
 fn quote_fts5_phrase(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
+}
+
+/// The largest `query` [`Indexer::search`] accepts, in bytes: an adversarial
+/// review measured 1 MB of a common repeated term costing 4.5 seconds and
+/// 2.18 GB of resident memory, because FTS5 opens one index iterator per
+/// phrase term and repeated tokens are not deduplicated. 1 KiB is generous
+/// for a legitimate search phrase (`spec/API_SPEC.md`'s `aicd_search(query)`
+/// is a short free-text query, never a document body) and keeps the worst
+/// case, even for the cheapest-per-byte common term the review measured
+/// (roughly 8.7 KB of resident memory per repeated `"the "`), in the tens of
+/// megabytes rather than gigabytes.
+const MAX_QUERY_BYTES: usize = 1024;
+
+/// The largest number of tokens [`count_tokens`] may count in `query`: a
+/// second, independent bound on the same cost, since [`MAX_QUERY_BYTES`]
+/// alone bounds total bytes but not how many short tokens (each still one
+/// FTS5 index iterator) can be packed inside that budget. 64 tokens is
+/// generously more than a natural-language search phrase for this
+/// indexer's corpus ever needs.
+const MAX_QUERY_TOKENS: usize = 64;
+
+/// This module's own coarse token count: the number of maximal runs of
+/// `char::is_alphanumeric` characters in `text`. Not FTS5's own tokenizer
+/// (`unicode61`, which also splits on some punctuation `is_alphanumeric`
+/// treats as non-alphanumeric the same way), only close enough to bound
+/// [`Indexer::search`]'s cost before the real tokenizer ever runs: undercounting
+/// by a little still catches the case that matters (many short repeated
+/// words), and this module never claims the count is exact.
+fn count_tokens(text: &str) -> usize {
+    let mut count = 0usize;
+    let mut in_token = false;
+    for character in text.chars() {
+        if character.is_alphanumeric() {
+            if !in_token {
+                count += 1;
+                in_token = true;
+            }
+        } else {
+            in_token = false;
+        }
+    }
+    count
 }
 
 /// The repository indexer: a SQLite FTS5 virtual table over
@@ -563,19 +873,33 @@ impl Indexer {
     ///
     /// # Errors
     ///
-    /// [`IndexerError::Sqlite`] if the read fails.
+    /// [`IndexerError::Corrupt`] if the index is damaged;
+    /// [`IndexerError::Sqlite`] if the read fails for another reason.
     pub fn all_documents(&self) -> Result<Vec<(IndexableDocument, u64)>, IndexerError> {
-        let mut statement = self
-            .conn
+        Self::all_documents_on(&self.conn, &self.display_path())
+    }
+
+    /// [`Indexer::all_documents`]'s body, taking any `&Connection` (an
+    /// ordinary connection or a `&rusqlite::Transaction`, which derefs to
+    /// one), so [`Indexer::incremental_sync`] can read the diff basis inside
+    /// its own write transaction: the module doc's "Reads and writes share
+    /// one transaction".
+    fn all_documents_on(
+        conn: &Connection,
+        display_path: &Path,
+    ) -> Result<Vec<(IndexableDocument, u64)>, IndexerError> {
+        let mut statement = conn
             .prepare("SELECT path, kind, title, body, checksum FROM documents ORDER BY path")
-            .map_err(|source| IndexerError::sqlite("prepare a full read of documents", source))?;
+            .map_err(|source| {
+                classify_error(display_path, "prepare a full read of documents", source)
+            })?;
         let rows = statement
             .query_map([], Self::row_to_document)
-            .map_err(|source| IndexerError::sqlite("read every document back", source))?;
+            .map_err(|source| classify_error(display_path, "read every document back", source))?;
         let mut out = Vec::new();
         for row in rows {
-            let pair =
-                row.map_err(|source| IndexerError::sqlite("read one document row", source))?;
+            let pair = row
+                .map_err(|source| classify_error(display_path, "read one document row", source))?;
             if let Some(pair) = pair {
                 out.push(pair);
             }
@@ -606,12 +930,18 @@ impl Indexer {
     ///
     /// # Errors
     ///
-    /// [`IndexerError::Sqlite`] if the read fails.
+    /// [`IndexerError::Corrupt`] if the index is damaged;
+    /// [`IndexerError::Sqlite`] if the read fails for another reason.
     fn total_indexed(&self) -> Result<usize, IndexerError> {
-        let total: i64 = self
-            .conn
+        Self::total_indexed_on(&self.conn, &self.display_path())
+    }
+
+    /// [`Indexer::total_indexed`]'s body, over any `&Connection`: see
+    /// [`Indexer::all_documents_on`].
+    fn total_indexed_on(conn: &Connection, display_path: &Path) -> Result<usize, IndexerError> {
+        let total: i64 = conn
             .query_row("SELECT count(*) FROM documents", [], |row| row.get(0))
-            .map_err(|source| IndexerError::sqlite("count documents", source))?;
+            .map_err(|source| classify_error(display_path, "count documents", source))?;
         Ok(total as usize)
     }
 
@@ -624,27 +954,60 @@ impl Indexer {
     /// # Errors
     ///
     /// [`IndexerError::Locked`] if another writer holds the lock;
-    /// [`IndexerError::Sqlite`] if the write fails.
+    /// [`IndexerError::Corrupt`] if the index is damaged;
+    /// [`IndexerError::Sqlite`] if the write fails for another reason.
     pub fn add_or_replace(&mut self, document: &IndexableDocument) -> Result<(), IndexerError> {
         let path = self.display_path();
         let tx = self
             .conn
             .transaction()
-            .map_err(|source| Self::write_error(&path, "begin transaction", source))?;
+            .map_err(|source| classify_error(&path, "begin transaction", source))?;
         Self::delete_path(&tx, &document.path, &path)?;
         Self::insert(&tx, document, &path)?;
         tx.commit()
-            .map_err(|source| Self::write_error(&path, "commit", source))
+            .map_err(|source| classify_error(&path, "commit", source))
     }
 
     /// Clears the index and indexes exactly `documents`: a full rebuild, the
     /// reconstruction the module doc's "the index is derived" section names.
     ///
+    /// Recovers from a corrupt index automatically: if the delete or an
+    /// insert reports [`IndexerError::Corrupt`] and this is an on-disk
+    /// index, `fts.sqlite` and its `-wal`/`-shm` side files are removed, a
+    /// fresh schema is created at the same path, and the whole rebuild is
+    /// retried exactly once against that fresh index. An adversarial review
+    /// found that, before this, a caller had no documented way to recover a
+    /// corrupt index at all; this is that way, and it is the only place
+    /// this module repairs anything, since it is the only operation whose
+    /// whole job is already "discard whatever is here and reconstruct from
+    /// the target set".
+    ///
     /// # Errors
     ///
+    /// [`IndexerError::DuplicatePath`] if `documents` holds one path twice;
     /// [`IndexerError::Locked`] if another writer holds the lock;
-    /// [`IndexerError::Sqlite`] if a write fails.
+    /// [`IndexerError::Corrupt`] if the index is an in-memory index and is
+    /// damaged (there is no file to delete and recreate);
+    /// [`IndexerError::Sqlite`] if a write fails for another reason,
+    /// including a failed recovery attempt.
     pub fn full_rebuild(
+        &mut self,
+        documents: &[IndexableDocument],
+    ) -> Result<IndexReport, IndexerError> {
+        refuse_duplicate_paths(documents)?;
+        match self.full_rebuild_once(documents) {
+            Err(IndexerError::Corrupt { .. }) if self.path.is_some() => {
+                self.recreate_on_disk()?;
+                self.full_rebuild_once(documents)
+            }
+            other => other,
+        }
+    }
+
+    /// [`Indexer::full_rebuild`]'s body, without the corruption-recovery
+    /// retry, so the retry attempt (itself a `full_rebuild_once` call) does
+    /// not recurse into the recovery logic a second time.
+    fn full_rebuild_once(
         &mut self,
         documents: &[IndexableDocument],
     ) -> Result<IndexReport, IndexerError> {
@@ -652,14 +1015,14 @@ impl Indexer {
         let tx = self
             .conn
             .transaction()
-            .map_err(|source| Self::write_error(&path, "begin transaction", source))?;
+            .map_err(|source| classify_error(&path, "begin transaction", source))?;
         tx.execute("DELETE FROM documents", [])
-            .map_err(|source| Self::write_error(&path, "delete_all for a full rebuild", source))?;
+            .map_err(|source| classify_error(&path, "delete_all for a full rebuild", source))?;
         for document in documents {
             Self::insert(&tx, document, &path)?;
         }
         tx.commit()
-            .map_err(|source| Self::write_error(&path, "commit", source))?;
+            .map_err(|source| classify_error(&path, "commit", source))?;
         Ok(IndexReport {
             upserted: documents.len(),
             removed: 0,
@@ -667,27 +1030,73 @@ impl Indexer {
         })
     }
 
+    /// Closes the current connection, deletes `fts.sqlite`, `fts.sqlite-wal`
+    /// and `fts.sqlite-shm` at [`Indexer::open`]'s path, and reopens a fresh,
+    /// empty, correctly schemaed index at the same path. Used only by
+    /// [`Indexer::full_rebuild`]'s corruption recovery. A missing side file
+    /// is not an error: WAL mode does not always leave one.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexerError::Sqlite`] if the fresh file cannot be opened or its
+    /// schema created.
+    fn recreate_on_disk(&mut self) -> Result<(), IndexerError> {
+        let Some(path) = self.path.clone() else {
+            return Ok(());
+        };
+        // Drop the corrupt connection's lock before touching the files on
+        // disk, by replacing it with a throwaway in-memory one first.
+        self.conn = Connection::open_in_memory()
+            .map_err(|source| IndexerError::sqlite("open a throwaway connection", source))?;
+        for suffix in ["", "-wal", "-shm"] {
+            let side = PathBuf::from(format!("{}{suffix}", path.display()));
+            let _ = std::fs::remove_file(&side);
+        }
+        let fresh = Connection::open(&path)
+            .map_err(|source| IndexerError::sqlite(format!("reopen {}", path.display()), source))?;
+        let recreated = Self::configure(fresh, Some(path))?;
+        self.conn = recreated.conn;
+        Ok(())
+    }
+
     /// Re-indexes to match `documents` exactly ("re-index on merge", PRD
     /// K-02): every path in the index but not in `documents` is deleted;
     /// every path in `documents` that is new, or whose checksum differs from
     /// what is on disk, is written (delete-then-add); every path present and
-    /// unchanged is left alone. Runs inside one transaction.
+    /// unchanged is left alone.
     ///
-    /// Reads the current index with [`Indexer::all_documents`] rather than
-    /// trusting any state held in memory, so this is correct even as the
-    /// first call after opening an existing on-disk index in a fresh
-    /// process: see that method's doc.
+    /// Reads the current index inside the same write transaction the deletes
+    /// and upserts run in, not before it: an adversarial review found that
+    /// reading the diff basis with a separate, earlier `all_documents()`
+    /// call let a concurrent writer's commit land in the gap between that
+    /// read and this transaction's start, silently lost rather than either
+    /// applied or refused. Also correct as the first call after opening an
+    /// existing on-disk index in a fresh process, for the same reason
+    /// [`Indexer::all_documents`]'s doc gives: nothing here is read from
+    /// bookkeeping held in memory.
     ///
     /// # Errors
     ///
-    /// [`IndexerError::Locked`] if another writer holds the lock;
+    /// [`IndexerError::DuplicatePath`] if `documents` holds one path twice;
+    /// [`IndexerError::Locked`] if another writer holds the lock, or holds
+    /// it by the time this call's reads try to become writes;
+    /// [`IndexerError::Corrupt`] if the index is damaged;
     /// [`IndexerError::Sqlite`] if reading the current state or a write
-    /// fails.
+    /// fails for another reason.
     pub fn incremental_sync(
         &mut self,
         documents: &[IndexableDocument],
     ) -> Result<IndexReport, IndexerError> {
-        let current = self.all_documents()?;
+        refuse_duplicate_paths(documents)?;
+        let path = self.display_path();
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|source| classify_error(&path, "begin transaction", source))?;
+
+        // Read inside the transaction just opened, not before it: see the
+        // doc above.
+        let current = Self::all_documents_on(&tx, &path)?;
         let current_checksums: BTreeMap<&str, u64> = current
             .iter()
             .map(|(document, checksum)| (document.path.as_str(), *checksum))
@@ -696,12 +1105,6 @@ impl Indexer {
             .iter()
             .map(|document| (document.path.as_str(), document))
             .collect();
-
-        let path = self.display_path();
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|source| Self::write_error(&path, "begin transaction", source))?;
 
         let mut removed = 0usize;
         for existing_path in current_checksums.keys() {
@@ -725,7 +1128,7 @@ impl Indexer {
         }
 
         tx.commit()
-            .map_err(|source| Self::write_error(&path, "commit", source))?;
+            .map_err(|source| classify_error(&path, "commit", source))?;
         Ok(IndexReport {
             upserted,
             removed,
@@ -742,7 +1145,7 @@ impl Indexer {
             "DELETE FROM documents WHERE path = ?1",
             params![target_path],
         )
-        .map_err(|source| Self::write_error(display_path, "delete one document", source))?;
+        .map_err(|source| classify_error(display_path, "delete one document", source))?;
         Ok(())
     }
 
@@ -761,40 +1164,55 @@ impl Indexer {
                 document.checksum() as i64,
             ],
         )
-        .map_err(|source| Self::write_error(display_path, "insert one document", source))?;
+        .map_err(|source| classify_error(display_path, "insert one document", source))?;
         Ok(())
     }
 
-    /// Maps a write failure to [`IndexerError::Locked`] when it is SQLite
-    /// reporting the file already held by another writer, and to
-    /// [`IndexerError::Sqlite`] otherwise.
-    fn write_error(path: &Path, context: &str, source: rusqlite::Error) -> IndexerError {
-        if is_locked(&source) {
-            IndexerError::Locked {
-                path: path.to_owned(),
-            }
-        } else {
-            IndexerError::sqlite(context, source)
-        }
-    }
-
-    /// Full-text search over `title` and `body`, at most `limit` hits,
-    /// best-scored (lowest `bm25()`) first, ties broken by `path` ascending
-    /// so the same query gives the same order every time. `query` is always
-    /// quoted as one FTS5 literal phrase before being bound; see the module
-    /// doc's "FTS5 query safety".
+    /// Full-text search over `title` and `body`, at most `limit` hits
+    /// (`limit` is honoured exactly, including zero), best-scored (lowest
+    /// `bm25()`) first, ties broken by `path` ascending so the same query
+    /// gives the same order every time. `query` is always quoted as one
+    /// FTS5 literal phrase before being bound; see the module doc's "FTS5
+    /// query safety".
     ///
     /// An empty `query` (after trimming) returns every stored document's
     /// zero matches directly, without asking FTS5 to parse a degenerate
-    /// phrase: `documents_covered` is still the index's real size.
+    /// phrase. `documents_covered` and the `MATCH` itself are read inside
+    /// one read transaction, so they always describe the same snapshot: the
+    /// module doc's "Reads and writes share one transaction" names why a
+    /// caller must never see a count that another connection's commit has
+    /// already invalidated by the time the hits come back.
     ///
     /// # Errors
     ///
+    /// [`IndexerError::QueryTooLarge`] if `query` exceeds
+    /// `MAX_QUERY_BYTES` or `MAX_QUERY_TOKENS` (the module doc's
+    /// "Unbounded query cost"), checked before FTS5 ever sees it;
     /// [`IndexerError::InvalidQuery`] if `query`, even quoted, cannot be
     /// searched safely (the module doc's embedded-`NUL` case);
+    /// [`IndexerError::Locked`] if a concurrent write holds the lock;
+    /// [`IndexerError::Corrupt`] if the index is damaged;
     /// [`IndexerError::Sqlite`] if the search fails for another reason.
     pub fn search(&self, query: &str, limit: usize) -> Result<SearchReport, IndexerError> {
-        let total = self.total_indexed()?;
+        if query.len() > MAX_QUERY_BYTES {
+            return Err(IndexerError::QueryTooLarge {
+                byte_len: query.len(),
+                token_count: count_tokens(query),
+            });
+        }
+        let token_count = count_tokens(query);
+        if token_count > MAX_QUERY_TOKENS {
+            return Err(IndexerError::QueryTooLarge {
+                byte_len: query.len(),
+                token_count,
+            });
+        }
+
+        let path = self.display_path();
+        let tx = self.conn.unchecked_transaction().map_err(|source| {
+            classify_error(&path, "begin a read transaction for search", source)
+        })?;
+        let total = Self::total_indexed_on(&tx, &path)?;
         if query.trim().is_empty() {
             return Ok(SearchReport {
                 hits: Vec::new(),
@@ -803,20 +1221,20 @@ impl Indexer {
         }
 
         let quoted = quote_fts5_phrase(query);
-        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
-        let mut statement = self
-            .conn
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = tx
             .prepare(
                 "SELECT path, kind, title, bm25(documents) AS rank \
                  FROM documents WHERE documents MATCH ?1 \
                  ORDER BY rank ASC, path ASC LIMIT ?2",
             )
-            .map_err(|source| IndexerError::sqlite("prepare a search", source))?;
+            .map_err(|source| classify_error(&path, "prepare a search", source))?;
         // `query_map` itself only prepares the row-mapping closure; FTS5's
         // own query-syntax errors (the embedded-NUL case this module's
-        // tests reach) surface lazily, while the returned iterator is
-        // stepped below, not here. Either failure point is mapped the same
-        // way: a typed InvalidQuery, never the raw SQLite message.
+        // tests reach), a locked write and a corrupt page all surface
+        // lazily, while the returned iterator is stepped below, not here.
+        // Either failure point goes through `search_error`, which tells
+        // them apart rather than blaming every one of them on the query.
         let rows = statement
             .query_map(params![quoted, limit], |row| {
                 let path: String = row.get(0)?;
@@ -825,19 +1243,15 @@ impl Indexer {
                 let score: f64 = row.get(3)?;
                 Ok((path, kind_text, title, score))
             })
-            .map_err(|_source| IndexerError::InvalidQuery {
-                query: query.to_owned(),
-            })?;
+            .map_err(|source| search_error(&path, query, source))?;
 
         let mut hits = Vec::new();
         for row in rows {
-            let (path, kind_text, title, score) =
-                row.map_err(|_source| IndexerError::InvalidQuery {
-                    query: query.to_owned(),
-                })?;
+            let (path_hit, kind_text, title, score) =
+                row.map_err(|source| search_error(&path, query, source))?;
             if let Some(kind) = DocumentKind::parse(&kind_text) {
                 hits.push(SearchHit {
-                    path,
+                    path: path_hit,
                     kind,
                     title,
                     score,
@@ -868,18 +1282,41 @@ impl Indexer {
     ///
     /// # Errors
     ///
-    /// [`IndexerError::Io`] if a directory or file cannot be read.
+    /// [`IndexerError::Io`] if a directory or file cannot be read, or if a
+    /// file this walk finds is not actually under `repo_root` (a symlink
+    /// escaping it, most plausibly; the module never synthesizes an
+    /// absolute-path identity as a fallback, see `walk_markdown`'s doc).
     pub fn collect_from_repo(repo_root: &Path) -> Result<Vec<IndexableDocument>, IndexerError> {
         let spec_dir = repo_root.join("spec");
         let mut out = Vec::new();
-        walk_markdown(&spec_dir, &mut out)?;
+        walk_markdown(repo_root, &spec_dir, &mut out)?;
         Ok(out)
     }
 }
 
 /// Recursively walks `dir` for `.md` files, skipping `spec/design/` by name,
-/// and appends every document found to `out`.
-fn walk_markdown(dir: &Path, out: &mut Vec<IndexableDocument>) -> Result<(), IndexerError> {
+/// and appends every document found to `out`, with `path` computed relative
+/// to `repo_root`, never to `dir` itself.
+///
+/// An adversarial review found the previous version stripped each file's
+/// path relative to `dir.parent().parent()`, where `dir` is whichever
+/// directory the recursion is currently walking, not `repo_root`. That kept
+/// only the file's last three path components, so a top-level `spec/*.md`
+/// file carried the checkout directory's own name as a prefix (identical
+/// content in two checkouts of the same repository, or in a worktree versus
+/// the main checkout, got two different identities), and a file three or
+/// more levels under `spec/` lost its leading `spec/` components entirely,
+/// so two unrelated files could collide on one path. The same defect made
+/// `is_adr`/`is_criteria` test the file's *absolute* path, so a directory
+/// named `adr` or `criteria` anywhere above `repo_root` reclassified the
+/// whole corpus. Passing `repo_root` down through every recursive call and
+/// stripping against it, once, fixes both: `relative` is always exactly the
+/// path under `repo_root`, and classification reads only its components.
+fn walk_markdown(
+    repo_root: &Path,
+    dir: &Path,
+    out: &mut Vec<IndexableDocument>,
+) -> Result<(), IndexerError> {
     if !dir.is_dir() {
         return Ok(());
     }
@@ -899,7 +1336,7 @@ fn walk_markdown(dir: &Path, out: &mut Vec<IndexableDocument>) -> Result<(), Ind
                 // See the module doc, "spec/design/ is excluded".
                 continue;
             }
-            walk_markdown(&path, out)?;
+            walk_markdown(repo_root, &path, out)?;
             continue;
         }
         if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
@@ -909,15 +1346,26 @@ fn walk_markdown(dir: &Path, out: &mut Vec<IndexableDocument>) -> Result<(), Ind
             path: path.clone(),
             source,
         })?;
-        let relative = path
-            .strip_prefix(dir.parent().and_then(Path::parent).unwrap_or(dir))
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let is_adr = path
+        // Refused, never defaulted to the absolute path: an identity that
+        // silently became absolute the one time stripping failed would
+        // reintroduce exactly the checkout-dependent-identity defect this
+        // rewrite exists to remove.
+        let relative_path = path
+            .strip_prefix(repo_root)
+            .map_err(|_source| IndexerError::Io {
+                path: path.clone(),
+                source: std::io::Error::other(format!(
+                    "{} is not under repo_root {}; refusing to synthesize an absolute-path \
+                     identity for it",
+                    path.display(),
+                    repo_root.display()
+                )),
+            })?;
+        let relative = relative_path.to_string_lossy().replace('\\', "/");
+        let is_adr = relative_path
             .components()
             .any(|component| component.as_os_str().to_str() == Some("adr"));
-        let is_criteria = path
+        let is_criteria = relative_path
             .components()
             .any(|component| component.as_os_str().to_str() == Some("criteria"));
         if is_adr {
@@ -954,14 +1402,36 @@ fn first_heading(text: &str) -> Option<String> {
 /// `ori-gates`'s level-aware split). Text before the first heading, if any,
 /// is not a document of its own; a file with no heading at all becomes one
 /// document titled by its path.
+///
+/// Two defects an adversarial review found are fixed here. First, a line
+/// starting with `#` *inside a fenced code block* (three or more backticks)
+/// is not a heading: a `# install` comment inside a shell snippet no longer
+/// splits the document or contributes an anchor. Second, two headings whose
+/// text produces the same anchor (an exact repeat, such as two `## Steps`
+/// in one file) are disambiguated deterministically, GitHub's own
+/// convention: the first occurrence keeps the plain anchor, the second
+/// becomes `#anchor-1`, the third `#anchor-2`, and so on. Without either
+/// fix, two documents could carry the same `path`, which
+/// [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] now refuse
+/// outright ([`refuse_duplicate_paths`]) rather than silently keep only
+/// one of.
 fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> {
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut current_title: Option<String> = None;
     let mut current_body = String::new();
+    let mut in_fence = false;
 
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            if current_title.is_some() {
+                current_body.push_str(line);
+                current_body.push('\n');
+            }
+            continue;
+        }
+        if !in_fence && trimmed.starts_with('#') {
             if let Some(title) = current_title.take() {
                 sections.push((title, std::mem::take(&mut current_body)));
             }
@@ -984,10 +1454,19 @@ fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> 
         )];
     }
 
+    let mut anchor_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     sections
         .into_iter()
         .map(|(title, body)| {
-            let anchor = heading_anchor(&title);
+            let base = heading_anchor(&title);
+            let seen = anchor_counts.entry(base.clone()).or_insert(0);
+            let anchor = if *seen == 0 {
+                base
+            } else {
+                format!("{base}-{seen}")
+            };
+            *seen += 1;
             IndexableDocument::new(
                 format!("{relative_path}#{anchor}"),
                 DocumentKind::Section,
@@ -1719,5 +2198,610 @@ mod tests {
         let dump = second.all_documents().expect("read back");
         assert_eq!(dump.len(), 1);
         assert_eq!(dump[0].0.path, "c.md");
+    }
+
+    // =====================================================================
+    // Adversarial review, ORI-T-0035 (recorded in the pull request report).
+    // One test per finding, each failing against the code before its fix
+    // and passing after; plants for the new guards follow in the pull
+    // request's own plant procedure, not here.
+    // =====================================================================
+
+    // ---------------------------------------------------------------------
+    // Finding 1 (HIGH): document identity computed against the wrong base.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_collect_from_repo_paths_are_exactly_repository_relative_at_every_depth() {
+        let scratch = Scratch::new("paths-depth");
+        let spec = scratch.path.join("spec");
+        fs::create_dir_all(spec.join("adr")).expect("create spec/adr");
+        fs::create_dir_all(spec.join("runbooks").join("deep")).expect("create a depth-3 dir");
+        fs::write(spec.join("PRD.md"), "# Top\n\ndepth one\n").expect("write depth-1 file");
+        fs::write(
+            spec.join("adr").join("ADR-0001.md"),
+            "# ADR-0001\n\ndepth two\n",
+        )
+        .expect("write depth-2 file");
+        fs::write(
+            spec.join("runbooks").join("deep").join("note.md"),
+            "# Deep\n\ndepth three\n",
+        )
+        .expect("write depth-3 file");
+
+        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let paths: Vec<&str> = documents.iter().map(|d| d.path.as_str()).collect();
+
+        // Built with `concat!` rather than one literal: this repository's
+        // own citation gate (crates/ori-gates/src/spec_refs.rs) reads any
+        // contiguous "spec/" ... ".md" token in the tree as a citation to check
+        // against this repository's real spec/, and these are test
+        // fixtures in a throwaway scratch directory, never a citation.
+        assert!(
+            paths.contains(&concat!("spec/", "PRD.md", "#top")),
+            "a depth-1 file must keep its full repository-relative path, not the checkout \
+             directory's own name: {paths:?}"
+        );
+        assert!(
+            paths.contains(&concat!("spec/adr/", "ADR-0001.md")),
+            "a depth-2 file (an ADR, one document per file) must be repository-relative: \
+             {paths:?}"
+        );
+        assert!(
+            paths.contains(&concat!("spec/runbooks/deep/", "note.md", "#deep")),
+            "a depth-3 file must keep its full leading path, not lose spec/runbooks/: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.starts_with(
+                scratch
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("")
+            )),
+            "no path may carry the checkout directory's own name as a prefix: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_collect_from_repo_gives_identical_paths_under_two_different_checkout_names() {
+        let base = std::env::temp_dir().join(format!(
+            "ori-t-0035-checkout-identity-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let checkout_a = base.join("main-checkout");
+        let checkout_b = base.join("worktree-x");
+        for root in [&checkout_a, &checkout_b] {
+            let spec = root.join("spec");
+            fs::create_dir_all(spec.join("adr")).expect("create spec/adr");
+            fs::write(spec.join("PRD.md"), "# Top\n\nsame content\n")
+                .expect("write the same top-level file in both checkouts");
+            fs::write(
+                spec.join("adr").join("ADR-0001.md"),
+                "# ADR-0001\n\nsame content\n",
+            )
+            .expect("write the same ADR in both checkouts");
+        }
+
+        let a = Indexer::collect_from_repo(&checkout_a).expect("collect from checkout A");
+        let b = Indexer::collect_from_repo(&checkout_b).expect("collect from checkout B");
+        let mut a_paths: Vec<&str> = a.iter().map(|d| d.path.as_str()).collect();
+        let mut b_paths: Vec<&str> = b.iter().map(|d| d.path.as_str()).collect();
+        a_paths.sort_unstable();
+        b_paths.sort_unstable();
+
+        assert_eq!(
+            a_paths, b_paths,
+            "identical content checked out under two different directory names must produce \
+             identical document identities, or an unchanged repository looks changed to \
+             incremental_sync and to a FreshnessTracker keyed on these paths"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // ---------------------------------------------------------------------
+    // Finding 2 (HIGH): duplicate paths.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_full_rebuild_refuses_a_target_set_with_a_duplicate_path() {
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        let result = indexer.full_rebuild(&[
+            doc(
+                "x.md#notes",
+                DocumentKind::Section,
+                "Notes",
+                "first notes body",
+            ),
+            doc(
+                "x.md#notes",
+                DocumentKind::Section,
+                "Notes",
+                "second notes body",
+            ),
+        ]);
+        match result {
+            Err(IndexerError::DuplicatePath { path }) => assert_eq!(path, "x.md#notes"),
+            other => panic!("a duplicate path must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            indexer.all_documents().expect("read back").len(),
+            0,
+            "a refused full_rebuild must not have written anything"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_incremental_sync_refuses_a_target_set_with_a_duplicate_path() {
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer
+            .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha")])
+            .expect("seed");
+        let result = indexer.incremental_sync(&[
+            doc("x.md#notes", DocumentKind::Section, "Notes", "first"),
+            doc("x.md#notes", DocumentKind::Section, "Notes", "second"),
+        ]);
+        assert!(
+            matches!(result, Err(IndexerError::DuplicatePath { .. })),
+            "a duplicate path must be refused: {result:?}"
+        );
+        let dump = indexer.all_documents().expect("read back");
+        assert_eq!(
+            dump.len(),
+            1,
+            "a refused incremental_sync must leave the existing index untouched"
+        );
+        assert_eq!(dump[0].0.path, "a.md");
+    }
+
+    #[test]
+    fn ori_t_0035_section_documents_disambiguates_repeated_headings_deterministically() {
+        // `docs/`, not `spec/`: this repository's own citation gate reads
+        // any "spec/" ... ".md" token as a citation to check, and `path` here is
+        // an arbitrary caller-supplied prefix as far as `section_documents`
+        // is concerned (the real `spec/` prefix `collect_from_repo` always
+        // uses is covered by
+        // `ori_t_0035_collect_from_repo_paths_are_exactly_repository_relative_at_every_depth`,
+        // above).
+        let text =
+            "# Restore\n\n## Steps\n\nstop the engine\n\n# Verify\n\n## Steps\n\ncheck the chain\n";
+        let documents = section_documents("docs/runbooks/restore.md", text);
+        let paths: Vec<&str> = documents.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "docs/runbooks/restore.md#restore",
+                "docs/runbooks/restore.md#steps",
+                "docs/runbooks/restore.md#verify",
+                "docs/runbooks/restore.md#steps-1",
+            ],
+            "the second '## Steps' must get GitHub's disambiguating suffix, not the same anchor \
+             as the first: {paths:?}"
+        );
+        assert!(paths.iter().all(|path| {
+            let mut seen = std::collections::HashSet::new();
+            seen.insert(*path)
+        }));
+    }
+
+    #[test]
+    fn ori_t_0035_section_documents_does_not_read_a_hash_comment_inside_a_fenced_code_block_as_a_heading()
+     {
+        let text = "# Setup\n\n```sh\n# install\nmake\n```\n\n# Install\n\nrun make install\n";
+        let documents = section_documents("docs/runbooks/code.md", text);
+        let paths: Vec<&str> = documents.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "docs/runbooks/code.md#setup",
+                "docs/runbooks/code.md#install"
+            ],
+            "a '#' line inside a fenced code block must never split a new section or duplicate \
+             an anchor: {paths:?}"
+        );
+        let setup = documents
+            .iter()
+            .find(|d| d.path == "docs/runbooks/code.md#setup")
+            .expect("the Setup section exists");
+        assert!(
+            setup.body.contains("# install"),
+            "the fenced '# install' line must stay in the Setup section's body, as text: {:?}",
+            setup.body
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Finding 3 (MEDIUM): kind was not in the checksum.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_incremental_sync_detects_a_kind_only_change() {
+        let mut rebuilt = Indexer::open_in_memory().expect("in-memory index opens");
+        rebuilt
+            .full_rebuild(&[doc("m.md", DocumentKind::Module, "T", "B")])
+            .expect("full rebuild with the new kind");
+
+        let mut synced = Indexer::open_in_memory().expect("in-memory index opens");
+        synced
+            .full_rebuild(&[doc("m.md", DocumentKind::Section, "T", "B")])
+            .expect("seed with the old kind");
+        let report = synced
+            .incremental_sync(&[doc("m.md", DocumentKind::Module, "T", "B")])
+            .expect("incremental sync with only the kind changed");
+
+        assert_eq!(
+            report.upserted, 1,
+            "a kind-only change must be counted as an upsert, not skipped as unchanged"
+        );
+        assert_eq!(
+            rebuilt.all_documents().expect("dump"),
+            synced.all_documents().expect("dump"),
+            "full_rebuild and incremental_sync must agree on kind, not only on title and body"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Finding 4 (MEDIUM): unbounded query cost.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_search_refuses_a_query_over_the_byte_limit() {
+        let indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        let huge = "a".repeat(MAX_QUERY_BYTES + 1);
+        match indexer.search(&huge, 10) {
+            Err(IndexerError::QueryTooLarge { byte_len, .. }) => {
+                assert_eq!(byte_len, MAX_QUERY_BYTES + 1);
+            }
+            other => panic!("a query over the byte limit must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ori_t_0035_search_refuses_a_query_over_the_token_limit() {
+        let indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        // Short enough in bytes to pass the byte cap, but with more tokens
+        // than MAX_QUERY_TOKENS allows.
+        let query = "a ".repeat(MAX_QUERY_TOKENS + 1);
+        assert!(
+            query.len() <= MAX_QUERY_BYTES,
+            "the byte cap must not be what refuses this"
+        );
+        match indexer.search(&query, 10) {
+            Err(IndexerError::QueryTooLarge { token_count, .. }) => {
+                assert_eq!(token_count, MAX_QUERY_TOKENS + 1);
+            }
+            other => panic!("a query over the token limit must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ori_t_0035_search_within_both_limits_still_runs() {
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer
+            .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha content")])
+            .expect("full rebuild");
+        let report = indexer
+            .search("alpha", 10)
+            .expect("an ordinary query must still run");
+        assert_eq!(report.hits.len(), 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Finding 5 (MEDIUM): every MATCH failure became InvalidQuery.
+    // ---------------------------------------------------------------------
+
+    /// Damages every row of the FTS5 shadow table `documents_data` through a
+    /// second, independent connection to the same on-disk file: the
+    /// reviewers' own technique, reproduced here.
+    fn corrupt_fts5_shadow_table(path: &Path) {
+        let raw =
+            rusqlite::Connection::open(path).expect("open a second, raw connection to the file");
+        let changed = raw
+            .execute(
+                "UPDATE documents_data SET block = randomblob(length(block)) \
+                 WHERE block IS NOT NULL",
+                [],
+            )
+            .expect("corrupt the FTS5 shadow table directly");
+        assert!(
+            changed > 0,
+            "the corruption update must actually touch at least one row, or this test proves \
+             nothing"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_a_corrupt_index_is_reported_as_corrupt_not_invalid_query() {
+        let scratch = Scratch::new("corrupt-search");
+        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let seed: Vec<IndexableDocument> = (0..80)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "D",
+                    "alpha content shared by every document so the term has a real doclist",
+                )
+            })
+            .collect();
+        indexer.full_rebuild(&seed).expect("seed a real corpus");
+        let before = indexer
+            .search("alpha", 10)
+            .expect("search before corruption");
+        assert!(
+            !before.hits.is_empty(),
+            "the query must genuinely match before corruption"
+        );
+
+        corrupt_fts5_shadow_table(&scratch.path.join("fts.sqlite"));
+
+        match indexer.search("alpha", 10) {
+            Err(IndexerError::Corrupt { .. }) => {}
+            other => panic!(
+                "a corrupt index must be reported as IndexerError::Corrupt, with the query \
+                 blameless, not {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn ori_t_0035_full_rebuild_recovers_a_corrupt_on_disk_index() {
+        let scratch = Scratch::new("corrupt-recover");
+        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let seed: Vec<IndexableDocument> = (0..80)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "D",
+                    "alpha content",
+                )
+            })
+            .collect();
+        indexer.full_rebuild(&seed).expect("seed a real corpus");
+
+        corrupt_fts5_shadow_table(&scratch.path.join("fts.sqlite"));
+        assert!(
+            matches!(
+                indexer.search("alpha", 10),
+                Err(IndexerError::Corrupt { .. })
+            ),
+            "the corruption must be real and detected before recovery is tested"
+        );
+
+        let report = indexer
+            .full_rebuild(&[doc("b.md", DocumentKind::Section, "B", "beta content")])
+            .expect("full_rebuild must recover from corruption rather than fail or stay corrupt");
+        assert_eq!(report.total, 1);
+
+        let hits = indexer
+            .search("beta", 10)
+            .expect("search after recovery must work normally")
+            .hits;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "b.md");
+    }
+
+    // ---------------------------------------------------------------------
+    // Finding 6 (MEDIUM): reads and dependent operations were not in one
+    // transaction. Stress tests: each round is cheap, and the invariant
+    // must hold on every one of them, not just on average.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_search_documents_covered_never_disagrees_with_a_concurrent_writer() {
+        let scratch = Scratch::new("race-search");
+        let mut seeder = Indexer::open(&scratch.path).expect("seed connection opens");
+        seeder.full_rebuild(&[]).expect("start empty");
+        drop(seeder);
+
+        let writer_path = scratch.path.clone();
+        let writer = std::thread::spawn(move || {
+            let mut writer = Indexer::open(&writer_path).expect("writer opens");
+            for round in 0..250 {
+                let docs: Vec<IndexableDocument> = if round % 2 == 0 {
+                    (0..40)
+                        .map(|n| {
+                            doc(
+                                &format!("w{n}.md"),
+                                DocumentKind::Section,
+                                "W",
+                                "needle content",
+                            )
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let _ = writer.full_rebuild(&docs);
+            }
+        });
+
+        let reader_path = scratch.path.clone();
+        let reader = std::thread::spawn(move || {
+            let reader = Indexer::open(&reader_path).expect("reader opens");
+            let mut vacuous = 0usize;
+            let mut inverse = 0usize;
+            for _ in 0..2000 {
+                if let Ok(report) = reader.search("needle", 1000) {
+                    if report.documents_covered > 0 && report.hits.is_empty() {
+                        vacuous += 1;
+                    }
+                    if report.documents_covered == 0 && !report.hits.is_empty() {
+                        inverse += 1;
+                    }
+                }
+            }
+            (vacuous, inverse)
+        });
+
+        writer.join().expect("writer thread must not panic");
+        let (vacuous, inverse) = reader.join().expect("reader thread must not panic");
+        assert_eq!(
+            (vacuous, inverse),
+            (0, 0),
+            "documents_covered and hits must always describe the same committed snapshot: a \
+             writer committing between two separate reads used to produce exactly this \
+             mismatch"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_incremental_sync_survives_heavy_concurrent_writing_without_corruption() {
+        // A precise reproduction of the original defect's exact race window
+        // (a handful of CPU instructions between one SQL statement and the
+        // next, inside one function call, with no test hook to pause
+        // there) is not practical to force deterministically from outside
+        // the function: whichever of a concurrent writer's commit and this
+        // call's own transaction happens to land first is a legitimate,
+        // unordered choice this test cannot and should not referee round by
+        // round (both "the writer's document is swept up and deleted
+        // because it already existed when the sync's transaction opened"
+        // and "the writer's document survives because it was added only
+        // after that sync's transaction had already committed" are correct
+        // outcomes, and nothing on the outside can tell them apart without
+        // reaching into the method's own internals). What this test checks
+        // instead, and can check honestly: heavy concurrent writing never
+        // corrupts the index or leaves it in a state incremental_sync
+        // cannot still converge correctly from, once the contention stops.
+        // `ori_t_0035_search_documents_covered_never_disagrees_with_a_concurrent_writer`,
+        // above, is this same finding's deterministic, precisely-targeted
+        // half for `search`.
+        let scratch = Scratch::new("race-sync");
+        let mut seeder = Indexer::open(&scratch.path).expect("seed connection opens");
+        seeder
+            .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "original")])
+            .expect("seed the target document");
+        drop(seeder);
+
+        let writer_path = scratch.path.clone();
+        let writer = std::thread::spawn(move || {
+            let mut writer = Indexer::open(&writer_path).expect("writer opens");
+            for _ in 0..300 {
+                let _ = writer.add_or_replace(&doc(
+                    "intruder.md",
+                    DocumentKind::Section,
+                    "I",
+                    "an unrelated document",
+                ));
+            }
+        });
+
+        let syncer_path = scratch.path.clone();
+        let syncer = std::thread::spawn(move || {
+            let mut syncer = Indexer::open(&syncer_path).expect("syncer opens");
+            for _ in 0..300 {
+                let _ =
+                    syncer.incremental_sync(&[doc("a.md", DocumentKind::Section, "A", "original")]);
+            }
+        });
+
+        writer.join().expect("writer thread must not panic");
+        syncer.join().expect("syncer thread must not panic");
+
+        // Contention has stopped; one final, uncontested sync must converge
+        // to exactly the target, proving the index survived the race
+        // intact rather than corrupted or permanently stuck.
+        let mut settle = Indexer::open(&scratch.path).expect("settle connection opens");
+        settle
+            .incremental_sync(&[doc("a.md", DocumentKind::Section, "A", "original")])
+            .expect("a final, uncontested sync must succeed");
+        let dump = settle.all_documents().expect("read back the settled state");
+        assert_eq!(
+            dump.len(),
+            1,
+            "after contention stops, the index must settle to exactly the target set, not stay \
+             corrupted or stuck with an extra document: {dump:?}"
+        );
+        assert_eq!(dump[0].0.path, "a.md");
+    }
+
+    // ---------------------------------------------------------------------
+    // Finding 7 (MEDIUM): the spec/design/ exclusion test passed vacuously.
+    // A new test, added beside the existing one rather than editing it
+    // (CLAUDE.md: an existing test is never modified).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_collect_from_repo_excludes_a_real_markdown_file_under_spec_design() {
+        let scratch = Scratch::new("collect-design-md");
+        let spec = scratch.path.join("spec");
+        let design = spec.join("design");
+        fs::create_dir_all(&design).expect("create spec/design");
+        fs::write(
+            design.join("DESIGN.md"),
+            "# Design Ori Studio\n\nLedgerline mock content that must never be indexed\n",
+        )
+        .expect("write a real markdown file under spec/design/");
+        fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
+
+        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        assert!(
+            !documents.is_empty(),
+            "the real document outside spec/design/ must still be collected"
+        );
+        assert!(
+            documents
+                .iter()
+                .all(|d| !d.path.starts_with("spec/design/")),
+            "a real .md file under spec/design/ must never be collected, unlike the .html file \
+             the existing test plants (which the extension filter alone already drops, so it \
+             cannot tell the directory skip apart from its absence): {documents:?}"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_collect_from_repo_treats_a_differently_cased_design_directory_as_a_different_name()
+     {
+        // The exclusion matches the literal directory name "design"
+        // (lower case), the name escalation E-0006 and this repository's
+        // real spec/design/ both use; it does not fold case. A directory a
+        // caller actually named "Design" is therefore a different name as
+        // far as this module is concerned, not an evasion of the exclusion:
+        // documenting that choice here, rather than leaving it implicit.
+        let scratch = Scratch::new("collect-design-case");
+        let spec = scratch.path.join("spec");
+        let differently_cased = spec.join("Design");
+        fs::create_dir_all(&differently_cased).expect("create spec/Design");
+        fs::write(differently_cased.join("NOTES.md"), "# Notes\n\ncontent\n")
+            .expect("write a markdown file under the differently-cased directory");
+
+        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        assert!(
+            documents.iter().any(|d| d.path.starts_with("spec/Design/")),
+            "a directory literally named Design is not the same name as design, and this \
+             module's exclusion is a literal name match, not a case-folded one: {documents:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Finding 8 (LOW): search(query, 0) returned one hit.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_search_with_limit_zero_returns_no_hits() {
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer
+            .full_rebuild(&[
+                doc("a.md", DocumentKind::Section, "Same", "tie words"),
+                doc("b.md", DocumentKind::Section, "Same", "tie words"),
+            ])
+            .expect("full rebuild");
+
+        let report = indexer.search("tie", 0).expect("limit zero must not error");
+        assert_eq!(
+            report.hits.len(),
+            0,
+            "\"at most limit hits\" with limit 0 must return zero hits, not one"
+        );
+        assert_eq!(
+            report.documents_covered, 2,
+            "documents_covered must still report the real index size at limit 0"
+        );
+
+        let one = indexer.search("tie", 1).expect("limit one must still work");
+        assert_eq!(one.hits.len(), 1);
     }
 }
