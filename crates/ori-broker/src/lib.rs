@@ -8,14 +8,16 @@
 //!
 //! # What is here and what is not (ORI-T-0026)
 //!
-//! [`identity`] and [`keychain`] are this ticket's declared scope:
-//! `AgentIdentity` (`spec/DATA_MODEL.md` section 2), and the `Keychain` trait
+//! [`identity`], [`keychain`] and [`family`] are declared scope so far:
+//! `AgentIdentity` (`spec/DATA_MODEL.md` section 2), the `Keychain` trait
 //! with its real and fake implementations plus the `Secret` newtype
-//! (`spec/SECURITY_NOTES.md` "Secrets"). `issuance.rs` (`CredentialIssuance`,
-//! full scoping and revocation on session end) is ORI-T-0027; `family.rs`
-//! (cross-model refusal) is ORI-T-0028; `forbidden.rs` (the forbidden-action
-//! test harness) is ORI-T-0029. None of the three exist yet, and nothing here
-//! reaches into them.
+//! (`spec/SECURITY_NOTES.md` "Secrets"), and the cross-model refusal at
+//! identity creation (ADR-0001 "Model family", AICD §7, criterion
+//! ORI-P1-035). `issuance.rs` (`CredentialIssuance`, full scoping and
+//! revocation on session end) is ORI-T-0027; `forbidden.rs` (the
+//! forbidden-action test harness) is ORI-T-0029. Neither exists yet, and
+//! nothing here reaches into them.
 
+pub mod family;
 pub mod identity;
 pub mod keychain;
