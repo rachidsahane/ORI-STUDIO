@@ -10,6 +10,46 @@
 //! reviews never share a model family, and the check is enforced at identity
 //! creation, not at review time."
 //!
+//! # ORI-T-0108: what moved, and what is still not wired in
+//!
+//! The operator's ruling on escalation 6 (`ops/phase-1-backlog.md`) settled
+//! where the family lives: on [`crate::identity::AgentIdentity`], as a
+//! required [`ori_core::types::ModelFamily`] value, never on
+//! `ProviderBinding`. Two things follow from that ruling and are done here:
+//! [`ModelFamily`] wraps [`ori_core::types::ModelFamily`] rather than holding
+//! its own `String` (see "A wrapper, not a re-export" below), and this
+//! module's doc comment no longer calls escalation 6 unresolved.
+//!
+//! One thing does not follow, and is not done: `AgentIdentity::create` does
+//! not yet take a `family` parameter or call the two functions below.
+//! `AgentIdentity::create` is called at 12 existing, unmodified call sites (9
+//! in `identity.rs`'s own tests, 2 in `keychain.rs`'s, 1 in `issuance.rs`'s);
+//! adding a required parameter changes the arity of every one, and no design
+//! that leaves them compiling can supply a family at those call sites without
+//! either making the field optional or defaulting it, both the fail-open
+//! shape this module exists to prevent. This is CLAUDE.md absolute rule 3 (no
+//! existing test is modified), reported as this ticket's stop point rather
+//! than applied.
+//!
+//! # A wrapper, not a re-export
+//!
+//! [`ModelFamily`] here is `ModelFamily(ori_core::types::ModelFamily)`, not a
+//! `pub use` of the core type. A `pub use` was tried first, per this ticket's
+//! instructions, and rejected: [`ModelFamily::declare`] must return
+//! [`FamilyError`], and Rust's orphan rule lets only the crate that defines a
+//! type add an inherent impl to it, so once the type is defined in
+//! `ori-core`, only `ori-core` can define an `impl ModelFamily { .. }` block
+//! at all, on any name. `ori-core` cannot return `ori-broker`'s `FamilyError`
+//! (`ori-core` depends on nothing in the workspace), so a re-exported type
+//! cannot carry a `declare` that returns `FamilyError`, and this module's own
+//! test `tests::ori_t_0028_model_family_declare_refuses_empty_or_whitespace` (which
+//! this ticket does not modify) matches its result against exactly that type.
+//! Wrapping keeps `ModelFamily` locally defined here, so `declare` stays legal
+//! to define, while [`ModelFamily::as_core`] and [`ModelFamily::from_core`]
+//! are the seam `identity.rs` would use, once ORI-T-0108's stop point is
+//! resolved, to move a value between the type `AgentIdentity` stores and the
+//! type these functions compare.
+//!
 //! # Where the family comes from, and why this module never infers one
 //!
 //! ADR-0001 rejected exact model ids for exactly this check: "a version bump
@@ -40,29 +80,32 @@
 //!   `model` field, only `product_id` and `provider`, so two identities on
 //!   the same provider but different models would resolve to the same
 //!   binding and be refused wrongly were the family read from there.
-//!   `ops/phase-1-backlog.md`'s open escalation 6 (`spec_conflict`) already
-//!   records exactly this: recorded, not resolved, as of this ticket
-//!   ("Both are one-line corrections to ADR-0001 and one field on
-//!   `AgentIdentity`, and I have not made them"). Recording it on
-//!   `AgentIdentity` instead, that escalation's own recommendation, would
-//!   mean editing `identity.rs`, which this ticket is told to read and not
-//!   modify, and reports as a finding instead if it must change. It must:
-//!   the escalation is unresolved, so this module edits neither
-//!   `identity.rs` nor `keychain.rs`.
+//!   `ops/phase-1-backlog.md`'s escalation 6 (`spec_conflict`) recorded
+//!   exactly this and recommended recording the family on `AgentIdentity`
+//!   instead; the operator's ruling on that escalation adopted the
+//!   recommendation, which is ORI-T-0108's mandate ("the ruling I
+//!   implement" in that ticket's own text). The escalation is resolved as of
+//!   ORI-T-0108; what is not yet done is wiring `AgentIdentity::create` to
+//!   read it, for the reason "ORI-T-0108: what moved, and what is still not
+//!   wired in" above states, so as of this ticket this module still edits
+//!   neither `identity.rs` nor `keychain.rs`.
 //!
-//! Both are a `precondition_missing` finding (this ticket's own instructions
-//! name the trigger; the `aicd_escalate` tool named in CLAUDE.md's
-//! escalation table does not exist in this repository, escalation E-0005, so
-//! the finding is carried in this ticket's report rather than filed through
-//! it). What this module builds instead, and what does not depend on either
-//! missing piece: [`ModelFamily`], a typed, caller-declared value (never a
-//! bare [`String`], so a caller cannot pass an unvalidated one by accident),
-//! and the two comparison functions below, which take every family they
-//! compare as an explicit parameter and store nothing. A future ticket that
-//! resolves escalation 6, whichever way, wires a real source (`RuntimeCaps`
-//! once it exists, or a `model_family` field once `identity.rs` grows one)
-//! through to these same functions without this module changing: the seam is
-//! the function boundary, not a field this module reads.
+//! The first bullet (`RuntimeCaps`) is unaffected by the ruling and remains a
+//! `precondition_missing` finding, carried in this ticket's report (the
+//! `aicd_escalate` tool named in CLAUDE.md's escalation table does not exist
+//! in this repository, escalation E-0005). What this module builds instead,
+//! and what does not depend on `RuntimeCaps` existing: [`ModelFamily`], a
+//! typed, caller-declared value (never a bare [`String`], so a caller cannot
+//! pass an unvalidated one by accident), and the two comparison functions
+//! below, which take every family they compare as an explicit parameter and
+//! store nothing. A future ticket that wires `AgentIdentity::create` to call
+//! these functions reaches a real source for `coder_families` /
+//! `lead_families` (`RuntimeCaps` once it exists is still how a runtime
+//! adapter's own declaration would reach a caller; what "the coders it
+//! reviews" reads from is a separate, larger question this ticket's report
+//! addresses directly) through to these same functions without this module
+//! changing: the seam is the function boundary, not a field this module
+//! reads.
 //!
 //! # The undeclared family: refused, never compared as distinct
 //!
@@ -151,49 +194,77 @@ use ori_core::error::MethodologyRef;
 /// grouping of models sharing a lineage; stable across version changes, and
 /// the coarsest unit at which two reviewers are genuinely different."
 ///
-/// Built only by [`ModelFamily::declare`], which a caller reaches for with a
-/// value it already holds (from a runtime adapter's `RuntimeCaps`, once that
-/// exists, or any other declared source), never one this module infers from
-/// a model id string; see this module's own doc comment, "Where the family
-/// comes from". Holding this as a typed newtype rather than a bare
-/// [`String`] is itself part of that: a function that took `&str` here could
-/// be handed an unvalidated, un-declared-on-purpose value at any call site,
-/// while a function that takes `&ModelFamily` can only be handed one that
-/// passed [`ModelFamily::declare`]'s refusal of an empty or whitespace-only
-/// value.
+/// A wrapper around [`ori_core::types::ModelFamily`], the value type
+/// ORI-T-0108 moved into `ori-core` (this module's own doc comment, "A
+/// wrapper, not a re-export", says why this is a wrapper and not that type
+/// re-exported under this name). Built only by [`ModelFamily::declare`],
+/// which a caller reaches for with a value it already holds (from a runtime
+/// adapter's `RuntimeCaps`, once that exists, or any other declared source),
+/// never one this module infers from a model id string; see this module's own
+/// doc comment, "Where the family comes from". Holding this as a typed
+/// newtype rather than a bare [`String`] is itself part of that: a function
+/// that took `&str` here could be handed an unvalidated, un-declared-on-purpose
+/// value at any call site, while a function that takes `&ModelFamily` can only
+/// be handed one that passed [`ModelFamily::declare`]'s refusal of an empty or
+/// whitespace-only value.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ModelFamily(String);
+pub struct ModelFamily(ori_core::types::ModelFamily);
 
 impl ModelFamily {
     /// Declares a model family, refusing one that is empty or only
     /// whitespace, the same shape [`crate::identity::AgentIdentity::create`]
-    /// uses for `model`.
+    /// uses for `model`. Delegates the validation itself to
+    /// [`ori_core::types::ModelFamily::parse`], so there is exactly one place
+    /// in this workspace that decides what a well-formed family looks like.
     ///
     /// # Errors
     ///
     /// [`FamilyError::Malformed`] when `family` is empty or only whitespace.
     pub fn declare(family: impl Into<String>) -> Result<Self, FamilyError> {
         let family = family.into();
-        let trimmed = family.trim();
-        if trimmed.is_empty() {
-            return Err(FamilyError::Malformed {
+        ori_core::types::ModelFamily::parse(&family)
+            .map(Self)
+            .map_err(|_| FamilyError::Malformed {
                 what: "model family",
                 value: family,
-            });
-        }
-        Ok(Self(trimmed.to_owned()))
+            })
     }
 
     /// The family as declared text.
     #[must_use]
     pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Wraps an already-validated [`ori_core::types::ModelFamily`] (the type
+    /// [`crate::identity::AgentIdentity`] would store, per the operator's
+    /// ruling on escalation 6) so it can be passed to
+    /// [`refuse_lead_sharing_family_with_coders`] or
+    /// [`refuse_coder_sharing_family_with_leads`]. Infallible: a value of the
+    /// core type already passed the one validation this module would apply.
+    #[must_use]
+    pub const fn from_core(family: ori_core::types::ModelFamily) -> Self {
+        Self(family)
+    }
+
+    /// The core value type this family wraps, the type
+    /// [`crate::identity::AgentIdentity`] would store, per the operator's
+    /// ruling on escalation 6.
+    #[must_use]
+    pub const fn as_core(&self) -> &ori_core::types::ModelFamily {
         &self.0
+    }
+
+    /// Consumes this value for the core type it wraps.
+    #[must_use]
+    pub fn into_core(self) -> ori_core::types::ModelFamily {
+        self.0
     }
 }
 
 impl fmt::Display for ModelFamily {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
