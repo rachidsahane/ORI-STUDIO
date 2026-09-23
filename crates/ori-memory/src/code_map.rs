@@ -71,19 +71,42 @@
 //!   is also how a test can tell "read, then cut off" apart from "read in
 //!   full, then measured"
 //!   (`tests::ori_t_0036_a_file_over_the_size_cap_is_skipped_and_never_fully_read`).
-//! - **Time.** [`CodeMapOptions::file_timeout`] (default 5 seconds) bounds
-//!   the *whole* per-file step, parsing and extraction together, not parsing
-//!   alone. Parsing is bounded through
-//!   [`tree_sitter::Parser::parse_with_options`]'s progress callback, which
-//!   tree-sitter polls periodically. Extraction is bounded by this module's
-//!   own traversal helpers (`for_each_node`, `for_each_sibling_group`)
-//!   and every language's top-level scan loop, each of which checks the same
-//!   deadline and stops early when it has passed. A file whose syntax is
-//!   small but pathologically nested (deeply bracketed input is the classic
-//!   case) is bounded by time even when it is not bounded by size, and
-//!   anything this module cannot finish in time is [`SkipReason::TimedOut`],
-//!   not a hang and not a false "clean" (see "Quadratic extraction" below for
-//!   the defect this closes).
+//! - **Time.** One principle, not a bound scoped to whichever stage a review
+//!   happened to measure first: every loop over content this module read
+//!   from the repository checks a wall-clock deadline, and whatever it
+//!   cannot finish before that deadline is a recorded `TimedOut`, never a
+//!   hang, and never presented as if it were complete. Concretely, the
+//!   stages, each under its own deadline:
+//!   - **Per file** (reading, parsing, extraction, and test detection,
+//!     together): [`CodeMapOptions::file_timeout`] plus a size-proportional
+//!     allowance (`per_file_budget`; see its doc for why a fixed bound alone
+//!     is wrong for roughly half the builds that check it). Parsing is
+//!     bounded through [`tree_sitter::Parser::parse_with_options`]'s
+//!     progress callback, which tree-sitter polls periodically. Extraction
+//!     is bounded by this module's own traversal helpers (`for_each_node`,
+//!     `for_each_sibling_group`) and every language's top-level scan loop,
+//!     each of which checks the same deadline. `use crate::...` resolution
+//!     (`RustModuleIndex::longest_prefix`) checks it too, periodically
+//!     during its own walk, not only between the `use` items around it: a
+//!     single pathological `use` path is exactly what escaped the per-file
+//!     check in this ticket's third review round, because nothing *inside*
+//!     the function that resolved it checked anything.
+//!   - **The `spec/` citation scan**, once per [`build_code_map`] call, not
+//!     once per file (it runs after every file's [`Module`] already
+//!     exists): its own deadline, sized by the same `file_timeout`
+//!     configuration value, checked periodically across every module and
+//!     document it scans (`attach_spec_citations`, `collect_markdown`).
+//!     [`Coverage::spec_citation_scan_complete`] is where its own
+//!     incompleteness is recorded, not a demotion of an already-successful
+//!     `Module`; see that field's doc for why.
+//!
+//!   A file whose syntax is small but pathologically nested (deeply
+//!   bracketed input is the classic case) is bounded by time even when it is
+//!   not bounded by size (see "Quadratic extraction" below for the defect
+//!   class this whole principle closes, and what its own third round found
+//!   still missing from the second round's version of it: two more stages
+//!   doing unbounded work outside any deadline, not a defect in the
+//!   per-file bound itself).
 //! - **Symlinks.** A directory reached through a symlink is never descended
 //!   into, whatever its target, which makes cycle-safety independent of where
 //!   the link points (a symlink loop cannot be walked into in the first
@@ -98,7 +121,28 @@
 //!   [`SkipReason::GitMetadata`] and is never opened. It is reported under
 //!   its own in-root path, never its target's, so a link and its target are
 //!   two distinct entries in [`Coverage`], the way two distinct files always
-//!   are.
+//!   are. A symlink to a directory is never descended into either, and is
+//!   recorded as [`SkipReason::SymlinkedDirectory`], not silently absent:
+//!   the walk saw it and made a decision about it, unlike an ordinary
+//!   subdirectory, which is not a "file" candidate at all.
+//! - **Time-of-check to time-of-use.** A symlink, once validated at walk
+//!   time (in-root, outside `.git`), is re-validated again immediately
+//!   before the read that follows, narrowing (never eliminating) the window
+//!   in which it could have been swapped for something else; a plain,
+//!   non-symlink entry is opened refusing to follow a symlink at all
+//!   (`open_regular_file_no_follow`), on the platforms this ticket could
+//!   verify those flags on, so a path swapped for a symlink after the walk
+//!   classified it as a plain file is refused, not read through. This
+//!   ticket's third review round reproduced exactly that swap (a race
+//!   between the walk and a later file's turn to be read) against the
+//!   second round's fix, which decided by a `stat` and then opened the same
+//!   path again later, a window the race fit inside every time it tried.
+//!   What is not eliminated, stated rather than assumed away: two syscalls
+//!   (a `canonicalize` and the `open` that follows it, for the symlink case;
+//!   a `stat` implicit in `O_NOFOLLOW`'s own kernel check and the `open`
+//!   call itself, for the plain-file case) are still two syscalls, not one,
+//!   so a swap timed into that narrower gap is not detected. Closing it
+//!   fully needs an atomically-checked open this module does not implement.
 //! - **Traversal.** The directory walk is iterative (an explicit stack of
 //!   pending directories), never recursive, so a pathologically deep
 //!   directory tree cannot overflow the call stack the way a naive recursive
@@ -126,13 +170,54 @@
 //!   build output dwarfs its source will have that reflected honestly in
 //!   [`Coverage`] rather than hidden by a heuristic this module does not
 //!   implement. Both are named as gaps in this ticket's closing report, not
-//!   silently assumed away. A narrower gap, stated rather than closed: the
-//!   `stat`-before-`open` type check closes every attack this module's own
-//!   review reproduced, but a `stat` and the `open` that follows it are two
-//!   syscalls, not one, so a filesystem swap timed into the gap between them
-//!   is not eliminated; closing that fully needs a non-blocking open and an
-//!   `fstat` on the resulting descriptor, which this module does not
-//!   implement.
+//!   silently assumed away. A narrower gap, stated rather than closed: see
+//!   "Time-of-check to time-of-use" above, which is the residual this
+//!   ticket's third review round left after moving the type check from a
+//!   `stat` on a path (checked, then opened again later) to a decision made
+//!   on the opened handle itself.
+//!
+//! # Quadratic extraction, and what stays fast
+//!
+//! This ticket's third adversarial-review round found that its own
+//! second-round fix ("the whole per-file step is bounded") was true of the
+//! stages the second round's own review had measured, and false of two more
+//! that process the same untrusted content: `use crate::` resolution (one
+//! function, rewritten to a per-prefix search that was itself O(k^2) in a
+//! `use` path's segment count, with no deadline check inside it) and the
+//! `spec/` citation scan (which does not run per file at all, so it never
+//! received a deadline to check in the first place). Both are fixed here;
+//! see "Time" above for where each stage's deadline now lives.
+//!
+//! `use crate::` resolution is also no longer quadratic in the general case,
+//! not only bounded: `RustModuleIndex` is a trie built once per
+//! [`build_code_map`] call, so a `use` path of `k` segments resolves in
+//! O(k), the same complexity the rest of this module's traversals already
+//! had. Building and, just as much, *dropping* that trie are both iterative
+//! rather than recursive, for the same reason `for_each_node` and
+//! `walk_repository` already are: a sufficiently long `use crate::` path
+//! (or a sufficiently deep directory tree feeding one) built a trie deep
+//! enough to overflow the stack on Rust's own default recursive `Drop`, a
+//! second, distinct stack-depth failure this module's own new test for the
+//! first one found, not a reviewer.
+//!
+//! One further shape this round's review measured but did not ask this
+//! module to change: many attributes stacked on one item (nested or
+//! repeated `#[...]` forms) costs real, non-trivial time to extract (about
+//! 1.5 seconds at 600 KB, in the review's own measurement), but that cost
+//! stays inside [`CodeMapOptions::file_timeout`]'s budget rather than
+//! escaping it the way the two fixed cases did: past the budget, it is
+//! [`SkipReason::TimedOut`], not a hang, which is what this module claims
+//! for every pathological shape, not linear time for all of them. Left as
+//! measured and documented, not changed.
+//!
+//! A grouped Rust import, `use crate::{foo::Foo, bar::Bar};`, is a case the
+//! same review round asked this module to pick a rule for and state it:
+//! this module cuts the argument text at its first `{` before resolution
+//! ever runs, which leaves no segments to look up, so the whole group is
+//! recorded as one external edge, its target the literal grouped text.
+//! Neither member is individually resolved. This was already the behaviour;
+//! what changed is that it is now a stated choice, tested, rather than an
+//! implicit consequence of the cut nobody had asserted on.
 //!
 //! # What "covering tests" means here, and what it misses
 //!
@@ -202,6 +287,7 @@
 //! and `tests::ori_p1_030_the_same_repository_gives_byte_identical_output_regardless_of_iteration_order`
 //! are what this claim is checked against).
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -432,9 +518,18 @@ pub enum SkipReason {
     /// path recorded here is a lossy rendering (invalid bytes replaced), for
     /// display only; it is not a path this module can open.
     NonUtf8Name,
-    /// This module did not finish parsing and extracting it within
-    /// [`CodeMapOptions::file_timeout`]; see the module doc's "Time" bound.
+    /// This module did not finish parsing and extracting it within its
+    /// budget; see the module doc's "Time" bound.
     TimedOut,
+    /// It is a symlink whose target is a directory. Never descended (see the
+    /// module doc's cycle-safety note), and, unlike a plain directory,
+    /// recorded here rather than silently absent from both
+    /// [`Coverage::files_seen`] and [`Coverage::files_skipped`]: a directory
+    /// reached by the ordinary (non-symlink) walk is not itself a "file" and
+    /// so is never a candidate in the first place, but a symlink *is* one
+    /// candidate entry this module saw and made a decision about, so that
+    /// decision is recorded like any other.
+    SymlinkedDirectory,
 }
 
 impl fmt::Display for SkipReason {
@@ -448,7 +543,8 @@ impl fmt::Display for SkipReason {
             Self::NotARegularFile => f.write_str("not a regular file"),
             Self::GitMetadata => f.write_str("inside .git, version-control metadata, never source"),
             Self::NonUtf8Name => f.write_str("name is not valid UTF-8"),
-            Self::TimedOut => f.write_str("parsing or extraction timed out"),
+            Self::TimedOut => f.write_str("timed out"),
+            Self::SymlinkedDirectory => f.write_str("symlink to a directory, never descended"),
         }
     }
 }
@@ -480,6 +576,21 @@ pub struct Coverage {
     pub files_parsed_with_errors: usize,
     /// Files seen but not parsed, with the reason for each, sorted by path.
     pub files_skipped: Vec<SkippedFile>,
+    /// Whether the `spec/` citation scan finished within its own budget.
+    /// `true` when there was no `spec/` directory at all, or the scan
+    /// completed; `false` when its deadline passed first. The scan is a
+    /// separate stage from parsing and extraction (it runs once, after every
+    /// file's `Module` already exists), so its own incompleteness is
+    /// recorded here rather than by turning an already-successfully-parsed
+    /// module into a [`SkippedFile`]: a module's interfaces, edges, entry
+    /// points and tests are unaffected by the citation scan running out of
+    /// time, and are not retroactively called incomplete for a reason that
+    /// has nothing to do with them. What *is* incomplete, honestly, when
+    /// this is `false`: some modules' [`Module::spec_sections`] may be
+    /// missing citations a completed scan would have found, and no module
+    /// past the point the deadline hit was scanned at all. See the module
+    /// doc's "Time" bound.
+    pub spec_citation_scan_complete: bool,
 }
 
 /// The result of [`build_code_map`]: every module found, and what the walk
@@ -558,6 +669,10 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
     let walk = walk_repository(&root_canon);
     let files_seen = walk.files.len() + walk.pre_skipped.len();
     let known: HashSet<String> = walk.files.iter().map(|file| file.rel.clone()).collect();
+    // Built once, shared by every file: see `RustModuleIndex`'s doc for why
+    // building it per `use crate::...` resolution (the shape this ticket's
+    // third review round found) is the defect, not a detail.
+    let rust_index = RustModuleIndex::build(&known);
 
     let mut modules: Vec<Module> = Vec::new();
     let mut skipped: Vec<SkippedFile> = walk.pre_skipped;
@@ -565,7 +680,7 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
     let mut files_parsed_with_errors = 0usize;
 
     for file in &walk.files {
-        match process_file(file, &known, options) {
+        match process_file(file, &known, &rust_index, options, &root_canon) {
             Ok(module) => {
                 if module.parsed_with_errors {
                     files_parsed_with_errors += 1;
@@ -582,7 +697,15 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
     }
 
     link_sibling_test_files(&mut modules);
-    attach_spec_citations(&root_canon, &mut modules, options);
+    // Its own budget, not a reused per-file deadline: this stage runs once,
+    // after every file's `Module` already exists, not per file, so it gets
+    // one fresh deadline sized by the same `file_timeout` configuration
+    // value rather than inheriting an `Instant` computed for (and mostly
+    // spent by) something else. See `attach_spec_citations`'s doc and the
+    // module doc's "Time" bound.
+    let spec_deadline = Instant::now() + options.file_timeout;
+    let spec_citation_scan_complete =
+        attach_spec_citations(&root_canon, &mut modules, options, spec_deadline);
 
     for module in &mut modules {
         module
@@ -611,6 +734,7 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
             files_parsed_clean,
             files_parsed_with_errors,
             files_skipped: skipped,
+            spec_citation_scan_complete,
         },
     })
 }
@@ -626,6 +750,15 @@ struct CandidateFile {
     abs: PathBuf,
     /// Root-relative, forward-slash path, used as the module's identity.
     rel: String,
+    /// Whether this entry was a symlink when the walk classified it. Read
+    /// again in `process_file`, which opens this path differently depending
+    /// on the answer: a direct entry is opened refusing any symlink the path
+    /// might name by the time `process_file` runs (nothing here was ever
+    /// meant to follow one), while a symlink entry is re-validated
+    /// immediately before its own open, narrowing (not eliminating) the
+    /// window between this classification and that read. See the module
+    /// doc's "Time-of-check to time-of-use" note.
+    was_symlink: bool,
 }
 
 /// What [`walk_repository`] found.
@@ -708,7 +841,17 @@ fn walk_repository(root_canon: &Path) -> Walk {
                 // a `stat`-family call.
                 match fs::metadata(&abs) {
                     Ok(target_meta) if target_meta.is_dir() => {
-                        // Never descended: see the module doc's cycle-safety note.
+                        // Never descended: see the module doc's cycle-safety
+                        // note. Recorded, not silently absent: this entry is
+                        // one the walk saw and decided about, unlike an
+                        // ordinary subdirectory, which is not a "file"
+                        // candidate at all.
+                        admit_skip(
+                            root_canon,
+                            &abs,
+                            SkipReason::SymlinkedDirectory,
+                            &mut pre_skipped,
+                        );
                     }
                     Ok(target_meta) if target_meta.is_file() => match fs::canonicalize(&abs) {
                         Ok(resolved) if resolved.starts_with(root_canon) => {
@@ -724,7 +867,7 @@ fn walk_repository(root_canon: &Path) -> Walk {
                                 // target's: a link and its target are two
                                 // distinct files, and only one of them is
                                 // this entry.
-                                admit_file(root_canon, &abs, &mut files, &mut pre_skipped);
+                                admit_file(root_canon, &abs, true, &mut files, &mut pre_skipped);
                             }
                         }
                         _ => admit_skip(
@@ -759,7 +902,7 @@ fn walk_repository(root_canon: &Path) -> Walk {
                 }
                 pending.push(abs);
             } else if file_type.is_file() {
-                admit_file(root_canon, &abs, &mut files, &mut pre_skipped);
+                admit_file(root_canon, &abs, false, &mut files, &mut pre_skipped);
             } else {
                 admit_skip(
                     root_canon,
@@ -818,6 +961,7 @@ fn resolved_path_enters_git(root_canon: &Path, resolved: &Path) -> bool {
 fn admit_file(
     root_canon: &Path,
     abs: &Path,
+    was_symlink: bool,
     files: &mut Vec<CandidateFile>,
     pre_skipped: &mut Vec<SkippedFile>,
 ) {
@@ -825,6 +969,7 @@ fn admit_file(
         Some(rel) => files.push(CandidateFile {
             abs: abs.to_path_buf(),
             rel,
+            was_symlink,
         }),
         None => pre_skipped.push(SkippedFile {
             path: lossy_rel_path_string(root_canon, abs),
@@ -851,6 +996,89 @@ fn admit_skip(
 // Per-file processing
 // ---------------------------------------------------------------------------
 
+/// Opens `path` for reading, refusing to follow a symlink the path names: a
+/// plain, non-symlink entry the walk already classified is meant to stay
+/// that way through to the read that follows this open, and this is what
+/// stops it from silently reading through a symlink that replaced the path
+/// afterward (this ticket's third review round reproduced exactly that
+/// swap). `libc` is not a dependency of this crate (`ori-memory`'s
+/// `Cargo.toml` does not list it, and CLAUDE.md rule 6 makes adding one an
+/// escalation this ticket does not make on its own), so the flag values
+/// below are the platform's own header constants, not `libc`'s named ones.
+///
+/// Verified, by platform: macOS (`O_NOFOLLOW` 0x0100, `O_NONBLOCK` 0x0004),
+/// compiled and run on this ticket's own development machine (arm64); Linux
+/// x86_64 (`O_NOFOLLOW` 0o400000, `O_NONBLOCK` 0o4000) and Linux aarch64
+/// (`O_NOFOLLOW` 0o100000, the same `O_NONBLOCK`), each compiled and run
+/// inside a `gcc:latest` Docker container for that platform, printing the
+/// macros from the container's own `<fcntl.h>`. Linux's `O_NOFOLLOW` is not
+/// architecture-uniform: `arch/arm64/include/uapi/asm/fcntl.h` overrides the
+/// `asm-generic` value x86_64 and most other architectures use, which is
+/// exactly why this is two Linux constants, not one. Every other unix this
+/// module might compile for (any other architecture, or another OS
+/// entirely) falls back to a plain open with no `O_NOFOLLOW`/`O_NONBLOCK`
+/// protection, narrower than the verified platforms but no narrower than
+/// this ticket's second round left it; that fallback, and the Windows path
+/// below, are things this ticket could only verify to compile (in a
+/// throwaway crate carrying none of this one's C dependencies, which do not
+/// cross-compile in this environment; see the report), never to run.
+#[cfg(unix)]
+fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(target_os = "macos")]
+        const O_NOFOLLOW: i32 = 0x0100;
+        #[cfg(target_os = "macos")]
+        const O_NONBLOCK: i32 = 0x0004;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        const O_NOFOLLOW: i32 = 0o400_000;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        const O_NONBLOCK: i32 = 0o4_000;
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        const O_NOFOLLOW: i32 = 0o100_000;
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        const O_NONBLOCK: i32 = 0o4_000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        fs::File::open(path)
+    }
+}
+
+/// [`open_regular_file_no_follow`], for Windows: opens the reparse point
+/// itself (`FILE_FLAG_OPEN_REPARSE_POINT`) rather than transparently
+/// following it, so a path that became a symlink or junction after the walk
+/// classified it as a plain file yields a handle whose own metadata this
+/// module can recognise as not a regular file
+/// ([`SkipReason::NotARegularFile`]), instead of silently opening whatever
+/// the reparse point now names. Checked for both `is_file()` and
+/// `is_symlink()` at the call site, not `is_file()` alone, as a second,
+/// independent guard: this constant's effect on the metadata Rust's `std`
+/// reports for a reparse-point handle is documented behaviour this module
+/// could not run and observe on an actual Windows machine (see the report).
+#[cfg(windows)]
+fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
 fn language_of(rel: &str) -> Option<Language> {
     let ext = rel.rsplit('.').next()?;
     match ext {
@@ -862,38 +1090,121 @@ fn language_of(rel: &str) -> Option<Language> {
     }
 }
 
+/// The wall-clock budget one file's whole step (open, read, parse,
+/// extraction and test detection together) gets:
+/// [`CodeMapOptions::file_timeout`] plus a size-proportional allowance for a
+/// file over 256 KiB (one second per MiB above that, computed
+/// proportionally, not a whole extra second added to every file regardless
+/// of size); nothing beyond `file_timeout` itself for a file at or under
+/// that threshold, which this module's own small fixtures, and any
+/// ordinarily-sized source file, always are.
+///
+/// Why an allowance beyond the fixed bound: a fixed bound checked once does
+/// not distinguish an ordinary large file from a pathological one, and this
+/// ticket's third review round measured that an *unoptimized* build's parse
+/// and extraction together can need several times as long as a release
+/// build's for the identical input, several seconds longer for a file
+/// already within the default 5 second budget. Without an allowance, such a
+/// file becomes `TimedOut` only in a debug build (`cargo test`,
+/// `scripts/gates.sh` and an unreleased `cargo build` all use one) while the
+/// identical file maps clean in release, which is not a bound working as
+/// documented, it is the bound being wrong for half the builds that use it.
+///
+/// The allowance is deliberately generous and is not a throughput promise;
+/// it exists so a legitimate large file is not mistaken for a pathological
+/// one, not so an actually pathological one passes. It does not undermine
+/// the other bound it sits next to: this ticket's quadratic-shape
+/// reproductions (nested Rust items, `use crate::` paths with huge segment
+/// counts) cost far more time than one second per MiB of the *small* inputs
+/// that trigger them, so a fixed floor plus a modest per-MiB allowance is
+/// nowhere near enough budget for either to pass.
+fn per_file_budget(options: &CodeMapOptions, file_bytes: u64) -> Duration {
+    /// Below this, the allowance is exactly zero, not a rounded-up sliver of
+    /// one: an ordinary small file (this module's own fixtures included)
+    /// gets exactly `options.file_timeout`, unchanged, which is also what
+    /// keeps a test-injected `Duration::ZERO` an exact, deterministic "the
+    /// deadline is already past" for every file this size or smaller,
+    /// rather than a few proportional microseconds that would make such a
+    /// test's outcome depend on real timing.
+    const THRESHOLD_BYTES: u64 = 256 * 1024;
+    /// One second of extra budget per MiB above the threshold, computed
+    /// proportionally (integer microseconds, not a whole MiB rounded up),
+    /// so a file just over the threshold gets a correspondingly small
+    /// allowance rather than jumping straight to a full extra second.
+    const PER_MIB_ALLOWANCE_MICROS: u64 = 1_000_000;
+    const MIB_BYTES: u64 = 1024 * 1024;
+
+    if file_bytes <= THRESHOLD_BYTES {
+        return options.file_timeout;
+    }
+    let allowance_micros = file_bytes.saturating_mul(PER_MIB_ALLOWANCE_MICROS) / MIB_BYTES;
+    options
+        .file_timeout
+        .saturating_add(Duration::from_micros(allowance_micros))
+}
+
 /// Turns one candidate file into a [`Module`], or the [`SkipReason`] it was
 /// skipped for.
-///
-/// The deadline for the *whole* step (reading, parsing, extraction and test
-/// detection together) is computed once, here, before anything else runs, so
-/// none of those stages resets the clock the others share.
 fn process_file(
     file: &CandidateFile,
     known: &HashSet<String>,
+    rust_index: &RustModuleIndex,
     options: &CodeMapOptions,
+    root_canon: &Path,
 ) -> std::result::Result<Module, SkipReason> {
-    let deadline = Instant::now() + options.file_timeout;
     let language = language_of(&file.rel).ok_or(SkipReason::UnsupportedLanguage)?;
 
-    // `stat`, never `open`, decides the type: `open` on a FIFO with no
-    // writer can block, and a `stat` never does. This is the second such
-    // check (`walk_repository` already made one for a symlink); repeating it
-    // here, right before the only `open` in this function, narrows the
-    // window in which the entry could have changed underneath this module
-    // between the walk and this call (not to zero: see the module doc's
-    // "What is not bounded").
-    let meta = fs::metadata(&file.abs).map_err(|err| SkipReason::Unreadable(err.to_string()))?;
-    if !meta.is_file() {
+    // Open first, decide by the opened handle, not by a path-based `stat`
+    // followed by a separate, later `open`: this ticket's third review round
+    // reproduced a swap timed into exactly that gap (a plain file replaced
+    // by a symlink out of the root, or into `.git`, after the walk but
+    // before this call), which the two-syscall form cannot see. What each
+    // branch does instead:
+    let opened = if file.was_symlink {
+        // This entry was already a symlink when the walk validated it
+        // in-root and outside `.git`. Re-validating immediately before this
+        // open narrows that window from "the whole walk plus every earlier
+        // file" down to "between this canonicalize and this open"; it does
+        // not close it fully (a swap timed into that narrower gap is still
+        // not detected). See the module doc's "Time-of-check to
+        // time-of-use" note for what this admits.
+        let resolved =
+            fs::canonicalize(&file.abs).map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+        if !resolved.starts_with(root_canon) {
+            return Err(SkipReason::SymlinkOutsideRoot);
+        }
+        if resolved_path_enters_git(root_canon, &resolved) {
+            return Err(SkipReason::GitMetadata);
+        }
+        fs::File::open(&file.abs).map_err(|err| SkipReason::Unreadable(err.to_string()))?
+    } else {
+        // This entry was a plain, non-symlink file when the walk saw it: it
+        // was never meant to follow a symlink at all, so if the path now
+        // names one (swapped in after the walk), the open itself refuses it
+        // on every platform this was verified on; see
+        // `open_regular_file_no_follow`'s doc for which those are.
+        open_regular_file_no_follow(&file.abs)
+            .map_err(|err| SkipReason::Unreadable(err.to_string()))?
+    };
+    let meta = opened
+        .metadata()
+        .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+    // Both conditions: on Windows, a handle opened with
+    // `FILE_FLAG_OPEN_REPARSE_POINT` onto a path that became a symlink or
+    // junction is expected to report `is_symlink()` on its own metadata,
+    // which `is_file()` alone might or might not also catch (undocumented
+    // behaviour this module could not observe on an actual Windows
+    // machine; see `open_regular_file_no_follow`'s doc).
+    if !meta.is_file() || meta.file_type().is_symlink() {
         return Err(SkipReason::NotARegularFile);
     }
+
+    let deadline = Instant::now() + per_file_budget(options, meta.len());
 
     // The cap is enforced on bytes actually read, through `Read::take`, not
     // on `meta.len()` taken on trust: a file that grows after this `stat`,
     // or that misreports its length, is still cut off at `cap + 1` bytes.
     let cap = options.max_file_bytes;
-    let opened =
-        fs::File::open(&file.abs).map_err(|err| SkipReason::Unreadable(err.to_string()))?;
     let mut bytes = Vec::new();
     opened
         .take(cap.saturating_add(1))
@@ -919,7 +1230,14 @@ fn process_file(
     let parsed_with_errors = root.has_error();
 
     let (mut extracted, extraction_completed) = match language {
-        Language::Rust => extract_rust(root, source.as_bytes(), &file.rel, known, deadline),
+        Language::Rust => extract_rust(
+            root,
+            source.as_bytes(),
+            &file.rel,
+            known,
+            rust_index,
+            deadline,
+        ),
         Language::TypeScript => {
             extract_typescript(root, source.as_bytes(), &file.rel, known, deadline)
         }
@@ -1192,33 +1510,143 @@ fn rust_crate_root(rel: &str, known: &HashSet<String>) -> Option<String> {
     }
 }
 
-/// Resolves a `crate::`-relative path (`segments`, already stripped of the
-/// leading `crate`) against `crate_root` (from [`rust_crate_root`]),
-/// trying progressively shorter prefixes because a `use` path typically names
-/// an item, not only modules (`crate::foo::Bar` is module `foo`, item
-/// `Bar`).
-fn resolve_rust_crate_path(
-    crate_root: &str,
-    segments: &[&str],
-    known: &HashSet<String>,
-) -> Option<String> {
-    for take in (1..=segments.len()).rev() {
-        let mut parts: Vec<&str> = Vec::new();
-        if !crate_root.is_empty() {
-            parts.push(crate_root);
-        }
-        parts.extend(&segments[..take]);
-        let base = parts.join("/");
-        let as_file = format!("{base}.rs");
-        if known.contains(&as_file) {
-            return Some(as_file);
-        }
-        let as_mod = format!("{base}/mod.rs");
-        if known.contains(&as_mod) {
-            return Some(as_mod);
+/// An index over every path in `known` that looks like a Rust source file,
+/// built once per [`build_code_map_with_options`] call and reused for every
+/// `use crate::...` resolution in every file mapped, so resolving one `use`
+/// path of `k` `::`-separated segments costs O(k), not O(k^2).
+///
+/// Before this index existed, resolution rebuilt and re-hashed a fresh
+/// candidate string for each of up to `k` progressively shorter prefixes.
+/// This ticket's third adversarial-review round measured exactly the
+/// quadratic shape that produces: 18 seconds for a 240 KB `use crate::`
+/// path at 80,000 segments, and still running past 120 seconds at 330,000
+/// segments (990 KB, 12% of the size cap), entirely outside the per-file
+/// deadline, because nothing inside the old function checked it. A trie
+/// walked once, segment by segment, from the crate root down, replaces the
+/// "try every prefix length" search with the same longest-prefix answer
+/// computed in one pass.
+#[derive(Default)]
+struct RustModuleIndex {
+    children: HashMap<String, RustModuleIndex>,
+    /// The resolved path when this node's own segment sequence names a real
+    /// `<segments>.rs` file. Preferred over `as_mod_dir` when both exist
+    /// (matching the original search order, which checked the file form
+    /// before the `mod.rs` form at each length).
+    as_file: Option<String>,
+    /// The resolved path when this node's own segment sequence names a real
+    /// `<segments>/mod.rs` file.
+    as_mod_dir: Option<String>,
+}
+
+/// Iterative, not the derived recursive drop glue: a deep, mostly
+/// single-child chain (the shape a long `use crate::` path, or a deep
+/// directory tree, builds) would otherwise overflow the stack when the
+/// index is dropped, one frame per level, the same failure class `insert`
+/// itself was rewritten to avoid. Found here by this module's own
+/// 50,000-segment test overflowing on drop, after `insert` was already
+/// iterative: fixing one recursive traversal is not fixing the shape, and
+/// this module's `Drop` is exactly the shape it names.
+impl Drop for RustModuleIndex {
+    fn drop(&mut self) {
+        let mut stack: Vec<RustModuleIndex> =
+            self.children.drain().map(|(_, child)| child).collect();
+        while let Some(mut node) = stack.pop() {
+            stack.extend(node.children.drain().map(|(_, child)| child));
+            // `node`'s own `children` is now empty, so its `Drop::drop`
+            // (this same implementation) recurses no further when it runs
+            // at the end of this iteration.
         }
     }
-    None
+}
+
+impl RustModuleIndex {
+    fn build(known: &HashSet<String>) -> Self {
+        let mut root = Self::default();
+        for path in known {
+            if let Some(stem) = path.strip_suffix("/mod.rs") {
+                root.insert(stem.split('/').filter(|s| !s.is_empty()), path, false);
+            } else if let Some(stem) = path.strip_suffix(".rs") {
+                if stem.is_empty() || stem == "mod" {
+                    // A bare top-level `mod.rs` or `.rs` names the crate
+                    // root itself, not a segment any `use crate::...` path
+                    // could name (Rust's grammar does not allow `mod` as a
+                    // path segment; harmless either way, excluded for
+                    // clarity of intent).
+                    continue;
+                }
+                root.insert(stem.split('/').filter(|s| !s.is_empty()), path, true);
+            }
+        }
+        root
+    }
+
+    /// Iterative, not recursive: a path with as many `::`-separated segments
+    /// as this ticket's own reproduction (tens of thousands) would overflow
+    /// the stack one frame per segment otherwise, which is exactly the kind
+    /// of pathological-depth failure the rest of this module (`for_each_node`,
+    /// `walk_repository`) is already iterative to avoid; found by this
+    /// ticket's own new stack-overflowing test before the fix, not by a
+    /// reviewer.
+    fn insert<'a>(
+        &mut self,
+        segments: impl Iterator<Item = &'a str>,
+        resolved: &str,
+        is_file: bool,
+    ) {
+        let mut node = self;
+        for seg in segments {
+            node = node.children.entry(seg.to_owned()).or_default();
+        }
+        if is_file {
+            node.as_file = Some(resolved.to_owned());
+        } else {
+            node.as_mod_dir = Some(resolved.to_owned());
+        }
+    }
+
+    fn resolved(&self) -> Option<&str> {
+        self.as_file.as_deref().or(self.as_mod_dir.as_deref())
+    }
+
+    /// Longest-prefix match of `crate_root` (from [`rust_crate_root`]) then
+    /// `segments`, one hop per segment: O(total segment count), not O(count
+    /// squared). `crate_root` alone, with no further segment, is never a
+    /// resolution by itself, matching the original search's `take` range
+    /// (which never tried zero segments either). Checks `deadline`
+    /// periodically (every 256 hops) so one pathological `use` item with an
+    /// enormous segment count cannot itself run past its file's budget,
+    /// stopping and returning whatever was found so far, which is what a
+    /// resolution this call could not finish in time degrades to: an
+    /// approximation on a path this large is already inside a
+    /// [`SkipReason::TimedOut`] result once the caller's own deadline check
+    /// runs, never a wrong answer presented as final.
+    fn longest_prefix<'a>(
+        &self,
+        crate_root: &str,
+        segments: impl Iterator<Item = &'a str>,
+        deadline: Instant,
+    ) -> Option<String> {
+        let mut node = self;
+        for seg in crate_root.split('/').filter(|s| !s.is_empty()) {
+            node = node.children.get(seg)?;
+        }
+        let mut best: Option<String> = None;
+        for (step, seg) in segments.enumerate() {
+            if step.is_multiple_of(256) && Instant::now() >= deadline {
+                return best;
+            }
+            match node.children.get(seg) {
+                Some(next) => {
+                    node = next;
+                    if let Some(resolved) = node.resolved() {
+                        best = Some(resolved.to_owned());
+                    }
+                }
+                None => break,
+            }
+        }
+        best
+    }
 }
 
 fn extract_rust(
@@ -1226,6 +1654,7 @@ fn extract_rust(
     source: &[u8],
     rel: &str,
     known: &HashSet<String>,
+    rust_index: &RustModuleIndex,
     deadline: Instant,
 ) -> (Extracted, bool) {
     let mut out = Extracted::new();
@@ -1272,10 +1701,9 @@ fn extract_rust(
                     head.strip_prefix("crate::")
                         .or(if head == "crate" { Some("") } else { None })
                 {
-                    let segments: Vec<&str> =
-                        after_crate.split("::").filter(|s| !s.is_empty()).collect();
+                    let segments = after_crate.split("::").filter(|s| !s.is_empty());
                     let resolved = crate_root.as_deref().and_then(|crate_root| {
-                        resolve_rust_crate_path(crate_root, &segments, known)
+                        rust_index.longest_prefix(crate_root, segments, deadline)
                     });
                     out.edges.push(DependencyEdge {
                         from: rel.to_owned(),
@@ -1978,9 +2406,101 @@ fn join_dir(dir: &str, sub: &str) -> String {
 /// [`collect_markdown`]'s doc for the memory bound this pairs with).
 const MAX_SPEC_CITATIONS_PER_MODULE: usize = 500;
 
+/// The longest heading text this module interns whole; a longer one is
+/// truncated (at a UTF-8 character boundary) before it is stored. Interning
+/// is still O(heading length) once per distinct heading, so an unbounded
+/// length would still make that one step slow even though (after this
+/// ticket's third round) it no longer repeats per matching line.
+const MAX_HEADING_BYTES: usize = 4096;
+
+/// How often (in scanned lines, across every module and document together)
+/// [`attach_spec_citations`] checks its deadline. Checking every single line
+/// would itself cost real time at the scale a `spec/` scan can reach
+/// (modules times documents times lines), so this amortizes that cost while
+/// still checking often enough that a slow module or document is caught
+/// well before its own scan could finish.
+const SPEC_SCAN_DEADLINE_CHECK_EVERY: u64 = 4096;
+
+/// One `spec/*.md` document, parsed once and shared by every module's
+/// citation scan, rather than re-parsed per module.
+///
+/// Before this ticket's third review round, `attach_spec_citations` re-typed
+/// scanned this way per module (module count times document size just to
+/// track headings again each time), and, on every line a module's path
+/// appeared in, cloned the *current heading's full text* twice (once to
+/// build the dedup key, once for `HashSet::insert`) before ever checking
+/// whether that (doc, heading) pair was already recorded; the doc comment
+/// there claimed this was "one allocation, not one per line", which was true
+/// for retained memory and false for the work done to get there. The review
+/// measured up to 173 CPU-seconds for a single document at the size cap with
+/// one long heading, entirely outside any deadline, because
+/// `attach_spec_citations` never received one to check. Here, each
+/// document's headings are interned once (`headings`, each distinct text
+/// stored once however many times it recurs), each line already carries its
+/// heading as a cheap index (`line_heading`), and the per-module scan
+/// deduplicates on `(usize, Option<usize>)` pairs, never touching heading
+/// text on the hot path.
+struct MarkdownDoc {
+    rel: String,
+    lines: Vec<String>,
+    /// The heading active at `lines[i]`, an index into `headings`.
+    line_heading: Vec<Option<usize>>,
+    /// Every distinct heading text in this document, first-seen order.
+    headings: Vec<String>,
+}
+
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn parse_markdown_doc(rel: String, content: &str) -> MarkdownDoc {
+    let mut headings: Vec<String> = Vec::new();
+    let mut heading_index: HashMap<String, usize> = HashMap::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut line_heading: Vec<Option<usize>> = Vec::new();
+    let mut current: Option<usize> = None;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if let Some(stripped) = trimmed.strip_prefix('#') {
+            let stripped = truncate_at_char_boundary(
+                stripped.trim_start_matches('#').trim(),
+                MAX_HEADING_BYTES,
+            );
+            if !stripped.is_empty() {
+                let next_index = headings.len();
+                let index = *heading_index
+                    .entry(stripped.to_owned())
+                    .or_insert(next_index);
+                if index == next_index {
+                    headings.push(stripped.to_owned());
+                }
+                current = Some(index);
+            }
+        }
+        lines.push(line.to_owned());
+        line_heading.push(current);
+    }
+    MarkdownDoc {
+        rel,
+        lines,
+        line_heading,
+        headings,
+    }
+}
+
 /// Scans `<root>/spec/**/*.md`, best effort, for each module's path as a
 /// literal substring. See the module doc, "What spec sections per module
-/// means here".
+/// means here". Returns whether the scan finished within `deadline`; see
+/// [`Coverage::spec_citation_scan_complete`]'s doc for what `false` means
+/// and why an incomplete scan does not turn an already-successful [`Module`]
+/// into a [`SkippedFile`].
 ///
 /// `spec` is found by reading `root`'s own entries and matching a name
 /// exactly, never by joining `"spec"` onto `root` and asking the OS whether
@@ -1994,9 +2514,14 @@ const MAX_SPEC_CITATIONS_PER_MODULE: usize = 500;
 /// equality on `root`'s own directory entries is exact and case-sensitive on
 /// every platform alike, and reading `symlink_metadata` (not `metadata`) is
 /// what refuses a symlinked or junctioned `spec` rather than following it.
-fn attach_spec_citations(root: &Path, modules: &mut [Module], options: &CodeMapOptions) {
+fn attach_spec_citations(
+    root: &Path,
+    modules: &mut [Module],
+    options: &CodeMapOptions,
+    deadline: Instant,
+) -> bool {
     let Ok(read_dir) = fs::read_dir(root) else {
-        return;
+        return true;
     };
     let spec_dir = read_dir
         .filter_map(std::result::Result::ok)
@@ -2015,71 +2540,87 @@ fn attach_spec_citations(root: &Path, modules: &mut [Module], options: &CodeMapO
             (file_type.is_dir() && !file_type.is_symlink()).then(|| entry.path())
         });
     let Some(spec_dir) = spec_dir else {
-        return;
+        return true;
     };
 
-    let docs = collect_markdown(&spec_dir, root, options);
+    let raw_docs = collect_markdown(&spec_dir, root, options, deadline);
+    if Instant::now() >= deadline {
+        return false;
+    }
+    let docs: Vec<MarkdownDoc> = raw_docs
+        .into_iter()
+        .map(|(rel, content)| parse_markdown_doc(rel, &content))
+        .collect();
+
+    let mut steps: u64 = 0;
     for module in modules.iter_mut() {
-        let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-        'docs: for (doc_rel, content) in &docs {
-            let mut heading: Option<String> = None;
-            for line in content.lines() {
-                let trimmed = line.trim_start();
-                if let Some(stripped) = trimmed.strip_prefix('#') {
-                    let stripped = stripped.trim_start_matches('#').trim();
-                    if !stripped.is_empty() {
-                        heading = Some(stripped.to_owned());
-                    }
+        let mut seen: HashSet<(usize, Option<usize>)> = HashSet::new();
+        'docs: for (doc_index, doc) in docs.iter().enumerate() {
+            for (line_index, line) in doc.lines.iter().enumerate() {
+                steps += 1;
+                if steps.is_multiple_of(SPEC_SCAN_DEADLINE_CHECK_EVERY)
+                    && Instant::now() >= deadline
+                {
+                    return false;
                 }
                 if line.contains(module.path.as_str()) {
-                    // Deduplicated by (doc, heading) before it is ever
-                    // pushed, not after: a heading repeated across many
-                    // matching lines is one allocation, not one per line.
-                    // Before this, a spec document within the size cap could
-                    // still request unbounded memory (a long heading times
-                    // many matching lines); see the report for the
-                    // measurement.
-                    let key = (doc_rel.clone(), heading.clone());
-                    if seen.insert(key.clone()) {
+                    let heading_idx = doc.line_heading[line_index];
+                    if seen.insert((doc_index, heading_idx)) {
                         if module.spec_sections.len() >= MAX_SPEC_CITATIONS_PER_MODULE {
                             module.spec_sections.push(SpecCitation {
-                                doc: doc_rel.clone(),
+                                doc: doc.rel.clone(),
                                 heading: Some(format!(
                                     "(truncated: this module cited more than {MAX_SPEC_CITATIONS_PER_MODULE} times; further citations were not recorded)"
                                 )),
                             });
                             break 'docs;
                         }
+                        let heading_text = heading_idx.map(|index| doc.headings[index].clone());
                         module.spec_sections.push(SpecCitation {
-                            doc: key.0,
-                            heading: key.1,
+                            doc: doc.rel.clone(),
+                            heading: heading_text,
                         });
                     }
                 }
             }
         }
     }
+    true
 }
 
 /// Walks `dir` (inside `root`) for `.md` files, following no symlinked
 /// directory, silently skipping what cannot be read within
 /// [`CodeMapOptions::max_file_bytes`]: this is a best-effort secondary scan,
-/// not part of [`Coverage`]. A candidate is confirmed a regular file by
-/// `stat` before it is opened, the same rule the main walk applies (see the
-/// module doc's "File type" bound), and the read is bounded by
-/// [`std::io::Read::take`]`(cap + 1)` the same way [`process_file`]'s is, so
-/// a FIFO named `*.md` under `spec/` is refused rather than blocking this
-/// scan forever, and a file that grows past the cap is still cut off.
-fn collect_markdown(dir: &Path, root: &Path, options: &CodeMapOptions) -> Vec<(String, String)> {
+/// not part of [`Coverage`]. Every entry reaching the open step here was
+/// already confirmed not a symlink at listing time (the `is_symlink()` check
+/// just above), so it was never meant to become one afterward either;
+/// `open_regular_file_no_follow` is what refuses it if it did, the same rule
+/// [`process_file`] applies to a plain (non-symlink) entry, for the same
+/// reason (see that function's doc). Stops (returning whatever it already
+/// collected) once `deadline` passes, checked once per file: a `spec/` tree
+/// could itself hold enough documents that discovering and reading them all
+/// is not free, even before any of them is scanned for citations.
+fn collect_markdown(
+    dir: &Path,
+    root: &Path,
+    options: &CodeMapOptions,
+    deadline: Instant,
+) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(current) = pending.pop() {
+        if Instant::now() >= deadline {
+            break;
+        }
         let Ok(read_dir) = fs::read_dir(&current) else {
             continue;
         };
         let mut entries: Vec<fs::DirEntry> = read_dir.filter_map(std::result::Result::ok).collect();
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
+            if Instant::now() >= deadline {
+                return out;
+            }
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
@@ -2094,15 +2635,15 @@ fn collect_markdown(dir: &Path, root: &Path, options: &CodeMapOptions) -> Vec<(S
             if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
                 continue;
             }
-            let Ok(meta) = fs::metadata(&path) else {
+            let Ok(opened) = open_regular_file_no_follow(&path) else {
                 continue;
             };
-            if !meta.is_file() {
+            let Ok(meta) = opened.metadata() else {
+                continue;
+            };
+            if !meta.is_file() || meta.file_type().is_symlink() {
                 continue;
             }
-            let Ok(opened) = fs::File::open(&path) else {
-                continue;
-            };
             let mut bytes = Vec::new();
             if opened
                 .take(options.max_file_bytes.saturating_add(1))
@@ -3276,11 +3817,14 @@ mod tests {
         let root = tree.root_node();
 
         let already_past = Instant::now() - Duration::from_secs(1);
+        let empty_known = HashSet::new();
+        let empty_index = RustModuleIndex::build(&empty_known);
         let (extracted, completed) = extract_rust(
             root,
             source.as_bytes(),
             "x.rs",
-            &HashSet::new(),
+            &empty_known,
+            &empty_index,
             already_past,
         );
         assert!(
@@ -3552,6 +4096,74 @@ mod tests {
         let real_count = map.modules.iter().filter(|m| m.path == "real.rs").count();
         assert_eq!(real_count, 1, "real.rs must not be duplicated");
         drop(guard);
+    }
+
+    // -----------------------------------------------------------------
+    // ORI-T-0036 adversarial review, round 3 (2026-09-23): "the fixes
+    // addressed instances, not the class." One test per item below that
+    // failed before its fix and passes after; the report's plant table
+    // says which.
+    // -----------------------------------------------------------------
+
+    /// Item 3 (MEDIUM), the mechanism directly: `open_regular_file_no_follow`
+    /// must refuse an actual symlink (deterministic, no race needed to prove
+    /// the open itself refuses one) and must still open an ordinary file
+    /// normally.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_open_regular_file_no_follow_refuses_a_symlink_but_opens_a_plain_file() {
+        let dir = temp_dir("no-follow-open");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "plain.rs", "pub fn plain() {}\n");
+        std::os::unix::fs::symlink(dir.join("plain.rs"), dir.join("link.rs"))
+            .expect("create symlink");
+
+        let plain_result = open_regular_file_no_follow(&dir.join("plain.rs"));
+        assert!(
+            plain_result.is_ok(),
+            "an ordinary file must still open: {plain_result:?}"
+        );
+
+        let link_result = open_regular_file_no_follow(&dir.join("link.rs"));
+        assert!(
+            link_result.is_err(),
+            "a symlink must be refused, not followed"
+        );
+        drop(guard);
+    }
+
+    /// Item 3 (MEDIUM), end to end: a path the walk would have classified
+    /// `was_symlink: false` (an ordinary file at walk time) that becomes a
+    /// symlink out of the root before `process_file` runs on it (what the
+    /// whole-walk race this ticket's report reproduces converges to, for one
+    /// file) must be refused, not read through.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_process_file_refuses_a_path_that_became_a_symlink_after_the_walk() {
+        let dir = temp_dir("toctou-process-file");
+        let guard = DropGuard(dir.clone());
+        let outside = temp_dir("toctou-process-file-outside");
+        let outside_guard = DropGuard(outside.clone());
+        let outside_file = outside.join("secret.rs");
+        fs::write(&outside_file, "pub fn outside_leak() {}\n").expect("write outside file");
+        let victim = dir.join("victim.rs");
+        std::os::unix::fs::symlink(&outside_file, &victim).expect("create symlink");
+
+        let candidate = CandidateFile {
+            abs: victim.clone(),
+            rel: "victim.rs".to_owned(),
+            was_symlink: false,
+        };
+        let known: HashSet<String> = HashSet::new();
+        let index = RustModuleIndex::build(&known);
+        let result = process_file(&candidate, &known, &index, &CodeMapOptions::default(), &dir);
+        assert!(
+            result.is_err(),
+            "a path that became a symlink after the walk classified it as a plain file must be \
+             refused, not read: {result:?}"
+        );
+        drop(guard);
+        drop(outside_guard);
     }
 
     /// Defect 7 (MEDIUM), the `.git` half: a symlink living outside `.git`
@@ -3865,5 +4477,378 @@ mod tests {
         assert!(entry_lines[1] > 1);
 
         drop(guard);
+    }
+
+    /// Item 1 (HIGH): the spec-citation scan used to clone the active
+    /// heading twice per matching line before ever checking the dedup key,
+    /// which is O(heading length) work repeated per matching line, entirely
+    /// outside any deadline. A long heading followed by many matching lines
+    /// must now stay fast.
+    #[test]
+    fn ori_t_0036_the_spec_citation_scan_stays_fast_on_a_pathological_document() {
+        let dir = temp_dir("spec-scan-fast");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "a.rs", "pub fn a() {}\n");
+        let mut doc = String::from("# ");
+        doc.push_str(&"H".repeat(256 * 1024));
+        doc.push('\n');
+        for _ in 0..8000 {
+            doc.push_str("a.rs\n");
+        }
+        // Assembled, not written whole: see the comment on the equivalent
+        // line in `ori_t_0036_spec_citations_are_deduplicated_not_one_allocation_per_matching_line`.
+        write(&dir, &format!("spec/{}.md", "big"), &doc);
+
+        let start = Instant::now();
+        let map = build_code_map(&dir).expect("maps");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the spec-citation scan over one long heading and 8000 matching lines took \
+             {elapsed:?}; the pre-fix cost was quadratic in heading length"
+        );
+        assert!(map.coverage.spec_citation_scan_complete);
+        let a = map
+            .modules
+            .iter()
+            .find(|m| m.path == "a.rs")
+            .expect("present");
+        assert_eq!(a.spec_sections.len(), 1);
+        drop(guard);
+    }
+
+    /// Item 1 (HIGH), the deadline itself: `attach_spec_citations` never
+    /// received `options` far enough to check one before this fix. An
+    /// already-past deadline must stop the scan and be recorded as
+    /// incomplete, tested directly since the function is private and this
+    /// is the same pattern used for the per-file extraction deadline above.
+    #[test]
+    fn ori_t_0036_an_expired_deadline_stops_the_spec_citation_scan_and_is_recorded() {
+        let dir = temp_dir("spec-scan-timeout");
+        let guard = DropGuard(dir.clone());
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(&dir, &format!("spec/{}.md", "x"), "# Heading\n\na.rs\n");
+        let options = CodeMapOptions {
+            file_timeout: Duration::ZERO,
+            ..CodeMapOptions::default()
+        };
+        let mut modules = vec![Module {
+            path: "a.rs".to_owned(),
+            language: Language::Rust,
+            parsed_with_errors: false,
+            interfaces: Vec::new(),
+            dependency_edges: Vec::new(),
+            entry_points: Vec::new(),
+            covering_tests: Vec::new(),
+            spec_sections: Vec::new(),
+        }];
+        let already_past = Instant::now() - Duration::from_secs(1);
+        let complete = attach_spec_citations(&dir, &mut modules, &options, already_past);
+        assert!(
+            !complete,
+            "a deadline already past must stop the scan and report incomplete"
+        );
+        drop(guard);
+    }
+
+    /// Item 2 (HIGH): `resolve_rust_crate_path`'s per-prefix rebuild-and-rehash
+    /// was O(k^2) in the number of `::`-separated segments in one
+    /// `use crate::` path, entirely outside the whole-file deadline (nothing
+    /// inside the old function checked one). `RustModuleIndex::longest_prefix`
+    /// replaces it with a single O(k) walk. A path with tens of thousands of
+    /// segments, which the pre-fix code took double-digit seconds or more to
+    /// resolve at this depth (this ticket's report cites 8 to 18 seconds at
+    /// 80,000 segments), must now resolve quickly.
+    #[test]
+    fn ori_t_0036_use_crate_path_resolution_is_linear_not_quadratic() {
+        let dir = temp_dir("use-crate-quadratic");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "src/lib.rs", "pub fn f() {}\n");
+        let depth = 40_000;
+        let mut content = String::from("use crate::");
+        for _ in 0..depth {
+            content.push_str("a::");
+        }
+        content.push_str("b;\npub fn f2() {}\n");
+        write(&dir, "src/big.rs", &content);
+
+        let start = Instant::now();
+        let map = build_code_map(&dir).expect("maps");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "resolving a {depth}-segment use crate:: path took {elapsed:?}; the O(k^2) \
+             regression took double-digit seconds at half this depth"
+        );
+        let big = map
+            .modules
+            .iter()
+            .find(|m| m.path == "src/big.rs")
+            .expect("present");
+        assert!(!big.parsed_with_errors);
+        drop(guard);
+    }
+
+    /// Item 2 (HIGH), the index directly: a chain where every prefix along
+    /// the walk actually resolves (not the fast-reject case the test above
+    /// happens to hit first), proving the O(k) claim on the case that
+    /// matters most: a long walk that does real work at every step, not one
+    /// that stops after the first mismatch.
+    #[test]
+    fn ori_t_0036_rust_module_index_longest_prefix_is_linear_on_a_long_matching_chain() {
+        let depth = 50_000;
+        let mut known: HashSet<String> = HashSet::new();
+        let mut path = String::from("src");
+        for _ in 0..depth {
+            path.push_str("/a");
+        }
+        path.push_str(".rs");
+        known.insert(path.clone());
+        known.insert("src/lib.rs".to_owned());
+        let index = RustModuleIndex::build(&known);
+
+        let segments: Vec<String> = (0..depth).map(|_| "a".to_owned()).collect();
+        let segment_refs: Vec<&str> = segments.iter().map(String::as_str).collect();
+
+        let start = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let resolved = index.longest_prefix("src", segment_refs.into_iter(), deadline);
+        let elapsed = start.elapsed();
+
+        assert_eq!(resolved.as_deref(), Some(path.as_str()));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "a {depth}-segment fully-matching walk took {elapsed:?}, expected linear time"
+        );
+    }
+
+    /// Item 4 (mutant survival): removing the `interfaces` sort passes every
+    /// existing test because every existing fixture's pub items are already
+    /// in ascending line order (tree-sitter visits source in document
+    /// order), which is the only order the sort's primary key could ever
+    /// disagree with; two items on the *same* line, where only the name
+    /// tiebreak can put them back in order, is what actually exercises it.
+    #[test]
+    fn ori_t_0036_interfaces_are_sorted_by_line_then_name_not_discovery_order() {
+        let dir = temp_dir("interfaces-sort");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub struct Zebra; pub struct Apple;\n");
+        let map = build_code_map(&dir).expect("maps");
+        let m = map
+            .modules
+            .iter()
+            .find(|mm| mm.path == "m.rs")
+            .expect("present");
+        let names: Vec<&str> = m.interfaces.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Apple", "Zebra"],
+            "same-line interfaces must be name-sorted as a tiebreak, not left in source order: \
+             {:?}",
+            m.interfaces
+        );
+        drop(guard);
+    }
+
+    /// Item 4 (mutant survival): removing the `spec_sections` sort passes
+    /// every existing test for the same shape of reason; two headings in one
+    /// document, cited in an order that disagrees with their alphabetical
+    /// order, is what actually exercises it.
+    #[test]
+    fn ori_t_0036_spec_sections_are_sorted_by_doc_then_heading_not_discovery_order() {
+        let dir = temp_dir("specsections-sort");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub fn m() {}\n");
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(
+            &dir,
+            &format!("spec/{}.md", "x"),
+            "# Zeta section\n\nm.rs\n\n# Alpha section\n\nm.rs\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let m = map
+            .modules
+            .iter()
+            .find(|mm| mm.path == "m.rs")
+            .expect("present");
+        let headings: Vec<Option<&str>> = m
+            .spec_sections
+            .iter()
+            .map(|c| c.heading.as_deref())
+            .collect();
+        assert_eq!(
+            headings,
+            vec![Some("Alpha section"), Some("Zeta section")],
+            "citations under the same doc must be heading-sorted, not left in the order the \
+             headings were encountered: {:?}",
+            m.spec_sections
+        );
+        drop(guard);
+    }
+
+    /// Item 4 (mutant survival): the combined invariant test added in round
+    /// 2 does not include a `GitMetadata` skip or an unreadable subdirectory
+    /// in the same run, so a mutant deleting either recording path at
+    /// `walk_repository` survives it.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_the_files_seen_invariant_holds_with_git_metadata_and_unreadable_subdirectory_too()
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("invariant-git-and-unreadable");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "clean.rs", "pub fn clean() {}\n");
+        write(&dir, ".git/secret.rs", "pub fn secret() {}\n");
+        std::os::unix::fs::symlink(dir.join(".git/secret.rs"), dir.join("z.rs"))
+            .expect("create symlink into .git");
+        let hidden_dir = dir.join("hidden");
+        fs::create_dir_all(&hidden_dir).expect("create hidden dir");
+        fs::write(hidden_dir.join("inner.rs"), "pub fn inner() {}\n").expect("write file");
+        let mut perms = fs::metadata(&hidden_dir).expect("stat").permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&hidden_dir, perms).expect("chmod");
+        let still_readable = fs::read_dir(&hidden_dir).is_ok();
+
+        let map = build_code_map(&dir);
+
+        let mut restore = fs::metadata(&hidden_dir).expect("stat").permissions();
+        restore.set_mode(0o755);
+        let _ = fs::set_permissions(&hidden_dir, restore);
+
+        let map = map.expect("maps despite the unreadable subdirectory and the git symlink");
+        let c = &map.coverage;
+        assert_eq!(
+            c.files_seen,
+            c.files_parsed_clean + c.files_parsed_with_errors + c.files_skipped.len(),
+            "the invariant must hold with a GitMetadata skip and an unreadable-subdirectory \
+             skip both present: {c:?}"
+        );
+        if still_readable {
+            eprintln!(
+                "running with elevated privileges; chmod 000 did not restrict access, the \
+                 unreadable-subdirectory half of this test did not exercise anything"
+            );
+        } else {
+            assert!(
+                c.files_skipped
+                    .iter()
+                    .any(|f| f.path == "hidden" && matches!(f.reason, SkipReason::Unreadable(_))),
+                "expected the unreadable subdirectory recorded: {c:?}"
+            );
+        }
+        assert!(
+            c.files_skipped
+                .iter()
+                .any(|f| f.reason == SkipReason::GitMetadata),
+            "expected a GitMetadata skip: {c:?}"
+        );
+        drop(guard);
+    }
+
+    /// Item 5 (LOW): a grouped `use crate::{a, b};` import cuts at the first
+    /// `{`, leaving no segments to resolve, so it is recorded external with
+    /// the grouped text as its target; this states that choice and tests it,
+    /// rather than leaving the behaviour implicit and untested.
+    #[test]
+    fn ori_t_0036_a_grouped_use_crate_import_is_recorded_external_not_silently_dropped() {
+        let dir = temp_dir("grouped-use");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "src/lib.rs",
+            "pub mod foo;\npub mod bar;\nuse crate::{foo::Foo, bar::Bar};\n\npub fn f() {}\n",
+        );
+        write(&dir, "src/foo.rs", "pub struct Foo;\n");
+        write(&dir, "src/bar.rs", "pub struct Bar;\n");
+        let map = build_code_map(&dir).expect("maps");
+        let lib = map
+            .modules
+            .iter()
+            .find(|m| m.path == "src/lib.rs")
+            .expect("present");
+        let grouped = lib
+            .dependency_edges
+            .iter()
+            .find(|e| e.to.contains("foo::Foo") && e.to.contains("bar::Bar"));
+        assert!(
+            grouped.is_some(),
+            "a grouped use crate::{{...}} must be recorded (external, with the grouped form \
+             visible in its text), not silently dropped: {:?}",
+            lib.dependency_edges
+        );
+        assert!(
+            grouped.expect("checked above").external,
+            "the grouped form is never individually resolved"
+        );
+        drop(guard);
+    }
+
+    /// Item 6 (LOW): a symlink to a directory used to be never descended
+    /// into (correctly) but also never recorded at all, so it vanished from
+    /// `Coverage` exactly like the "silently dropped" defect class this
+    /// module otherwise refuses.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_symlinked_directory_is_recorded_not_silently_absent() {
+        let dir = temp_dir("symlinked-dir-recorded");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "real.rs", "pub fn real_fn() {}\n");
+        let target_dir = temp_dir("symlinked-dir-target");
+        let target_guard = DropGuard(target_dir.clone());
+        write(&target_dir, "inside.rs", "pub fn inside() {}\n");
+        std::os::unix::fs::symlink(&target_dir, dir.join("linked_dir"))
+            .expect("create symlink to directory");
+
+        let map = build_code_map(&dir).expect("maps");
+        assert!(
+            map.modules
+                .iter()
+                .all(|m| !m.path.starts_with("linked_dir")),
+            "a symlinked directory must never be descended into: {:?}",
+            map.modules.iter().map(|m| &m.path).collect::<Vec<_>>()
+        );
+        let skip = map
+            .coverage
+            .files_skipped
+            .iter()
+            .find(|f| f.path == "linked_dir");
+        assert_eq!(
+            skip.map(|s| &s.reason),
+            Some(&SkipReason::SymlinkedDirectory),
+            "a symlink to a directory must be recorded, not silently absent from coverage: {:?}",
+            map.coverage.files_skipped
+        );
+        drop(guard);
+        drop(target_guard);
+    }
+
+    /// Item 7 (LOW): the shared per-file deadline, checked directly against
+    /// the formula rather than by timing a real multi-second debug-build
+    /// run: a small file gets no allowance beyond `file_timeout`, and a
+    /// file over the threshold gets a meaningfully larger budget.
+    #[test]
+    fn ori_t_0036_per_file_budget_scales_with_size_above_the_threshold_not_below() {
+        let options = CodeMapOptions {
+            file_timeout: Duration::from_secs(5),
+            ..CodeMapOptions::default()
+        };
+        assert_eq!(
+            per_file_budget(&options, 1000),
+            Duration::from_secs(5),
+            "a small file gets exactly file_timeout, no allowance added"
+        );
+        assert_eq!(
+            per_file_budget(&options, 256 * 1024),
+            Duration::from_secs(5),
+            "exactly at the threshold, still no allowance"
+        );
+        let big = per_file_budget(&options, 8 * 1024 * 1024);
+        assert!(
+            big > Duration::from_secs(5) + Duration::from_secs(7),
+            "an 8 MiB file must get a meaningfully larger budget than the base 5s, so a debug \
+             build's slower parse and extraction is not mistaken for a hang; got {big:?}"
+        );
     }
 }
