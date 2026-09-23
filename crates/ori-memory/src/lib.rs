@@ -8,3 +8,4 @@
 //! (`spec/LLD.md` section 2).
 
 pub mod barrier;
+pub mod code_map;
