@@ -99,6 +99,8 @@ use ori_core::types::Id;
 use ori_core::types::Timestamp;
 
 use crate::acp::AgentRuntime;
+use crate::acp::ClockFn;
+use crate::acp::DefectRecorder;
 use crate::acp::LaunchConfig;
 use crate::acp::LaunchConfigError;
 use crate::acp::LaunchDefect;
@@ -155,15 +157,31 @@ struct ActiveHeadlessSession {
 pub struct HeadlessAdapter {
     caps: RuntimeCaps,
     session: Option<ActiveHeadlessSession>,
+    record_defect: DefectRecorder,
+    clock: ClockFn,
 }
 
 impl HeadlessAdapter {
     /// An adapter declaring `caps`, with no session spawned yet.
-    #[must_use]
-    pub const fn new(caps: RuntimeCaps) -> Self {
+    ///
+    /// `record_defect` and `clock` are required here, once, rather than at
+    /// each call: see `crate::acp`'s own module doc comment, "Why the
+    /// recorder and the clock are constructor parameters, not per-call
+    /// ones" (fix 3 of this ticket's follow-up review). There is no other
+    /// constructor and no `Default`, so a `HeadlessAdapter` cannot exist
+    /// without both, and its one possible defect (a run that times out,
+    /// see `AgentRuntime::send`'s own doc comment) is always recorded
+    /// through a real recorder.
+    pub fn new(
+        caps: RuntimeCaps,
+        record_defect: impl FnMut(LaunchDefect) -> Result<(), String> + 'static,
+        clock: impl FnMut() -> Timestamp + 'static,
+    ) -> Self {
         Self {
             caps,
             session: None,
+            record_defect: Box::new(record_defect),
+            clock: Box::new(clock),
         }
     }
 
@@ -234,18 +252,14 @@ impl AgentRuntime for HeadlessAdapter {
     /// shot, not a turn-based session", for why `prompt` is not written
     /// anywhere here and why a second call is refused.
     ///
-    /// `record_defect` is called when the process does not exit within
-    /// `RUN_TIMEOUT`: from outside this module that is indistinguishable
-    /// from a runtime blocked on a prompt it should never have been able to
-    /// raise, so it is recorded the same way, over the same
-    /// [`RuntimeError::methodology_ref`], AICD §17.
-    fn send(
-        &mut self,
-        handle: &SessionHandle,
-        prompt: &str,
-        at: Timestamp,
-        record_defect: &mut dyn FnMut(LaunchDefect) -> Result<(), String>,
-    ) -> Result<StopReason, RuntimeError> {
+    /// The recorder and clock this adapter was constructed with are used
+    /// when the process does not exit within `RUN_TIMEOUT`: from outside
+    /// this module that is indistinguishable from a runtime blocked on a
+    /// prompt it should never have been able to raise, so it is recorded
+    /// the same way, over the same [`RuntimeError::methodology_ref`], AICD
+    /// §17.
+    fn send(&mut self, handle: &SessionHandle, prompt: &str) -> Result<StopReason, RuntimeError> {
+        let at = (self.clock)();
         let session = match &mut self.session {
             Some(session) if &session.id == handle.id() => session,
             Some(_) | None => {
@@ -279,7 +293,7 @@ impl AgentRuntime for HeadlessAdapter {
                     ),
                     reason: LaunchDefect::reason(),
                 };
-                record_defect(defect.clone())
+                (self.record_defect)(defect.clone())
                     .map_err(|message| RuntimeError::DefectSink { message })?;
                 session.transcript = session.transcript.record(Entry::new(
                     1,
@@ -388,6 +402,16 @@ mod tests {
         .expect("a valid name")
     }
 
+    /// An adapter with a fixed clock (`START`) and the caller's own defect
+    /// recorder: every test builds one this way now that both are
+    /// constructor parameters (fix 3, ORI-T-0033's follow-up review), rather
+    /// than a call-time no-op no code path can be left to substitute.
+    fn adapter(
+        record_defect: impl FnMut(LaunchDefect) -> Result<(), String> + 'static,
+    ) -> HeadlessAdapter {
+        HeadlessAdapter::new(caps(), record_defect, || START)
+    }
+
     // -----------------------------------------------------------------------
     // The fixture: a re-exec of this test binary with a sentinel argument
     // and a sentinel environment variable (the same trick `crate::acp`'s
@@ -459,7 +483,7 @@ mod tests {
 
     #[test]
     fn ori_t_0033_spawn_refuses_a_launch_configuration_whose_stdin_is_not_null() {
-        let mut adapter = HeadlessAdapter::new(caps());
+        let mut adapter = adapter(|_| Ok(()));
         let mut spec = spawn_fixture_spec("RFSE1");
         // The wrong shape plant 4 names: stdin inherited rather than closed.
         spec.launch = LaunchConfig::assemble(
@@ -493,21 +517,15 @@ mod tests {
 
     #[test]
     fn ori_p1_039_a_headless_run_with_stdin_null_never_blocks_on_a_read() {
-        let mut adapter = HeadlessAdapter::new(caps());
-        let mut record_defect = |defect: LaunchDefect| -> Result<(), String> {
+        let mut adapter = adapter(|defect: LaunchDefect| -> Result<(), String> {
             panic!("no defect expected for a well-behaved fixture: {defect:?}")
-        };
+        });
         let started = Instant::now();
         let handle = adapter
             .spawn(spawn_fixture_spec("STDN1"))
             .expect("the fixture spawns with stdin null");
         let stop_reason = adapter
-            .send(
-                &handle,
-                "unused for a one-shot run",
-                START,
-                &mut record_defect,
-            )
+            .send(&handle, "unused for a one-shot run")
             .expect("the one-shot run completes");
         let elapsed = started.elapsed();
 
@@ -536,14 +554,13 @@ mod tests {
 
     #[test]
     fn ori_p1_039_a_second_send_on_a_one_shot_session_is_refused() {
-        let mut adapter = HeadlessAdapter::new(caps());
-        let mut record_defect = |_: LaunchDefect| -> Result<(), String> { Ok(()) };
+        let mut adapter = adapter(|_| Ok(()));
         let handle = adapter.spawn(spawn_fixture_spec("SCND2")).expect("spawns");
         adapter
-            .send(&handle, "first", START, &mut record_defect)
+            .send(&handle, "first")
             .expect("the first send runs the one shot to completion");
         let refusal = adapter
-            .send(&handle, "second", START, &mut record_defect)
+            .send(&handle, "second")
             .expect_err("there is no second turn for a one-shot run");
         assert_eq!(refusal, RuntimeError::AlreadyCompleted);
         adapter.kill(&handle).expect("teardown");
@@ -639,11 +656,10 @@ mod tests {
             // A normal `cargo test` run: not a re-exec, do nothing.
             return;
         }
-        let mut adapter = HeadlessAdapter::new(caps());
-        let mut record_defect = |_: LaunchDefect| -> Result<(), String> { Ok(()) };
+        let mut adapter = adapter(|_| Ok(()));
         let report = match adapter.spawn(spawn_fixture_spec("WRAP1")) {
             Ok(handle) => {
-                let outcome = adapter.send(&handle, "unused", START, &mut record_defect);
+                let outcome = adapter.send(&handle, "unused");
                 let saw_eof = adapter
                     .transcript()
                     .and_then(|transcript| transcript.entries().first().cloned())
