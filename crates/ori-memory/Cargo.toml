@@ -52,3 +52,24 @@ tree-sitter-rust = "=0.24.2"
 tree-sitter-typescript = "=0.23.2"
 tree-sitter-python = "=0.25.0"
 tree-sitter-go = "=0.25.0"
+# rusqlite: the repository indexer's storage engine, per the operator's
+# ruling on this ticket (recorded in escalation E-0004): tantivy's own
+# transitive dependency graph could not be pinned into this workspace
+# without `cargo deny` refusing 12 duplicate crate versions (against
+# `keyring`'s and `proptest`'s already-pinned `windows-sys`/`getrandom`
+# trees) and `cargo audit --deny warnings` denying RUSTSEC-2026-0253 in
+# `lru 0.16.4` with no fix in tantivy's own compatible range; both were
+# proved, not assumed (see the pull request report), before the ruling.
+# SQLite's FTS5 extension is the replacement: it is already compiled into
+# the SQLite this workspace bundles (`libsqlite3-sys 0.38.2`'s `build.rs`
+# passes `-DSQLITE_ENABLE_FTS5` unconditionally under the `bundled` feature),
+# so pinning `rusqlite` here the *exact* way `crates/ori-store/Cargo.toml`
+# already does adds no new crate to the workspace's dependency graph at all,
+# only a second edge to one already-audited version: `cargo tree -e normal`
+# after this change carries no line `cargo tree` before it did not already
+# carry, elsewhere in the workspace. `default-features = false` plus exactly
+# `bundled`, matching `ori-store`'s own choice and its own reasoning
+# (`crates/ori-store/Cargo.toml`'s comment): one self-contained binary, no
+# `libsqlite3-dev` package assumed present on a CI runner or a developer's
+# machine.
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
