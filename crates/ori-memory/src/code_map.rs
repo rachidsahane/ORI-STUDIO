@@ -192,7 +192,12 @@
 //!   `spec/` scan resolves the directory named `spec` by
 //!   reading the mapped root's own entries and matching the name exactly,
 //!   never by asking the OS whether `root.join("spec")` is a directory,
-//!   which would follow a symlink or, on Windows, a junction, there too. A
+//!   which would follow a symlink or, on Windows, a junction, there too.
+//!   The `spec/` scan follows no symlink at all, and records each one it
+//!   declines that could stand for documents (`spec` itself, a link named
+//!   `*.md`, a link to a directory) as [`SkipReason::SymlinkNotFollowed`] in
+//!   [`Coverage::spec_docs_skipped`], so the scan is then
+//!   [`SpecScan::Partial`], not complete. A
 //!   symlinked *file* is read only when [`std::fs::canonicalize`] resolves it
 //!   to a path inside the repository root and outside any directory named
 //!   `.git`; otherwise it is [`SkipReason::SymlinkOutsideRoot`] or
@@ -247,9 +252,11 @@
 //!     most `max_file_bytes + 1` bytes (8 MiB by default) and dropped before
 //!     the next is read, every line searched in place as a slice of that
 //!     buffer and never copied (`CitationScan::scan_document`). Besides the
-//!     buffer: the list of document paths (as many as `spec/` has entries,
-//!     the one quantity here bounded only the way the walk itself is; see
-//!     "What is not bounded"), per module the (document, heading) pairs it
+//!     buffer: the list of document paths and the record of entries not
+//!     scanned ([`Coverage::spec_docs_skipped`], one entry each; both as
+//!     many as `spec/` has entries, the one quantity here bounded only the
+//!     way the walk itself is; see "What is not bounded"), per module the
+//!     (document, heading) pairs it
 //!     has been cited under (at most 500), and the output below, whose
 //!     heading text is held twice while the scan runs (the table and its
 //!     lookup index) and once after.
@@ -258,8 +265,20 @@
 //!     actually read (at most one byte past the budget, which is how the
 //!     scan knows the corpus did not fit). A larger corpus is scanned up to
 //!     the first document that does not fit and reported as
-//!     [`SpecScan::CorpusOverBudget`], never as complete
+//!     [`SpecScan::CorpusOverBudget`], never as complete, with that document
+//!     and every one after it in [`Coverage::spec_docs_skipped`] as
+//!     [`SkipReason::SpecCorpusOverBudget`]
 //!     (`tests::ori_t_0036_a_spec_corpus_over_the_total_budget_is_reported_incomplete`).
+//!   - *Nothing passed over silently:* a document over the per-file cap
+//!     ([`SkipReason::TooLarge`]), not UTF-8 ([`SkipReason::Binary`]), not a
+//!     regular file or not readable ([`SkipReason::NotARegularFile`],
+//!     [`SkipReason::Unreadable`]), a directory under `spec/` that cannot
+//!     be listed, and a symlink the scan declines are each recorded in
+//!     [`Coverage::spec_docs_skipped`], and the scan is then
+//!     [`SpecScan::Partial`]. [`SpecScan::Complete`] means every listed
+//!     document was read and scanned and that list is empty: the bounds
+//!     above never make a scan that passed over something look like one
+//!     that did not.
 //!   - *Kept in the returned map:* each cited document's path once
 //!     ([`CodeMap::spec_docs`]) and each distinct cited heading once
 //!     ([`CodeMap::spec_headings`]), a heading longer than 4096 bytes cut to
@@ -382,10 +401,12 @@
 //! (that is `ori-orchestrator` and `ori-store`'s territory). What this module
 //! does instead: if the mapped root has a `spec/` directory, every `.md` file
 //! under it (each bounded by the same [`CodeMapOptions::max_file_bytes`], all
-//! of them together by [`CodeMapOptions::max_spec_bytes`], read best effort,
-//! an unreadable or oversized document silently contributing nothing rather
-//! than failing the map, a corpus over the total budget stopping the scan
-//! and saying so) is scanned for the module's own path exactly as this map
+//! of them together by [`CodeMapOptions::max_spec_bytes`], read best effort:
+//! a document that cannot be scanned contributes nothing rather than
+//! failing the map, and is recorded in [`Coverage::spec_docs_skipped`] with
+//! its reason, the scan then reported as not complete; a corpus over the
+//! total budget stops the scan and says so) is scanned for the module's own
+//! path exactly as this map
 //! records it (root-relative, forward slashes) appearing as a literal
 //! substring anywhere in the text, and each match is recorded as a
 //! [`SpecCitation`] naming the document and the nearest preceding Markdown
@@ -688,6 +709,20 @@ pub enum SkipReason {
     /// candidate entry this module saw and made a decision about, so that
     /// decision is recorded like any other.
     SymlinkedDirectory,
+    /// A symlink under `spec/` (or `spec` itself) that the `spec/` citation
+    /// scan does not follow, wherever it points: the scan reads no document
+    /// through a link. Recorded only in [`Coverage::spec_docs_skipped`], and
+    /// only for a link that could stand for documents: one named `*.md`, or
+    /// one whose target is a directory.
+    SymlinkNotFollowed,
+    /// A `spec/` document the citation scan did not scan because the whole
+    /// corpus reached [`CodeMapOptions::max_spec_bytes`] first: the
+    /// document that did not fit, and every one after it. Recorded only in
+    /// [`Coverage::spec_docs_skipped`].
+    SpecCorpusOverBudget {
+        /// The budget that ran out, in bytes.
+        budget: u64,
+    },
 }
 
 impl fmt::Display for SkipReason {
@@ -703,6 +738,13 @@ impl fmt::Display for SkipReason {
             Self::NonUtf8Name => f.write_str("name is not valid UTF-8"),
             Self::TimedOut => f.write_str("timed out"),
             Self::SymlinkedDirectory => f.write_str("symlink to a directory, never descended"),
+            Self::SymlinkNotFollowed => f.write_str("symlink the spec/ scan does not follow"),
+            Self::SpecCorpusOverBudget { budget } => {
+                write!(
+                    f,
+                    "not scanned: the spec/ corpus used up its {budget} byte budget first"
+                )
+            }
         }
     }
 }
@@ -750,6 +792,15 @@ pub struct Coverage {
     /// completed scan would have found. See the module doc's "Time" and
     /// "Memory" bounds.
     pub spec_citation_scan: SpecScan,
+    /// Every entry under `spec/` the citation scan saw and did not scan, with
+    /// the reason for each, sorted by path: a document that could not be
+    /// opened as a regular file or read, was over
+    /// [`CodeMapOptions::max_file_bytes`], was not UTF-8, or was not reached
+    /// before the deadline or the corpus budget ran out; a directory that
+    /// could not be listed; a symlink the scan does not follow. Empty exactly
+    /// when [`Coverage::spec_citation_scan`] is [`SpecScan::Complete`], and
+    /// never empty when it is [`SpecScan::Partial`].
+    pub spec_docs_skipped: Vec<SkippedFile>,
 }
 
 /// How the `spec/` citation scan ended. Anything but [`SpecScan::Complete`]
@@ -758,9 +809,14 @@ pub struct Coverage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
 pub enum SpecScan {
-    /// Every document under `spec/` was read and scanned, or the mapped root
-    /// has no `spec/` directory at all.
+    /// Every document under `spec/` was read and scanned and nothing under
+    /// it was skipped ([`Coverage::spec_docs_skipped`] is empty), or the
+    /// mapped root has no `spec/` directory at all.
     Complete,
+    /// The scan went through every document it listed, but did not scan at
+    /// least one entry: each is in [`Coverage::spec_docs_skipped`] with its
+    /// reason.
+    Partial,
     /// The scan's deadline passed before it finished.
     TimedOut,
     /// The documents under `spec/` add up to more than
@@ -774,7 +830,8 @@ pub enum SpecScan {
 }
 
 impl SpecScan {
-    /// Whether the scan finished: every document read and scanned.
+    /// Whether the scan finished with nothing skipped: every document read
+    /// and scanned.
     #[must_use]
     pub fn is_complete(self) -> bool {
         matches!(self, Self::Complete)
@@ -959,6 +1016,7 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
             files_parsed_with_errors,
             files_skipped: skipped,
             spec_citation_scan: spec.status,
+            spec_docs_skipped: spec.skipped,
         },
         spec_docs: spec.docs,
         spec_headings: spec.headings,
@@ -3282,6 +3340,8 @@ struct SpecScanOutput {
     docs: Vec<String>,
     headings: Vec<SpecHeading>,
     status: SpecScan,
+    /// Every entry under `spec/` seen and not scanned, sorted by path.
+    skipped: Vec<SkippedFile>,
 }
 
 /// The key a module's citations are sorted by: the document's path, then
@@ -3480,147 +3540,302 @@ fn attach_spec_citations(
     deadline: Instant,
 ) -> SpecScanOutput {
     let mut scan = CitationScan::new(modules.len());
-    let status = scan_spec_directory(root, modules, options, deadline, &mut scan);
+    let mut skipped = Vec::new();
+    let status = scan_spec_directory(root, modules, options, deadline, &mut scan, &mut skipped);
+    skipped.sort_by(|a, b| a.path.cmp(&b.path));
     SpecScanOutput {
         docs: scan.docs,
         headings: scan.headings,
         status,
+        skipped,
     }
 }
 
 /// [`attach_spec_citations`]'s body: finds `spec`, lists its documents, then
 /// reads and scans them one at a time, in path order, charging every byte
-/// read to [`CodeMapOptions::max_spec_bytes`].
+/// read to [`CodeMapOptions::max_spec_bytes`], and records in `skipped`
+/// every entry it saw and did not scan, with the reason. The result is
+/// [`SpecScan::Complete`] only when `skipped` is empty: a scan that passed
+/// over anything says so, rather than looking as complete as one that did
+/// not.
 ///
 /// Each document is read with a limit of the smaller of
 /// [`CodeMapOptions::max_file_bytes`] and what is left of the budget,
 /// through `take(limit + 1)`: more than what is left means the corpus does
 /// not fit, and the scan stops there as [`SpecScan::CorpusOverBudget`],
-/// having read at most one byte past the budget; more than the per-file cap
-/// means this one document is skipped, its bytes still charged, since they
-/// were read. A document that cannot be opened as a regular file, cannot be
-/// read, or is not UTF-8 contributes nothing and is not charged beyond what
-/// was read of it.
+/// having read at most one byte past the budget, with that document and
+/// every one after it recorded as [`SkipReason::SpecCorpusOverBudget`];
+/// more than the per-file cap means this one document is skipped as
+/// [`SkipReason::TooLarge`], its bytes still charged, since they were read.
+/// A document that cannot be opened as a regular file or read is skipped
+/// with the reason [`open_regular_file`] or the read gave, and one that is
+/// not UTF-8 as [`SkipReason::Binary`]. A deadline that passes records the
+/// document it interrupted and every one after it as
+/// [`SkipReason::TimedOut`].
 fn scan_spec_directory(
     root: &Path,
     modules: &mut [Module],
     options: &CodeMapOptions,
     deadline: Instant,
     scan: &mut CitationScan,
+    skipped: &mut Vec<SkippedFile>,
 ) -> SpecScan {
-    let Ok(read_dir) = fs::read_dir(root) else {
-        return SpecScan::Complete;
+    let read_dir = match fs::read_dir(root) {
+        Ok(read_dir) => read_dir,
+        Err(err) => {
+            // Listed moments ago by the walk; if it cannot be listed now,
+            // whether there is a `spec/` is unknown, which is not complete.
+            skipped.push(SkippedFile {
+                path: "spec".to_owned(),
+                reason: SkipReason::Unreadable(format!(
+                    "the mapped root could not be listed again to look for spec/: {err}"
+                )),
+            });
+            return SpecScan::Partial;
+        }
     };
-    let spec_dir = read_dir
+    let Some(spec_entry) = read_dir
         .filter_map(std::result::Result::ok)
-        .find_map(|entry| {
-            if entry.file_name() != std::ffi::OsStr::new("spec") {
-                return None;
-            }
-            let meta = fs::symlink_metadata(entry.path()).ok()?;
-            let file_type = meta.file_type();
-            // Both conditions, deliberately, not `is_dir()` alone: a Windows
-            // junction is a directory-shaped reparse point, so if a future
-            // platform ever reported `is_dir() == true` for one under
-            // `symlink_metadata` (unverified here, no Windows machine to check
-            // on), `is_symlink()` is the second, independent guard against
-            // treating it as a real directory.
-            (file_type.is_dir() && !file_type.is_symlink()).then(|| entry.path())
-        });
-    let Some(spec_dir) = spec_dir else {
+        .find(|entry| entry.file_name() == std::ffi::OsStr::new("spec"))
+    else {
         return SpecScan::Complete;
     };
-
-    let Some(documents) = list_markdown(&spec_dir, root, deadline) else {
-        return SpecScan::TimedOut;
+    let spec_dir = spec_entry.path();
+    let file_type = match fs::symlink_metadata(&spec_dir) {
+        Ok(meta) => meta.file_type(),
+        Err(err) => {
+            admit_skip(
+                root,
+                &spec_dir,
+                SkipReason::Unreadable(err.to_string()),
+                skipped,
+            );
+            return SpecScan::Partial;
+        }
     };
+    // `is_symlink()` checked first and on its own, not folded into
+    // `is_dir()`: a Windows junction is a directory-shaped reparse point, so
+    // if a platform ever reported `is_dir() == true` for one under
+    // `symlink_metadata` (unverified here, no Windows machine to check on),
+    // this is the independent guard against treating it as a real
+    // directory. A `spec` link to a directory is recorded, since it stands
+    // for documents the scan will not read; one to anything else is not a
+    // `spec/` directory at all.
+    if file_type.is_symlink() {
+        if fs::metadata(&spec_dir).is_ok_and(|meta| meta.is_dir()) {
+            admit_skip(root, &spec_dir, SkipReason::SymlinkNotFollowed, skipped);
+            return SpecScan::Partial;
+        }
+        return SpecScan::Complete;
+    }
+    if !file_type.is_dir() {
+        return SpecScan::Complete;
+    }
+
+    let listing = list_markdown(&spec_dir, root, deadline);
+    skipped.extend(listing.skipped);
+    let mut documents = listing.documents.into_iter();
+    if !listing.completed {
+        skipped.extend(documents.map(|(path, _)| SkippedFile {
+            path,
+            reason: SkipReason::TimedOut,
+        }));
+        return SpecScan::TimedOut;
+    }
     let mut remaining = options.max_spec_bytes;
-    for (rel, path) in documents {
+    while let Some((rel, path)) = documents.next() {
         if Instant::now() >= deadline {
+            skipped.extend(
+                std::iter::once((rel, path))
+                    .chain(documents)
+                    .map(|(path, _)| SkippedFile {
+                        path,
+                        reason: SkipReason::TimedOut,
+                    }),
+            );
             return SpecScan::TimedOut;
         }
         let limit = options.max_file_bytes.min(remaining);
-        let Some(bytes) = read_markdown(&path, limit) else {
-            continue;
+        let bytes = match read_markdown(&path, limit) {
+            Ok(bytes) => bytes,
+            Err(reason) => {
+                skipped.push(SkippedFile { path: rel, reason });
+                continue;
+            }
         };
         let read = bytes.len() as u64;
         if read > remaining {
+            let reason = SkipReason::SpecCorpusOverBudget {
+                budget: options.max_spec_bytes,
+            };
+            skipped.extend(
+                std::iter::once((rel, path))
+                    .chain(documents)
+                    .map(|(path, _)| SkippedFile {
+                        path,
+                        reason: reason.clone(),
+                    }),
+            );
             return SpecScan::CorpusOverBudget {
                 budget: options.max_spec_bytes,
             };
         }
         remaining -= read;
         if read > options.max_file_bytes {
+            skipped.push(SkippedFile {
+                path: rel,
+                reason: SkipReason::TooLarge {
+                    bytes: read,
+                    cap: options.max_file_bytes,
+                },
+            });
             continue;
         }
         // Validated in place: `from_utf8` takes the buffer, it does not copy
         // it.
         let Ok(content) = String::from_utf8(bytes) else {
+            skipped.push(SkippedFile {
+                path: rel,
+                reason: SkipReason::Binary,
+            });
             continue;
         };
         if !scan.scan_document(&rel, &content, modules, deadline) {
+            skipped.extend(
+                std::iter::once((rel, path))
+                    .chain(documents)
+                    .map(|(path, _)| SkippedFile {
+                        path,
+                        reason: SkipReason::TimedOut,
+                    }),
+            );
             return SpecScan::TimedOut;
         }
         // `content`, the only copy of this document, is dropped here, before
         // the next one is read.
     }
-    SpecScan::Complete
+    if skipped.is_empty() {
+        SpecScan::Complete
+    } else {
+        SpecScan::Partial
+    }
+}
+
+/// What [`list_markdown`] found under `spec/`.
+struct SpecListing {
+    /// Every document to read: root-relative path, path to open. Sorted by
+    /// the former.
+    documents: Vec<(String, PathBuf)>,
+    /// Every entry seen and not listed as a document, with the reason.
+    skipped: Vec<SkippedFile>,
+    /// `false` when the deadline passed before the listing finished.
+    completed: bool,
 }
 
 /// Lists every `.md` file under `dir` (inside `root`), following no
-/// symlinked directory and skipping any symlinked entry: each document's
-/// root-relative path and its path to open, sorted by the former. Only
-/// paths, never contents: [`scan_spec_directory`] reads each document in
-/// turn. `None` when `deadline` passed while listing, checked once per
-/// entry: a `spec/` tree could itself hold enough entries that listing them
-/// is not free.
-fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> Option<Vec<(String, PathBuf)>> {
-    let mut out = Vec::new();
+/// symlink: only paths, never contents, since [`scan_spec_directory`] reads
+/// each document in turn. What it passes over is recorded, the way the main
+/// walk records it (see [`walk_repository`]): a directory it cannot list,
+/// or an entry it cannot read the type of, as [`SkipReason::Unreadable`]; a
+/// document whose path is not UTF-8 as [`SkipReason::NonUtf8Name`]; a
+/// symlink that could stand for documents (named `*.md`, or whose target a
+/// `stat`, never an open, says is a directory) as
+/// [`SkipReason::SymlinkNotFollowed`]. Checks `deadline` once per entry: a
+/// `spec/` tree could itself hold enough entries that listing them is not
+/// free.
+fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> SpecListing {
+    let mut documents = Vec::new();
+    let mut skipped = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(current) = pending.pop() {
-        let Ok(read_dir) = fs::read_dir(&current) else {
-            continue;
+        let read_dir = match fs::read_dir(&current) {
+            Ok(read_dir) => read_dir,
+            Err(err) => {
+                admit_skip(
+                    root,
+                    &current,
+                    SkipReason::Unreadable(err.to_string()),
+                    &mut skipped,
+                );
+                continue;
+            }
         };
-        let mut entries: Vec<fs::DirEntry> = read_dir.filter_map(std::result::Result::ok).collect();
+        let mut entries: Vec<fs::DirEntry> = Vec::new();
+        for entry in read_dir {
+            match entry {
+                Ok(entry) => entries.push(entry),
+                Err(err) => admit_skip(
+                    root,
+                    &current,
+                    SkipReason::Unreadable(err.to_string()),
+                    &mut skipped,
+                ),
+            }
+        }
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             if Instant::now() >= deadline {
-                return None;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
+                documents.sort_by(|a: &(String, PathBuf), b| a.0.cmp(&b.0));
+                return SpecListing {
+                    documents,
+                    skipped,
+                    completed: false,
+                };
             }
             let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    admit_skip(
+                        root,
+                        &path,
+                        SkipReason::Unreadable(err.to_string()),
+                        &mut skipped,
+                    );
+                    continue;
+                }
+            };
+            let is_markdown = path.extension().and_then(|ext| ext.to_str()) == Some("md");
+            if file_type.is_symlink() {
+                if is_markdown || fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                    admit_skip(root, &path, SkipReason::SymlinkNotFollowed, &mut skipped);
+                }
+                continue;
+            }
             if file_type.is_dir() {
                 pending.push(path);
                 continue;
             }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            if !is_markdown {
                 continue;
             }
-            if let Some(rel) = rel_path_string(root, &path) {
-                out.push((rel, path));
+            match rel_path_string(root, &path) {
+                Some(rel) => documents.push((rel, path)),
+                None => skipped.push(SkippedFile {
+                    path: lossy_rel_path_string(root, &path),
+                    reason: SkipReason::NonUtf8Name,
+                }),
             }
         }
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Some(out)
+    documents.sort_by(|a, b| a.0.cmp(&b.0));
+    SpecListing {
+        documents,
+        skipped,
+        completed: true,
+    }
 }
 
-/// Reads one `spec/` document, at most `limit + 1` bytes of it, or `None`
-/// when it cannot be opened as a regular file or read. Every entry reaching
-/// here was confirmed not a symlink when it was listed, so it was never
-/// meant to become one afterward either; [`open_regular_file`], refusing a
-/// final symlink, is what refuses it if it did, and what opens a FIFO or
-/// device without waiting and refuses it by its own handle: the same rule
-/// [`process_file`] applies to a plain (non-symlink) entry, for the same
-/// reason.
-fn read_markdown(path: &Path, limit: u64) -> Option<Vec<u8>> {
-    let (opened, meta) = open_regular_file(path, false).ok()?;
-    read_capped(opened, limit, meta.len()).ok()
+/// Reads one `spec/` document, at most `limit + 1` bytes of it, or the
+/// reason it could not be. Every entry reaching here was confirmed not a
+/// symlink when it was listed, so it was never meant to become one
+/// afterward either; [`open_regular_file`], refusing a final symlink, is
+/// what refuses it if it did, and what opens a FIFO or device without
+/// waiting and refuses it by its own handle: the same rule [`process_file`]
+/// applies to a plain (non-symlink) entry, for the same reason.
+fn read_markdown(path: &Path, limit: u64) -> std::result::Result<Vec<u8>, SkipReason> {
+    let (opened, meta) = open_regular_file(path, false)?;
+    read_capped(opened, limit, meta.len()).map_err(|err| SkipReason::Unreadable(err.to_string()))
 }
 
 #[cfg(test)]
@@ -5986,13 +6201,15 @@ mod tests {
             return;
         }
         let fifo = spec.join("b.md");
-        let fifo_read = within(Duration::from_secs(10), move || {
-            read_markdown(&fifo, 1024).is_some()
-        });
-        assert!(!fifo_read, "a FIFO must never be read as a document");
+        let fifo_read = within(Duration::from_secs(10), move || read_markdown(&fifo, 1024));
+        assert_eq!(
+            fifo_read,
+            Err(SkipReason::NotARegularFile),
+            "a FIFO must never be read as a document"
+        );
 
         let root = dir.clone();
-        let (status, modules, docs) = within(Duration::from_secs(10), move || {
+        let (output, modules) = within(Duration::from_secs(10), move || {
             let mut modules = vec![bare_module("src/a.rs")];
             let output = attach_spec_citations(
                 &root,
@@ -6000,13 +6217,22 @@ mod tests {
                 &CodeMapOptions::default(),
                 Instant::now() + Duration::from_secs(60),
             );
-            (output.status, modules, output.docs)
+            (output, modules)
         });
-        assert_eq!(status, SpecScan::Complete);
+        // Round 5 fix: a listed document the scan could not read makes the
+        // scan partial, with the document and its reason recorded.
+        assert_eq!(output.status, SpecScan::Partial);
         // Assembled, not written whole: see the fixture-path comment earlier
         // in this file.
         assert_eq!(
-            docs,
+            output.skipped,
+            vec![SkippedFile {
+                path: format!("spec/{}.md", "b"),
+                reason: SkipReason::NotARegularFile,
+            }]
+        );
+        assert_eq!(
+            output.docs,
             vec![format!("spec/{}.md", "a")],
             "only the regular document"
         );
@@ -7061,6 +7287,14 @@ mod tests {
             "what was scanned before the budget ran out is kept; the document that did not \
              fit is not scanned"
         );
+        assert_eq!(
+            map.coverage.spec_docs_skipped,
+            vec![SkippedFile {
+                path: format!("spec/{}.md", "b"),
+                reason: SkipReason::SpecCorpusOverBudget { budget: total - 1 },
+            }],
+            "the document that did not fit is recorded, with the reason"
+        );
 
         let exact = CodeMapOptions {
             max_spec_bytes: total,
@@ -7068,7 +7302,253 @@ mod tests {
         };
         let map = build_code_map_with_options(&dir, &exact).expect("maps");
         assert_eq!(map.coverage.spec_citation_scan, SpecScan::Complete);
+        assert!(map.coverage.spec_docs_skipped.is_empty());
         assert_eq!(map.modules[0].spec_sections.len(), 2);
         drop(guard);
+    }
+    // -----------------------------------------------------------------
+    // ORI-T-0036, round 5 follow-up: a spec document the scan passes over
+    // is recorded with its reason, and the scan is not called complete.
+    // -----------------------------------------------------------------
+
+    /// A repository with one module, `m.rs`, one document citing it (`good`
+    /// under `spec/`), and whatever `extra` adds, mapped with `options`.
+    fn map_with_spec_extra(
+        label: &str,
+        options: &CodeMapOptions,
+        extra: impl FnOnce(&Path),
+    ) -> (DropGuard, CodeMap) {
+        let dir = temp_dir(label);
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub fn f() {}\n");
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(&dir, &format!("spec/{}.md", "good"), "# Good\n\nm.rs\n");
+        extra(&dir);
+        let map = build_code_map_with_options(&dir, options).expect("maps");
+        (guard, map)
+    }
+
+    /// The scan is partial, `path` is the one entry recorded as skipped,
+    /// with a reason `expected` accepts, and the good document was still
+    /// scanned: the skip stopped nothing else.
+    fn assert_spec_skip(map: &CodeMap, path: &str, expected: impl Fn(&SkipReason) -> bool) {
+        assert_eq!(
+            map.coverage.spec_citation_scan,
+            SpecScan::Partial,
+            "a scan that passed over a document is not complete: {:?}",
+            map.coverage
+        );
+        assert_eq!(
+            map.coverage.spec_docs_skipped.len(),
+            1,
+            "{:?}",
+            map.coverage
+        );
+        let recorded = &map.coverage.spec_docs_skipped[0];
+        assert_eq!(recorded.path, path);
+        assert!(expected(&recorded.reason), "{recorded:?}");
+        assert_eq!(
+            map.modules[0].spec_sections.len(),
+            1,
+            "the good document is still scanned"
+        );
+    }
+
+    /// Reason one of three: a document that cannot be read.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_an_unreadable_spec_document_makes_the_scan_partial_and_is_recorded() {
+        use std::os::unix::fs::PermissionsExt;
+        let bad = format!("spec/{}.md", "bad");
+        let mut locked: Option<PathBuf> = None;
+        let (guard, map) =
+            map_with_spec_extra("spec-skip-unreadable", &CodeMapOptions::default(), |dir| {
+                write(dir, &bad, "# Bad\n\nm.rs\n");
+                let path = dir.join(&bad);
+                let mut perms = fs::metadata(&path).expect("stat").permissions();
+                perms.set_mode(0o000);
+                fs::set_permissions(&path, perms).expect("chmod");
+                locked = Some(path);
+            });
+        let path = locked.expect("locked");
+        let still_readable = fs::read(&path).is_ok();
+        let mut restore = fs::metadata(&path).expect("stat").permissions();
+        restore.set_mode(0o644);
+        let _ = fs::set_permissions(&path, restore);
+        if still_readable {
+            eprintln!(
+                "running with elevated privileges; chmod 000 did not restrict access, skipping"
+            );
+            drop(guard);
+            return;
+        }
+        assert_spec_skip(&map, &bad, |reason| {
+            matches!(reason, SkipReason::Unreadable(_))
+        });
+        drop(guard);
+    }
+
+    /// Reason two of three: a document that is not UTF-8.
+    #[test]
+    fn ori_t_0036_a_non_utf8_spec_document_makes_the_scan_partial_and_is_recorded() {
+        let bad = format!("spec/{}.md", "bad");
+        let (guard, map) =
+            map_with_spec_extra("spec-skip-binary", &CodeMapOptions::default(), |dir| {
+                fs::write(
+                    dir.join(&bad),
+                    [b'#', b' ', 0xff, 0xfe, b'\n', b'm', b'.', b'r', b's'],
+                )
+                .expect("write");
+            });
+        assert_spec_skip(&map, &bad, |reason| *reason == SkipReason::Binary);
+        drop(guard);
+    }
+
+    /// Reason three of three: a document over the per-file cap, recorded
+    /// with what was actually read (at most the cap plus one byte).
+    #[test]
+    fn ori_t_0036_a_spec_document_over_the_per_file_cap_makes_the_scan_partial_and_is_recorded() {
+        let bad = format!("spec/{}.md", "bad");
+        let options = CodeMapOptions {
+            max_file_bytes: 200,
+            ..CodeMapOptions::default()
+        };
+        let (guard, map) = map_with_spec_extra("spec-skip-too-large", &options, |dir| {
+            write(dir, &bad, &format!("# Big\n\nm.rs\n{}\n", "x".repeat(300)));
+        });
+        assert_spec_skip(&map, &bad, |reason| {
+            *reason
+                == SkipReason::TooLarge {
+                    bytes: 201,
+                    cap: 200,
+                }
+        });
+        drop(guard);
+    }
+
+    /// The other entries the scan passes over are recorded the same way: a
+    /// symlink named `*.md`, a symlink to a directory, an unreadable
+    /// subdirectory. A symlink that stands for no document (here, one named
+    /// `*.txt` to a file) is not a document and is not recorded.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_spec_symlinks_and_unreadable_directories_are_recorded_not_passed_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut locked: Option<PathBuf> = None;
+        let (guard, map) =
+            map_with_spec_extra("spec-skip-links", &CodeMapOptions::default(), |dir| {
+                write(dir, "notes/real.md", "# Real\n\nm.rs\n");
+                write(dir, "notes/real.txt", "m.rs\n");
+                let spec = dir.join("spec");
+                std::os::unix::fs::symlink(dir.join("notes/real.md"), spec.join("linked.md"))
+                    .expect("symlink");
+                std::os::unix::fs::symlink(dir.join("notes"), spec.join("linked_dir"))
+                    .expect("symlink");
+                std::os::unix::fs::symlink(dir.join("notes/real.txt"), spec.join("other.txt"))
+                    .expect("symlink");
+                let sub = spec.join("locked");
+                fs::create_dir_all(&sub).expect("mkdir");
+                fs::write(sub.join("inner.md"), "# Inner\n\nm.rs\n").expect("write");
+                let mut perms = fs::metadata(&sub).expect("stat").permissions();
+                perms.set_mode(0o000);
+                fs::set_permissions(&sub, perms).expect("chmod");
+                locked = Some(sub);
+            });
+        let sub = locked.expect("locked");
+        let still_readable = fs::read_dir(&sub).is_ok();
+        let mut restore = fs::metadata(&sub).expect("stat").permissions();
+        restore.set_mode(0o755);
+        let _ = fs::set_permissions(&sub, restore);
+
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Partial);
+        let recorded: Vec<(&str, &SkipReason)> = map
+            .coverage
+            .spec_docs_skipped
+            .iter()
+            .map(|f| (f.path.as_str(), &f.reason))
+            .collect();
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        let linked_md = format!("spec/{}.md", "linked");
+        assert!(recorded.contains(&(linked_md.as_str(), &SkipReason::SymlinkNotFollowed)));
+        assert!(recorded.contains(&("spec/linked_dir", &SkipReason::SymlinkNotFollowed)));
+        assert!(
+            recorded.iter().all(|(path, _)| *path != "spec/other.txt"),
+            "a link standing for no document is not recorded: {recorded:?}"
+        );
+        if still_readable {
+            eprintln!("running with elevated privileges; the unreadable half is not exercised");
+        } else {
+            assert!(
+                recorded.iter().any(|(path, reason)| *path == "spec/locked"
+                    && matches!(reason, SkipReason::Unreadable(_))),
+                "{recorded:?}"
+            );
+        }
+        drop(guard);
+    }
+
+    /// A `spec` entry that is itself a symlink to a directory is recorded
+    /// too: the documents it stands for are not read, so the scan is not
+    /// complete.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_symlinked_spec_directory_makes_the_scan_partial() {
+        let dir = temp_dir("spec-root-link");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub fn f() {}\n");
+        write(&dir, "docs/x.md", "# X\n\nm.rs\n");
+        std::os::unix::fs::symlink(dir.join("docs"), dir.join("spec")).expect("symlink");
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Partial);
+        assert_eq!(
+            map.coverage.spec_docs_skipped,
+            vec![SkippedFile {
+                path: "spec".to_owned(),
+                reason: SkipReason::SymlinkNotFollowed,
+            }]
+        );
+        assert!(map.modules[0].spec_sections.is_empty());
+        drop(guard);
+    }
+
+    /// A scan the deadline cut short records the document it was in, not
+    /// only its own status.
+    #[test]
+    fn ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded() {
+        let dir = temp_dir("spec-skip-deadline");
+        let guard = DropGuard(dir.clone());
+        let prefix = "as".repeat(20);
+        for n in 0..192 {
+            write(&dir, &format!("{prefix}a{n:04}.rs"), "pub fn f() {}\n");
+        }
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        let long = format!("spec/{}.md", "long");
+        write(&dir, &long, &"as".repeat(4_194_300));
+        let options = CodeMapOptions {
+            file_timeout: Duration::from_millis(250),
+            ..CodeMapOptions::default()
+        };
+        let map = build_code_map_with_options(&dir, &options).expect("maps");
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::TimedOut);
+        assert_eq!(
+            map.coverage.spec_docs_skipped,
+            vec![SkippedFile {
+                path: long,
+                reason: SkipReason::TimedOut,
+            }]
+        );
+        drop(guard);
+    }
+
+    /// The other half of the rule: a scan that read and scanned every
+    /// document is complete and recorded nothing skipped.
+    #[test]
+    fn ori_t_0036_a_complete_spec_scan_skipped_nothing() {
+        let (_guard, map) = built_fixture();
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Complete);
+        assert!(map.coverage.spec_docs_skipped.is_empty());
     }
 }
