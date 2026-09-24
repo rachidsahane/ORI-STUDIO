@@ -1493,9 +1493,17 @@ fn open_regular_file(
 /// length, is still cut off: whether it was over the cap is the caller's
 /// check on the returned length, never on a `stat`ed size. See the module
 /// doc's "Size" bound.
-fn read_capped(opened: fs::File, cap: u64) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    opened.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+///
+/// `stated_len`, the handle's own reported length, only sizes the buffer up
+/// front, and never past `cap + 1`: without it, `read_to_end` grows the
+/// buffer by doubling, so a read of just over 8 MiB could hold a 16 MiB
+/// allocation, and briefly both it and the 8 MiB one it replaced. A length
+/// that lies costs at most one `cap + 1` allocation; it is never what
+/// decides anything.
+fn read_capped(opened: fs::File, cap: u64, stated_len: u64) -> io::Result<Vec<u8>> {
+    let limit = cap.saturating_add(1);
+    let mut bytes = Vec::with_capacity(usize::try_from(stated_len.min(limit)).unwrap_or(0));
+    opened.take(limit).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -1617,7 +1625,8 @@ fn process_file(
     // `meta.len()` taken on trust: a file that grows after this `fstat`, or
     // that misreports its length, is still cut off at `cap + 1` bytes.
     let cap = options.max_file_bytes;
-    let bytes = read_capped(opened, cap).map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+    let bytes = read_capped(opened, cap, meta.len())
+        .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
     if bytes.len() as u64 > cap {
         return Err(SkipReason::TooLarge {
             bytes: bytes.len() as u64,
@@ -3610,8 +3619,8 @@ fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> Option<Vec<(Stri
 /// [`process_file`] applies to a plain (non-symlink) entry, for the same
 /// reason.
 fn read_markdown(path: &Path, limit: u64) -> Option<Vec<u8>> {
-    let (opened, _meta) = open_regular_file(path, false).ok()?;
-    read_capped(opened, limit).ok()
+    let (opened, meta) = open_regular_file(path, false).ok()?;
+    read_capped(opened, limit, meta.len()).ok()
 }
 
 #[cfg(test)]
