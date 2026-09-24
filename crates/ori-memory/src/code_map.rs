@@ -1310,6 +1310,31 @@ fn open_regular_file(
     path: &Path,
     follow_final_symlink: bool,
 ) -> std::result::Result<(fs::File, fs::Metadata), SkipReason> {
+    // Outside the verified set, the open functions below refuse anything
+    // that is not a regular file by a `stat` before their open (see their
+    // docs), but can only say so through an `io::Error`. The same `stat`,
+    // taken here first, is what lets that refusal come back as
+    // `NotARegularFile` on those platforms too, the reason the verified
+    // platforms give from the handle, rather than as `Unreadable`.
+    #[cfg(all(
+        unix,
+        not(any(
+            target_os = "macos",
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))
+    ))]
+    {
+        let before = if follow_final_symlink {
+            fs::metadata(path)
+        } else {
+            fs::symlink_metadata(path)
+        }
+        .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+        if !before.is_file() {
+            return Err(SkipReason::NotARegularFile);
+        }
+    }
     let opened = if follow_final_symlink {
         open_regular_file_following(path)
     } else {
