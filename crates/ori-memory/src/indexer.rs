@@ -5143,6 +5143,42 @@ mod tests {
     }
 
     #[test]
+    fn ori_t_0035_an_fts5_format_this_build_does_not_read_is_reported_as_it_is_and_recover_replaces_it()
+     {
+        // A newer build's index and a damaged config row look the same from
+        // here: FTS5 refuses the version number with a plain SQLITE_ERROR,
+        // and so does the check. It is reported as that error, never as
+        // Corrupt, and recover replaces it without reading it.
+        let scratch = Scratch::new("fts5-format");
+        let mut db = product(&scratch);
+        let corpus = vec![doc("a.md", DocumentKind::Section, "A", "alpha content")];
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&corpus).expect("seed");
+        }
+        Connection::open(index_file(&db))
+            .expect("a raw connection")
+            .execute("UPDATE documents_config SET v = 99 WHERE k = 'version'", [])
+            .expect("claim an FTS5 format this build does not read");
+        {
+            let indexer = Indexer::open(&db).expect("the file itself still opens");
+            assert_eq!(quick_check(&indexer.conn), Integrity::Undetermined);
+            match indexer.search("alpha", 10) {
+                Err(IndexerError::Sqlite { source, .. }) => assert_eq!(
+                    source.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::Unknown),
+                    "the plain SQLITE_ERROR FTS5 reports: {source:?}"
+                ),
+                other => panic!("reported as the error it is, never Corrupt: {other:?}"),
+            }
+        }
+        Indexer::recover(&mut db, &corpus, Timestamp::from_millis(7_000))
+            .expect("recover replaces a file it never reads");
+        let indexer = Indexer::open(&db).expect("the fresh index opens");
+        assert_eq!(indexer.search("alpha", 10).expect("search").hits.len(), 1);
+    }
+
+    #[test]
     fn ori_t_0035_classify_calls_corrupt_exactly_what_the_check_calls_damaged() {
         // The rule itself, against one synthetic out-of-memory error: the
         // same error is Corrupt on a damaged file and itself on a healthy
