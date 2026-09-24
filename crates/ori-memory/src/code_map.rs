@@ -654,7 +654,10 @@ pub struct SkippedFile {
 /// Every file seen is accounted for exactly once: `files_seen ==
 /// files_parsed_clean + files_parsed_with_errors + files_skipped.len()`
 /// always holds (`tests::ori_p1_030_coverage_accounts_for_every_file_seen_exactly_once`
-/// checks it). A map is never presented as complete while
+/// checks it, and
+/// `tests::ori_t_0036_the_files_seen_invariant_holds_with_every_pre_skip_reason_nested`
+/// checks it with every reason the walk itself records, below the root).
+/// A map is never presented as complete while
 /// `files_parsed_with_errors` or `files_skipped` is nonzero without that
 /// being visible here.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6334,5 +6337,253 @@ mod tests {
         );
         assert!(completed);
         assert_eq!(edges.len(), 3, "{edges:?}");
+    }
+    /// Item 4 (mutant survival), V3 of the review of round 3: `files_seen`
+    /// counting only the pre-skips whose path has no `/` survived every
+    /// test, because every invariant fixture put its pre-skips at the top
+    /// level. Here every reason the walk itself can record sits two
+    /// directories down (the unreadable directory one down, since its
+    /// contents are what cannot be listed), next to one clean top-level
+    /// file and one clean nested one, and the count is asserted exactly, not
+    /// only through the invariant.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_the_files_seen_invariant_holds_with_every_pre_skip_reason_nested() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("invariant-nested");
+        let guard = DropGuard(dir.clone());
+        let outside = temp_dir("invariant-nested-outside");
+        let outside_guard = DropGuard(outside.clone());
+        fs::write(outside.join("secret.rs"), "pub fn secret() {}\n").expect("write outside");
+        write(&dir, "clean.rs", "pub fn clean() {}\n");
+        write(&dir, "deep/nested/ok.rs", "pub fn ok() {}\n");
+        write(&dir, ".git/secret.rs", "pub fn git_secret() {}\n");
+        write(&dir, "deep/target_dir/inside.rs", "pub fn inside() {}\n");
+        let nested = dir.join("deep/nested");
+        let link = |target: &Path, name: &str| {
+            std::os::unix::fs::symlink(target, nested.join(name)).expect("create symlink");
+        };
+        link(&dir.join("deep/nowhere.rs"), "dangling.rs");
+        link(&dir.join("deep/target_dir"), "linked_dir");
+        link(&outside.join("secret.rs"), "escapes.rs");
+        link(&dir.join(".git/secret.rs"), "z.rs");
+        let fifo_ok = make_fifo(&nested.join("pipe.rs"));
+        if fifo_ok {
+            link(&nested.join("pipe.rs"), "pipe_link.rs");
+        }
+        let locked = dir.join("deep/locked");
+        fs::create_dir_all(&locked).expect("create locked dir");
+        fs::write(locked.join("hidden.rs"), "pub fn hidden() {}\n").expect("write hidden");
+        let mut perms = fs::metadata(&locked).expect("stat").permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&locked, perms).expect("chmod");
+        let locked_is_unreadable = fs::read_dir(&locked).is_err();
+
+        let map = build_code_map(&dir);
+
+        let mut restore = fs::metadata(&locked).expect("stat").permissions();
+        restore.set_mode(0o755);
+        let _ = fs::set_permissions(&locked, restore);
+
+        let map = map.expect("maps");
+        let c = &map.coverage;
+        assert_eq!(
+            c.files_seen,
+            c.files_parsed_clean + c.files_parsed_with_errors + c.files_skipped.len(),
+            "the invariant must hold with every pre-skip nested: {c:?}"
+        );
+        let mut expected: Vec<(&str, SkipReason)> = vec![
+            (
+                "deep/nested/dangling.rs",
+                SkipReason::Unreadable(String::new()),
+            ),
+            ("deep/nested/escapes.rs", SkipReason::SymlinkOutsideRoot),
+            ("deep/nested/linked_dir", SkipReason::SymlinkedDirectory),
+            ("deep/nested/z.rs", SkipReason::GitMetadata),
+        ];
+        if fifo_ok {
+            expected.push(("deep/nested/pipe.rs", SkipReason::NotARegularFile));
+            expected.push(("deep/nested/pipe_link.rs", SkipReason::NotARegularFile));
+        }
+        if locked_is_unreadable {
+            expected.push(("deep/locked", SkipReason::Unreadable(String::new())));
+        } else {
+            eprintln!(
+                "chmod 000 did not restrict access here; the unreadable half is not exercised"
+            );
+        }
+        for (path, reason) in &expected {
+            let found = c.files_skipped.iter().find(|f| f.path == *path);
+            let matches = match (found.map(|f| &f.reason), reason) {
+                (Some(SkipReason::Unreadable(_)), SkipReason::Unreadable(_)) => true,
+                (Some(actual), wanted) => actual == wanted,
+                (None, _) => false,
+            };
+            assert!(matches, "{path} must be recorded as {reason:?}: {c:?}");
+        }
+        // Two clean modules (`clean.rs`, `deep/nested/ok.rs`) and
+        // `deep/target_dir/inside.rs`, a third, reached directly; plus every
+        // nested pre-skip above. `.git` is never walked.
+        assert_eq!(c.files_seen, 3 + expected.len(), "{c:?}");
+        drop(guard);
+        drop(outside_guard);
+    }
+
+    /// Item 4 (mutant survival), the second `files_seen` mutant the review
+    /// of round 3 listed: dropping `SymlinkedDirectory` from the count
+    /// survived, since the test that checks the record never checks the
+    /// count, and no invariant fixture had a symlinked directory.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_symlinked_directory_counts_in_files_seen() {
+        let dir = temp_dir("symlinked-dir-counted");
+        let guard = DropGuard(dir.clone());
+        let target = temp_dir("symlinked-dir-counted-target");
+        let target_guard = DropGuard(target.clone());
+        write(&dir, "real.rs", "pub fn real_fn() {}\n");
+        std::os::unix::fs::symlink(&target, dir.join("linked_dir")).expect("symlink");
+        let map = build_code_map(&dir).expect("maps");
+        let c = &map.coverage;
+        assert_eq!(c.files_seen, 2, "real.rs and linked_dir: {c:?}");
+        assert_eq!(
+            c.files_seen,
+            c.files_parsed_clean + c.files_parsed_with_errors + c.files_skipped.len()
+        );
+        drop(guard);
+        drop(target_guard);
+    }
+
+    /// Item 4 (mutant survival): the `interfaces` sort's *primary* key.
+    /// The round-3 test put both items on one line, which exercises only
+    /// the name tiebreak, so sorting by name alone survived. Two lines in
+    /// reverse alphabetical order must stay in line order.
+    #[test]
+    fn ori_t_0036_interfaces_are_sorted_by_line_first_not_by_name() {
+        let dir = temp_dir("interfaces-line-first");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub struct Zed;\npub struct Abe;\n");
+        let map = build_code_map(&dir).expect("maps");
+        let names: Vec<&str> = map.modules[0]
+            .interfaces
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Zed", "Abe"]);
+        drop(guard);
+    }
+
+    /// Item 4 (mutant survival): the `spec_sections` sort's *primary* key.
+    /// The round-3 test put both headings in one document, which exercises
+    /// only the heading tiebreak, so sorting by heading alone survived. Two
+    /// documents whose headings sort the other way must stay in document
+    /// order.
+    #[test]
+    fn ori_t_0036_spec_sections_are_sorted_by_doc_first_not_by_heading() {
+        let dir = temp_dir("specsections-doc-first");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub fn m() {}\n");
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(&dir, &format!("spec/{}.md", "a"), "# Zeta\n\nm.rs\n");
+        write(&dir, &format!("spec/{}.md", "b"), "# Alpha\n\nm.rs\n");
+        let map = build_code_map(&dir).expect("maps");
+        let cited: Vec<(String, Option<String>)> = map.modules[0]
+            .spec_sections
+            .iter()
+            .map(|c| (c.doc.clone(), c.heading.clone()))
+            .collect();
+        assert_eq!(
+            cited,
+            vec![
+                (format!("spec/{}.md", "a"), Some("Zeta".to_owned())),
+                (format!("spec/{}.md", "b"), Some("Alpha".to_owned())),
+            ]
+        );
+        drop(guard);
+    }
+
+    /// Item 4 (mutant survival): removing `covering_tests.dedup()` survived.
+    /// A Python module named `test.py` has two filename-convention
+    /// candidates that are the same file, `test_test.py`
+    /// (`test_<stem>.py` and `<stem>_test.py`), so it is found twice and
+    /// must be listed once.
+    #[test]
+    fn ori_t_0036_a_covering_test_found_by_two_conventions_is_listed_once() {
+        let dir = temp_dir("covering-dedup");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "test.py", "x = 1\n");
+        write(&dir, "test_test.py", "def check():\n    pass\n");
+        let map = build_code_map(&dir).expect("maps");
+        let module = map
+            .modules
+            .iter()
+            .find(|m| m.path == "test.py")
+            .expect("present");
+        assert_eq!(module.covering_tests, vec!["test_test.py".to_owned()]);
+        drop(guard);
+    }
+
+    /// Item 4 (mutant survival): `go_exported` always returning `true`
+    /// survived. Only an identifier starting with an uppercase letter is
+    /// exported in Go, so `hidden` and `main` are not interfaces.
+    #[test]
+    fn ori_t_0036_an_unexported_go_identifier_is_not_an_interface() {
+        let dir = temp_dir("go-unexported");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "main.go",
+            "package main\n\nfunc Hello() {}\n\nfunc hidden() {}\n\nfunc main() {}\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let names: Vec<&str> = map.modules[0]
+            .interfaces
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Hello"]);
+        drop(guard);
+    }
+
+    /// Item 4 (mutant survival): weakening the Python entry-point guard to
+    /// "the condition mentions `__name__`" survived. A guard comparing
+    /// `__name__` to anything other than `"__main__"` is not an entry point.
+    #[test]
+    fn ori_t_0036_a_python_name_guard_not_naming_main_is_not_an_entry_point() {
+        let dir = temp_dir("py-not-main-guard");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "m.py",
+            "def f():\n    pass\n\n\nif __name__ == \"not_main\":\n    f()\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        assert!(
+            map.modules[0].entry_points.is_empty(),
+            "{:?}",
+            map.modules[0].entry_points
+        );
+        drop(guard);
+    }
+
+    /// Item 4 (mutant survival): removing the underscore filter on Python
+    /// *classes* survived (the round-2 test covers functions only).
+    #[test]
+    fn ori_t_0036_a_python_underscore_prefixed_class_is_not_an_interface() {
+        let dir = temp_dir("py-private-class");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "m.py",
+            "class _Hidden:\n    pass\n\n\nclass Shown:\n    pass\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let names: Vec<&str> = map.modules[0]
+            .interfaces
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Shown"]);
+        drop(guard);
     }
 }
