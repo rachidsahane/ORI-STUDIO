@@ -313,8 +313,13 @@
 //! one. It checks every b-tree page and, in the SQLite this workspace
 //! bundles, also runs FTS5's own inverted-index check through the virtual
 //! table's integrity method. It is a read: it takes no write lock, so a
-//! concurrent writer can neither refuse it nor be locked out by it. The
-//! rule:
+//! concurrent writer can neither refuse it nor be locked out by it. It runs
+//! inside a savepoint after first opening a cursor on the table, because
+//! FTS5 refreshes its per-connection view of the index only when a cursor
+//! opens and its integrity method reads that view as it stands: measured
+//! while building this, a bare `PRAGMA quick_check` on a healthy index
+//! another connection had just written reported "checksum mismatch" 133
+//! times in 200, and 0 in 200 opened this way. The rule:
 //!
 //! - the check returns any row but `ok`, or itself fails with
 //!   `SQLITE_CORRUPT` or `SQLITE_NOTADB`: `Corrupt`, carrying the original
@@ -366,12 +371,10 @@
 //! `0xFF`, and `full_rebuild` repaired 0 of 300. The only repair for that is
 //! a new file.
 //!
-//! Replacing the file is safe only when nothing has it open. Round 3
+//! Replacing the file is safe only when nothing has it open: round 3
 //! deleted it under other open connections, whose later writes then went
-//! to an unlinked file and were silently lost; and SQLite removes a closing
-//! connection's `-wal` file *by path*, so a connection still open on the old
-//! file would, on closing, delete the new index's write-ahead log. So file
-//! recovery is one associated function, [`Indexer::recover`], taking
+//! to an unlinked file and were silently lost. So file recovery is one
+//! associated function, [`Indexer::recover`], taking
 //! `&mut ProductDb`, and every on-disk [`Indexer`] holds a shared borrow of
 //! the `ProductDb` it was opened from for as long as it lives
 //! (`Indexer<'db>`). The proof has two halves:
@@ -382,20 +385,33 @@
 //!    `compile_fail` examples that pin this). `Indexer` implements [`Drop`],
 //!    with an empty body, for exactly this reason: without it the borrow
 //!    would end at an `Indexer`'s last *use*, and one merely left in scope
-//!    would still close its connection, and delete that `-wal` by path,
-//!    after `recover` had run. With it the borrow lasts until the
-//!    connection is closed. An `Indexer` leaked with `std::mem::forget`
-//!    never closes its connection, so it never deletes anything either.
+//!    would still have its connection open on the file `recover` moves,
+//!    which is exactly what this half of the proof says cannot happen. With
+//!    it the borrow lasts until the connection is closed. (How much a
+//!    connection left open that way could actually hurt was measured, not
+//!    assumed: on this build, on macOS, closing it after the move neither
+//!    checkpointed into the moved file nor deleted anything at the live
+//!    path, and it can never be used again, since any use would extend the
+//!    borrow; on Windows, where SQLite opens files without delete sharing,
+//!    the move would be refused instead, which was not measured here. The
+//!    proof rests on neither.) An `Indexer` leaked with
+//!    `std::mem::forget` holds the moved file open, unused, until the
+//!    process ends.
 //! 2. **Every other engine process.** A live `ProductDb` holds the
 //!    product's OS-level single-writer lock (`crates/ori-store/src/db.rs`'s
 //!    module doc), so no other process holds a `ProductDb`, and so an
 //!    `Indexer`, for this product while `recover` runs.
 //!
 //! Under that proof `recover` moves `fts.sqlite` and any `-wal`, `-journal`
-//! or `-shm` beside it into `index/quarantine/<recovered_at>-<n>/`, the
-//! side files first so that no failure can leave a stale write-ahead log
-//! beside a fresh database; it never deletes them, because they are the
-//! evidence of what went wrong. It then creates a fresh index and runs
+//! or `-shm` beside it into `index/quarantine/<recovered_at>-<n>/`, and
+//! never deletes them, because they are the evidence of what went wrong: the
+//! write-ahead log may hold the damaged index's last committed transactions,
+//! which the database file itself does not. Side files move first, because
+//! SQLite discards a write-ahead log or rollback journal it finds beside a
+//! new, empty database (measured on this build: a leftover log was gone once
+//! the new database's connection closed, a leftover journal once it was
+//! first read), so one left behind by a failure part way would be lost as
+//! soon as a fresh index was used. It then creates a fresh index and runs
 //! [`Indexer::full_rebuild`] from the caller's target set. It never opens
 //! the damaged file, so no damage can make it fail, and damage found while
 //! opening (a destroyed header included) is recovered exactly like any
@@ -499,10 +515,11 @@ const QUARANTINE_DIR: &str = "quarantine";
 
 /// The files SQLite may keep beside [`INDEX_FILE`], in the order
 /// [`Indexer::recover`] moves them: every side file before the database
-/// itself, so a failure part way can leave the old database without its
-/// log, which `recover` can simply be run again against, but never a stale
-/// write-ahead log beside a fresh database, which SQLite would replay into
-/// it.
+/// itself. A failure part way can then leave the old database without its
+/// side files, which `recover` can simply be run again against, but never
+/// the side files beside a fresh database, where SQLite would discard them,
+/// and the evidence with them (the module doc's "Recovery" records the
+/// measurement).
 const INDEX_FILE_SET: [&str; 4] = [
     "fts.sqlite-wal",
     "fts.sqlite-journal",
@@ -1213,11 +1230,11 @@ pub struct Indexer<'db> {
 /// `Indexer<'db>` a use of `'db`, so the borrow of the [`ProductDb`] it was
 /// opened from lasts until its connection is actually closed, not merely
 /// until its last method call. Without it, an `Indexer` still in scope but
-/// no longer used would let [`Indexer::recover`] compile and run, and would
-/// then close its connection on the replaced file afterwards, which makes
-/// SQLite delete the `-wal` file at the index's path: by then, the fresh
-/// index's. The second `compile_fail` example on [`Indexer::recover`] pins
-/// this.
+/// no longer used would let [`Indexer::recover`] compile and run while its
+/// connection was still open on the file being moved, which is what the
+/// module doc's "Recovery" proves cannot happen. The second `compile_fail`
+/// example on [`Indexer::recover`] pins this: remove this impl and that
+/// example compiles.
 impl Drop for Indexer<'_> {
     fn drop(&mut self) {}
 }
@@ -1805,8 +1822,8 @@ impl Indexer<'_> {
     /// ```
     ///
     /// So is one made while an `Indexer` is merely still in scope, never
-    /// used again but not yet dropped (its connection would otherwise close
-    /// on the replaced file after this returned; see the `Drop` impl):
+    /// used again but not yet dropped (its connection would otherwise still
+    /// be open on the file this moves; see the `Drop` impl):
     ///
     /// ```compile_fail,E0502
     /// # use ori_core::types::Timestamp;
@@ -4698,10 +4715,12 @@ mod tests {
     }
 
     #[test]
-    fn ori_t_0035_recover_quarantines_a_leftover_write_ahead_log_and_never_replays_it() {
-        // SQLite replays a write-ahead log into whatever database sits
-        // beside it: a log left at the live path would put the old index's
-        // pages into the fresh one. recover moves it with the database.
+    fn ori_t_0035_recover_quarantines_the_write_ahead_log_with_its_database_as_evidence() {
+        // A write-ahead log holding committed frames the database file does
+        // not: part of the evidence. Left at the live path, SQLite would
+        // discard it once the fresh index beside it was used (see the module
+        // doc's "Recovery"). recover moves it with the database, byte for
+        // byte.
         let scratch = Scratch::new("leftover-wal");
         let mut db = product(&scratch);
         let stale: Vec<IndexableDocument> = (0..50)
