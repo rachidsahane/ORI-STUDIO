@@ -45,6 +45,55 @@
 //! all, each with a [`SkipReason`]. Nothing here calls a map "complete"; it
 //! reports what it saw, and lets the caller decide what "complete" requires.
 //!
+//! # Threat model
+//!
+//! In scope: a hostile repository that holds still. Everything in it may be
+//! chosen by an attacker: a FIFO, socket or device where a source file
+//! should be, symlinks aimed anywhere (out of the root, into `.git`, at a
+//! FIFO, at a directory, at themselves), a `spec` directory that is itself a
+//! symlink, names that are not UTF-8, and files at or near the size cap
+//! shaped to make parsing, extraction, import resolution or the citation
+//! scan slow. None of it may make [`build_code_map`] hang, read outside the
+//! mapped root or inside `.git`, run a stage without a time bound, or
+//! report a map as more complete than it is. The bounds in the next section
+//! are how.
+//!
+//! Out of scope: a live writer, a process changing the tree while it is
+//! being mapped. The code map reads the product's canonical checkout, and a
+//! process able to swap files there already has write access to the host's
+//! tree, so racing this module gains it nothing it did not already have
+//! (the operator's ruling for this ticket, 2026-09-24). What such a race can
+//! still do, stated here rather than claimed closed:
+//!
+//! - retarget a symlink entry between its re-validation and its open (the
+//!   `canonicalize`-then-open gap in `process_file`), so a file outside the
+//!   root or inside `.git` is read under the link's own path;
+//! - swap a directory for a symlink after the walk classified it, so the
+//!   walk lists a directory outside the root, or a later open passes through
+//!   one (`O_NOFOLLOW` guards only a path's final component); the `spec`
+//!   directory and everything under it, found once and then listed and
+//!   opened by path, are open to the same swap, so citations can come from
+//!   documents outside the root;
+//! - keep growing the tree while it is walked, which lengthens the walk for
+//!   as long as the writer keeps writing (the walk has no total bound; see
+//!   "What is not bounded");
+//! - on a unix platform outside the verified set (see
+//!   `open_regular_file_no_follow`), swap a FIFO in between the `stat` that
+//!   stands in for `O_NONBLOCK` there and the open, which then waits.
+//!
+//! One property is kept even against a live writer, on every platform this
+//! ticket verified (macOS, Linux x86_64 and aarch64): the mapper never
+//! hangs. Every open of repository content is non-blocking and decided by
+//! the opened handle's own metadata before anything is read (see "File
+//! type" below), a directory is listed with `opendir`, which fails at once
+//! on a FIFO rather than waiting
+//! (`tests::ori_t_0036_listing_a_directory_that_became_a_fifo_fails_rather_than_blocks`),
+//! and every stage that processes content runs under a deadline. A race can
+//! change what is read; it cannot make an open, a read or a listing wait,
+//! so the map always comes back
+//! (`tests::ori_t_0036_a_fifo_swapped_in_after_the_walk_never_hangs_the_map`
+//! swaps a FIFO in mid-run and waits a bounded time for the result).
+//!
 //! # Untrusted input, and the bounds this module sets
 //!
 //! The repository being mapped may be a user's own, so its content is
@@ -54,13 +103,27 @@
 //! here executes a file, runs a build script, or shells out. The bounds
 //! actually enforced:
 //!
-//! - **File type.** A candidate is only ever opened for reading after a
-//!   `stat`-family call (never an `open`) has confirmed it is a regular
-//!   file. A FIFO, socket or device is [`SkipReason::NotARegularFile`], for a
-//!   direct entry and for a symlink alike, checked *before* any open, because
-//!   `open` on a FIFO with no writer blocks: a `stat` never does. See "A
-//!   symlink to a FIFO" below for the defect this closes and the residual gap
-//!   this bound admits.
+//! - **File type.** Every read of repository content, a plain walk entry, a
+//!   symlink walk entry and a `spec/` document alike, goes through one
+//!   function, `open_regular_file`: an open that never blocks (`O_NONBLOCK`,
+//!   plus `O_NOFOLLOW` unless the entry is a symlink the walk validated),
+//!   then a decision on the opened handle's own metadata, and only then a
+//!   read, through `take(cap + 1)`. `open(2)` on a FIFO with no writer waits
+//!   for one; with `O_NONBLOCK` it returns at once, and the handle's `fstat`
+//!   refuses it, a socket or a device as [`SkipReason::NotARegularFile`]
+//!   before a byte is read, whether it was there when the walk ran or was
+//!   swapped in after. The walk still classifies each entry by its directory
+//!   entry type (and a symlink's target by a `stat`), which skips a FIFO
+//!   already in place without opening it, but the guarantee no longer rests
+//!   on that early check: round 3 had left the symlink branch opening with a
+//!   blocking, link-following open and checking the type only afterward,
+//!   and the review of that round hung the map forever by swapping a FIFO in
+//!   behind a symlink after the walk. Windows has no FIFO in a checkout; see
+//!   `open_regular_file_no_follow`'s Windows variant for what its open does
+//!   with the nearest things. On a unix platform outside the verified set, a
+//!   `stat` taken just before the open stands in for `O_NONBLOCK`: it
+//!   refuses every FIFO already in place, and not one swapped in between the
+//!   two calls (see "Threat model").
 //! - **Size.** [`CodeMapOptions::max_file_bytes`] caps how much of any one
 //!   file is read, default 8 MiB. The bound is enforced on the bytes
 //!   actually read, through [`std::io::Read::take`]`(cap + 1)`, not on a
@@ -86,16 +149,25 @@
 //!     is bounded by this module's own traversal helpers (`for_each_node`,
 //!     `for_each_sibling_group`) and every language's top-level scan loop,
 //!     each of which checks the same deadline. `use crate::...` resolution
-//!     (`RustModuleIndex::longest_prefix`) checks it too, periodically
-//!     during its own walk, not only between the `use` items around it: a
-//!     single pathological `use` path is exactly what escaped the per-file
-//!     check in this ticket's third review round, because nothing *inside*
-//!     the function that resolved it checked anything.
+//!     (`RustModuleIndex::advance`) checks it too, periodically during its
+//!     own walk, not only between the `use` items around it: a single
+//!     pathological `use` path is exactly what escaped the per-file check in
+//!     this ticket's third review round, because nothing *inside* the
+//!     function that resolved it checked anything. The same holds for the
+//!     two other places one statement can hold unbounded work, both found by
+//!     the review of round 3 or while fixing it: a grouped `use` is walked
+//!     node by node with a check per node (`rust_use_edges`), and a Python
+//!     `from ... import` checks before each imported name
+//!     (`python_import_from_edges`).
 //!   - **The `spec/` citation scan**, once per [`build_code_map`] call, not
 //!     once per file (it runs after every file's [`Module`] already
 //!     exists): its own deadline, sized by the same `file_timeout`
-//!     configuration value, checked periodically across every module and
-//!     document it scans (`attach_spec_citations`, `collect_markdown`).
+//!     configuration value, checked across every module and document it
+//!     scans by the work done, after every 4096 lines or every 1 MiB of
+//!     search, whichever comes first (`scan_spec_citations`), and once per
+//!     file while documents are read (`collect_markdown`). By lines alone,
+//!     one line can be a whole 8 MiB document: the review of round 3 ran the
+//!     round-3 scan 5 to 9 times past its budget that way.
 //!     [`Coverage::spec_citation_scan_complete`] is where its own
 //!     incompleteness is recorded, not a demotion of an already-successful
 //!     `Module`; see that field's doc for why.
@@ -110,8 +182,9 @@
 //! - **Symlinks.** A directory reached through a symlink is never descended
 //!   into, whatever its target, which makes cycle-safety independent of where
 //!   the link points (a symlink loop cannot be walked into in the first
-//!   place, so no separate loop detector is needed). This rule has no
-//!   exception: the `spec/` scan resolves the directory named `spec` by
+//!   place, so no separate loop detector is needed). In a repository that
+//!   holds still (see "Threat model"), this rule has no exception: the
+//!   `spec/` scan resolves the directory named `spec` by
 //!   reading the mapped root's own entries and matching the name exactly,
 //!   never by asking the OS whether `root.join("spec")` is a directory,
 //!   which would follow a symlink or, on Windows, a junction, there too. A
@@ -126,23 +199,16 @@
 //!   the walk saw it and made a decision about it, unlike an ordinary
 //!   subdirectory, which is not a "file" candidate at all.
 //! - **Time-of-check to time-of-use.** A symlink, once validated at walk
-//!   time (in-root, outside `.git`), is re-validated again immediately
-//!   before the read that follows, narrowing (never eliminating) the window
-//!   in which it could have been swapped for something else; a plain,
-//!   non-symlink entry is opened refusing to follow a symlink at all
-//!   (`open_regular_file_no_follow`), on the platforms this ticket could
-//!   verify those flags on, so a path swapped for a symlink after the walk
-//!   classified it as a plain file is refused, not read through. This
-//!   ticket's third review round reproduced exactly that swap (a race
-//!   between the walk and a later file's turn to be read) against the
-//!   second round's fix, which decided by a `stat` and then opened the same
-//!   path again later, a window the race fit inside every time it tried.
-//!   What is not eliminated, stated rather than assumed away: two syscalls
-//!   (a `canonicalize` and the `open` that follows it, for the symlink case;
-//!   a `stat` implicit in `O_NOFOLLOW`'s own kernel check and the `open`
-//!   call itself, for the plain-file case) are still two syscalls, not one,
-//!   so a swap timed into that narrower gap is not detected. Closing it
-//!   fully needs an atomically-checked open this module does not implement.
+//!   time (in-root, outside `.git`), is re-validated immediately before its
+//!   open, and a plain, non-symlink entry is opened refusing to follow a
+//!   symlink at all (`open_regular_file_no_follow`, on the platforms this
+//!   ticket verified those flags on), so a path swapped for a symlink after
+//!   the walk classified it as a plain file is refused, not read through
+//!   (this ticket's third review round reproduced that swap against the
+//!   second round's `stat`-then-open). This narrows what a live writer can
+//!   do; it does not close it, and closing it is not claimed: see "Threat
+//!   model" for what a race can still change, and for the one thing it
+//!   cannot, which is make the map hang.
 //! - **Traversal.** The directory walk is iterative (an explicit stack of
 //!   pending directories), never recursive, so a pathologically deep
 //!   directory tree cannot overflow the call stack the way a naive recursive
@@ -170,11 +236,14 @@
 //!   build output dwarfs its source will have that reflected honestly in
 //!   [`Coverage`] rather than hidden by a heuristic this module does not
 //!   implement. Both are named as gaps in this ticket's closing report, not
-//!   silently assumed away. A narrower gap, stated rather than closed: see
-//!   "Time-of-check to time-of-use" above, which is the residual this
-//!   ticket's third review round left after moving the type check from a
-//!   `stat` on a path (checked, then opened again later) to a decision made
-//!   on the opened handle itself.
+//!   silently assumed away. Nor is the memory the `spec/` scan holds: every
+//!   document is kept as a copy of each of its lines (`MarkdownDoc`), about
+//!   35 times the document's size in memory (the review of round 3 measured
+//!   2.3 GB for eight newline-only documents of 8 MiB each), all documents
+//!   at once, with no cap on how many there are. That is a static hostile
+//!   repository, so inside the threat model; it was not among round 4's
+//!   required items and is not fixed here. Races with a live writer are out
+//!   of scope; see "Threat model".
 //!
 //! # Quadratic extraction, and what stays fast
 //!
@@ -210,14 +279,29 @@
 //! for every pathological shape, not linear time for all of them. Left as
 //! measured and documented, not changed.
 //!
-//! A grouped Rust import, `use crate::{foo::Foo, bar::Bar};`, is a case the
-//! same review round asked this module to pick a rule for and state it:
-//! this module cuts the argument text at its first `{` before resolution
-//! ever runs, which leaves no segments to look up, so the whole group is
-//! recorded as one external edge, its target the literal grouped text.
-//! Neither member is individually resolved. This was already the behaviour;
-//! what changed is that it is now a stated choice, tested, rather than an
-//! implicit consequence of the cut nobody had asserted on.
+//! A grouped Rust import (`use crate::{foo::Foo, bar::Bar};`, a prefixed one
+//! such as `use crate::net::{http::Client, tcp::Stream};`, nested groups, or
+//! a top-level `use {crate::foo::Foo, std::fmt};`) gives exactly the edges
+//! its ungrouped equivalent would, member by member, resolved or not
+//! (`rust_use_edges`, which walks the parser's own tree and resolves each
+//! member from the trie position its group's prefix reached, so a shared
+//! prefix is walked once). Round 3 cut the argument text at its first `{`
+//! and resolved what was left: a top-level group came out as one unresolved
+//! edge carrying the grouped text, and a prefixed group as one edge to the
+//! prefix's own file (`src/net.rs` for the example above), a
+//! complete-looking edge to the wrong module, which the review of round 3
+//! found. The text spent spelling out unresolved members is capped (a long
+//! prefix over many members would otherwise cost their product); past the
+//! cap, the rest are recorded once, together, as the declaration exactly as
+//! written.
+//!
+//! The same shape, in Python: `from <K dots> import <M names>` rebuilt its
+//! K-dot prefix once per name, K times M work inside one statement with no
+//! deadline check inside it (over two minutes for one 8 MiB statement, in
+//! the review of round 3), and kept all K dots in every unresolved edge's
+//! text (678 MB from a 169 KB file). The dots are now counted once, spelled
+//! as a count past 32, and the names loop checks the deadline
+//! (`python_import_from_edges`).
 //!
 //! # What "covering tests" means here, and what it misses
 //!
@@ -418,9 +502,14 @@ pub struct DependencyEdge {
     pub from: String,
     /// When [`DependencyEdge::external`] is `false`, another module's
     /// [`Module::path`] in this same [`CodeMap`]. Otherwise, the import
-    /// target exactly as written in the source (a crate name, a bare
-    /// specifier, a dotted absolute import, a Go import path), because it
-    /// could not be resolved to a file in the mapped repository.
+    /// target as written in the source (a crate name, a bare specifier, a
+    /// dotted absolute import, a Go import path), because it could not be
+    /// resolved to a file in the mapped repository. Two bounded departures
+    /// from "as written": a member of a grouped Rust `use` is written as its
+    /// own full path (its group's prefix, `::`, the member), which is what
+    /// its ungrouped form records; and a Python relative import with more
+    /// than 32 leading dots writes them as a count (`[N leading dots]name`).
+    /// See the module doc's "Quadratic extraction" for why.
     pub to: String,
     /// Whether `to` names something outside the mapped repository (or
     /// something this module's resolver did not attempt, see the module
@@ -505,10 +594,12 @@ pub enum SkipReason {
     /// It is a symlink whose target resolves outside the mapped repository
     /// root, or whose target could not be resolved at all.
     SymlinkOutsideRoot,
-    /// A `stat`-family call (never an `open`) confirmed it, or a symlink's
-    /// target, is not a regular file: a FIFO, socket, device or similar.
-    /// Checked before any `open`, because `open` on a FIFO can block; see the
-    /// module doc's "File type" bound.
+    /// It, or a symlink's target, is not a regular file: a FIFO, socket,
+    /// device or similar. Decided at walk time from the directory entry's
+    /// type (or a `stat` of a symlink's target), neither of which opens
+    /// anything, or, when it became one after the walk, from the opened
+    /// handle's own metadata, after an open that does not block and before
+    /// anything is read; see the module doc's "File type" bound.
     NotARegularFile,
     /// A symlink resolves inside a directory named `.git`. This module never
     /// descends `.git` directly; this reason is what stops a symlink from
@@ -756,8 +847,9 @@ struct CandidateFile {
     /// might name by the time `process_file` runs (nothing here was ever
     /// meant to follow one), while a symlink entry is re-validated
     /// immediately before its own open, narrowing (not eliminating) the
-    /// window between this classification and that read. See the module
-    /// doc's "Time-of-check to time-of-use" note.
+    /// window between this classification and that read. Both opens are
+    /// non-blocking and decided by the handle. See the module doc's
+    /// "Threat model".
     was_symlink: bool,
 }
 
@@ -996,32 +1088,73 @@ fn admit_skip(
 // Per-file processing
 // ---------------------------------------------------------------------------
 
-/// Opens `path` for reading, refusing to follow a symlink the path names: a
-/// plain, non-symlink entry the walk already classified is meant to stay
-/// that way through to the read that follows this open, and this is what
-/// stops it from silently reading through a symlink that replaced the path
-/// afterward (this ticket's third review round reproduced exactly that
-/// swap). `libc` is not a dependency of this crate (`ori-memory`'s
+/// The raw `open(2)` flag values this module passes through
+/// [`std::os::unix::fs::OpenOptionsExt::custom_flags`], on the platforms they
+/// were verified for. `libc` is not a dependency of this crate (`ori-memory`'s
 /// `Cargo.toml` does not list it, and CLAUDE.md rule 6 makes adding one an
-/// escalation this ticket does not make on its own), so the flag values
-/// below are the platform's own header constants, not `libc`'s named ones.
+/// escalation this ticket does not make on its own), so these are the
+/// platform's own header constants, not `libc`'s named ones.
 ///
 /// Verified, by platform: macOS (`O_NOFOLLOW` 0x0100, `O_NONBLOCK` 0x0004),
-/// compiled and run on this ticket's own development machine (arm64); Linux
-/// x86_64 (`O_NOFOLLOW` 0o400000, `O_NONBLOCK` 0o4000) and Linux aarch64
-/// (`O_NOFOLLOW` 0o100000, the same `O_NONBLOCK`), each compiled and run
-/// inside a `gcc:latest` Docker container for that platform, printing the
-/// macros from the container's own `<fcntl.h>`. Linux's `O_NOFOLLOW` is not
+/// compiled and run on this ticket's own development machine (arm64), and
+/// read again from the SDK's own `sys/fcntl.h` in round 4; Linux x86_64
+/// (`O_NOFOLLOW` 0o400000, `O_NONBLOCK` 0o4000) and Linux aarch64
+/// (`O_NOFOLLOW` 0o100000, the same `O_NONBLOCK`), each compiled and run in
+/// round 3 inside a container for that platform, printing the macros from its
+/// own `<fcntl.h>`, and cross-checked in round 4 against the `libc` crate's
+/// source for both the glibc and musl targets (0x20000, 0x8000 and 2048,
+/// the same three numbers). Linux's `O_NOFOLLOW` is not
 /// architecture-uniform: `arch/arm64/include/uapi/asm/fcntl.h` overrides the
 /// `asm-generic` value x86_64 and most other architectures use, which is
-/// exactly why this is two Linux constants, not one. Every other unix this
-/// module might compile for (any other architecture, or another OS
-/// entirely) falls back to a plain open with no `O_NOFOLLOW`/`O_NONBLOCK`
-/// protection, narrower than the verified platforms but no narrower than
-/// this ticket's second round left it; that fallback, and the Windows path
-/// below, are things this ticket could only verify to compile (in a
-/// throwaway crate carrying none of this one's C dependencies, which do not
-/// cross-compile in this environment; see the report), never to run.
+/// exactly why this is two Linux constants, not one. Every other unix takes
+/// the fallback in [`open_regular_file_no_follow`] and
+/// [`open_regular_file_following`]; see their docs for what it keeps and what
+/// it cannot.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
+mod raw_open_flags {
+    #[cfg(target_os = "macos")]
+    pub(super) const O_NOFOLLOW: i32 = 0x0100;
+    #[cfg(target_os = "macos")]
+    pub(super) const O_NONBLOCK: i32 = 0x0004;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(super) const O_NOFOLLOW: i32 = 0o400_000;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(super) const O_NONBLOCK: i32 = 0o4_000;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(super) const O_NOFOLLOW: i32 = 0o100_000;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(super) const O_NONBLOCK: i32 = 0o4_000;
+}
+
+/// Opens `path` for reading, never blocking in the open, and refusing to
+/// follow a symlink the path's final component names: the open for a plain,
+/// non-symlink entry the walk already classified, and for every `spec/`
+/// document. The entry is meant to stay a plain file through to the read
+/// that follows, and `O_NOFOLLOW` is what stops the open from silently
+/// reading through a symlink that replaced the path afterward (this ticket's
+/// third review round reproduced exactly that swap). `O_NONBLOCK` is what
+/// stops the open itself from waiting: `open(2)` on a FIFO with no writer
+/// blocks until one appears, and a path that was a regular file when the walk
+/// classified it can be a FIFO by the time it is opened. With `O_NONBLOCK`
+/// the open of a FIFO returns at once, and [`open_regular_file`] then refuses
+/// the handle by its own metadata before anything reads from it. On a regular
+/// file `O_NONBLOCK` changes nothing about the read that follows.
+///
+/// On a unix platform outside the verified set (see [`raw_open_flags`]), no
+/// flag value is trusted, so this takes a `stat`-family call on the path
+/// first (`symlink_metadata`, which does not follow a final symlink and never
+/// opens anything) and refuses anything that is not a regular file before a
+/// plain, blocking open. That keeps a FIFO or a symlink that is already in
+/// place when this runs from ever being opened, which is every static case,
+/// and is what the review of this ticket's third round found missing from its
+/// fallback (a FIFO named `*.md` under `spec/` hung it with no race at all).
+/// It does not keep a FIFO swapped in between that `stat` and the open from
+/// blocking the open: on those platforms, "never hangs, even under a race"
+/// is not claimed. See the module doc's threat model.
 #[cfg(unix)]
 fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
     #[cfg(any(
@@ -1030,19 +1163,8 @@ fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
         all(target_os = "linux", target_arch = "aarch64"),
     ))]
     {
+        use raw_open_flags::{O_NOFOLLOW, O_NONBLOCK};
         use std::os::unix::fs::OpenOptionsExt;
-        #[cfg(target_os = "macos")]
-        const O_NOFOLLOW: i32 = 0x0100;
-        #[cfg(target_os = "macos")]
-        const O_NONBLOCK: i32 = 0x0004;
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        const O_NOFOLLOW: i32 = 0o400_000;
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        const O_NONBLOCK: i32 = 0o4_000;
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        const O_NOFOLLOW: i32 = 0o100_000;
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        const O_NONBLOCK: i32 = 0o4_000;
         fs::OpenOptions::new()
             .read(true)
             .custom_flags(O_NOFOLLOW | O_NONBLOCK)
@@ -1054,6 +1176,68 @@ fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
         all(target_os = "linux", target_arch = "aarch64"),
     )))]
     {
+        let meta = fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Err(io::Error::other(
+                "refusing to open a symlink (checked by a stat before the open: no verified \
+                 O_NOFOLLOW on this platform)",
+            ));
+        }
+        if !meta.is_file() {
+            return Err(io::Error::other(
+                "not a regular file (checked by a stat before the open: no verified O_NONBLOCK \
+                 on this platform)",
+            ));
+        }
+        fs::File::open(path)
+    }
+}
+
+/// Opens `path` for reading, never blocking in the open, following a symlink
+/// the path's final component names: the open for an entry the walk
+/// classified as a symlink, which [`process_file`] has just re-validated as
+/// resolving inside the root and outside `.git`. This is the open this
+/// ticket's round-3 fix left blocking (a plain `fs::File::open`, with the
+/// type check moved to after it), so a symlink whose in-root target was
+/// replaced by a FIFO after the walk hung [`build_code_map`] forever in
+/// `open(2)`; the review of this ticket's third round reproduced it three
+/// times out of three.
+/// `O_NONBLOCK` alone, without `O_NOFOLLOW`, is the fix: the link is still
+/// followed, as it must be, but the open of whatever it now names returns at
+/// once, and [`open_regular_file`] decides by the handle.
+///
+/// Outside the verified set (see [`raw_open_flags`]), the same fallback as
+/// [`open_regular_file_no_follow`], through `fs::metadata` (which follows the
+/// link, and is still a `stat`, never an open): every static case is refused
+/// before the open; a swap between that `stat` and the open is not.
+#[cfg(unix)]
+fn open_regular_file_following(path: &Path) -> io::Result<fs::File> {
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    ))]
+    {
+        use raw_open_flags::O_NONBLOCK;
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        let meta = fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(io::Error::other(
+                "not a regular file (checked by a stat before the open: no verified O_NONBLOCK \
+                 on this platform)",
+            ));
+        }
         fs::File::open(path)
     }
 }
@@ -1065,10 +1249,26 @@ fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
 /// module can recognise as not a regular file
 /// ([`SkipReason::NotARegularFile`]), instead of silently opening whatever
 /// the reparse point now names. Checked for both `is_file()` and
-/// `is_symlink()` at the call site, not `is_file()` alone, as a second,
-/// independent guard: this constant's effect on the metadata Rust's `std`
-/// reports for a reparse-point handle is documented behaviour this module
-/// could not run and observe on an actual Windows machine (see the report).
+/// `is_symlink()` in [`open_regular_file`], not `is_file()` alone, as a
+/// second, independent guard: this constant's effect on the metadata Rust's
+/// `std` reports for a reparse-point handle is documented behaviour this
+/// module could not run and observe on an actual Windows machine.
+///
+/// What this open does with a FIFO-like target: Windows has no FIFO in the
+/// file system's namespace, so no directory entry in a checkout can be one.
+/// The nearest things are a named pipe, which lives in the separate
+/// `\\.\pipe\` device namespace, and a device (a console, a serial port).
+/// A path reaches either only by naming it, through a symlink target or a
+/// reserved device name, and neither blocks this open waiting for a peer
+/// the way a unix FIFO's `open(2)` does: `CreateFileW` on a named pipe
+/// with no free instance fails at once (`ERROR_PIPE_BUSY`), since waiting for
+/// one is `WaitNamedPipe`'s job, which this module never calls. What could
+/// wait is a read from such a handle, which is why nothing is read before
+/// [`open_regular_file`] has seen `is_file()` on the handle's own metadata.
+/// Whether Rust's `std` reports `is_file() == false` for a pipe or console
+/// handle (it derives the file type from attributes and the reparse tag, not
+/// from `GetFileType`) is the one link in that chain this ticket could only
+/// compile, never run.
 #[cfg(windows)]
 fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -1077,6 +1277,66 @@ fn open_regular_file_no_follow(path: &Path) -> io::Result<fs::File> {
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
+}
+
+/// [`open_regular_file_following`], for Windows: a plain open, which follows
+/// a symlink the way the unix variant does. What it does with a FIFO-like
+/// target is what [`open_regular_file_no_follow`]'s Windows doc says: the
+/// open does not wait for a peer, and nothing is read until the handle's own
+/// metadata says `is_file()`.
+#[cfg(windows)]
+fn open_regular_file_following(path: &Path) -> io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+/// Opens one piece of repository content for reading and decides, by the
+/// opened handle's own metadata, whether it is a regular file: the one
+/// function every read of repository content goes through (a plain walk
+/// entry, a symlink walk entry, and a `spec/` document alike). The open never
+/// blocks on the verified platforms (see [`open_regular_file_no_follow`] and
+/// [`open_regular_file_following`]), and the decision is made on the handle,
+/// not on a path that could name something else by the time it is read, so no
+/// FIFO, device or swapped-in file can make a caller wait in the open or in
+/// the read that follows: a caller only ever reads a handle this has already
+/// seen to be a regular file, through [`read_capped`].
+///
+/// `follow_final_symlink` is `true` only for an entry the walk classified as
+/// a symlink and the caller has just re-validated; everything else is opened
+/// refusing one.
+fn open_regular_file(
+    path: &Path,
+    follow_final_symlink: bool,
+) -> std::result::Result<(fs::File, fs::Metadata), SkipReason> {
+    let opened = if follow_final_symlink {
+        open_regular_file_following(path)
+    } else {
+        open_regular_file_no_follow(path)
+    }
+    .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+    let meta = opened
+        .metadata()
+        .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+    // Both conditions: on Windows, a handle opened with
+    // `FILE_FLAG_OPEN_REPARSE_POINT` onto a path that became a symlink or
+    // junction is expected to report `is_symlink()` on its own metadata,
+    // which `is_file()` alone might or might not also catch (behaviour this
+    // module could not observe on an actual Windows machine; see
+    // `open_regular_file_no_follow`'s doc).
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(SkipReason::NotARegularFile);
+    }
+    Ok((opened, meta))
+}
+
+/// Reads at most `cap + 1` bytes from `opened`, through
+/// [`std::io::Read::take`], so a file that grows, or that misreports its
+/// length, is still cut off: whether it was over the cap is the caller's
+/// check on the returned length, never on a `stat`ed size. See the module
+/// doc's "Size" bound.
+fn read_capped(opened: fs::File, cap: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    opened.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn language_of(rel: &str) -> Option<Language> {
@@ -1158,16 +1418,21 @@ fn process_file(
     // followed by a separate, later `open`: this ticket's third review round
     // reproduced a swap timed into exactly that gap (a plain file replaced
     // by a symlink out of the root, or into `.git`, after the walk but
-    // before this call), which the two-syscall form cannot see. What each
-    // branch does instead:
-    let opened = if file.was_symlink {
+    // before this call), which the two-syscall form cannot see. Both
+    // branches open without blocking and decide by the handle
+    // (`open_regular_file`), so a FIFO or device swapped in after the walk,
+    // under either kind of entry, is refused rather than waited on; the
+    // review of the third round found the symlink branch still opening
+    // blocking, and hung it forever that way. What each branch does beyond
+    // that:
+    let (opened, meta) = if file.was_symlink {
         // This entry was already a symlink when the walk validated it
         // in-root and outside `.git`. Re-validating immediately before this
         // open narrows that window from "the whole walk plus every earlier
         // file" down to "between this canonicalize and this open"; it does
-        // not close it fully (a swap timed into that narrower gap is still
-        // not detected). See the module doc's "Time-of-check to
-        // time-of-use" note for what this admits.
+        // not close it (a swap timed into that narrower gap is not
+        // detected, and is outside this module's threat model: see the
+        // module doc).
         let resolved =
             fs::canonicalize(&file.abs).map_err(|err| SkipReason::Unreadable(err.to_string()))?;
         if !resolved.starts_with(root_canon) {
@@ -1176,40 +1441,23 @@ fn process_file(
         if resolved_path_enters_git(root_canon, &resolved) {
             return Err(SkipReason::GitMetadata);
         }
-        fs::File::open(&file.abs).map_err(|err| SkipReason::Unreadable(err.to_string()))?
+        open_regular_file(&file.abs, true)?
     } else {
         // This entry was a plain, non-symlink file when the walk saw it: it
         // was never meant to follow a symlink at all, so if the path now
         // names one (swapped in after the walk), the open itself refuses it
         // on every platform this was verified on; see
         // `open_regular_file_no_follow`'s doc for which those are.
-        open_regular_file_no_follow(&file.abs)
-            .map_err(|err| SkipReason::Unreadable(err.to_string()))?
+        open_regular_file(&file.abs, false)?
     };
-    let meta = opened
-        .metadata()
-        .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
-    // Both conditions: on Windows, a handle opened with
-    // `FILE_FLAG_OPEN_REPARSE_POINT` onto a path that became a symlink or
-    // junction is expected to report `is_symlink()` on its own metadata,
-    // which `is_file()` alone might or might not also catch (undocumented
-    // behaviour this module could not observe on an actual Windows
-    // machine; see `open_regular_file_no_follow`'s doc).
-    if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err(SkipReason::NotARegularFile);
-    }
 
     let deadline = Instant::now() + per_file_budget(options, meta.len());
 
-    // The cap is enforced on bytes actually read, through `Read::take`, not
-    // on `meta.len()` taken on trust: a file that grows after this `stat`,
-    // or that misreports its length, is still cut off at `cap + 1` bytes.
+    // The cap is enforced on bytes actually read (`read_capped`), not on
+    // `meta.len()` taken on trust: a file that grows after this `fstat`, or
+    // that misreports its length, is still cut off at `cap + 1` bytes.
     let cap = options.max_file_bytes;
-    let mut bytes = Vec::new();
-    opened
-        .take(cap.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+    let bytes = read_capped(opened, cap).map_err(|err| SkipReason::Unreadable(err.to_string()))?;
     if bytes.len() as u64 > cap {
         return Err(SkipReason::TooLarge {
             bytes: bytes.len() as u64,
@@ -1608,45 +1856,404 @@ impl RustModuleIndex {
         self.as_file.as_deref().or(self.as_mod_dir.as_deref())
     }
 
+    /// The trie node standing for `crate_root` (from [`rust_crate_root`]),
+    /// where every `use crate::...` path's walk starts. `None` when no Rust
+    /// file lives under it at all.
+    fn crate_root_node(&self, crate_root: &str) -> Option<&Self> {
+        let mut node = self;
+        for seg in crate_root.split('/').filter(|s| !s.is_empty()) {
+            node = node.children.get(seg)?;
+        }
+        Some(node)
+    }
+
+    /// Advances `cursor` one trie hop per segment, remembering the deepest
+    /// node that names a real file: O(segment count), whatever the path.
+    /// Returns the advanced cursor and whether it finished before `deadline`,
+    /// which it checks every 256 hops so that one pathological path with an
+    /// enormous segment count cannot run past its file's budget. A walk cut
+    /// short keeps whatever it had found, and the `false` it returns is what
+    /// turns the whole file into [`SkipReason::TimedOut`], so an
+    /// approximation is never presented as final.
+    ///
+    /// A cursor is a position, not a path: a grouped import's prefix is
+    /// walked once, and every member under it continues from the cursor the
+    /// prefix left, rather than walking the shared prefix again per member.
+    fn advance<'i, 's>(
+        cursor: TrieCursor<'i>,
+        segments: impl Iterator<Item = &'s str>,
+        deadline: Instant,
+    ) -> (TrieCursor<'i>, bool) {
+        let mut cursor = cursor;
+        for (step, seg) in segments.enumerate() {
+            if step.is_multiple_of(256) && Instant::now() >= deadline {
+                return (cursor, false);
+            }
+            let Some(node) = cursor.node else {
+                break;
+            };
+            match node.children.get(seg) {
+                Some(next) => {
+                    cursor.node = Some(next);
+                    if let Some(resolved) = next.resolved() {
+                        cursor.best = Some(resolved);
+                    }
+                }
+                None => {
+                    cursor.node = None;
+                    break;
+                }
+            }
+        }
+        (cursor, true)
+    }
+
     /// Longest-prefix match of `crate_root` (from [`rust_crate_root`]) then
     /// `segments`, one hop per segment: O(total segment count), not O(count
     /// squared). `crate_root` alone, with no further segment, is never a
     /// resolution by itself, matching the original search's `take` range
-    /// (which never tried zero segments either). Checks `deadline`
-    /// periodically (every 256 hops) so one pathological `use` item with an
-    /// enormous segment count cannot itself run past its file's budget,
-    /// stopping and returning whatever was found so far, which is what a
-    /// resolution this call could not finish in time degrades to: an
-    /// approximation on a path this large is already inside a
-    /// [`SkipReason::TimedOut`] result once the caller's own deadline check
-    /// runs, never a wrong answer presented as final.
+    /// (which never tried zero segments either). Checks `deadline` the way
+    /// [`RustModuleIndex::advance`] does, and returns whatever was found
+    /// before it passed; see that function for why that is never a wrong
+    /// answer presented as final.
+    ///
+    /// Test-only since round 4: resolution itself goes through
+    /// `extend_use_root`, which composes the same two steps
+    /// ([`RustModuleIndex::crate_root_node`], then
+    /// [`RustModuleIndex::advance`]) but keeps the cursor, so a grouped
+    /// import's members can continue from their prefix. This is that
+    /// composition for a single path, which the index's own tests call.
+    #[cfg(test)]
     fn longest_prefix<'a>(
         &self,
         crate_root: &str,
         segments: impl Iterator<Item = &'a str>,
         deadline: Instant,
     ) -> Option<String> {
-        let mut node = self;
-        for seg in crate_root.split('/').filter(|s| !s.is_empty()) {
-            node = node.children.get(seg)?;
-        }
-        let mut best: Option<String> = None;
-        for (step, seg) in segments.enumerate() {
-            if step.is_multiple_of(256) && Instant::now() >= deadline {
-                return best;
-            }
-            match node.children.get(seg) {
-                Some(next) => {
-                    node = next;
-                    if let Some(resolved) = node.resolved() {
-                        best = Some(resolved.to_owned());
-                    }
-                }
-                None => break,
-            }
-        }
-        best
+        let start = self.crate_root_node(crate_root)?;
+        let (cursor, _) = Self::advance(
+            TrieCursor {
+                node: Some(start),
+                best: None,
+            },
+            segments,
+            deadline,
+        );
+        cursor.best.map(str::to_owned)
     }
+}
+
+/// Where a `use crate::...` path's walk through [`RustModuleIndex`] stands.
+#[derive(Clone, Copy)]
+struct TrieCursor<'i> {
+    /// The trie node the segments so far lead to; `None` once one had no
+    /// child (no longer path can then resolve any deeper than `best`), or
+    /// when the importing file has no crate root to start from.
+    node: Option<&'i RustModuleIndex>,
+    /// The deepest file found along the walk so far.
+    best: Option<&'i str>,
+}
+
+/// What a `use` path's leading segments have decided so far.
+#[derive(Clone, Copy)]
+enum UseRoot<'i> {
+    /// No segment seen yet: a top-level group, `use {a, b};`, whose members
+    /// each decide for themselves.
+    Undecided,
+    /// The path starts with something other than `crate` (a crate name,
+    /// `std`, `self`, `super`): never resolved, recorded as written.
+    NotCrate,
+    /// The path starts with `crate`, and its walk has reached this far.
+    Crate(TrieCursor<'i>),
+}
+
+/// Extends `root` with `segments`: the first segment of an undecided path
+/// decides whether it is `crate`-rooted, and a `crate`-rooted path advances
+/// its trie walk (see [`RustModuleIndex::advance`]). The `bool` is `false`
+/// when `deadline` cut the walk short.
+fn extend_use_root<'i, 's>(
+    root: UseRoot<'i>,
+    segments: impl IntoIterator<Item = &'s str>,
+    crate_start: Option<&'i RustModuleIndex>,
+    deadline: Instant,
+) -> (UseRoot<'i>, bool) {
+    let mut segments = segments.into_iter();
+    let root = match root {
+        UseRoot::Undecided => match segments.next() {
+            None => return (UseRoot::Undecided, true),
+            Some("crate") => UseRoot::Crate(TrieCursor {
+                node: crate_start,
+                best: None,
+            }),
+            Some(_) => return (UseRoot::NotCrate, true),
+        },
+        decided => decided,
+    };
+    match root {
+        UseRoot::Crate(cursor) => {
+            let (cursor, completed) = RustModuleIndex::advance(cursor, segments, deadline);
+            (UseRoot::Crate(cursor), completed)
+        }
+        other => (other, true),
+    }
+}
+
+/// The `::`-separated segments of a path node as the parser gives them
+/// (`scoped_identifier`, `identifier`, `crate`, `self`, `super`), read from
+/// the tree rather than split out of the text, so whitespace or a comment
+/// between segments changes nothing. Iterative: a `scoped_identifier` nests
+/// one level per segment, and a path can have hundreds of thousands.
+fn rust_path_segments<'s>(path: Node<'s>, source: &'s [u8]) -> Vec<&'s str> {
+    let mut reversed = Vec::new();
+    let mut current = Some(path);
+    while let Some(node) = current {
+        if node.kind() == "scoped_identifier" {
+            if let Some(name) = node.child_by_field_name("name") {
+                reversed.push(text(name, source));
+            }
+            current = node.child_by_field_name("path");
+        } else {
+            reversed.push(text(node, source));
+            current = None;
+        }
+    }
+    reversed.reverse();
+    reversed
+}
+
+/// The path segments one `use` leaf names: an `a::b as c` names `a::b`, an
+/// `a::b::*` names `a::b` (so `use crate::foo::*;` resolves to the file for
+/// `foo`), and anything else is a path itself.
+fn rust_use_leaf_segments<'s>(leaf: Node<'s>, source: &'s [u8]) -> Vec<&'s str> {
+    match leaf.kind() {
+        "use_as_clause" => leaf
+            .child_by_field_name("path")
+            .map(|path| rust_path_segments(path, source))
+            .unwrap_or_default(),
+        "use_wildcard" => {
+            let mut cursor = leaf.walk();
+            let path = leaf
+                .named_children(&mut cursor)
+                .find(|child| !child.is_extra());
+            path.map(|path| rust_path_segments(path, source))
+                .unwrap_or_default()
+        }
+        _ => rust_path_segments(leaf, source),
+    }
+}
+
+/// How much text, as a multiple of the whole declaration's own length, one
+/// grouped `use` may spend spelling out its unresolved members (plus
+/// [`USE_GROUP_TEXT_SLACK`]). A member's text repeats its group's prefix, so
+/// a long prefix over many members would otherwise cost prefix length times
+/// member count: `use crate::a::...::a::{b, b, ...}` inside one 8 MiB file
+/// could ask for hundreds of GB. Ordinary code spends two or three times its
+/// own length at most, far inside this.
+const USE_GROUP_TEXT_FACTOR: usize = 16;
+
+/// See [`USE_GROUP_TEXT_FACTOR`].
+const USE_GROUP_TEXT_SLACK: usize = 4096;
+
+/// One `path::` level of a grouped `use`, shared by every member under it,
+/// so a member's text is built by walking up these rather than by copying
+/// its prefix into every member.
+struct UsePrefix<'s> {
+    parent: Option<usize>,
+    /// This level's own path, exactly as written.
+    text: &'s str,
+    /// The length of the whole prefix chain rendered with `::` joins.
+    rendered_len: usize,
+}
+
+/// The text of an unresolved grouped member: its group's prefix chain and
+/// its own text, joined with `::`; a `self` member is its prefix itself.
+fn render_use_member(
+    prefixes: &[UsePrefix<'_>],
+    prefix: Option<usize>,
+    member: &str,
+    is_self: bool,
+) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut current = prefix;
+    while let Some(index) = current {
+        parts.push(prefixes[index].text);
+        current = prefixes[index].parent;
+    }
+    parts.reverse();
+    if !(is_self && !parts.is_empty()) {
+        parts.push(member);
+    }
+    parts.join("::")
+}
+
+/// The dependency edges of one Rust `use` declaration, given its `argument`
+/// node, and whether it finished before `deadline`.
+///
+/// A declaration without a group is one path: an edge to the file its
+/// longest `crate::` prefix names, or, when it does not start with `crate`
+/// or no prefix names a file, one external edge carrying the argument
+/// exactly as written.
+///
+/// A grouped declaration (`use crate::{a::A, b::B};`,
+/// `use crate::net::{http::Client, tcp::Stream};`, nested groups, a
+/// top-level `use {crate::a::A, std::fmt};`) gives exactly the edges its
+/// ungrouped equivalent would: the parser's own tree is walked, each member
+/// is resolved on its own, from the trie position its group's prefix
+/// reached (so a shared prefix is walked once, not once per member), and an
+/// unresolved member is recorded as its own external edge, its text the
+/// member's path with its group's prefix (`crate::net::Missing`), which is
+/// what the ungrouped `use` would have recorded. A `self` member stands for
+/// its group's prefix, as in Rust. No member is ever represented by its
+/// group's prefix alone: the round-3 version cut the text at the first `{`
+/// and resolved what was left, so `use crate::net::{http::Client,
+/// tcp::Stream};` came out as one edge to `src/net.rs`, a complete-looking
+/// edge to the wrong file.
+///
+/// Bounded: every tree node visited checks `deadline`, and the text spent on
+/// unresolved members is capped at [`USE_GROUP_TEXT_FACTOR`] times the
+/// declaration's own length plus [`USE_GROUP_TEXT_SLACK`]. Past that cap, the
+/// members not yet spelled out are recorded once, together, as one external
+/// edge carrying the whole argument exactly as written: honest about what
+/// was not resolved, and never a partial edge that looks complete.
+fn rust_use_edges(
+    argument: Node,
+    source: &[u8],
+    rel: &str,
+    crate_start: Option<&RustModuleIndex>,
+    deadline: Instant,
+) -> (Vec<DependencyEdge>, bool) {
+    let raw = text(argument, source);
+    let mut edges = Vec::new();
+
+    if !matches!(argument.kind(), "use_list" | "scoped_use_list") {
+        let (root, completed) = extend_use_root(
+            UseRoot::Undecided,
+            rust_use_leaf_segments(argument, source),
+            crate_start,
+            deadline,
+        );
+        let resolved = match root {
+            UseRoot::Crate(cursor) => cursor.best,
+            _ => None,
+        };
+        edges.push(DependencyEdge {
+            from: rel.to_owned(),
+            to: resolved.unwrap_or(raw).to_owned(),
+            external: resolved.is_none(),
+        });
+        return (edges, completed);
+    }
+
+    let mut prefixes: Vec<UsePrefix<'_>> = Vec::new();
+    let mut text_budget = raw
+        .len()
+        .saturating_mul(USE_GROUP_TEXT_FACTOR)
+        .saturating_add(USE_GROUP_TEXT_SLACK);
+    let mut over_budget = false;
+    let mut stack: Vec<(Node, UseRoot<'_>, Option<usize>)> =
+        vec![(argument, UseRoot::Undecided, None)];
+    while let Some((node, root, prefix)) = stack.pop() {
+        if Instant::now() >= deadline {
+            return (edges, false);
+        }
+        match node.kind() {
+            "use_list" => {
+                let mut cursor = node.walk();
+                let members: Vec<Node> = node
+                    .named_children(&mut cursor)
+                    .filter(|member| !member.is_extra())
+                    .collect();
+                // Reversed onto the stack, so members come off it in source
+                // order (the order is only cosmetic: edges are sorted later).
+                stack.extend(
+                    members
+                        .into_iter()
+                        .rev()
+                        .map(|member| (member, root, prefix)),
+                );
+            }
+            "scoped_use_list" => {
+                let Some(list) = node.child_by_field_name("list") else {
+                    continue;
+                };
+                let Some(path) = node.child_by_field_name("path") else {
+                    // `use ::{a, b};`: no prefix of its own.
+                    stack.push((list, root, prefix));
+                    continue;
+                };
+                let (root, completed) = extend_use_root(
+                    root,
+                    rust_path_segments(path, source),
+                    crate_start,
+                    deadline,
+                );
+                if !completed {
+                    return (edges, false);
+                }
+                let own = text(path, source);
+                let rendered_len =
+                    prefix.map_or(0, |index| prefixes[index].rendered_len + 2) + own.len();
+                prefixes.push(UsePrefix {
+                    parent: prefix,
+                    text: own,
+                    rendered_len,
+                });
+                stack.push((list, root, Some(prefixes.len() - 1)));
+            }
+            _ => {
+                let (root, completed) = extend_use_root(
+                    root,
+                    rust_use_leaf_segments(node, source),
+                    crate_start,
+                    deadline,
+                );
+                if !completed {
+                    return (edges, false);
+                }
+                if let UseRoot::Crate(TrieCursor {
+                    best: Some(resolved),
+                    ..
+                }) = root
+                {
+                    edges.push(DependencyEdge {
+                        from: rel.to_owned(),
+                        to: resolved.to_owned(),
+                        external: false,
+                    });
+                    continue;
+                }
+                if over_budget {
+                    continue;
+                }
+                let member = text(node, source);
+                let is_self = node.kind() == "self";
+                let prefix_len = prefix.map_or(0, |index| prefixes[index].rendered_len);
+                let rendered_len = match prefix {
+                    Some(_) if is_self => prefix_len,
+                    Some(_) => prefix_len + 2 + member.len(),
+                    None => member.len(),
+                };
+                if rendered_len > text_budget {
+                    over_budget = true;
+                    continue;
+                }
+                text_budget -= rendered_len;
+                edges.push(DependencyEdge {
+                    from: rel.to_owned(),
+                    to: render_use_member(&prefixes, prefix, member, is_self),
+                    external: true,
+                });
+            }
+        }
+    }
+    if over_budget {
+        edges.push(DependencyEdge {
+            from: rel.to_owned(),
+            to: raw.to_owned(),
+            external: true,
+        });
+    }
+    (edges, true)
 }
 
 fn extract_rust(
@@ -1658,7 +2265,9 @@ fn extract_rust(
     deadline: Instant,
 ) -> (Extracted, bool) {
     let mut out = Extracted::new();
-    let crate_root = rust_crate_root(rel, known);
+    let crate_start = rust_crate_root(rel, known)
+        .as_deref()
+        .and_then(|crate_root| rust_index.crate_root_node(crate_root));
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
         if Instant::now() >= deadline {
@@ -1691,31 +2300,11 @@ fn extract_rust(
                 let Some(argument) = child.child_by_field_name("argument") else {
                     continue;
                 };
-                let raw = text(argument, source);
-                let head = raw
-                    .split(['{', '*'])
-                    .next()
-                    .unwrap_or(raw)
-                    .trim_end_matches("::");
-                if let Some(after_crate) =
-                    head.strip_prefix("crate::")
-                        .or(if head == "crate" { Some("") } else { None })
-                {
-                    let segments = after_crate.split("::").filter(|s| !s.is_empty());
-                    let resolved = crate_root.as_deref().and_then(|crate_root| {
-                        rust_index.longest_prefix(crate_root, segments, deadline)
-                    });
-                    out.edges.push(DependencyEdge {
-                        from: rel.to_owned(),
-                        to: resolved.clone().unwrap_or_else(|| raw.to_owned()),
-                        external: resolved.is_none(),
-                    });
-                } else {
-                    out.edges.push(DependencyEdge {
-                        from: rel.to_owned(),
-                        to: raw.to_owned(),
-                        external: true,
-                    });
+                let (edges, completed) =
+                    rust_use_edges(argument, source, rel, crate_start, deadline);
+                out.edges.extend(edges);
+                if !completed {
+                    return (out, false);
                 }
             }
             "function_item" => {
@@ -1990,87 +2579,136 @@ fn typescript_test_names(root: Node, source: &[u8], deadline: Instant) -> (Vec<S
 // Python
 // ---------------------------------------------------------------------------
 
+/// The most leading dots a Python relative import's unresolved edge spells
+/// out literally in [`DependencyEdge::to`]. Past this, the prefix is written
+/// as a count (`"[N leading dots]"`) instead, so no edge's text grows with a
+/// dot count an attacker chose. No real import comes near it: a relative
+/// import climbs one directory per dot beyond the first, and one that
+/// climbs past the mapped root (which any count above the file's own depth
+/// does) is never resolved here anyway.
+const MAX_SPELLED_RELATIVE_IMPORT_DOTS: usize = 32;
+
+/// The dependency edges of one Python `from ... import ...` statement, and
+/// whether it finished before `deadline`.
+///
+/// A relative import (`from . import a`, `from ..pkg import b`) resolves
+/// against the importing file's own directory, climbing one level per dot
+/// beyond the first. What makes this bounded in the size of the statement,
+/// which the round-3 version was not (the review of that round measured one
+/// 8 MiB statement of `K` dots and `M` names costing `K x M`, over two
+/// minutes, because the dot prefix was rebuilt for every name and nothing
+/// inside the loop read the clock):
+///
+/// - The dots are counted once, and the climb is one `truncate`, not a loop
+///   of `K` pops.
+/// - A climb past the mapped root is never resolved: the target is outside
+///   this map, so it cannot name a file in it. (The round-3 version clamped
+///   such a climb to the root, resolving `from .. import b` in a top-level
+///   file to the root's own `b.py`, which Python itself refuses.)
+/// - The unresolved text's prefix is built once per statement, and spelled
+///   as a count past [`MAX_SPELLED_RELATIVE_IMPORT_DOTS`], so each edge costs
+///   the length of its own name, not `K` more.
+/// - The loop over names checks `deadline` before every name, returning
+///   what it has and `false` when it passes.
 fn python_import_from_edges(
     node: Node,
     source: &[u8],
     rel: &str,
     known: &HashSet<String>,
-) -> Vec<DependencyEdge> {
+    deadline: Instant,
+) -> (Vec<DependencyEdge>, bool) {
     let mut edges = Vec::new();
     let Some(module_name) = node.child_by_field_name("module_name") else {
-        return edges;
+        return (edges, true);
     };
 
-    if module_name.kind() == "relative_import" {
-        let mut cursor = module_name.walk();
-        let dots = module_name
-            .children(&mut cursor)
-            .find(|child| child.kind() == "import_prefix")
-            .map(|prefix| text(prefix, source).chars().count())
-            .unwrap_or(1);
-        let dotted = {
-            let mut cursor = module_name.walk();
-            module_name
-                .children(&mut cursor)
-                .find(|child| child.kind() == "dotted_name")
-                .map(|dotted_name| text(dotted_name, source).to_owned())
-        };
-
-        let mut base = dir_components(rel);
-        for _ in 0..dots.saturating_sub(1) {
-            base.pop();
-        }
-
-        if let Some(dotted) = dotted {
-            let mut target_dir = base;
-            target_dir.extend(dotted.split('.').map(str::to_owned));
-            let joined = target_dir.join("/");
-            let resolved = [format!("{joined}.py"), format!("{joined}/__init__.py")]
-                .into_iter()
-                .find(|candidate| known.contains(candidate));
-            edges.push(DependencyEdge {
-                from: rel.to_owned(),
-                to: resolved.clone().unwrap_or_else(|| format!(".{dotted}")),
-                external: resolved.is_none(),
-            });
-        } else {
-            let names: Vec<Node> = node
-                .children_by_field_name("name", &mut node.walk())
-                .collect();
-            for name_node in names {
-                let name_text = if name_node.kind() == "aliased_import" {
-                    name_node
-                        .child_by_field_name("name")
-                        .map(|n| text(n, source).to_owned())
-                } else {
-                    Some(text(name_node, source).to_owned())
-                };
-                let Some(name_text) = name_text else { continue };
-                let mut target_dir = base.clone();
-                target_dir.push(name_text.clone());
-                let joined = target_dir.join("/");
-                let resolved = [format!("{joined}.py"), format!("{joined}/__init__.py")]
-                    .into_iter()
-                    .find(|candidate| known.contains(candidate));
-                let dots_text = ".".repeat(dots);
-                edges.push(DependencyEdge {
-                    from: rel.to_owned(),
-                    to: resolved
-                        .clone()
-                        .unwrap_or_else(|| format!("{dots_text}{name_text}")),
-                    external: resolved.is_none(),
-                });
-            }
-        }
-    } else {
+    if module_name.kind() != "relative_import" {
         edges.push(DependencyEdge {
             from: rel.to_owned(),
             to: text(module_name, source).to_owned(),
             external: true,
         });
+        return (edges, true);
     }
 
-    edges
+    let (dots, dotted) = {
+        let mut cursor = module_name.walk();
+        let mut dots = 0usize;
+        let mut dotted = None;
+        for child in module_name.children(&mut cursor) {
+            match child.kind() {
+                "import_prefix" => {
+                    dots = text(child, source).bytes().filter(|b| *b == b'.').count();
+                }
+                "dotted_name" => dotted = Some(text(child, source)),
+                _ => {}
+            }
+        }
+        (dots.max(1), dotted)
+    };
+
+    // `None` when the climb leaves the mapped root: nothing in this map can
+    // be the target, so nothing is looked up.
+    let base: Option<Vec<String>> = {
+        let mut base = dir_components(rel);
+        let climb = dots - 1;
+        (climb <= base.len()).then(|| {
+            base.truncate(base.len() - climb);
+            base
+        })
+    };
+    let prefix = if dots <= MAX_SPELLED_RELATIVE_IMPORT_DOTS {
+        ".".repeat(dots)
+    } else {
+        format!("[{dots} leading dots]")
+    };
+    let resolve = |segments: &[&str]| -> Option<String> {
+        let mut target_dir = base.clone()?;
+        target_dir.extend(segments.iter().map(|segment| (*segment).to_owned()));
+        let joined = target_dir.join("/");
+        [format!("{joined}.py"), format!("{joined}/__init__.py")]
+            .into_iter()
+            .find(|candidate| known.contains(candidate))
+    };
+
+    if let Some(dotted) = dotted {
+        let segments: Vec<&str> = dotted.split('.').collect();
+        let resolved = resolve(&segments);
+        edges.push(DependencyEdge {
+            from: rel.to_owned(),
+            to: resolved
+                .clone()
+                .unwrap_or_else(|| format!("{prefix}{dotted}")),
+            external: resolved.is_none(),
+        });
+        return (edges, true);
+    }
+
+    let names: Vec<Node> = node
+        .children_by_field_name("name", &mut node.walk())
+        .collect();
+    for name_node in names {
+        if Instant::now() >= deadline {
+            return (edges, false);
+        }
+        let name_text = if name_node.kind() == "aliased_import" {
+            name_node
+                .child_by_field_name("name")
+                .map(|n| text(n, source))
+        } else {
+            Some(text(name_node, source))
+        };
+        let Some(name_text) = name_text else { continue };
+        let resolved = resolve(&[name_text]);
+        edges.push(DependencyEdge {
+            from: rel.to_owned(),
+            to: resolved
+                .clone()
+                .unwrap_or_else(|| format!("{prefix}{name_text}")),
+            external: resolved.is_none(),
+        });
+    }
+    (edges, true)
 }
 
 fn extract_python(
@@ -2109,8 +2747,12 @@ fn extract_python(
                 }
             }
             "import_from_statement" => {
-                out.edges
-                    .extend(python_import_from_edges(child, source, rel, known));
+                let (edges, completed) =
+                    python_import_from_edges(child, source, rel, known, deadline);
+                out.edges.extend(edges);
+                if !completed {
+                    return (out, false);
+                }
             }
             "function_definition" => {
                 if let Some(name) = child.child_by_field_name("name") {
@@ -2413,13 +3055,30 @@ const MAX_SPEC_CITATIONS_PER_MODULE: usize = 500;
 /// ticket's third round) it no longer repeats per matching line.
 const MAX_HEADING_BYTES: usize = 4096;
 
-/// How often (in scanned lines, across every module and document together)
-/// [`attach_spec_citations`] checks its deadline. Checking every single line
-/// would itself cost real time at the scale a `spec/` scan can reach
-/// (modules times documents times lines), so this amortizes that cost while
-/// still checking often enough that a slow module or document is caught
-/// well before its own scan could finish.
-const SPEC_SCAN_DEADLINE_CHECK_EVERY: u64 = 4096;
+/// How many lines [`scan_spec_citations`] scans, across every module and
+/// document together, before it reads the clock again, unless
+/// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] comes first. Checking every single
+/// line would itself cost real time at the scale a `spec/` scan can reach
+/// (modules times documents times lines), so this amortizes that cost on the
+/// ordinary shape, many short lines.
+const SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES: u64 = 4096;
+
+/// How many bytes of work [`scan_spec_citations`] does before it reads the
+/// clock again, unless [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`] comes first:
+/// each line is charged its own length plus the module path searched for in
+/// it, which is what one `str::contains` call costs, linear in both.
+///
+/// Why bytes and not lines alone: a line can be as long as a whole document,
+/// up to [`CodeMapOptions::max_file_bytes`], so a line count says nothing
+/// about how much work was done between two checks. The review of this
+/// ticket's third round built exactly that document (256 modules, 17 documents of one
+/// 8 MiB line each, with module paths chosen to make each search slow) and
+/// measured the round-3 scan, which checked every 4096 lines only, running
+/// 27 to 45 seconds against its 5 second budget, because the first check
+/// came at line 4096 and the whole scan was 4352 line searches. Charged by bytes,
+/// the scan now reads the clock after every line at least 1 MiB long, so it
+/// overruns its deadline by at most one line's search.
+const SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES: u64 = 1024 * 1024;
 
 /// One `spec/*.md` document, parsed once and shared by every module's
 /// citation scan, rather than re-parsed per module.
@@ -2552,17 +3211,27 @@ fn attach_spec_citations(
         .map(|(rel, content)| parse_markdown_doc(rel, &content))
         .collect();
 
-    let mut steps: u64 = 0;
+    scan_spec_citations(&docs, modules, deadline)
+}
+
+/// The citation scan itself: every module's path, searched for in every line
+/// of every document, recording a [`SpecCitation`] per distinct (document,
+/// heading) pair. Returns whether it finished before `deadline`.
+///
+/// The deadline is checked by work done, not by lines alone: after
+/// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`] lines or
+/// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] bytes of search, whichever comes
+/// first (see the latter's doc for the document that made the difference).
+/// The check comes after a line's search, never before the first one, so an
+/// already-expired deadline still lets exactly one bounded amount of work
+/// run; what it never allows is an unbounded amount.
+fn scan_spec_citations(docs: &[MarkdownDoc], modules: &mut [Module], deadline: Instant) -> bool {
+    let mut lines_since_check: u64 = 0;
+    let mut bytes_since_check: u64 = 0;
     for module in modules.iter_mut() {
         let mut seen: HashSet<(usize, Option<usize>)> = HashSet::new();
         'docs: for (doc_index, doc) in docs.iter().enumerate() {
             for (line_index, line) in doc.lines.iter().enumerate() {
-                steps += 1;
-                if steps.is_multiple_of(SPEC_SCAN_DEADLINE_CHECK_EVERY)
-                    && Instant::now() >= deadline
-                {
-                    return false;
-                }
                 if line.contains(module.path.as_str()) {
                     let heading_idx = doc.line_heading[line_index];
                     if seen.insert((doc_index, heading_idx)) {
@@ -2582,6 +3251,19 @@ fn attach_spec_citations(
                         });
                     }
                 }
+                lines_since_check += 1;
+                bytes_since_check = bytes_since_check
+                    .saturating_add(line.len() as u64)
+                    .saturating_add(module.path.len() as u64);
+                if lines_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES
+                    || bytes_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES
+                {
+                    lines_since_check = 0;
+                    bytes_since_check = 0;
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                }
             }
         }
     }
@@ -2594,9 +3276,10 @@ fn attach_spec_citations(
 /// not part of [`Coverage`]. Every entry reaching the open step here was
 /// already confirmed not a symlink at listing time (the `is_symlink()` check
 /// just above), so it was never meant to become one afterward either;
-/// `open_regular_file_no_follow` is what refuses it if it did, the same rule
-/// [`process_file`] applies to a plain (non-symlink) entry, for the same
-/// reason (see that function's doc). Stops (returning whatever it already
+/// [`open_regular_file`], refusing a final symlink, is what refuses it if it
+/// did, and what opens a FIFO or device without waiting and refuses it by
+/// its own handle: the same rule [`process_file`] applies to a plain
+/// (non-symlink) entry, for the same reason. Stops (returning whatever it already
 /// collected) once `deadline` passes, checked once per file: a `spec/` tree
 /// could itself hold enough documents that discovering and reading them all
 /// is not free, even before any of them is scanned for citations.
@@ -2635,23 +3318,17 @@ fn collect_markdown(
             if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
                 continue;
             }
-            let Ok(opened) = open_regular_file_no_follow(&path) else {
+            // Every document goes through the same non-blocking open and
+            // handle-based decision as a source file (`open_regular_file`):
+            // a FIFO named `*.md`, whether it was already there when this
+            // directory was listed or swapped in after, is opened without
+            // waiting and refused by its own handle, never read.
+            let Ok((opened, _meta)) = open_regular_file(&path, false) else {
                 continue;
             };
-            let Ok(meta) = opened.metadata() else {
+            let Ok(bytes) = read_capped(opened, options.max_file_bytes) else {
                 continue;
             };
-            if !meta.is_file() || meta.file_type().is_symlink() {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            if opened
-                .take(options.max_file_bytes.saturating_add(1))
-                .read_to_end(&mut bytes)
-                .is_err()
-            {
-                continue;
-            }
             if bytes.len() as u64 > options.max_file_bytes {
                 continue;
             }
@@ -4780,12 +5457,16 @@ mod tests {
         drop(guard);
     }
 
-    /// Item 5 (LOW): a grouped `use crate::{a, b};` import cuts at the first
-    /// `{`, leaving no segments to resolve, so it is recorded external with
-    /// the grouped text as its target; this states that choice and tests it,
-    /// rather than leaving the behaviour implicit and untested.
+    /// Item 5 (LOW) of round 3, rule replaced in round 4: round 3 pinned the
+    /// grouped form as one external edge carrying the grouped text, never
+    /// resolved. Round 4's ruling is that a grouped import is either
+    /// resolved member by member or honestly absent, and this module now
+    /// resolves each member, so this test (the ticket's own, never on
+    /// `main`) asserts the new rule on the same fixture: `use
+    /// crate::{foo::Foo, bar::Bar};` gives one resolved edge per member, the
+    /// same two the ungrouped form gives, and no edge carrying grouped text.
     #[test]
-    fn ori_t_0036_a_grouped_use_crate_import_is_recorded_external_not_silently_dropped() {
+    fn ori_t_0036_a_grouped_use_crate_import_resolves_each_member_it_names() {
         let dir = temp_dir("grouped-use");
         let guard = DropGuard(dir.clone());
         write(
@@ -4801,19 +5482,22 @@ mod tests {
             .iter()
             .find(|m| m.path == "src/lib.rs")
             .expect("present");
-        let grouped = lib
+        let edges: Vec<(&str, bool)> = lib
             .dependency_edges
             .iter()
-            .find(|e| e.to.contains("foo::Foo") && e.to.contains("bar::Bar"));
-        assert!(
-            grouped.is_some(),
-            "a grouped use crate::{{...}} must be recorded (external, with the grouped form \
-             visible in its text), not silently dropped: {:?}",
-            lib.dependency_edges
-        );
-        assert!(
-            grouped.expect("checked above").external,
-            "the grouped form is never individually resolved"
+            .map(|e| (e.to.as_str(), e.external))
+            .collect();
+        // Two from `mod foo; mod bar;`, two from the grouped `use`.
+        assert_eq!(
+            edges,
+            vec![
+                ("src/bar.rs", false),
+                ("src/bar.rs", false),
+                ("src/foo.rs", false),
+                ("src/foo.rs", false),
+            ],
+            "each member of the group must resolve on its own, and nothing may carry the \
+             grouped text"
         );
         drop(guard);
     }
@@ -4883,5 +5567,772 @@ mod tests {
             "an 8 MiB file must get a meaningfully larger budget than the base 5s, so a debug \
              build's slower parse and extraction is not mistaken for a hang; got {big:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // ORI-T-0036, round 4 (2026-09-24), from the review of round 3. One test (at
+    // least) per required item, each failing before its fix and passing
+    // after; the report's plant table says which test catches which plant.
+    // -----------------------------------------------------------------
+
+    /// Creates a FIFO at `path` with the system `mkfifo`, the way the
+    /// round-2 FIFO tests above do. `false` when this machine has no
+    /// `mkfifo` (the caller then skips, loudly).
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) -> bool {
+        std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    /// Runs `work` on its own thread and waits at most `limit` for it, so a
+    /// regression that blocks in `open(2)` fails the test in bounded time
+    /// instead of hanging the whole suite. A thread left blocked by such a
+    /// regression is torn down when the test binary exits.
+    fn within<T: Send + 'static>(limit: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+        rx.recv_timeout(limit).unwrap_or_else(|_| {
+            panic!(
+                "did not return within {limit:?}: something blocked (an open or a read of a \
+                 FIFO, most likely)"
+            )
+        })
+    }
+
+    /// Item 1 (HIGH), the symlink branch directly: an entry the walk
+    /// classified as a symlink to an in-root regular file, whose target is a
+    /// FIFO by the time `process_file` opens it (the state the reviewers'
+    /// swap converges to, reached here without a race). Round 3 opened this
+    /// branch with a blocking, link-following `fs::File::open` and checked
+    /// the type only afterward, so this hung forever.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_process_file_never_blocks_on_a_symlink_entry_whose_target_became_a_fifo() {
+        let dir = temp_dir("fifo-symlink-branch");
+        let guard = DropGuard(dir.clone());
+        let fifo = dir.join("t.rs");
+        if !make_fifo(&fifo) {
+            eprintln!("mkfifo not available on this machine; skipping");
+            drop(guard);
+            return;
+        }
+        std::os::unix::fs::symlink(&fifo, dir.join("z.rs")).expect("create symlink to fifo");
+        let candidate = CandidateFile {
+            abs: dir.join("z.rs"),
+            rel: "z.rs".to_owned(),
+            was_symlink: true,
+        };
+        let root = fs::canonicalize(&dir).expect("canonicalize root");
+        let result = within(Duration::from_secs(10), move || {
+            let known: HashSet<String> = HashSet::new();
+            let index = RustModuleIndex::build(&known);
+            process_file(
+                &candidate,
+                &known,
+                &index,
+                &CodeMapOptions::default(),
+                &root,
+            )
+        });
+        assert_eq!(result, Err(SkipReason::NotARegularFile));
+        drop(guard);
+    }
+
+    /// Item 1 (HIGH), the plain branch directly: an entry the walk
+    /// classified as a plain regular file that is a FIFO by the time
+    /// `process_file` opens it. `O_NONBLOCK` on this open is what keeps it
+    /// from waiting for a writer.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_process_file_never_blocks_on_a_plain_entry_that_became_a_fifo() {
+        let dir = temp_dir("fifo-plain-branch");
+        let guard = DropGuard(dir.clone());
+        let fifo = dir.join("t.rs");
+        if !make_fifo(&fifo) {
+            eprintln!("mkfifo not available on this machine; skipping");
+            drop(guard);
+            return;
+        }
+        let candidate = CandidateFile {
+            abs: fifo,
+            rel: "t.rs".to_owned(),
+            was_symlink: false,
+        };
+        let root = fs::canonicalize(&dir).expect("canonicalize root");
+        let result = within(Duration::from_secs(10), move || {
+            let known: HashSet<String> = HashSet::new();
+            let index = RustModuleIndex::build(&known);
+            process_file(
+                &candidate,
+                &known,
+                &index,
+                &CodeMapOptions::default(),
+                &root,
+            )
+        });
+        assert_eq!(result, Err(SkipReason::NotARegularFile));
+        drop(guard);
+    }
+
+    /// Item 1 (HIGH), the `spec/` open directly: `collect_markdown` given a
+    /// directory holding a FIFO named `*.md` next to a real document must
+    /// return, keep the real document, and never read the FIFO. The round-2
+    /// test `tests::ori_t_0036_a_fifo_under_spec_is_skipped_not_a_hang` covers
+    /// the same open end to end; this one also asserts what was kept.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_collect_markdown_never_blocks_on_a_fifo_document() {
+        let dir = temp_dir("fifo-spec-direct");
+        let guard = DropGuard(dir.clone());
+        let spec = dir.join("spec");
+        fs::create_dir_all(&spec).expect("create spec dir");
+        fs::write(spec.join("a.md"), "# H\n\nsrc/a.rs\n").expect("write doc");
+        if !make_fifo(&spec.join("b.md")) {
+            eprintln!("mkfifo not available on this machine; skipping");
+            drop(guard);
+            return;
+        }
+        let root = dir.clone();
+        let docs = within(Duration::from_secs(10), move || {
+            collect_markdown(
+                &root.join("spec"),
+                &root,
+                &CodeMapOptions::default(),
+                Instant::now() + Duration::from_secs(60),
+            )
+        });
+        let names: Vec<&str> = docs.iter().map(|(rel, _)| rel.as_str()).collect();
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        let regular = format!("spec/{}.md", "a");
+        assert_eq!(
+            names,
+            vec![regular.as_str()],
+            "only the regular document is read"
+        );
+        drop(guard);
+    }
+
+    /// Item 1 (HIGH), end to end, the swap the review of round 3 used: a
+    /// slow file sorted first (`a_slow.rs`), a plain `t.rs`, and `z.rs`, a
+    /// symlink to `t.rs`. After the walk has classified all three and while
+    /// `a_slow.rs` is still being parsed, `t.rs` is atomically replaced by a
+    /// FIFO (created elsewhere, then renamed over it) at a fixed delay. Both
+    /// later opens then meet a FIFO: `t.rs` through the plain branch, `z.rs`
+    /// through the symlink branch, which is the one round 3 left blocking
+    /// (the review reproduced a hang there three times out of three).
+    ///
+    /// The delay (250 ms after the mapping thread starts) is far longer than
+    /// the walk of three files and far shorter than parsing `a_slow.rs`
+    /// (about 1.8 s in this ticket's debug build). If a much faster machine
+    /// ever parses it before the swap lands, the assertions below fail
+    /// saying so, rather than passing without having exercised anything.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_fifo_swapped_in_after_the_walk_never_hangs_the_map() {
+        let dir = temp_dir("fifo-swap-race");
+        let guard = DropGuard(dir.clone());
+        let staging = temp_dir("fifo-swap-race-staging");
+        let staging_guard = DropGuard(staging.clone());
+        let staged_fifo = staging.join("fifo");
+        if !make_fifo(&staged_fifo) {
+            eprintln!("mkfifo not available on this machine; skipping");
+            drop(guard);
+            drop(staging_guard);
+            return;
+        }
+        let mut slow = String::with_capacity(150_000 * 20);
+        for i in 0..150_000 {
+            slow.push_str(&format!("pub fn f{i:06}() {{}}\n"));
+        }
+        write(&dir, "a_slow.rs", &slow);
+        write(&dir, "t.rs", "pub fn t() {}\n");
+        std::os::unix::fs::symlink(dir.join("t.rs"), dir.join("z.rs")).expect("create symlink");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let root = dir.clone();
+        std::thread::spawn(move || {
+            let _ = started_tx.send(());
+            let _ = done_tx.send(build_code_map(&root));
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the mapping thread starts");
+        std::thread::sleep(Duration::from_millis(250));
+        fs::rename(&staged_fifo, dir.join("t.rs")).expect("swap the FIFO in over t.rs");
+
+        let map = done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect(
+                "build_code_map must return within 60s; a FIFO swapped in after the walk must \
+                 never block an open",
+            )
+            .expect("maps");
+        let reason_of = |path: &str| {
+            map.coverage
+                .files_skipped
+                .iter()
+                .find(|f| f.path == path)
+                .map(|f| f.reason.clone())
+        };
+        assert_eq!(
+            reason_of("t.rs"),
+            Some(SkipReason::NotARegularFile),
+            "t.rs must be refused as the FIFO it became; if it mapped instead, the swap landed \
+             after it was read and this run exercised nothing: {:?}",
+            map.coverage
+        );
+        assert_eq!(
+            reason_of("z.rs"),
+            Some(SkipReason::NotARegularFile),
+            "z.rs, the symlink whose target became a FIFO, must be refused: {:?}",
+            map.coverage
+        );
+        drop(guard);
+        drop(staging_guard);
+    }
+
+    /// Item 1 (HIGH), an assumption the "never hangs" claim rests on: the
+    /// walk lists directories with `fs::read_dir`, and a directory swapped
+    /// for a FIFO after the walk queued it is then listed through a path
+    /// that names a FIFO. `read_dir` (`opendir` on unix) must fail at once
+    /// on it, not wait for a writer.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_listing_a_directory_that_became_a_fifo_fails_rather_than_blocks() {
+        let dir = temp_dir("fifo-read-dir");
+        let guard = DropGuard(dir.clone());
+        let fifo = dir.join("was_a_dir");
+        if !make_fifo(&fifo) {
+            eprintln!("mkfifo not available on this machine; skipping");
+            drop(guard);
+            return;
+        }
+        let listed = within(Duration::from_secs(10), move || fs::read_dir(&fifo).is_ok());
+        assert!(!listed, "a FIFO must not list as a directory");
+        drop(guard);
+    }
+
+    /// A bare [`Module`] at `path`, for tests that drive the spec scan
+    /// directly rather than through a whole build.
+    fn bare_module(path: &str) -> Module {
+        Module {
+            path: path.to_owned(),
+            language: Language::Rust,
+            parsed_with_errors: false,
+            interfaces: Vec::new(),
+            dependency_edges: Vec::new(),
+            entry_points: Vec::new(),
+            covering_tests: Vec::new(),
+            spec_sections: Vec::new(),
+        }
+    }
+
+    /// Item 2 (HIGH), the check itself, deterministically: four lines of
+    /// just over 1 MiB each is far fewer than the 4096 lines the round-3
+    /// scan waited for before its first check, so with an already-expired
+    /// deadline that scan read the clock zero times and reported itself
+    /// complete. Charged by bytes, the scan must check after the first
+    /// line and stop.
+    #[test]
+    fn ori_t_0036_the_spec_scan_checks_its_deadline_by_bytes_scanned_not_only_by_lines() {
+        let long_line = "x".repeat(1024 * 1024 + 1);
+        let content = format!("{long_line}\n{long_line}\n{long_line}\n{long_line}\n");
+        let docs = vec![parse_markdown_doc(format!("spec/{}.md", "long"), &content)];
+        let mut modules = vec![bare_module("a.rs")];
+        let already_past = Instant::now() - Duration::from_secs(1);
+        assert!(
+            !scan_spec_citations(&docs, &mut modules, already_past),
+            "four 1 MiB lines past an expired deadline must stop the scan, not complete it"
+        );
+
+        // The line count still bounds the ordinary shape, many short lines.
+        let short_lines = "a.rs\n".repeat(5000);
+        let docs = vec![parse_markdown_doc(
+            format!("spec/{}.md", "short"),
+            &short_lines,
+        )];
+        let mut modules = vec![bare_module("a.rs")];
+        assert!(
+            !scan_spec_citations(&docs, &mut modules, already_past),
+            "5000 short lines past an expired deadline must stop the scan too"
+        );
+
+        // And a scan with time left completes.
+        let docs = vec![parse_markdown_doc(format!("spec/{}.md", "long"), &content)];
+        let mut modules = vec![bare_module("a.rs")];
+        assert!(scan_spec_citations(
+            &docs,
+            &mut modules,
+            Instant::now() + Duration::from_secs(60)
+        ));
+    }
+
+    /// Item 2 (HIGH), end to end, the long-line document the review of round
+    /// 3 built, scaled down to fit a unit test: 64 modules named
+    /// `("as" x 20) + "aNNNN.rs"` and three `spec/` documents, each a single
+    /// line of `"as"` repeated to just under the 8 MiB cap, so every search
+    /// is slow and there are only 192 line searches in all (the round-3
+    /// scan's first check came at the 4096th, so it never checked). The
+    /// round-3 scan ran every search, about 8 s in this ticket's debug build
+    /// (2 s in release), and reported itself complete; with a 250 ms budget
+    /// the scan must stop and say so.
+    #[test]
+    fn ori_t_0036_a_spec_document_of_long_lines_cannot_overrun_the_scan_deadline() {
+        let dir = temp_dir("spec-long-lines");
+        let guard = DropGuard(dir.clone());
+        let prefix = "as".repeat(20);
+        for n in 0..64 {
+            write(&dir, &format!("{prefix}a{n:04}.rs"), "pub fn f() {}\n");
+        }
+        let line = "as".repeat(4_194_300);
+        for n in 0..3 {
+            // Assembled, not written whole: see the fixture-path comment
+            // earlier in this file.
+            write(&dir, &format!("spec/{}{n}.md", "long"), &line);
+        }
+        let options = CodeMapOptions {
+            file_timeout: Duration::from_millis(250),
+            ..CodeMapOptions::default()
+        };
+        let start = Instant::now();
+        let map = build_code_map_with_options(&dir, &options).expect("maps");
+        let elapsed = start.elapsed();
+        assert!(
+            map.modules.len() >= 32,
+            "the modules themselves must map, or there is nothing to scan: {:?}",
+            map.coverage
+        );
+        assert!(
+            !map.coverage.spec_citation_scan_complete,
+            "192 slow 8 MiB line searches cannot finish in 250 ms; the scan must stop at its \
+             deadline and say so (took {elapsed:?})"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "the whole map must come back near the scan's 250 ms budget, not after every search; \
+             took {elapsed:?}"
+        );
+        drop(guard);
+    }
+    /// `from <dots> import a, a, ..., a`, the statement shape the review of
+    /// round 3 used against `python_import_from_edges`.
+    fn python_relative_import(dots: usize, names: usize) -> String {
+        let mut content = String::with_capacity(dots + 3 * names + 16);
+        content.push_str("from ");
+        content.push_str(&".".repeat(dots));
+        content.push_str(" import ");
+        for i in 0..names {
+            if i > 0 {
+                content.push_str(", ");
+            }
+            content.push('a');
+        }
+        content.push('\n');
+        content
+    }
+
+    /// The first `import_from_statement` in `source`'s Python parse tree.
+    fn first_import_from(tree: &tree_sitter::Tree) -> Node<'_> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        root.children(&mut cursor)
+            .find(|child| child.kind() == "import_from_statement")
+            .expect("an import_from_statement")
+    }
+
+    /// Item 3 (HIGH), the deadline inside the loop: a statement's names are
+    /// iterated with a check before each one, so an expired deadline stops
+    /// the loop at once and says so. The round-3 loop had no check at all:
+    /// it would have produced every edge and reported itself complete.
+    #[test]
+    fn ori_t_0036_python_import_from_checks_the_deadline_inside_the_names_loop() {
+        let source = python_relative_import(2, 1000);
+        let tree = parse_bounded(
+            Language::Python,
+            false,
+            &source,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .expect("parses");
+        let statement = first_import_from(&tree);
+        let already_past = Instant::now() - Duration::from_secs(1);
+        let (edges, completed) = python_import_from_edges(
+            statement,
+            source.as_bytes(),
+            "pkg/m.py",
+            &HashSet::new(),
+            already_past,
+        );
+        assert!(!completed, "an expired deadline must stop the names loop");
+        assert!(
+            edges.is_empty(),
+            "nothing is produced after the deadline: {} edges",
+            edges.len()
+        );
+
+        let (edges, completed) = python_import_from_edges(
+            statement,
+            source.as_bytes(),
+            "pkg/m.py",
+            &HashSet::new(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert!(completed);
+        assert_eq!(edges.len(), 1000, "with time left, every name is an edge");
+    }
+
+    /// Item 3 (HIGH), the memory form, end to end: `K` dots and `M` names
+    /// that do not resolve. The round-3 code built each unresolved edge's
+    /// text as `K` dots plus the name, so memory was `K x M` (the review
+    /// measured 678 MB from a 169 KB file); here it is 40 MB with the
+    /// round-3 code and a few hundred KB now. Every edge's text must stay
+    /// short, whatever `K` is, and still say how many dots there were.
+    #[test]
+    fn ori_t_0036_python_relative_import_edges_do_not_grow_with_the_dot_count() {
+        let dir = temp_dir("py-dots-memory");
+        let guard = DropGuard(dir.clone());
+        let dots = 20_000;
+        let mut content = String::from("from ");
+        content.push_str(&".".repeat(dots));
+        content.push_str(" import ");
+        let names: Vec<String> = (0..2000).map(|i| format!("n{i}")).collect();
+        content.push_str(&names.join(", "));
+        content.push('\n');
+        write(&dir, "pkg/m.py", &content);
+        let map = build_code_map(&dir).expect("maps");
+        let m = map
+            .modules
+            .iter()
+            .find(|m| m.path == "pkg/m.py")
+            .expect("present");
+        assert_eq!(m.dependency_edges.len(), 2000, "one edge per name");
+        let longest = m
+            .dependency_edges
+            .iter()
+            .map(|e| e.to.len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            longest <= 64,
+            "an edge's text must not grow with the dot count ({dots} dots); longest is \
+             {longest} bytes"
+        );
+        assert!(
+            m.dependency_edges
+                .iter()
+                .all(|e| e.external && e.to.starts_with("[20000 leading dots]")),
+            "an import climbing past the root is unresolved, and its count is still stated: {:?}",
+            &m.dependency_edges[..3]
+        );
+        drop(guard);
+    }
+
+    /// Item 3 (HIGH), the time form, with large `K` and `M`: two million dots
+    /// and two hundred thousand names in one statement (2.6 MB, under the
+    /// 8 MiB cap). The round-3 code rebuilt the `K`-dot prefix for every
+    /// name, `K x M` = 4e11 bytes of copying, several seconds on this
+    /// ticket's machine and outside any deadline check; counted once, the
+    /// same statement is linear. Timed on the extraction step alone (the
+    /// parse, itself linear, is done first, outside the timing).
+    #[test]
+    fn ori_t_0036_python_relative_import_work_is_linear_in_dots_plus_names() {
+        let (dots, names) = (2_000_000, 200_000);
+        let source = python_relative_import(dots, names);
+        let tree = parse_bounded(
+            Language::Python,
+            false,
+            &source,
+            Instant::now() + Duration::from_secs(120),
+        )
+        .expect("parses");
+        let statement = first_import_from(&tree);
+        let start = Instant::now();
+        let (edges, completed) = python_import_from_edges(
+            statement,
+            source.as_bytes(),
+            "m.py",
+            &HashSet::new(),
+            Instant::now() + Duration::from_secs(120),
+        );
+        let elapsed = start.elapsed();
+        assert!(completed);
+        assert_eq!(edges.len(), names);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "{dots} dots and {names} names took {elapsed:?}; the prefix must be built once, not \
+             once per name"
+        );
+    }
+
+    /// Item 3 (HIGH), what bounding the dots must not break: a relative
+    /// import that stays inside the map still resolves, one that climbs past
+    /// the mapped root never resolves to a file inside it (the round-3 code
+    /// clamped the climb at the root and did), and an unresolved dotted form
+    /// keeps its own dot count in its text.
+    #[test]
+    fn ori_t_0036_python_relative_imports_resolve_inside_the_map_and_never_above_it() {
+        let dir = temp_dir("py-relative-bounds");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "b.py", "x = 1\n");
+        write(&dir, "pkg/b.py", "x = 1\n");
+        write(
+            &dir,
+            "pkg/sub/m.py",
+            "from .. import b\nfrom ...gone import y\n",
+        );
+        write(&dir, "top.py", "from .. import b\n");
+        let map = build_code_map(&dir).expect("maps");
+        let edges_of = |path: &str| -> Vec<(String, bool)> {
+            map.modules
+                .iter()
+                .find(|m| m.path == path)
+                .expect("present")
+                .dependency_edges
+                .iter()
+                .map(|e| (e.to.clone(), e.external))
+                .collect()
+        };
+        assert_eq!(
+            edges_of("pkg/sub/m.py"),
+            vec![("pkg/b.py".to_owned(), false), ("...gone".to_owned(), true)],
+        );
+        assert_eq!(
+            edges_of("top.py"),
+            vec![("..b".to_owned(), true)],
+            "from .. in a top-level file climbs out of the map; it must not resolve to the \
+             root's own b.py"
+        );
+        drop(guard);
+    }
+    /// A small crate for the grouped-import tests: `src/lib.rs` (the crate
+    /// root), `src/foo.rs`, `src/bar.rs`, `src/net.rs`, `src/net/http.rs`
+    /// and `src/net/tcp.rs`.
+    fn write_grouped_import_crate(dir: &Path) {
+        write(
+            dir,
+            "src/lib.rs",
+            "pub mod foo;\npub mod bar;\npub mod net;\n",
+        );
+        write(dir, "src/foo.rs", "pub struct Foo;\npub struct Baz;\n");
+        write(dir, "src/bar.rs", "pub struct Bar;\n");
+        write(dir, "src/net.rs", "pub mod http;\npub mod tcp;\n");
+        write(dir, "src/net/http.rs", "pub struct Client;\n");
+        write(dir, "src/net/tcp.rs", "pub struct Stream;\n");
+    }
+
+    /// `module`'s dependency edges as sorted `(to, external)` pairs.
+    fn edge_pairs(map: &CodeMap, module: &str) -> Vec<(String, bool)> {
+        let mut pairs: Vec<(String, bool)> = map
+            .modules
+            .iter()
+            .find(|m| m.path == module)
+            .unwrap_or_else(|| panic!("{module} present"))
+            .dependency_edges
+            .iter()
+            .map(|e| (e.to.clone(), e.external))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    /// Item 5 (LOW), the rule itself: a grouped import gives exactly the
+    /// edges its ungrouped equivalent gives, member for member, resolved or
+    /// not. Covers a top-level group, a group under a prefix, groups nested
+    /// in groups, a group with no prefix at all mixing `crate` and `std`,
+    /// members that do not resolve, `self`, a wildcard, an alias, and an
+    /// all-external group. The round-3 code resolved none of the grouped
+    /// forms and turned the prefixed one into an edge to `src/net.rs`.
+    #[test]
+    fn ori_t_0036_a_grouped_use_gives_exactly_the_edges_of_its_ungrouped_equivalent() {
+        let dir = temp_dir("grouped-equivalence");
+        let guard = DropGuard(dir.clone());
+        write_grouped_import_crate(&dir);
+        write(
+            &dir,
+            "src/grouped.rs",
+            "use crate::{foo::Foo, bar::Bar};\n\
+             use crate::net::{http::Client, tcp::Stream};\n\
+             use crate::{foo::{Foo, Baz}, net::{self, http::{self, Client}, tcp::Stream}};\n\
+             use {crate::foo::Foo, std::fmt};\n\
+             use crate::{Error, Result, net::Missing};\n\
+             use crate::{foo::*, bar::Bar as B};\n\
+             use std::{fmt, io};\n",
+        );
+        write(
+            &dir,
+            "src/ungrouped.rs",
+            "use crate::foo::Foo;\nuse crate::bar::Bar;\n\
+             use crate::net::http::Client;\nuse crate::net::tcp::Stream;\n\
+             use crate::foo::Foo;\nuse crate::foo::Baz;\nuse crate::net;\n\
+             use crate::net::http;\nuse crate::net::http::Client;\nuse crate::net::tcp::Stream;\n\
+             use crate::foo::Foo;\nuse std::fmt;\n\
+             use crate::Error;\nuse crate::Result;\nuse crate::net::Missing;\n\
+             use crate::foo::*;\nuse crate::bar::Bar as B;\n\
+             use std::fmt;\nuse std::io;\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let grouped = edge_pairs(&map, "src/grouped.rs");
+        let ungrouped = edge_pairs(&map, "src/ungrouped.rs");
+        assert_eq!(grouped, ungrouped);
+        assert!(
+            grouped
+                .iter()
+                .any(|(to, ext)| to == "src/net/http.rs" && !ext)
+                && grouped
+                    .iter()
+                    .any(|(to, ext)| to == "src/net/tcp.rs" && !ext),
+            "the prefixed and nested members must resolve past their prefix: {grouped:?}"
+        );
+        assert!(
+            grouped.iter().all(|(to, _)| !to.contains('{')),
+            "no edge may carry grouped text: {grouped:?}"
+        );
+        drop(guard);
+    }
+
+    /// Item 5 (LOW), the exact case the review of round 3 found: `use
+    /// crate::net::{http::Client, tcp::Stream};` with `src/net.rs`,
+    /// `src/net/http.rs` and `src/net/tcp.rs` all present gave one edge, to
+    /// `src/net.rs`: a complete-looking edge to the wrong file. It must give
+    /// the two member files and nothing else.
+    #[test]
+    fn ori_t_0036_a_prefixed_grouped_use_never_resolves_to_its_prefix_alone() {
+        let dir = temp_dir("grouped-prefixed");
+        let guard = DropGuard(dir.clone());
+        write_grouped_import_crate(&dir);
+        write(
+            &dir,
+            "src/user.rs",
+            "use crate::net::{http::Client, tcp::Stream};\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(
+            edge_pairs(&map, "src/user.rs"),
+            vec![
+                ("src/net/http.rs".to_owned(), false),
+                ("src/net/tcp.rs".to_owned(), false),
+            ]
+        );
+        drop(guard);
+    }
+
+    /// Item 5 (LOW), nesting, exactly: groups inside groups inside a
+    /// prefix, with a `self` member and an unresolved member at the inner
+    /// level, each member placed by its own full path.
+    #[test]
+    fn ori_t_0036_a_nested_grouped_use_resolves_every_member_at_every_level() {
+        let dir = temp_dir("grouped-nested");
+        let guard = DropGuard(dir.clone());
+        write_grouped_import_crate(&dir);
+        write(
+            &dir,
+            "src/user.rs",
+            "use crate::{net::{http::{self, Client}, tcp::{Stream, Gone}}, foo::Foo};\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(
+            edge_pairs(&map, "src/user.rs"),
+            vec![
+                ("src/foo.rs".to_owned(), false),
+                ("src/net/http.rs".to_owned(), false),
+                ("src/net/http.rs".to_owned(), false),
+                ("src/net/tcp.rs".to_owned(), false),
+                ("src/net/tcp.rs".to_owned(), false),
+            ],
+            "Gone is under tcp, so, like its ungrouped form, it resolves to tcp.rs by its \
+             longest prefix"
+        );
+        drop(guard);
+    }
+
+    /// Item 5 (LOW), the text bound: a long prefix that resolves nowhere,
+    /// over many members, would cost prefix length times member count to
+    /// spell out member by member (here 2000 members under a 6 KB prefix,
+    /// about 12 MB). Past the budget, the members not yet spelled out are
+    /// recorded once, as the declaration exactly as written, and the total
+    /// text stays near the declaration's own size.
+    #[test]
+    fn ori_t_0036_a_grouped_use_with_a_long_unresolved_prefix_stays_bounded() {
+        let dir = temp_dir("grouped-budget");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "src/lib.rs", "pub fn f() {}\n");
+        let mut argument = String::from("crate::");
+        argument.push_str(&"q::".repeat(2000));
+        argument.push('{');
+        let members: Vec<String> = (0..2000).map(|i| format!("x{i}")).collect();
+        argument.push_str(&members.join(", "));
+        argument.push('}');
+        write(&dir, "src/user.rs", &format!("use {argument};\n"));
+        let map = build_code_map(&dir).expect("maps");
+        let user = map
+            .modules
+            .iter()
+            .find(|m| m.path == "src/user.rs")
+            .expect("present");
+        let total: usize = user.dependency_edges.iter().map(|e| e.to.len()).sum();
+        let budget = argument.len() * USE_GROUP_TEXT_FACTOR + USE_GROUP_TEXT_SLACK;
+        assert!(
+            total <= budget + argument.len(),
+            "{total} bytes of edge text for a {} byte declaration; the cap is {budget} plus \
+             the declaration itself",
+            argument.len()
+        );
+        assert!(
+            user.dependency_edges
+                .iter()
+                .any(|e| e.external && e.to == argument),
+            "the members past the budget must be recorded, once, as the declaration as written"
+        );
+        assert!(
+            user.dependency_edges
+                .iter()
+                .filter(|e| e.to != argument)
+                .all(|e| e.external && e.to.starts_with("crate::q::q::")),
+            "every member spelled out before the budget ran out is its own full path"
+        );
+        drop(guard);
+    }
+
+    /// Item 5 (LOW), the walk's own deadline: a grouped import is walked
+    /// node by node, and an expired deadline must stop it and say so, the
+    /// same as every other stage.
+    #[test]
+    fn ori_t_0036_the_grouped_use_walk_checks_its_deadline() {
+        let source = "use crate::{a::A, b::B, c::C};\n";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .expect("set language");
+        let tree = parser.parse(source, None).expect("parses");
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let declaration = root
+            .children(&mut cursor)
+            .find(|child| child.kind() == "use_declaration")
+            .expect("a use declaration");
+        let argument = declaration
+            .child_by_field_name("argument")
+            .expect("an argument");
+        let already_past = Instant::now() - Duration::from_secs(1);
+        let (edges, completed) =
+            rust_use_edges(argument, source.as_bytes(), "src/x.rs", None, already_past);
+        assert!(!completed, "an expired deadline must stop the walk");
+        assert!(edges.is_empty(), "{edges:?}");
+        let (edges, completed) = rust_use_edges(
+            argument,
+            source.as_bytes(),
+            "src/x.rs",
+            None,
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert!(completed);
+        assert_eq!(edges.len(), 3, "{edges:?}");
     }
 }
