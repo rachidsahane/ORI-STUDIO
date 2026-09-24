@@ -81,9 +81,12 @@
 //!   `open_regular_file_no_follow`), swap a FIFO in between the `stat` that
 //!   stands in for `O_NONBLOCK` there and the open, which then waits.
 //!
-//! One property is kept even against a live writer, on every platform this
-//! ticket verified (macOS, Linux x86_64 and aarch64): the mapper never
-//! hangs. Every open of repository content is non-blocking and decided by
+//! One property is kept even against a live writer, on the platforms whose
+//! `open(2)` flag values this ticket verified (macOS, where this round's
+//! tests also ran; Linux x86_64 and aarch64, whose values were run in round 3
+//! and cross-checked against the `libc` crate's source in round 4, with
+//! this round's tests not run there): the mapper never hangs. Every open of
+//! repository content is non-blocking and decided by
 //! the opened handle's own metadata before anything is read (see "File
 //! type" below), a directory is listed with `opendir`, which fails at once
 //! on a FIFO rather than waiting
