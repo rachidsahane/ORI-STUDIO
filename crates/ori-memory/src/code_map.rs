@@ -53,10 +53,11 @@
 //! FIFO, at a directory, at themselves), a `spec` directory that is itself a
 //! symlink, names that are not UTF-8, and files at or near the size cap
 //! shaped to make parsing, extraction, import resolution or the citation
-//! scan slow. None of it may make [`build_code_map`] hang, read outside the
-//! mapped root or inside `.git`, run a stage without a time bound, or
-//! report a map as more complete than it is. The bounds in the next section
-//! are how.
+//! scan slow, or large. None of it may make [`build_code_map`] hang, read
+//! outside the mapped root or inside `.git`, run a stage without a time
+//! bound, hold or return memory beyond the bounds stated under "Memory"
+//! below, or report a map as more complete than it is. The bounds in the
+//! next section are how.
 //!
 //! Out of scope: a live writer, a process changing the tree while it is
 //! being mapped. The code map reads the product's canonical checkout, and a
@@ -167,12 +168,13 @@
 //!     exists): its own deadline, sized by the same `file_timeout`
 //!     configuration value, checked across every module and document it
 //!     scans by the work done, after every 4096 lines or every 1 MiB of
-//!     search, whichever comes first (`scan_spec_citations`), and once per
-//!     file while documents are read (`collect_markdown`). By lines alone,
+//!     search, whichever comes first (`CitationScan::scan_document`), once
+//!     per entry while documents are listed (`list_markdown`), and once per
+//!     document before it is read (`scan_spec_directory`). By lines alone,
 //!     one line can be a whole 8 MiB document: the review of round 3 ran the
 //!     round-3 scan 5 to 9 times past its budget that way.
-//!     [`Coverage::spec_citation_scan_complete`] is where its own
-//!     incompleteness is recorded, not a demotion of an already-successful
+//!     [`Coverage::spec_citation_scan`] is where its own incompleteness is
+//!     recorded, with the reason, not a demotion of an already-successful
 //!     `Module`; see that field's doc for why.
 //!
 //!   A file whose syntax is small but pathologically nested (deeply
@@ -232,6 +234,47 @@
 //!   `files_seen` and `files_skipped`; this cannot be exercised on this
 //!   module's own development filesystem (APFS rejects such names outright),
 //!   so it is proven on Linux instead (see the report for how).
+//! - **Memory.** What the `spec/` citation scan holds while it runs, how
+//!   much of `spec/` it reads, and what the returned map keeps from it, each
+//!   bounded since round 5. Until then none was: the review of round 3
+//!   measured 2.3 GB held for eight newline-only documents of 8 MiB (every
+//!   line of every document copied into its own `String`, all documents at
+//!   once, about 35 times the corpus), and 4.2 GB of heading text in the
+//!   returned map for 2000 modules each cited under 500 long headings (the
+//!   heading copied into every citation), both from repositories that hold
+//!   still.
+//!   - *While scanning:* one document at a time, read into one buffer of at
+//!     most `max_file_bytes + 1` bytes (8 MiB by default) and dropped before
+//!     the next is read, every line searched in place as a slice of that
+//!     buffer and never copied (`CitationScan::scan_document`). Besides the
+//!     buffer: the list of document paths (as many as `spec/` has entries,
+//!     the one quantity here bounded only the way the walk itself is; see
+//!     "What is not bounded"), per module the (document, heading) pairs it
+//!     has been cited under (at most 500), and the output below, whose
+//!     heading text is held twice while the scan runs (the table and its
+//!     lookup index) and once after.
+//!   - *The whole corpus:* at most [`CodeMapOptions::max_spec_bytes`] read
+//!     across every document together, 64 MiB by default, counted on bytes
+//!     actually read (at most one byte past the budget, which is how the
+//!     scan knows the corpus did not fit). A larger corpus is scanned up to
+//!     the first document that does not fit and reported as
+//!     [`SpecScan::CorpusOverBudget`], never as complete
+//!     (`tests::ori_t_0036_a_spec_corpus_over_the_total_budget_is_reported_incomplete`).
+//!   - *Kept in the returned map:* each cited document's path once
+//!     ([`CodeMap::spec_docs`]) and each distinct cited heading once
+//!     ([`CodeMap::spec_headings`]), a heading longer than 4096 bytes cut to
+//!     4096 (back to a UTF-8 character boundary) and marked
+//!     [`SpecHeading::truncated`]. So the heading text a map keeps is at
+//!     most the smaller of 4096 bytes times the number of distinct cited
+//!     headings and the bytes read from `spec/` (each kept heading is a
+//!     different piece of a line that was read, kept at most once), which
+//!     is at most `max_spec_bytes`, 64 MiB by default, however many modules
+//!     cite it. Each citation is two indices, 24 bytes on a 64-bit target,
+//!     at most 500 per module ([`Module::spec_sections_truncated`] marks a
+//!     module that had more), so at most 12 KB of citations per module
+//!     (`tests::ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings`
+//!     sums what a returned map keeps, for the review's shape, against this
+//!     bound).
 //! - **What is not bounded.** There is no cap on the total number of files or
 //!   total bytes walked, and no `.gitignore` is honored: a `target/` or
 //!   `node_modules/` directory is walked like any other, its files seen,
@@ -239,14 +282,9 @@
 //!   build output dwarfs its source will have that reflected honestly in
 //!   [`Coverage`] rather than hidden by a heuristic this module does not
 //!   implement. Both are named as gaps in this ticket's closing report, not
-//!   silently assumed away. Nor is the memory the `spec/` scan holds: every
-//!   document is kept as a copy of each of its lines (`MarkdownDoc`), about
-//!   35 times the document's size in memory (the review of round 3 measured
-//!   2.3 GB for eight newline-only documents of 8 MiB each), all documents
-//!   at once, with no cap on how many there are. That is a static hostile
-//!   repository, so inside the threat model; it was not among round 4's
-//!   required items and is not fixed here. Races with a live writer are out
-//!   of scope; see "Threat model".
+//!   silently assumed away. The same holds for the number of entries under
+//!   `spec/`, which are listed (paths only) before any is read. Races with a
+//!   live writer are out of scope; see "Threat model".
 //!
 //! # Quadratic extraction, and what stays fast
 //!
@@ -343,13 +381,16 @@
 //! which needs the git and pull-request history this module does not read
 //! (that is `ori-orchestrator` and `ori-store`'s territory). What this module
 //! does instead: if the mapped root has a `spec/` directory, every `.md` file
-//! under it (bounded by the same [`CodeMapOptions::max_file_bytes`], read
-//! best effort, an unreadable or oversized document silently contributing
-//! nothing rather than failing the map) is scanned for the module's own path
-//! exactly as this map records it (root-relative, forward slashes) appearing
-//! as a literal substring anywhere in the text, and each match is recorded as
-//! a [`SpecCitation`] naming the document and the nearest preceding Markdown
-//! heading, if any. This is deliberately narrower than AICD §25's rule: a
+//! under it (each bounded by the same [`CodeMapOptions::max_file_bytes`], all
+//! of them together by [`CodeMapOptions::max_spec_bytes`], read best effort,
+//! an unreadable or oversized document silently contributing nothing rather
+//! than failing the map, a corpus over the total budget stopping the scan
+//! and saying so) is scanned for the module's own path exactly as this map
+//! records it (root-relative, forward slashes) appearing as a literal
+//! substring anywhere in the text, and each match is recorded as a
+//! [`SpecCitation`] naming the document and the nearest preceding Markdown
+//! heading, if any, by index into tables the map keeps once each (see
+//! "Memory"). This is deliberately narrower than AICD §25's rule: a
 //! specification that names a module by a different relative form, by name
 //! alone, or from a different mapped root, is not found; a document that
 //! merely happens to contain the path as a substring inside a code fence or
@@ -535,15 +576,34 @@ pub struct EntryPoint {
 }
 
 /// One citation of a module's path found in the mapped repository's own
-/// `spec/` documents. See the module doc, "What spec sections per module
-/// means here, and what it misses".
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+/// `spec/` documents: which document, and under which heading, as indices
+/// into [`CodeMap::spec_docs`] and [`CodeMap::spec_headings`], where each
+/// cited document's path and each distinct cited heading is stored once for
+/// the whole map rather than once per citation. [`CodeMap::spec_doc`] and
+/// [`CodeMap::spec_heading`] read them. See the module doc, "What spec
+/// sections per module means here, and what it misses", and "Memory" for
+/// why a citation holds indices and not text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct SpecCitation {
-    /// The document's path, relative to the mapped root.
-    pub doc: String,
-    /// The nearest Markdown heading before the citation, if the document has
-    /// one above it.
-    pub heading: Option<String>,
+    /// The citing document, an index into [`CodeMap::spec_docs`].
+    pub doc_index: usize,
+    /// The nearest Markdown heading above the citation, an index into
+    /// [`CodeMap::spec_headings`]; `None` when the document has no heading
+    /// above it.
+    pub heading_index: Option<usize>,
+}
+
+/// One distinct heading some [`SpecCitation`] names, stored once in
+/// [`CodeMap::spec_headings`] however many modules cite under it.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct SpecHeading {
+    /// The heading's text, without its leading `#` marks and surrounding
+    /// whitespace, and never longer than 4096 bytes.
+    pub text: String,
+    /// Whether the heading was longer than 4096 bytes, so that `text` is its
+    /// first 4096 bytes (cut back to a UTF-8 character boundary), not all of
+    /// it.
+    pub truncated: bool,
 }
 
 /// One parsed source file and what this module found in it.
@@ -567,9 +627,13 @@ pub struct Module {
     /// The tests found to cover this module, by the rule the module doc
     /// states. Sorted and deduplicated.
     pub covering_tests: Vec<String>,
-    /// The specification sections found to cite this module's path. Sorted
-    /// by (doc, heading).
+    /// The specification sections found to cite this module's path, at most
+    /// 500. Sorted by the texts they index: document path, then heading.
     pub spec_sections: Vec<SpecCitation>,
+    /// Whether this module was cited under more than 500 distinct (document,
+    /// heading) pairs, so that `spec_sections` holds the first 500 found and
+    /// the scan stopped looking for more of this module's citations.
+    pub spec_sections_truncated: bool,
 }
 
 /// Why one candidate file was not parsed into a [`Module`].
@@ -673,21 +737,48 @@ pub struct Coverage {
     pub files_parsed_with_errors: usize,
     /// Files seen but not parsed, with the reason for each, sorted by path.
     pub files_skipped: Vec<SkippedFile>,
-    /// Whether the `spec/` citation scan finished within its own budget.
-    /// `true` when there was no `spec/` directory at all, or the scan
-    /// completed; `false` when its deadline passed first. The scan is a
-    /// separate stage from parsing and extraction (it runs once, after every
-    /// file's `Module` already exists), so its own incompleteness is
-    /// recorded here rather than by turning an already-successfully-parsed
-    /// module into a [`SkippedFile`]: a module's interfaces, edges, entry
-    /// points and tests are unaffected by the citation scan running out of
-    /// time, and are not retroactively called incomplete for a reason that
-    /// has nothing to do with them. What *is* incomplete, honestly, when
-    /// this is `false`: some modules' [`Module::spec_sections`] may be
-    /// missing citations a completed scan would have found, and no module
-    /// past the point the deadline hit was scanned at all. See the module
-    /// doc's "Time" bound.
-    pub spec_citation_scan_complete: bool,
+    /// How the `spec/` citation scan ended: complete, or incomplete and why.
+    /// The scan is a separate stage from parsing and extraction (it runs
+    /// once, after every file's `Module` already exists), so its own
+    /// incompleteness is recorded here rather than by turning an
+    /// already-successfully-parsed module into a [`SkippedFile`]: a module's
+    /// interfaces, edges, entry points and tests are unaffected by the
+    /// citation scan stopping early, and are not retroactively called
+    /// incomplete for a reason that has nothing to do with them. What *is*
+    /// incomplete, honestly, when this is not [`SpecScan::Complete`]: some
+    /// modules' [`Module::spec_sections`] may be missing citations a
+    /// completed scan would have found. See the module doc's "Time" and
+    /// "Memory" bounds.
+    pub spec_citation_scan: SpecScan,
+}
+
+/// How the `spec/` citation scan ended. Anything but [`SpecScan::Complete`]
+/// means some citations may be missing; the citations found before the scan
+/// stopped are kept.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum SpecScan {
+    /// Every document under `spec/` was read and scanned, or the mapped root
+    /// has no `spec/` directory at all.
+    Complete,
+    /// The scan's deadline passed before it finished.
+    TimedOut,
+    /// The documents under `spec/` add up to more than
+    /// [`CodeMapOptions::max_spec_bytes`]: the scan stopped at the first
+    /// document that did not fit in what was left of the budget, and scanned
+    /// neither it nor anything after it.
+    CorpusOverBudget {
+        /// The budget the corpus exceeded, in bytes.
+        budget: u64,
+    },
+}
+
+impl SpecScan {
+    /// Whether the scan finished: every document read and scanned.
+    #[must_use]
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
 }
 
 /// The result of [`build_code_map`]: every module found, and what the walk
@@ -698,6 +789,33 @@ pub struct CodeMap {
     pub modules: Vec<Module>,
     /// What the walk saw, parsed or not.
     pub coverage: Coverage,
+    /// Every `spec/` document some [`SpecCitation`] names, each stored once,
+    /// its path relative to the mapped root. [`SpecCitation::doc_index`]
+    /// indexes this.
+    pub spec_docs: Vec<String>,
+    /// Every distinct heading some [`SpecCitation`] names, each stored once
+    /// for the whole map, however many modules cite under it.
+    /// [`SpecCitation::heading_index`] indexes this. See the module doc's
+    /// "Memory" bound for how large it can get.
+    pub spec_headings: Vec<SpecHeading>,
+}
+
+impl CodeMap {
+    /// The document `citation` names, or `None` when `citation` did not come
+    /// from this map.
+    #[must_use]
+    pub fn spec_doc(&self, citation: &SpecCitation) -> Option<&str> {
+        self.spec_docs.get(citation.doc_index).map(String::as_str)
+    }
+
+    /// The heading `citation` names: `None` when the citation has no heading
+    /// above it, or did not come from this map.
+    #[must_use]
+    pub fn spec_heading(&self, citation: &SpecCitation) -> Option<&SpecHeading> {
+        citation
+            .heading_index
+            .and_then(|index| self.spec_headings.get(index))
+    }
 }
 
 /// The bounds [`build_code_map_with_options`] enforces. See the module doc's
@@ -712,6 +830,13 @@ pub struct CodeMapOptions {
     /// `parse_timeout`: extraction did not used to share this bound, which
     /// was itself a defect (see the module doc's "Quadratic extraction").
     pub file_timeout: Duration,
+    /// The most bytes the whole `spec/` citation scan reads, across every
+    /// document together. Default 64 MiB (eight documents at the default
+    /// `max_file_bytes`). Enforced on bytes actually read: the scan reads at
+    /// most one byte past it, and a corpus larger than this is scanned up to
+    /// the first document that does not fit and reported as
+    /// [`SpecScan::CorpusOverBudget`], never as complete.
+    pub max_spec_bytes: u64,
 }
 
 impl Default for CodeMapOptions {
@@ -719,6 +844,7 @@ impl Default for CodeMapOptions {
         Self {
             max_file_bytes: 8 * 1024 * 1024,
             file_timeout: Duration::from_secs(5),
+            max_spec_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -801,8 +927,7 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
     // spent by) something else. See `attach_spec_citations`'s doc and the
     // module doc's "Time" bound.
     let spec_deadline = Instant::now() + options.file_timeout;
-    let spec_citation_scan_complete =
-        attach_spec_citations(&root_canon, &mut modules, options, spec_deadline);
+    let spec = attach_spec_citations(&root_canon, &mut modules, options, spec_deadline);
 
     for module in &mut modules {
         module
@@ -816,9 +941,11 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
             .sort_by(|a, b| (a.line, &a.name).cmp(&(b.line, &b.name)));
         module.covering_tests.sort();
         module.covering_tests.dedup();
-        module
-            .spec_sections
-            .sort_by(|a, b| (&a.doc, &a.heading).cmp(&(&b.doc, &b.heading)));
+        // By the texts the indices name, not the indices themselves, which
+        // are in first-cited order.
+        module.spec_sections.sort_by(|a, b| {
+            spec_citation_sort_key(&spec, a).cmp(&spec_citation_sort_key(&spec, b))
+        });
         module.spec_sections.dedup();
     }
     modules.sort_by(|a, b| a.path.cmp(&b.path));
@@ -831,8 +958,10 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
             files_parsed_clean,
             files_parsed_with_errors,
             files_skipped: skipped,
-            spec_citation_scan_complete,
+            spec_citation_scan: spec.status,
         },
+        spec_docs: spec.docs,
+        spec_headings: spec.headings,
     })
 }
 
@@ -1553,6 +1682,7 @@ fn process_file(
         entry_points: extracted.entry_points,
         covering_tests,
         spec_sections: Vec::new(),
+        spec_sections_truncated: false,
     })
 }
 
@@ -3072,72 +3202,46 @@ fn join_dir(dir: &str, sub: &str) -> String {
 // Spec citations
 // ---------------------------------------------------------------------------
 
-/// The most citations one module accumulates from the `spec/` scan before
-/// the scan stops early for that module and records one truncation marker
-/// instead of continuing. A bound against a pathological document with many
-/// distinct headings each citing the same module (see
-/// [`collect_markdown`]'s doc for the memory bound this pairs with).
+/// The most citations one module keeps from the `spec/` scan. Past it, the
+/// scan stops looking for that module and sets
+/// [`Module::spec_sections_truncated`], so a document of many distinct
+/// headings each citing the same module cannot grow that module's list
+/// without bound. See the module doc's "Memory" bound.
 const MAX_SPEC_CITATIONS_PER_MODULE: usize = 500;
 
-/// The longest heading text this module interns whole; a longer one is
-/// truncated (at a UTF-8 character boundary) before it is stored. Interning
-/// is still O(heading length) once per distinct heading, so an unbounded
-/// length would still make that one step slow even though (after this
-/// ticket's third round) it no longer repeats per matching line.
+/// The longest heading text the map keeps. A longer heading is cut to this
+/// many bytes, back to a UTF-8 character boundary, and marked
+/// [`SpecHeading::truncated`]. This, with each distinct heading being kept
+/// once for the whole map ([`CitationScan::intern_heading`]), is what bounds
+/// the heading text a [`CodeMap`] retains; see the module doc's "Memory".
 const MAX_HEADING_BYTES: usize = 4096;
 
-/// How many lines [`scan_spec_citations`] scans, across every module and
-/// document together, before it reads the clock again, unless
+/// How many lines [`CitationScan::scan_document`] searches, across every
+/// module and document together, before it reads the clock again, unless
 /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] comes first. Checking every single
 /// line would itself cost real time at the scale a `spec/` scan can reach
 /// (modules times documents times lines), so this amortizes that cost on the
 /// ordinary shape, many short lines.
 const SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES: u64 = 4096;
 
-/// How many bytes of work [`scan_spec_citations`] does before it reads the
-/// clock again, unless [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`] comes first:
-/// each line is charged its own length plus the module path searched for in
-/// it, which is what one `str::contains` call costs, linear in both.
+/// How many bytes of work [`CitationScan::scan_document`] does before it
+/// reads the clock again, unless [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`]
+/// comes first: each line is charged its own length plus the module path
+/// searched for in it, which is what one `str::contains` call costs, linear
+/// in both.
 ///
 /// Why bytes and not lines alone: a line can be as long as a whole document,
 /// up to [`CodeMapOptions::max_file_bytes`], so a line count says nothing
 /// about how much work was done between two checks. The review of this
-/// ticket's third round built exactly that document (256 modules, 17 documents of one
-/// 8 MiB line each, with module paths chosen to make each search slow) and
-/// measured the round-3 scan, which checked every 4096 lines only, running
-/// 27 to 45 seconds against its 5 second budget, because the first check
-/// came at line 4096 and the whole scan was 4352 line searches. Charged by bytes,
-/// the scan now reads the clock after every line at least 1 MiB long, so it
-/// overruns its deadline by at most one line's search.
+/// ticket's third round built exactly that document (256 modules, 17
+/// documents of one 8 MiB line each, with module paths chosen to make each
+/// search slow) and measured the round-3 scan, which checked every 4096
+/// lines only, running 27 to 45 seconds against its 5 second budget,
+/// because the first check came at line 4096 and the whole scan was 4352
+/// line searches. Charged by bytes, the scan now reads the clock after every
+/// line at least 1 MiB long, so it overruns its deadline by at most one
+/// line's search.
 const SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES: u64 = 1024 * 1024;
-
-/// One `spec/*.md` document, parsed once and shared by every module's
-/// citation scan, rather than re-parsed per module.
-///
-/// Before this ticket's third review round, `attach_spec_citations` re-typed
-/// scanned this way per module (module count times document size just to
-/// track headings again each time), and, on every line a module's path
-/// appeared in, cloned the *current heading's full text* twice (once to
-/// build the dedup key, once for `HashSet::insert`) before ever checking
-/// whether that (doc, heading) pair was already recorded; the doc comment
-/// there claimed this was "one allocation, not one per line", which was true
-/// for retained memory and false for the work done to get there. The review
-/// measured up to 173 CPU-seconds for a single document at the size cap with
-/// one long heading, entirely outside any deadline, because
-/// `attach_spec_citations` never received one to check. Here, each
-/// document's headings are interned once (`headings`, each distinct text
-/// stored once however many times it recurs), each line already carries its
-/// heading as a cheap index (`line_heading`), and the per-module scan
-/// deduplicates on `(usize, Option<usize>)` pairs, never touching heading
-/// text on the hot path.
-struct MarkdownDoc {
-    rel: String,
-    lines: Vec<String>,
-    /// The heading active at `lines[i]`, an index into `headings`.
-    line_heading: Vec<Option<usize>>,
-    /// Every distinct heading text in this document, first-seen order.
-    headings: Vec<String>,
-}
 
 fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -3150,47 +3254,203 @@ fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-fn parse_markdown_doc(rel: String, content: &str) -> MarkdownDoc {
-    let mut headings: Vec<String> = Vec::new();
-    let mut heading_index: HashMap<String, usize> = HashMap::new();
-    let mut lines: Vec<String> = Vec::new();
-    let mut line_heading: Vec<Option<usize>> = Vec::new();
-    let mut current: Option<usize> = None;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if let Some(stripped) = trimmed.strip_prefix('#') {
-            let stripped = truncate_at_char_boundary(
-                stripped.trim_start_matches('#').trim(),
-                MAX_HEADING_BYTES,
-            );
-            if !stripped.is_empty() {
-                let next_index = headings.len();
-                let index = *heading_index
-                    .entry(stripped.to_owned())
-                    .or_insert(next_index);
-                if index == next_index {
-                    headings.push(stripped.to_owned());
+/// A Markdown heading's text: the line with its leading whitespace, its run
+/// of `#` marks and its surrounding whitespace removed, or `None` when the
+/// line is not a heading or the heading is empty. A slice of `line`, never a
+/// copy.
+fn markdown_heading(line: &str) -> Option<&str> {
+    let text = line
+        .trim_start()
+        .strip_prefix('#')?
+        .trim_start_matches('#')
+        .trim();
+    (!text.is_empty()).then_some(text)
+}
+
+/// What the `spec/` scan hands back besides each module's own citations:
+/// the tables the citations index into, and how the scan ended.
+struct SpecScanOutput {
+    docs: Vec<String>,
+    headings: Vec<SpecHeading>,
+    status: SpecScan,
+}
+
+/// The key a module's citations are sorted by: the document's path, then
+/// the heading's text (no heading first), the texts the indices name rather
+/// than the indices, so the order is the same whatever order the headings
+/// were first cited in.
+fn spec_citation_sort_key<'s>(
+    spec: &'s SpecScanOutput,
+    citation: &SpecCitation,
+) -> (&'s str, Option<(&'s str, bool)>) {
+    (
+        spec.docs.get(citation.doc_index).map_or("", String::as_str),
+        citation
+            .heading_index
+            .and_then(|index| spec.headings.get(index))
+            .map(|heading| (heading.text.as_str(), heading.truncated)),
+    )
+}
+
+/// The citation scan's state, carried from one document to the next: the
+/// output tables, and per module what it has already been cited under.
+///
+/// Documents are scanned one at a time, each from one owned buffer that is
+/// dropped before the next is read, and every line is searched in place as
+/// a slice of that buffer. The round-3 version held every document at once,
+/// each line copied into its own `String` with a heading index beside it,
+/// about 35 times the corpus's size in memory; the review of that round
+/// measured 2.3 GB for eight newline-only documents of 8 MiB each. See the
+/// module doc's "Memory" bound for what is held now.
+struct CitationScan {
+    /// Every cited document's path, first-cited order.
+    docs: Vec<String>,
+    /// Every distinct cited heading, first-cited order.
+    headings: Vec<SpecHeading>,
+    /// `headings`' lookup index, one map per value of
+    /// [`SpecHeading::truncated`], so a lookup by `&str` allocates nothing.
+    /// A second copy of each heading's text, held only while the scan runs.
+    heading_ids: [HashMap<String, usize>; 2],
+    /// Per module, the (document, heading) pairs it has been cited under: at
+    /// most [`MAX_SPEC_CITATIONS_PER_MODULE`] each.
+    seen: Vec<HashSet<(usize, Option<usize>)>>,
+    /// Per module, whether it reached [`MAX_SPEC_CITATIONS_PER_MODULE`] and
+    /// is no longer searched for.
+    done: Vec<bool>,
+    lines_since_check: u64,
+    bytes_since_check: u64,
+}
+
+impl CitationScan {
+    fn new(modules: usize) -> Self {
+        Self {
+            docs: Vec::new(),
+            headings: Vec::new(),
+            heading_ids: [HashMap::new(), HashMap::new()],
+            seen: vec![HashSet::new(); modules],
+            done: vec![false; modules],
+            lines_since_check: 0,
+            bytes_since_check: 0,
+        }
+    }
+
+    /// The index of `text` in `headings`, adding it if this is its first
+    /// citation: each distinct heading is stored once for the whole map,
+    /// however many modules and documents cite under it.
+    fn intern_heading(&mut self, text: &str, truncated: bool) -> usize {
+        let ids = &mut self.heading_ids[usize::from(truncated)];
+        if let Some(&id) = ids.get(text) {
+            return id;
+        }
+        let id = self.headings.len();
+        self.headings.push(SpecHeading {
+            text: text.to_owned(),
+            truncated,
+        });
+        ids.insert(text.to_owned(), id);
+        id
+    }
+
+    /// Searches `content`, the whole of one document, for every module's
+    /// path, line by line, in place: each line is a slice of `content`, and
+    /// the heading above it is tracked as a slice too, so nothing is copied
+    /// per line. A heading's text is copied only when a citation under it is
+    /// recorded for the first time, and a document's path only when it is
+    /// first cited. Returns `false` when `deadline` passed first.
+    ///
+    /// The deadline is checked by work done, not by lines alone: after
+    /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`] lines or
+    /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] bytes of search, whichever
+    /// comes first. The check comes after a line's search, never before the
+    /// first one, so an already-expired deadline still lets exactly one
+    /// bounded amount of work run; what it never allows is an unbounded
+    /// amount.
+    fn scan_document(
+        &mut self,
+        rel: &str,
+        content: &str,
+        modules: &mut [Module],
+        deadline: Instant,
+    ) -> bool {
+        let mut doc_index: Option<usize> = None;
+        for (m, module) in modules.iter_mut().enumerate() {
+            if self.done[m] {
+                continue;
+            }
+            // The heading above the current line, and whether it was cut.
+            let mut heading: Option<(&str, bool)> = None;
+            // Its index in `headings`, once looked up: `Some(None)` when it
+            // has not been cited yet, `None` when not looked up since the
+            // heading last changed.
+            let mut heading_id: Option<Option<usize>> = None;
+            for line in content.lines() {
+                if let Some(full) = markdown_heading(line) {
+                    let text = truncate_at_char_boundary(full, MAX_HEADING_BYTES);
+                    heading = Some((text, text.len() < full.len()));
+                    heading_id = None;
                 }
-                current = Some(index);
+                if line.contains(module.path.as_str()) {
+                    // The pair's key, if both halves have been cited before;
+                    // `None` means this pair is certainly new.
+                    let heading_key: Option<Option<usize>> = match heading {
+                        None => Some(None),
+                        Some((text, truncated)) => (*heading_id.get_or_insert_with(|| {
+                            self.heading_ids[usize::from(truncated)].get(text).copied()
+                        }))
+                        .map(Some),
+                    };
+                    let is_new = match (doc_index, heading_key) {
+                        (Some(doc), Some(key)) => !self.seen[m].contains(&(doc, key)),
+                        _ => true,
+                    };
+                    if is_new {
+                        if module.spec_sections.len() >= MAX_SPEC_CITATIONS_PER_MODULE {
+                            module.spec_sections_truncated = true;
+                            self.done[m] = true;
+                            break;
+                        }
+                        let doc = *doc_index.get_or_insert_with(|| {
+                            self.docs.push(rel.to_owned());
+                            self.docs.len() - 1
+                        });
+                        let key = heading.map(|(text, truncated)| {
+                            let id = self.intern_heading(text, truncated);
+                            heading_id = Some(Some(id));
+                            id
+                        });
+                        self.seen[m].insert((doc, key));
+                        module.spec_sections.push(SpecCitation {
+                            doc_index: doc,
+                            heading_index: key,
+                        });
+                    }
+                }
+                self.lines_since_check += 1;
+                self.bytes_since_check = self
+                    .bytes_since_check
+                    .saturating_add(line.len() as u64)
+                    .saturating_add(module.path.len() as u64);
+                if self.lines_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES
+                    || self.bytes_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES
+                {
+                    self.lines_since_check = 0;
+                    self.bytes_since_check = 0;
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                }
             }
         }
-        lines.push(line.to_owned());
-        line_heading.push(current);
-    }
-    MarkdownDoc {
-        rel,
-        lines,
-        line_heading,
-        headings,
+        true
     }
 }
 
 /// Scans `<root>/spec/**/*.md`, best effort, for each module's path as a
-/// literal substring. See the module doc, "What spec sections per module
-/// means here". Returns whether the scan finished within `deadline`; see
-/// [`Coverage::spec_citation_scan_complete`]'s doc for what `false` means
-/// and why an incomplete scan does not turn an already-successful [`Module`]
-/// into a [`SkippedFile`].
+/// literal substring, recording each citation into its module. See the
+/// module doc, "What spec sections per module means here". Returns the
+/// tables the citations index into and how the scan ended; see
+/// [`Coverage::spec_citation_scan`] for why an incomplete scan does not turn
+/// an already-successful [`Module`] into a [`SkippedFile`].
 ///
 /// `spec` is found by reading `root`'s own entries and matching a name
 /// exactly, never by joining `"spec"` onto `root` and asking the OS whether
@@ -3209,9 +3469,38 @@ fn attach_spec_citations(
     modules: &mut [Module],
     options: &CodeMapOptions,
     deadline: Instant,
-) -> bool {
+) -> SpecScanOutput {
+    let mut scan = CitationScan::new(modules.len());
+    let status = scan_spec_directory(root, modules, options, deadline, &mut scan);
+    SpecScanOutput {
+        docs: scan.docs,
+        headings: scan.headings,
+        status,
+    }
+}
+
+/// [`attach_spec_citations`]'s body: finds `spec`, lists its documents, then
+/// reads and scans them one at a time, in path order, charging every byte
+/// read to [`CodeMapOptions::max_spec_bytes`].
+///
+/// Each document is read with a limit of the smaller of
+/// [`CodeMapOptions::max_file_bytes`] and what is left of the budget,
+/// through `take(limit + 1)`: more than what is left means the corpus does
+/// not fit, and the scan stops there as [`SpecScan::CorpusOverBudget`],
+/// having read at most one byte past the budget; more than the per-file cap
+/// means this one document is skipped, its bytes still charged, since they
+/// were read. A document that cannot be opened as a regular file, cannot be
+/// read, or is not UTF-8 contributes nothing and is not charged beyond what
+/// was read of it.
+fn scan_spec_directory(
+    root: &Path,
+    modules: &mut [Module],
+    options: &CodeMapOptions,
+    deadline: Instant,
+    scan: &mut CitationScan,
+) -> SpecScan {
     let Ok(read_dir) = fs::read_dir(root) else {
-        return true;
+        return SpecScan::Complete;
     };
     let spec_dir = read_dir
         .filter_map(std::result::Result::ok)
@@ -3230,102 +3519,56 @@ fn attach_spec_citations(
             (file_type.is_dir() && !file_type.is_symlink()).then(|| entry.path())
         });
     let Some(spec_dir) = spec_dir else {
-        return true;
+        return SpecScan::Complete;
     };
 
-    let raw_docs = collect_markdown(&spec_dir, root, options, deadline);
-    if Instant::now() >= deadline {
-        return false;
-    }
-    let docs: Vec<MarkdownDoc> = raw_docs
-        .into_iter()
-        .map(|(rel, content)| parse_markdown_doc(rel, &content))
-        .collect();
-
-    scan_spec_citations(&docs, modules, deadline)
-}
-
-/// The citation scan itself: every module's path, searched for in every line
-/// of every document, recording a [`SpecCitation`] per distinct (document,
-/// heading) pair. Returns whether it finished before `deadline`.
-///
-/// The deadline is checked by work done, not by lines alone: after
-/// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`] lines or
-/// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] bytes of search, whichever comes
-/// first (see the latter's doc for the document that made the difference).
-/// The check comes after a line's search, never before the first one, so an
-/// already-expired deadline still lets exactly one bounded amount of work
-/// run; what it never allows is an unbounded amount.
-fn scan_spec_citations(docs: &[MarkdownDoc], modules: &mut [Module], deadline: Instant) -> bool {
-    let mut lines_since_check: u64 = 0;
-    let mut bytes_since_check: u64 = 0;
-    for module in modules.iter_mut() {
-        let mut seen: HashSet<(usize, Option<usize>)> = HashSet::new();
-        'docs: for (doc_index, doc) in docs.iter().enumerate() {
-            for (line_index, line) in doc.lines.iter().enumerate() {
-                if line.contains(module.path.as_str()) {
-                    let heading_idx = doc.line_heading[line_index];
-                    if seen.insert((doc_index, heading_idx)) {
-                        if module.spec_sections.len() >= MAX_SPEC_CITATIONS_PER_MODULE {
-                            module.spec_sections.push(SpecCitation {
-                                doc: doc.rel.clone(),
-                                heading: Some(format!(
-                                    "(truncated: this module cited more than {MAX_SPEC_CITATIONS_PER_MODULE} times; further citations were not recorded)"
-                                )),
-                            });
-                            break 'docs;
-                        }
-                        let heading_text = heading_idx.map(|index| doc.headings[index].clone());
-                        module.spec_sections.push(SpecCitation {
-                            doc: doc.rel.clone(),
-                            heading: heading_text,
-                        });
-                    }
-                }
-                lines_since_check += 1;
-                bytes_since_check = bytes_since_check
-                    .saturating_add(line.len() as u64)
-                    .saturating_add(module.path.len() as u64);
-                if lines_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES
-                    || bytes_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES
-                {
-                    lines_since_check = 0;
-                    bytes_since_check = 0;
-                    if Instant::now() >= deadline {
-                        return false;
-                    }
-                }
-            }
+    let Some(documents) = list_markdown(&spec_dir, root, deadline) else {
+        return SpecScan::TimedOut;
+    };
+    let mut remaining = options.max_spec_bytes;
+    for (rel, path) in documents {
+        if Instant::now() >= deadline {
+            return SpecScan::TimedOut;
         }
+        let limit = options.max_file_bytes.min(remaining);
+        let Some(bytes) = read_markdown(&path, limit) else {
+            continue;
+        };
+        let read = bytes.len() as u64;
+        if read > remaining {
+            return SpecScan::CorpusOverBudget {
+                budget: options.max_spec_bytes,
+            };
+        }
+        remaining -= read;
+        if read > options.max_file_bytes {
+            continue;
+        }
+        // Validated in place: `from_utf8` takes the buffer, it does not copy
+        // it.
+        let Ok(content) = String::from_utf8(bytes) else {
+            continue;
+        };
+        if !scan.scan_document(&rel, &content, modules, deadline) {
+            return SpecScan::TimedOut;
+        }
+        // `content`, the only copy of this document, is dropped here, before
+        // the next one is read.
     }
-    true
+    SpecScan::Complete
 }
 
-/// Walks `dir` (inside `root`) for `.md` files, following no symlinked
-/// directory, silently skipping what cannot be read within
-/// [`CodeMapOptions::max_file_bytes`]: this is a best-effort secondary scan,
-/// not part of [`Coverage`]. Every entry reaching the open step here was
-/// already confirmed not a symlink at listing time (the `is_symlink()` check
-/// just above), so it was never meant to become one afterward either;
-/// [`open_regular_file`], refusing a final symlink, is what refuses it if it
-/// did, and what opens a FIFO or device without waiting and refuses it by
-/// its own handle: the same rule [`process_file`] applies to a plain
-/// (non-symlink) entry, for the same reason. Stops (returning whatever it already
-/// collected) once `deadline` passes, checked once per file: a `spec/` tree
-/// could itself hold enough documents that discovering and reading them all
-/// is not free, even before any of them is scanned for citations.
-fn collect_markdown(
-    dir: &Path,
-    root: &Path,
-    options: &CodeMapOptions,
-    deadline: Instant,
-) -> Vec<(String, String)> {
+/// Lists every `.md` file under `dir` (inside `root`), following no
+/// symlinked directory and skipping any symlinked entry: each document's
+/// root-relative path and its path to open, sorted by the former. Only
+/// paths, never contents: [`scan_spec_directory`] reads each document in
+/// turn. `None` when `deadline` passed while listing, checked once per
+/// entry: a `spec/` tree could itself hold enough entries that listing them
+/// is not free.
+fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> Option<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(current) = pending.pop() {
-        if Instant::now() >= deadline {
-            break;
-        }
         let Ok(read_dir) = fs::read_dir(&current) else {
             continue;
         };
@@ -3333,7 +3576,7 @@ fn collect_markdown(
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             if Instant::now() >= deadline {
-                return out;
+                return None;
             }
             let Ok(file_type) = entry.file_type() else {
                 continue;
@@ -3349,30 +3592,26 @@ fn collect_markdown(
             if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
                 continue;
             }
-            // Every document goes through the same non-blocking open and
-            // handle-based decision as a source file (`open_regular_file`):
-            // a FIFO named `*.md`, whether it was already there when this
-            // directory was listed or swapped in after, is opened without
-            // waiting and refused by its own handle, never read.
-            let Ok((opened, _meta)) = open_regular_file(&path, false) else {
-                continue;
-            };
-            let Ok(bytes) = read_capped(opened, options.max_file_bytes) else {
-                continue;
-            };
-            if bytes.len() as u64 > options.max_file_bytes {
-                continue;
-            }
-            let Ok(content) = String::from_utf8(bytes) else {
-                continue;
-            };
             if let Some(rel) = rel_path_string(root, &path) {
-                out.push((rel, content));
+                out.push((rel, path));
             }
         }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
+    Some(out)
+}
+
+/// Reads one `spec/` document, at most `limit + 1` bytes of it, or `None`
+/// when it cannot be opened as a regular file or read. Every entry reaching
+/// here was confirmed not a symlink when it was listed, so it was never
+/// meant to become one afterward either; [`open_regular_file`], refusing a
+/// final symlink, is what refuses it if it did, and what opens a FIFO or
+/// device without waiting and refuses it by its own handle: the same rule
+/// [`process_file`] applies to a plain (non-symlink) entry, for the same
+/// reason.
+fn read_markdown(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    let (opened, _meta) = open_regular_file(path, false).ok()?;
+    read_capped(opened, limit).ok()
 }
 
 #[cfg(test)]
@@ -4266,8 +4505,11 @@ mod tests {
             .find(|m| m.path == "rust/src/foo.rs")
             .expect("present");
         assert!(
-            foo.spec_sections.iter().any(|c| c.doc == "spec/LLD.md"
-                && c.heading.as_deref() == Some("2. Crate responsibilities")),
+            foo.spec_sections
+                .iter()
+                .any(|c| map.spec_doc(c) == Some("spec/LLD.md")
+                    && map.spec_heading(c).map(|h| h.text.as_str())
+                        == Some("2. Crate responsibilities")),
             "{:?}",
             foo.spec_sections
         );
@@ -4606,7 +4848,9 @@ mod tests {
     /// Defect 4 (HIGH), the cap: many *distinct* headings each citing the
     /// same module are not deduplicated away (each is a real, distinct
     /// citation), so a separate, explicit cap is what bounds that case, with
-    /// a recorded truncation marker rather than a silent cutoff.
+    /// a recorded truncation marker rather than a silent cutoff (since round
+    /// 5, the module's own `spec_sections_truncated` flag rather than an
+    /// extra citation whose heading is made-up marker text).
     #[test]
     fn ori_t_0036_spec_citations_are_capped_per_module_with_a_truncation_marker() {
         let dir = temp_dir("spec-cap");
@@ -4625,18 +4869,17 @@ mod tests {
             .iter()
             .find(|m| m.path == "a.rs")
             .expect("present");
-        assert!(
-            a.spec_sections.len() <= MAX_SPEC_CITATIONS_PER_MODULE + 1,
-            "citations must be capped, got {}",
-            a.spec_sections.len()
+        // Round 5: the cap is marked by a flag on the module, not by a
+        // citation whose heading is a made-up marker text (which would have
+        // been interned into the map's heading table as if it were a heading).
+        assert_eq!(
+            a.spec_sections.len(),
+            MAX_SPEC_CITATIONS_PER_MODULE,
+            "citations must be capped at exactly the cap"
         );
         assert!(
-            a.spec_sections.iter().any(|c| c
-                .heading
-                .as_deref()
-                .is_some_and(|h| h.contains("truncated"))),
-            "a truncation marker must be recorded when the cap is hit: {:?}",
-            a.spec_sections
+            a.spec_sections_truncated,
+            "the module must be marked truncated when the cap is hit"
         );
         drop(guard);
     }
@@ -5215,7 +5458,7 @@ mod tests {
             "the spec-citation scan over one long heading and 8000 matching lines took \
              {elapsed:?}; the pre-fix cost was quadratic in heading length"
         );
-        assert!(map.coverage.spec_citation_scan_complete);
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Complete);
         let a = map
             .modules
             .iter()
@@ -5250,12 +5493,14 @@ mod tests {
             entry_points: Vec::new(),
             covering_tests: Vec::new(),
             spec_sections: Vec::new(),
+            spec_sections_truncated: false,
         }];
         let already_past = Instant::now() - Duration::from_secs(1);
-        let complete = attach_spec_citations(&dir, &mut modules, &options, already_past);
-        assert!(
-            !complete,
-            "a deadline already past must stop the scan and report incomplete"
+        let output = attach_spec_citations(&dir, &mut modules, &options, already_past);
+        assert_eq!(
+            output.status,
+            SpecScan::TimedOut,
+            "a deadline already past must stop the scan and report it timed out"
         );
         drop(guard);
     }
@@ -5417,7 +5662,7 @@ mod tests {
         let headings: Vec<Option<&str>> = m
             .spec_sections
             .iter()
-            .map(|c| c.heading.as_deref())
+            .map(|c| map.spec_heading(c).map(|h| h.text.as_str()))
             .collect();
         assert_eq!(
             headings,
@@ -5710,14 +5955,17 @@ mod tests {
         drop(guard);
     }
 
-    /// Item 1 (HIGH), the `spec/` open directly: `collect_markdown` given a
+    /// Item 1 (HIGH), the `spec/` open directly: the scan given a `spec/`
     /// directory holding a FIFO named `*.md` next to a real document must
-    /// return, keep the real document, and never read the FIFO. The round-2
-    /// test `tests::ori_t_0036_a_fifo_under_spec_is_skipped_not_a_hang` covers
-    /// the same open end to end; this one also asserts what was kept.
+    /// return, keep the real document's citation, and never read the FIFO.
+    /// The round-2 test `tests::ori_t_0036_a_fifo_under_spec_is_skipped_not_a_hang`
+    /// covers the same open end to end. Rewritten in round 5, when listing
+    /// documents and reading them became two steps (`list_markdown`, then
+    /// `read_markdown` per document, one at a time): it used to call the
+    /// round-4 `collect_markdown`, which did both and held every document.
     #[cfg(unix)]
     #[test]
-    fn ori_t_0036_collect_markdown_never_blocks_on_a_fifo_document() {
+    fn ori_t_0036_reading_spec_documents_never_blocks_on_a_fifo_document() {
         let dir = temp_dir("fifo-spec-direct");
         let guard = DropGuard(dir.clone());
         let spec = dir.join("spec");
@@ -5728,24 +5976,32 @@ mod tests {
             drop(guard);
             return;
         }
+        let fifo = spec.join("b.md");
+        let fifo_read = within(Duration::from_secs(10), move || {
+            read_markdown(&fifo, 1024).is_some()
+        });
+        assert!(!fifo_read, "a FIFO must never be read as a document");
+
         let root = dir.clone();
-        let docs = within(Duration::from_secs(10), move || {
-            collect_markdown(
-                &root.join("spec"),
+        let (status, modules, docs) = within(Duration::from_secs(10), move || {
+            let mut modules = vec![bare_module("src/a.rs")];
+            let output = attach_spec_citations(
                 &root,
+                &mut modules,
                 &CodeMapOptions::default(),
                 Instant::now() + Duration::from_secs(60),
-            )
+            );
+            (output.status, modules, output.docs)
         });
-        let names: Vec<&str> = docs.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(status, SpecScan::Complete);
         // Assembled, not written whole: see the fixture-path comment earlier
         // in this file.
-        let regular = format!("spec/{}.md", "a");
         assert_eq!(
-            names,
-            vec![regular.as_str()],
-            "only the regular document is read"
+            docs,
+            vec![format!("spec/{}.md", "a")],
+            "only the regular document"
         );
+        assert_eq!(modules[0].spec_sections.len(), 1);
         drop(guard);
     }
 
@@ -5862,6 +6118,7 @@ mod tests {
             entry_points: Vec::new(),
             covering_tests: Vec::new(),
             spec_sections: Vec::new(),
+            spec_sections_truncated: false,
         }
     }
 
@@ -5873,33 +6130,32 @@ mod tests {
     /// line and stop.
     #[test]
     fn ori_t_0036_the_spec_scan_checks_its_deadline_by_bytes_scanned_not_only_by_lines() {
+        // Round 5: driven through `CitationScan::scan_document`, the
+        // per-document scan that replaced round 4's all-documents-at-once
+        // `scan_spec_citations`; the check itself is the same code.
         let long_line = "x".repeat(1024 * 1024 + 1);
         let content = format!("{long_line}\n{long_line}\n{long_line}\n{long_line}\n");
-        let docs = vec![parse_markdown_doc(format!("spec/{}.md", "long"), &content)];
+        let rel = format!("spec/{}.md", "long");
         let mut modules = vec![bare_module("a.rs")];
         let already_past = Instant::now() - Duration::from_secs(1);
         assert!(
-            !scan_spec_citations(&docs, &mut modules, already_past),
+            !CitationScan::new(1).scan_document(&rel, &content, &mut modules, already_past),
             "four 1 MiB lines past an expired deadline must stop the scan, not complete it"
         );
 
         // The line count still bounds the ordinary shape, many short lines.
         let short_lines = "a.rs\n".repeat(5000);
-        let docs = vec![parse_markdown_doc(
-            format!("spec/{}.md", "short"),
-            &short_lines,
-        )];
         let mut modules = vec![bare_module("a.rs")];
         assert!(
-            !scan_spec_citations(&docs, &mut modules, already_past),
+            !CitationScan::new(1).scan_document(&rel, &short_lines, &mut modules, already_past),
             "5000 short lines past an expired deadline must stop the scan too"
         );
 
         // And a scan with time left completes.
-        let docs = vec![parse_markdown_doc(format!("spec/{}.md", "long"), &content)];
         let mut modules = vec![bare_module("a.rs")];
-        assert!(scan_spec_citations(
-            &docs,
+        assert!(CitationScan::new(1).scan_document(
+            &rel,
+            &content,
             &mut modules,
             Instant::now() + Duration::from_secs(60)
         ));
@@ -5941,7 +6197,7 @@ mod tests {
             map.coverage
         );
         assert!(
-            !map.coverage.spec_citation_scan_complete,
+            map.coverage.spec_citation_scan == SpecScan::TimedOut,
             "192 slow 8 MiB line searches cannot finish in 250 ms; the scan must stop at its \
              deadline and say so (took {elapsed:?})"
         );
@@ -6518,7 +6774,12 @@ mod tests {
         let cited: Vec<(String, Option<String>)> = map.modules[0]
             .spec_sections
             .iter()
-            .map(|c| (c.doc.clone(), c.heading.clone()))
+            .map(|c| {
+                (
+                    map.spec_doc(c).unwrap_or_default().to_owned(),
+                    map.spec_heading(c).map(|h| h.text.clone()),
+                )
+            })
             .collect();
         assert_eq!(
             cited,
@@ -6612,6 +6873,187 @@ mod tests {
             .map(|i| i.name.as_str())
             .collect();
         assert_eq!(names, vec!["Shown"]);
+        drop(guard);
+    }
+    // -----------------------------------------------------------------
+    // ORI-T-0036, round 5 (2026-09-24): the spec scan's memory, from the
+    // review of round 3's residual and the coordinator's ruling that it is
+    // inside the threat model.
+    // -----------------------------------------------------------------
+
+    /// Round 5, item 2, measured: the review of round 3's shape, many
+    /// modules each cited under many long, distinct headings. Here 64
+    /// modules (`a.rs`, `aa.rs`, ... 64 `a`s, so one line of 64 `a`s cites
+    /// every one of them) and one document of 500 sections, each a distinct
+    /// heading of about 4.2 KB followed by that line. Stored per citation,
+    /// as round 4 did, that is 64 x 500 headings of 4096 bytes, 131 MB kept
+    /// in the returned map (the review measured 2.1 GB at 1000 modules).
+    /// Stored once each and capped, it is 500 x 4096 bytes, and this test
+    /// sums what the returned `CodeMap` actually holds and checks it against
+    /// the module doc's stated bound: at most `MAX_HEADING_BYTES` per
+    /// distinct cited heading, and never more than the corpus read.
+    #[test]
+    fn ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings() {
+        let dir = temp_dir("spec-retained-headings");
+        let guard = DropGuard(dir.clone());
+        let modules = 64;
+        for k in 1..=modules {
+            write(&dir, &format!("{}.rs", "a".repeat(k)), "pub fn f() {}\n");
+        }
+        let citing_line = format!("{}.rs", "a".repeat(modules));
+        let sections = MAX_SPEC_CITATIONS_PER_MODULE;
+        let mut doc = String::new();
+        for i in 0..sections {
+            doc.push_str(&format!(
+                "# {i:04} {}\n\n{citing_line}\n\n",
+                "h".repeat(4200)
+            ));
+        }
+        let corpus_bytes = doc.len();
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(&dir, &format!("spec/{}.md", "x"), &doc);
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Complete);
+        assert_eq!(map.modules.len(), modules);
+        assert!(
+            map.modules
+                .iter()
+                .all(|m| m.spec_sections.len() == sections && !m.spec_sections_truncated),
+            "every module is cited under every one of the {sections} headings"
+        );
+
+        let retained: usize = map.spec_headings.iter().map(|h| h.text.len()).sum();
+        let bound = (sections * MAX_HEADING_BYTES).min(corpus_bytes);
+        assert!(
+            map.spec_headings.len() <= sections,
+            "each distinct heading is stored once for the whole map, not once per citing \
+             module: {} stored for {sections} distinct headings",
+            map.spec_headings.len()
+        );
+        assert!(
+            retained <= bound,
+            "retained heading text is {retained} bytes; the stated bound for {sections} distinct \
+             headings over a {corpus_bytes} byte corpus is {bound}"
+        );
+        assert!(
+            map.spec_headings
+                .iter()
+                .all(|h| h.truncated && h.text.len() <= MAX_HEADING_BYTES),
+            "every one of these headings is longer than the cap, so each is cut and marked"
+        );
+        assert!(
+            std::mem::size_of::<SpecCitation>() <= 24,
+            "a citation is two indices, the per-citation cost the module doc states"
+        );
+        drop(guard);
+    }
+
+    /// Round 5, item 2, the semantics of storing once: the same heading text
+    /// cited by two modules in two documents is one entry, which every such
+    /// citation indexes; a heading at or under the cap is kept whole and not
+    /// marked; a longer one is cut to `MAX_HEADING_BYTES` and marked.
+    #[test]
+    fn ori_t_0036_a_heading_is_stored_once_and_marked_only_when_cut() {
+        let dir = temp_dir("spec-heading-once");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m1.rs", "pub fn f() {}\n");
+        write(&dir, "m2.rs", "pub fn f() {}\n");
+        let long = "x".repeat(5000);
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(
+            &dir,
+            &format!("spec/{}.md", "a"),
+            &format!("# Shared\n\nm1.rs m2.rs\n\n# {long}\n\nm1.rs\n"),
+        );
+        write(&dir, &format!("spec/{}.md", "b"), "# Shared\n\nm2.rs\n");
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(map.spec_headings.len(), 2, "{:?}", map.spec_headings.len());
+        let shared: Vec<&SpecHeading> = map
+            .spec_headings
+            .iter()
+            .filter(|h| h.text == "Shared")
+            .collect();
+        assert_eq!(shared.len(), 1, "one entry for the shared heading");
+        assert!(
+            !shared[0].truncated,
+            "a short heading is kept whole, unmarked"
+        );
+        let cut = map
+            .spec_headings
+            .iter()
+            .find(|h| h.text != "Shared")
+            .expect("the long heading");
+        assert!(cut.truncated && cut.text.len() == MAX_HEADING_BYTES);
+        let shared_index = map.spec_headings.iter().position(|h| h.text == "Shared");
+        let citing_shared = map
+            .modules
+            .iter()
+            .flat_map(|m| m.spec_sections.iter())
+            .filter(|c| c.heading_index == shared_index)
+            .count();
+        assert_eq!(
+            citing_shared, 3,
+            "m1 in a.md, m2 in a.md and m2 in b.md all index the one shared entry"
+        );
+        drop(guard);
+    }
+
+    /// Round 5, item 3: a `spec/` corpus over the total budget is scanned up
+    /// to the first document that does not fit and reported
+    /// `CorpusOverBudget`, never complete, and the citations found before
+    /// that are kept. The same corpus at a budget it exactly fits is
+    /// complete, so the budget is a bound, not an alarm that always trips.
+    #[test]
+    fn ori_t_0036_a_spec_corpus_over_the_total_budget_is_reported_incomplete() {
+        assert_eq!(
+            CodeMapOptions::default().max_spec_bytes,
+            64 * 1024 * 1024,
+            "the default the module doc states"
+        );
+        let dir = temp_dir("spec-corpus-budget");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub fn f() {}\n");
+        let padding = "p".repeat(580);
+        let first = format!("# First\n\nm.rs\n{padding}\n");
+        let second = format!("# Second\n\nm.rs\n{padding}\n");
+        let total = (first.len() + second.len()) as u64;
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(&dir, &format!("spec/{}.md", "a"), &first);
+        write(&dir, &format!("spec/{}.md", "b"), &second);
+
+        let over = CodeMapOptions {
+            max_spec_bytes: total - 1,
+            ..CodeMapOptions::default()
+        };
+        let map = build_code_map_with_options(&dir, &over).expect("maps");
+        assert_eq!(
+            map.coverage.spec_citation_scan,
+            SpecScan::CorpusOverBudget { budget: total - 1 },
+            "one byte over the budget must be reported, not scanned as if complete"
+        );
+        assert!(!map.coverage.spec_citation_scan.is_complete());
+        let cited: Vec<Option<&str>> = map.modules[0]
+            .spec_sections
+            .iter()
+            .map(|c| map.spec_heading(c).map(|h| h.text.as_str()))
+            .collect();
+        assert_eq!(
+            cited,
+            vec![Some("First")],
+            "what was scanned before the budget ran out is kept; the document that did not \
+             fit is not scanned"
+        );
+
+        let exact = CodeMapOptions {
+            max_spec_bytes: total,
+            ..CodeMapOptions::default()
+        };
+        let map = build_code_map_with_options(&dir, &exact).expect("maps");
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Complete);
+        assert_eq!(map.modules[0].spec_sections.len(), 2);
         drop(guard);
     }
 }
