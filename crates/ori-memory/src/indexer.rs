@@ -6,9 +6,11 @@
 //! (`crates/ori-store/src/db.rs`'s `ProductDb::open` already creates that
 //! directory; this module is what fills it, in its own file,
 //! `index/fts.sqlite`, never inside `product.sqlite`: see "The index is
-//! derived" below). `spec/PRD.md` K-02 is the requirement: "Repository
-//! indexer: full-text, document graph (sections, ADRs, criteria, modules),
-//! re-index on merge".
+//! derived" below). An on-disk [`Indexer`] is opened only from the
+//! [`ProductDb`] that owns the product directory, never from a bare path, and
+//! borrows it for as long as it lives; "Recovery" below is what that buys.
+//! `spec/PRD.md` K-02 is the requirement: "Repository indexer: full-text,
+//! document graph (sections, ADRs, criteria, modules), re-index on merge".
 //!
 //! # Why SQLite FTS5, not `tantivy`
 //!
@@ -89,18 +91,21 @@
 //! (ruling R23) and is real specification content for a different purpose
 //! (the UI's own design system, not mocked); this indexer takes no side on
 //! that file's worth, only on whether it belongs in *this* corpus, and it
-//! does not.
+//! does not. A symbolic link pointing into `spec/design/` from anywhere else
+//! under `spec/` is never followed either ("What the repository walk never
+//! reads", below), so the exclusion cannot be walked around.
 //!
 //! # The index is derived: rebuild and incremental must agree
 //!
 //! Same discipline `ori-store`'s projections and `rebuild.rs` already carry
 //! for the event log: `index/` holds nothing that cannot be reconstructed
-//! from the repository. [`Indexer::open`] creates `<dir>/fts.sqlite`, a file
-//! of its own, never a table inside `product.sqlite`: deleting `index/` and
-//! reopening loses nothing that [`Indexer::full_rebuild`] cannot put back
-//! from the repository, whereas a table sharing `product.sqlite` would tie
-//! this derived, disposable data to the event log's own file, which
-//! `spec/LLD.md` section 6 never asks for and this module's own tests
+//! from the repository. [`Indexer::open`] creates
+//! `<product dir>/index/fts.sqlite`, a file of its own, never a table inside
+//! `product.sqlite`: deleting it and reopening loses nothing that
+//! [`Indexer::full_rebuild`] cannot put back from the repository, whereas a
+//! table sharing `product.sqlite` would tie this derived, disposable data to
+//! the event log's own file, which `spec/LLD.md` section 6 never asks for and
+//! this module's own tests
 //! (`tests::ori_t_0035_the_index_lives_in_its_own_file_never_inside_product_sqlite`)
 //! check directly. [`Indexer::incremental_sync`] ("re-index on merge") must
 //! leave the index in the state a full rebuild from the same target document
@@ -108,19 +113,20 @@
 //! own claim: by dumping [`Indexer::all_documents`] (every stored column of
 //! every document, sorted by path so the dump does not depend on row
 //! insertion order) from both paths and comparing byte for byte, not by
-//! inspection. A document removed from the target set is deleted (`DELETE
-//! FROM documents WHERE path = ?1`), not left to linger, which
-//! [`Indexer::incremental_sync`]'s own tests check directly.
+//! inspection, and, for rows this build did not write itself, by comparing
+//! the raw stored rows. A document removed from the target set is deleted,
+//! not left to linger, which [`Indexer::incremental_sync`]'s own tests check
+//! directly.
 //!
 //! ```mermaid
 //! flowchart TB
 //!   T[target: &[IndexableDocument]] --> C{full_rebuild or incremental_sync}
-//!   C -->|full_rebuild| CLEAR[DELETE FROM documents] --> ADDALL[INSERT every target document] --> COMMIT[transaction commit]
-//!   C -->|incremental_sync| CURRENT[all_documents: what is on disk now]
-//!   CURRENT --> DIFF{diff against target, by path and checksum}
-//!   DIFF -->|path in current, not in target| DEL[DELETE WHERE path]
-//!   DIFF -->|path new, or checksum changed| UPSERT[DELETE WHERE path, then INSERT]
-//!   DIFF -->|path present, checksum unchanged| SKIP[leave alone]
+//!   C -->|full_rebuild| CLEAR[DROP and CREATE documents] --> ADDALL[INSERT every target document] --> COMMIT[transaction commit]
+//!   C -->|incremental_sync| CURRENT[every stored row: rowid, path, kind, checksum]
+//!   CURRENT --> DIFF{diff against target, by path}
+//!   DIFF -->|path not text, or path not in target| DEL[DELETE the rows]
+//!   DIFF -->|path new, or anything stored differs, or two rows share it| UPSERT[DELETE WHERE path, then INSERT]
+//!   DIFF -->|exactly one row, same kind, same checksum| SKIP[leave alone]
 //!   DEL --> COMMIT
 //!   UPSERT --> COMMIT
 //! ```
@@ -139,7 +145,16 @@
 //! refused rather than defaulted to an absolute path on failure) and the
 //! full account of the defect are in that function's own doc.
 //!
-//! # Duplicate paths are refused, not silently resolved
+//! The path is the file's components joined with `/`, and nothing else is
+//! rewritten. A later review found the walk replacing every `\` with `/`
+//! on every platform, so on Unix, where `\` is an ordinary character in a
+//! file name, a file named with one collided with the real file of the
+//! same `/` spelling, and the duplicate then refused indexing the whole
+//! repository. `Path::components` already splits on `\` exactly where the
+//! platform treats it as a separator (Windows) and nowhere else, so joining
+//! the components is the whole normalization.
+//!
+//! # Duplicate paths: skipped by the walk, refused by the writers
 //!
 //! [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] both call
 //! `refuse_duplicate_paths` before writing anything: a target set holding
@@ -150,13 +165,61 @@
 //! `incremental_sync` kept exactly one and, because its own diff runs
 //! against a `BTreeMap` that already dropped the duplicate, never settled:
 //! it deleted and re-inserted a different one of the two documents on every
-//! call against the same unchanged target). [`Indexer::collect_from_repo`]'s
-//! own walk is also fixed so it does not normally produce this: fenced code
-//! is never read as a heading, and repeated headings get GitHub's
-//! disambiguating suffix (`section_documents`'s own doc has the detail);
-//! the refusal stands as the guard for every other caller, and for a
-//! criteria table's genuinely repeated ID, which this module does not
-//! silently rename.
+//! call against the same unchanged target).
+//!
+//! The repository walk must never hand them such a set, because one odd file
+//! must never refuse indexing the whole repository. Fenced code is never
+//! read as a heading, and repeated headings get GitHub's disambiguating
+//! suffix (`section_documents`'s own doc has the detail); anything that
+//! still repeats a path an earlier document already took (a criteria
+//! table's genuinely repeated ID, which this module does not silently
+//! rename) is left out and reported in [`RepoWalk::skipped`] with
+//! [`SkipReason::DuplicateDocumentPath`], naming the file it came from. The
+//! walk visits directory entries in name order, so which of two such
+//! documents is kept does not depend on the filesystem's own order.
+//!
+//! # What the repository walk never reads
+//!
+//! The operator's threat model for this repository's content readers
+//! (ruled 2026-09-24 for the code map, ORI-T-0036, and applying here): a
+//! static hostile repository is in scope. [`Indexer::walk_repo`] therefore
+//! decides every entry by `DirEntry::file_type`, which describes the entry
+//! itself and never what a symbolic link points at, and records in
+//! [`RepoWalk::skipped`], with a [`SkipReason`], each of these instead of
+//! reading it:
+//!
+//! - a symbolic link, to a file or to a directory, anywhere under `spec/`,
+//!   `spec/` itself included ([`SkipReason::Symlink`]): followed, `spec/mockups
+//!   -> design` or a file link into `spec/design/` indexed exactly the mock
+//!   data the exclusion above keeps out, and a link out of the repository
+//!   would have read whatever it pointed at;
+//! - a `.md` entry that is not a regular file, such as a named pipe, which
+//!   would block the walk forever on read ([`SkipReason::NotARegularFile`]);
+//! - a `.md` file whose path under the repository is not UTF-8
+//!   ([`SkipReason::NonUtf8Path`]): a lossy conversion would map two
+//!   different names onto one identity;
+//! - a file or directory that cannot be read, including a `.md` file whose
+//!   bytes are not UTF-8 text ([`SkipReason::Unreadable`]), so one such file
+//!   no longer fails the whole walk;
+//! - a document whose path an earlier document already took (above).
+//!
+//! A static repository is the scope: an entry swapped for a link between the
+//! walk's type check and its read is a race this does not claim to close.
+//!
+//! # Text before the first heading is a document too
+//!
+//! A review found every line above a file's first heading discarded: the
+//! six role files under `spec/agents/` are front matter plus prose with no
+//! heading at all and indexed whole, and adding one heading anywhere in one
+//! removed all of its text above that heading from search while every sync
+//! returned `Ok`. `section_documents` now keeps that text as a document of
+//! its own at the file's bare path, no anchor, kind
+//! [`DocumentKind::Section`], titled by the path: the identity a
+//! heading-less file already has, so adding a first heading keeps the old
+//! text at the path it was always found at and adds the new section beside
+//! it, and a bare path can never collide with a heading's, which always
+//! carries a `#`. A preamble of only blank lines is not a document; no
+//! non-blank line of a walked section file is ever dropped.
 //!
 //! # FTS5 query safety: quoting is not optional
 //!
@@ -180,18 +243,34 @@
 //! string" because FTS5's parser stops scanning at a `NUL`; that raw report
 //! is discarded and mapped to [`IndexerError::InvalidQuery`], not returned).
 //!
-//! # Unbounded query cost is refused before FTS5 ever sees it
+//! # Query cost is bounded by bytes, and only by bytes
 //!
 //! Quoting stops `query` from being read as FTS5 syntax; it does nothing
 //! about `query`'s *cost*. An adversarial review measured one search of a
 //! common word repeated to fill 1 MB costing 4.5 seconds and 2.18 GB of
 //! resident memory, because FTS5 opens one index iterator per phrase term
 //! and does not deduplicate repeated tokens, so cost grows with (repeated
-//! terms) x (how many documents contain each). [`Indexer::search`] now
-//! refuses `query` outright, before it is quoted or bound, if it exceeds
-//! `MAX_QUERY_BYTES` or `count_tokens` finds more than
-//! `MAX_QUERY_TOKENS`; both constants name the review's numbers and why
-//! their limits hold.
+//! terms) x (how many documents contain each). [`Indexer::search`] refuses
+//! `query` outright, before it is quoted or bound, when it is longer than
+//! `MAX_QUERY_BYTES`, and that byte length is the whole bound: under
+//! `unicode61` every term is at least one byte and two terms are separated
+//! by at least one more, so 1024 bytes can never hold more than 512 terms,
+//! whatever the script.
+//!
+//! Earlier rounds also capped a token count, computed by this module's own
+//! approximation of `unicode61`. Reviews found it wrong in both directions
+//! (NFD text overcounted, refusing legitimate queries; combining marks that
+//! `unicode61` treats as separators, U+0336 among them, undercounted, so a
+//! query FTS5 splits into 341 terms counted as one), and it bounded nothing
+//! the byte cap did not already bound, so it was removed rather than
+//! refined once more.
+//! `tests::ori_t_0035_the_most_expensive_query_within_the_byte_cap_stays_bounded_in_time_and_memory`
+//! measures the most expensive query shape found within the cap, a
+//! one-letter term repeated 512 times against documents that each repeat it
+//! more often than that, so the whole phrase really is matched against
+//! every document: in a child process whose SQLite heap is capped, it
+//! completes inside the cap in bounded time, while the same term repeated
+//! past the byte cap runs out of that same heap.
 //!
 //! # Tokenizer
 //!
@@ -217,58 +296,130 @@
 //! (`tests::ori_t_0035_a_second_writer_against_the_same_on_disk_index_fails_cleanly_not_corrupting_it`)
 //! without a timeout-dependent, potentially flaky test. A caller that wants
 //! to wait instead retries on [`IndexerError::Locked`] itself; this module
-//! does not hide that choice inside an implicit, undocumented wait.
+//! does not hide that choice inside an implicit, undocumented wait. Any
+//! number of [`Indexer`]s may be open on one product at once, in one process
+//! or across threads (an `Indexer` is `Send`); SQLite's own locking orders
+//! them.
 //!
-//! # A corrupt index is reported honestly, and `full_rebuild` repairs it
+//! # What is reported as corrupt, and what is not
 //!
-//! An adversarial review damaged an on-disk index directly (writing garbage
-//! into its FTS5 segment pages through a second connection) and found every
-//! resulting error folded into [`IndexerError::InvalidQuery`], which blamed
-//! a perfectly ordinary, valid query for damage that had nothing to do with
-//! it, and left `documents_covered` and `all_documents` reporting the old,
-//! stale count as if nothing were wrong. `search`, `full_rebuild` and
-//! `incremental_sync` now all classify a `rusqlite` failure by its SQLite
-//! error code (`classify_error`, `search_error`) before choosing a variant:
-//! [`IndexerError::Corrupt`] for `SQLITE_CORRUPT`, [`IndexerError::Locked`]
-//! for a busy write lock, and only a bare, query-specific `SQLITE_ERROR`
-//! becomes [`IndexerError::InvalidQuery`].
+//! [`IndexerError::Corrupt`] means the file is damaged, and nothing else.
+//! A failure SQLite itself reports as `SQLITE_CORRUPT`, or as
+//! `SQLITE_NOTADB` (what a destroyed header produces, at open), is `Corrupt`
+//! directly. Every other failure that is not a held lock, on every read and
+//! every write this module makes, is settled by asking SQLite rather than by
+//! guessing from the error code (`classify`): `PRAGMA quick_check`, on the
+//! same connection, inside the same snapshot when the failing statement had
+//! one. It checks every b-tree page and, in the SQLite this workspace
+//! bundles, also runs FTS5's own inverted-index check through the virtual
+//! table's integrity method. It is a read: it takes no write lock, so a
+//! concurrent writer can neither refuse it nor be locked out by it. The
+//! rule:
 //!
-//! A later re-verification workflow found that classification incomplete: a
-//! corrupted structural record whose length prefix happens to decode to an
-//! implausible size can make SQLite report `ErrorCode::OutOfMemory`
-//! (`SQLITE_NOMEM`, the allocator refusing an implausible request, not an
-//! actual low-memory condition) for the exact same underlying damage, and
-//! neither `classify_error` nor `search_error` recognized it, so it fell
-//! into the generic [`IndexerError::Sqlite`] and gave a caller no signal to
-//! rebuild -- the same "damage reported as something else" class, one level
-//! deeper. Rather than adding `OutOfMemory` to the list of codes read as
-//! corruption (a genuine out-of-memory condition is not corruption, and
-//! guessing from the error code alone would misreport one as the other),
-//! `search`'s and `incremental_sync`'s own reads now settle an error that is
-//! neither a clean lock nor an already-recognized `SQLITE_CORRUPT` by asking
-//! FTS5 directly, on the same connection: `INSERT INTO documents(documents)
-//! VALUES('integrity-check')`, the internal command FTS5 exposes for this
-//! exact purpose (`diagnose_ambiguous_read_error`). Only when that check
-//! also fails is the original error reported as [`IndexerError::Corrupt`];
-//! when it passes, the original error is reported unchanged, so a real
-//! out-of-memory condition is never relabeled as corruption it is not.
+//! - the check returns any row but `ok`, or itself fails with
+//!   `SQLITE_CORRUPT` or `SQLITE_NOTADB`: `Corrupt`, carrying the original
+//!   error;
+//! - the check returns `ok`, or fails for any other reason (busy, locked,
+//!   out of memory, an FTS5 format this build does not read): the original
+//!   error, unchanged, as [`IndexerError::Sqlite`] (or
+//!   [`IndexerError::Locked`], or for a search [`IndexerError::InvalidQuery`],
+//!   exactly as it would have been without the check).
 //!
-//! Recovery is [`Indexer::full_rebuild`]'s job, and only its: the index is
-//! derived data ("The index is derived" above), so on
-//! [`IndexerError::Corrupt`] it drops and recreates the FTS5 virtual table
-//! in place, inside its own write transaction, and never deletes
-//! `fts.sqlite` itself. An earlier version did (delete the file and its
-//! `-wal`/`-shm` side files, recreate at the same path); a re-verification
-//! workflow found that deleting the file out from under every *other* open
-//! connection to it silently lost that connection's acknowledged writes and
-//! defeated this module's own "Concurrency" guarantee between them, so the
-//! file is now repaired in place instead. `search` and `incremental_sync` do
-//! not self-heal; they report [`IndexerError::Corrupt`] so a caller can
-//! choose to call `full_rebuild`, rather than a read or a diff silently
-//! triggering a rebuild neither asked for. Corruption found while merely
-//! opening the file ([`Indexer::open`]) is classified and reported the same
-//! way, but is never self-healed either: destroying a file this module was
-//! only handed a path to is `ProductDb`'s decision, not `Indexer`'s.
+//! Round 4 asked FTS5's `integrity-check` command instead. That command is
+//! an `INSERT`, so it needed the write lock with a zero busy timeout, it
+//! allocated more than the read that had just failed, and any failure of
+//! it at all was read as corruption: a review measured a genuine
+//! out-of-memory condition reported as `Corrupt` in 76 of 76 attempts, a
+//! concurrent writer turning a healthy index `Corrupt` in 2989 of 3000, and
+//! one failed search holding every writer off for a scan of the whole index.
+//!
+//! What the rule gives up, stated rather than hidden: damage that makes the
+//! check itself fail with anything but `SQLITE_CORRUPT` is not called
+//! `Corrupt`. This module's tests pin one such shape
+//! (`tests::ori_t_0035_an_out_of_memory_error_the_check_cannot_settle_is_never_called_corrupt_and_recover_still_repairs_it`):
+//! FTS5's structure record rewritten through SQL so that a length in it
+//! decodes to an implausible size, after which every reader, the check
+//! included, fails with `SQLITE_NOMEM`, which nothing distinguishes from a
+//! real out-of-memory condition. Likewise an FTS5 format version this build
+//! does not read (a newer build's index, or a damaged config row) fails the
+//! check with a plain `SQLITE_ERROR`. Both are reported as the error they
+//! are, and [`Indexer::recover`] repairs both, because it never reads the
+//! old file at all. Page-level damage, the kind storage actually produces,
+//! is seen: in this module's page sweep the check reports every damaged
+//! copy as damaged, including the ones whose damage an ordinary search
+//! never touches.
+//!
+//! The check reads the whole file, so it costs time in proportion to the
+//! index. It runs only on a failure that is neither a lock nor already
+//! `SQLITE_CORRUPT`, never on a success path, and never blocks anyone.
+//!
+//! # Recovery: [`Indexer::recover`], and why the compiler proves it safe
+//!
+//! Some damage cannot be repaired from inside the file.
+//! [`Indexer::full_rebuild`] drops and recreates the FTS5 table inside one
+//! write transaction, which repairs damage done to the shadow tables'
+//! *rows* through SQL; but dropping an FTS5 table walks and frees every page
+//! of every shadow b-tree, so one damaged *page* makes the `DROP` itself fail
+//! with `SQLITE_CORRUPT`, the transaction rolls back, and every retry fails
+//! the same way. Round 4 claimed otherwise; a review overwrote each page of a
+//! closed index in turn, on a fresh copy each time, with `0x00` and with
+//! `0xFF`, and `full_rebuild` repaired 0 of 300. The only repair for that is
+//! a new file.
+//!
+//! Replacing the file is safe only when nothing has it open. Round 3
+//! deleted it under other open connections, whose later writes then went
+//! to an unlinked file and were silently lost; and SQLite removes a closing
+//! connection's `-wal` file *by path*, so a connection still open on the old
+//! file would, on closing, delete the new index's write-ahead log. So file
+//! recovery is one associated function, [`Indexer::recover`], taking
+//! `&mut ProductDb`, and every on-disk [`Indexer`] holds a shared borrow of
+//! the `ProductDb` it was opened from for as long as it lives
+//! (`Indexer<'db>`). The proof has two halves:
+//!
+//! 1. **Every `Indexer` in this process.** `&mut ProductDb` cannot exist
+//!    while any `&ProductDb` does, so while any `Indexer<'db>` is alive the
+//!    compiler refuses a call to `recover` (`recover`'s own doc carries
+//!    `compile_fail` examples that pin this). `Indexer` implements [`Drop`],
+//!    with an empty body, for exactly this reason: without it the borrow
+//!    would end at an `Indexer`'s last *use*, and one merely left in scope
+//!    would still close its connection, and delete that `-wal` by path,
+//!    after `recover` had run. With it the borrow lasts until the
+//!    connection is closed. An `Indexer` leaked with `std::mem::forget`
+//!    never closes its connection, so it never deletes anything either.
+//! 2. **Every other engine process.** A live `ProductDb` holds the
+//!    product's OS-level single-writer lock (`crates/ori-store/src/db.rs`'s
+//!    module doc), so no other process holds a `ProductDb`, and so an
+//!    `Indexer`, for this product while `recover` runs.
+//!
+//! Under that proof `recover` moves `fts.sqlite` and any `-wal`, `-journal`
+//! or `-shm` beside it into `index/quarantine/<recovered_at>-<n>/`, the
+//! side files first so that no failure can leave a stale write-ahead log
+//! beside a fresh database; it never deletes them, because they are the
+//! evidence of what went wrong. It then creates a fresh index and runs
+//! [`Indexer::full_rebuild`] from the caller's target set. It never opens
+//! the damaged file, so no damage can make it fail, and damage found while
+//! opening (a destroyed header included) is recovered exactly like any
+//! other. `tests::ori_t_0035_recover_repairs_every_page_of_a_damaged_index_in_a_deterministic_sweep`
+//! overwrites every page in turn, with `0x00` and with `0xFF`: after
+//! `recover`, every case opens, passes `PRAGMA integrity_check`, and
+//! finds every rebuilt document.
+//!
+//! ```mermaid
+//! flowchart TB
+//!   ERR[IndexerError::Corrupt from any call] --> DROP[caller drops every Indexer on the product]
+//!   DROP --> MUT[&mut ProductDb: the compiler proves no Indexer is alive; the OS lock proves no other engine process]
+//!   MUT --> MOVE[move -wal, -journal, -shm, then fts.sqlite into index/quarantine/recovered_at-n/]
+//!   MOVE --> FRESH[create a fresh fts.sqlite]
+//!   FRESH --> REBUILD[full_rebuild from the caller's target set]
+//! ```
+//!
+//! What the proof does not cover, the same limits `ProductDb`'s own lock
+//! states for `product.sqlite`: a process that opens `fts.sqlite` directly,
+//! bypassing `ProductDb` (an operator's `sqlite3` shell, say), is outside it.
+//! An `index/` or `index/quarantine/` that is a symbolic link is refused
+//! ([`IndexerError::RecoveryRefused`]): `recover` moves files only inside a
+//! directory the product owns outright, never into or out of one that may
+//! be another product's.
 //!
 //! # Reads and writes share one transaction
 //!
@@ -291,7 +442,11 @@
 //! snapshot (seen and diffed against correctly) or entirely after (this
 //! transaction's own commit orders before or after it, and SQLite's own
 //! `SQLITE_BUSY_SNAPSHOT` refuses the ambiguous case as
-//! [`IndexerError::Locked`]), never split across the two.
+//! [`IndexerError::Locked`]), never split across the two. [`IndexReport::total`]
+//! is read the same way, inside the write transaction before it commits;
+//! `tests::ori_t_0035_index_report_total_is_read_before_commit_never_after_another_writers_commit`
+//! proves it deterministically, by committing a second connection's write
+//! at the exact moment after this one's commit returns.
 //!
 //! # The vacuity trap
 //!
@@ -308,17 +463,22 @@
 //! cannot represent an entry from it.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ori_core::types::Timestamp;
+use ori_store::db::ProductDb;
 use rusqlite::Connection;
 use rusqlite::ErrorCode;
 use rusqlite::params;
+use rusqlite::types::ValueRef;
 
 /// How long a write waits for a lock another connection holds before
 /// [`Indexer::full_rebuild`], [`Indexer::incremental_sync`] or
@@ -326,6 +486,29 @@ use rusqlite::params;
 /// deliberate, documented choice ("Concurrency" above), not SQLite's own
 /// undocumented default.
 const WRITE_BUSY_TIMEOUT: Duration = Duration::from_millis(0);
+
+/// The directory under a product's own directory the index lives in, per
+/// `spec/LLD.md` section 6's layout.
+const INDEX_DIR: &str = "index";
+
+/// The index's own database file, inside [`INDEX_DIR`].
+const INDEX_FILE: &str = "fts.sqlite";
+
+/// Where [`Indexer::recover`] moves a replaced index, inside [`INDEX_DIR`].
+const QUARANTINE_DIR: &str = "quarantine";
+
+/// The files SQLite may keep beside [`INDEX_FILE`], in the order
+/// [`Indexer::recover`] moves them: every side file before the database
+/// itself, so a failure part way can leave the old database without its
+/// log, which `recover` can simply be run again against, but never a stale
+/// write-ahead log beside a fresh database, which SQLite would replay into
+/// it.
+const INDEX_FILE_SET: [&str; 4] = [
+    "fts.sqlite-wal",
+    "fts.sqlite-journal",
+    "fts.sqlite-shm",
+    INDEX_FILE,
+];
 
 /// The virtual table's schema: `path`, `kind` and `checksum` carry
 /// `UNINDEXED` (stored and retrievable, never matched by `MATCH`, the same
@@ -481,29 +664,93 @@ pub struct SearchReport {
 /// call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IndexReport {
-    /// Documents written (added new, or replaced because their checksum
-    /// changed).
+    /// Documents written (added new, or replaced because anything stored
+    /// for them differed from the target).
     pub upserted: usize,
-    /// Documents deleted because they were no longer in the target set.
+    /// Stored rows deleted because they were no longer in the target set
+    /// (or, for a row this build did not write, because nothing in the
+    /// target set could be addressed by its path at all).
     pub removed: usize,
-    /// The index's total live document count after this call.
+    /// The index's total live document count after this call, read inside
+    /// the same transaction as the writes, before it commits.
     pub total: usize,
+}
+
+/// What [`Indexer::recover`] did: AICD §25.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryReport {
+    /// The directory, under `index/quarantine/`, the replaced files were
+    /// moved into; `None` when there was no index file to move.
+    pub quarantine: Option<PathBuf>,
+    /// Every file moved, at its new path inside `quarantine`, in the order
+    /// it was moved.
+    pub quarantined_files: Vec<PathBuf>,
+    /// The full rebuild of the fresh index from the caller's target set.
+    pub rebuilt: IndexReport,
+}
+
+/// One entry the repository walk did not read, and why: AICD §25.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkippedEntry {
+    /// The entry, as the walk reached it (under the `repo_root` it was
+    /// given).
+    pub path: PathBuf,
+    /// Why it was not read.
+    pub reason: SkipReason,
+}
+
+/// Why [`Indexer::walk_repo`] left an entry out: the module doc's "What the
+/// repository walk never reads".
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SkipReason {
+    /// A symbolic link, to a file or a directory: never followed.
+    Symlink,
+    /// A `.md` entry that is not a regular file (a named pipe, a socket, a
+    /// device): never opened.
+    NotARegularFile,
+    /// A `.md` file whose path under the repository is not valid UTF-8.
+    NonUtf8Path,
+    /// A file or directory that could not be read; `error` is the
+    /// operating system's description.
+    Unreadable {
+        /// Why the read failed.
+        error: String,
+    },
+    /// A document whose path an earlier document in the same walk already
+    /// took; the earlier one is kept.
+    DuplicateDocumentPath {
+        /// The document path that was already taken.
+        path: String,
+    },
+}
+
+/// What one [`Indexer::walk_repo`] found: AICD §25.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RepoWalk {
+    /// Every document collected, ready for [`Indexer::full_rebuild`] or
+    /// [`Indexer::incremental_sync`], with no two sharing a path.
+    pub documents: Vec<IndexableDocument>,
+    /// Every entry left out, with the reason, in walk order.
+    pub skipped: Vec<SkippedEntry>,
 }
 
 /// A refusal from this module: AICD §25.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum IndexerError {
-    /// Creating the on-disk directory at `path` failed.
+    /// Creating or resolving the on-disk directory at `path` failed.
     Directory {
         /// The directory this was attempted against.
         path: PathBuf,
         /// The underlying error.
         source: std::io::Error,
     },
-    /// A repository walk failed reading a file.
+    /// A filesystem operation failed: reading the repository's `spec/`
+    /// directory itself, or moving a file aside during
+    /// [`Indexer::recover`].
     Io {
-        /// The path the read was against.
+        /// The path the operation was against.
         path: PathBuf,
         /// The underlying error.
         source: std::io::Error,
@@ -516,30 +763,23 @@ pub enum IndexerError {
         /// The database file that was already locked.
         path: PathBuf,
     },
-    /// `path` is damaged: either SQLite itself reported
-    /// `ErrorCode::DatabaseCorrupt` directly, or a read got some other
-    /// ambiguous error (round 4's own finding: a corrupted length prefix
-    /// can make SQLite report `ErrorCode::OutOfMemory` instead) and FTS5's
-    /// own `integrity-check` command, asked directly, agreed
-    /// (`diagnose_ambiguous_read_error`). [`Indexer::full_rebuild`]
-    /// recovers from this by dropping and recreating the FTS5 virtual
-    /// table in place, inside its own write transaction (the module doc's
-    /// "A corrupt index is reported honestly, and `full_rebuild` repairs
-    /// it"); `path` is never deleted. [`Indexer::search`] and
-    /// [`Indexer::incremental_sync`] report it rather than silently
-    /// widening or narrowing what they return, since neither is the
-    /// reconstruction step; corruption found while opening the file at all
-    /// ([`Indexer::open`]) is reported the same way but is never
-    /// self-healed, since destroying a file the caller handed a path to is
-    /// `ProductDb`'s decision, not this module's.
+    /// `path` is damaged: SQLite reported `SQLITE_CORRUPT` or
+    /// `SQLITE_NOTADB`, or `PRAGMA quick_check`, asked after some other
+    /// failure, reported damage (the module doc's "What is reported as
+    /// corrupt, and what is not"; a check that merely could not run never
+    /// produces this). Recovery is [`Indexer::recover`], which needs the
+    /// product's `ProductDb` exclusively; `path` is never deleted, only
+    /// moved aside into `index/quarantine/` by that call.
     Corrupt {
-        /// The database file SQLite reported corrupt.
+        /// The database file found damaged.
         path: PathBuf,
-        /// The underlying error.
+        /// The underlying error: the one the failing call itself got, not
+        /// the check's.
         source: rusqlite::Error,
     },
     /// A `rusqlite` call failed in a way none of the above names more
-    /// specifically.
+    /// specifically, and the integrity check found nothing wrong or could
+    /// not run.
     Sqlite {
         /// What was being attempted.
         context: String,
@@ -561,37 +801,42 @@ pub enum IndexerError {
         /// The text that could not be searched safely.
         query: String,
     },
-    /// `query`'s byte length exceeds `MAX_QUERY_BYTES`, or it tokenizes to
-    /// more than `MAX_QUERY_TOKENS` terms: the module doc's "Unbounded
-    /// query cost". Refused before FTS5 ever sees it, so the cost this
-    /// guards against is never paid.
+    /// `query`'s byte length exceeds `MAX_QUERY_BYTES`: the module doc's
+    /// "Query cost is bounded by bytes". Refused before FTS5 ever sees it,
+    /// so the cost this guards against is never paid.
     QueryTooLarge {
         /// `query`'s length in bytes.
         byte_len: usize,
-        /// How many alphanumeric runs (this module's own coarse token
-        /// count, `count_tokens`) `query` has.
-        token_count: usize,
     },
-    /// `documents` (the target set given to [`Indexer::full_rebuild`] or
-    /// [`Indexer::incremental_sync`]) held the same `path` more than once.
-    /// Refused rather than silently keeping whichever of the two happened
-    /// to be written last: an adversarial review found that
-    /// `full_rebuild` and `incremental_sync` disagreed on such a set (the
-    /// former kept every row, the latter kept one and never settled on
-    /// repeated syncs of the same unchanged target).
+    /// `documents` (the target set given to [`Indexer::full_rebuild`],
+    /// [`Indexer::incremental_sync`] or [`Indexer::recover`]) held the same
+    /// `path` more than once. Refused rather than silently keeping
+    /// whichever of the two happened to be written last: an adversarial
+    /// review found that `full_rebuild` and `incremental_sync` disagreed on
+    /// such a set (the former kept every row, the latter kept one and never
+    /// settled on repeated syncs of the same unchanged target).
     DuplicatePath {
         /// The path that appeared more than once.
         path: String,
+    },
+    /// [`Indexer::recover`] refused to move anything, because the directory
+    /// it would move files out of or into is not one the product owns
+    /// outright (the module doc's "Recovery").
+    RecoveryRefused {
+        /// The directory refused.
+        path: PathBuf,
+        /// Why.
+        reason: &'static str,
     },
 }
 
 impl IndexerError {
     /// Wraps a `rusqlite` failure with what was being attempted, for the one
     /// variant that is not any of this module's named refusals; the specific
-    /// case of a write lock already held is split out as
-    /// [`IndexerError::Locked`] by [`is_locked`] at each write call site,
-    /// the same split `crates/ori-store/src/db.rs`'s `DbError::sqlite` and
-    /// `is_busy` make for `product.sqlite`'s own lock.
+    /// cases of a write lock already held and of damage are split out by
+    /// [`classify`] at each call site, the same split
+    /// `crates/ori-store/src/db.rs`'s `DbError::sqlite` and `is_busy` make
+    /// for `product.sqlite`'s own lock.
     fn sqlite(context: impl Into<String>, source: rusqlite::Error) -> Self {
         Self::Sqlite {
             context: context.into(),
@@ -628,26 +873,35 @@ impl fmt::Display for IndexerError {
                 "{} is held by another writer; refusing to wait (retry is safe)",
                 path.display()
             ),
+            Self::Corrupt { path, source } if path.as_os_str() == IN_MEMORY_LABEL => write!(
+                f,
+                "{} is corrupt: {source}; an in-memory index is derived data held nowhere \
+                 else: drop this Indexer and open a new one",
+                path.display()
+            ),
             Self::Corrupt { path, source } => write!(
                 f,
-                "{} is corrupt: {source}; the index is derived data, rebuild it with \
-                 Indexer::full_rebuild",
+                "{} is corrupt: {source}; the index is derived data: recover it with \
+                 Indexer::recover, which needs the product's ProductDb exclusively (drop every \
+                 Indexer on the product first), moves the damaged files aside into \
+                 index/quarantine/ and rebuilds the index from the target set it is given",
                 path.display()
             ),
             Self::Sqlite { context, source } => write!(f, "{context}: {source}"),
             Self::InvalidQuery { query } => write!(f, "invalid query: {query}"),
-            Self::QueryTooLarge {
-                byte_len,
-                token_count,
-            } => write!(
+            Self::QueryTooLarge { byte_len } => write!(
                 f,
-                "query is too large: {byte_len} bytes (max {MAX_QUERY_BYTES}), {token_count} \
-                 tokens (max {MAX_QUERY_TOKENS})"
+                "query is too large: {byte_len} bytes (max {MAX_QUERY_BYTES})"
             ),
             Self::DuplicatePath { path } => write!(
                 f,
                 "{path} appears more than once in the target set; full_rebuild and \
                  incremental_sync both refuse rather than guess which one should win"
+            ),
+            Self::RecoveryRefused { path, reason } => write!(
+                f,
+                "refusing to recover the index through {}: {reason}",
+                path.display()
             ),
         }
     }
@@ -661,10 +915,15 @@ impl std::error::Error for IndexerError {
             Self::Locked { .. }
             | Self::InvalidQuery { .. }
             | Self::QueryTooLarge { .. }
-            | Self::DuplicatePath { .. } => None,
+            | Self::DuplicatePath { .. }
+            | Self::RecoveryRefused { .. } => None,
         }
     }
 }
+
+/// The label an [`Indexer::open_in_memory`] index is named by in an error,
+/// since it has no file.
+const IN_MEMORY_LABEL: &str = ":memory:";
 
 /// Whether a `rusqlite` failure is SQLite reporting a write conflict rather
 /// than any other error: the same check
@@ -678,14 +937,17 @@ fn is_locked(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Whether a `rusqlite` failure is SQLite reporting `ErrorCode::DatabaseCorrupt`
-/// (`SQLITE_CORRUPT`): the check that routes a damaged index to
-/// [`IndexerError::Corrupt`] instead of [`IndexerError::Sqlite`] or (worse,
-/// the defect an adversarial review found) [`IndexerError::InvalidQuery`].
+/// Whether a `rusqlite` failure is SQLite itself reporting the file damaged:
+/// `SQLITE_CORRUPT` (`ErrorCode::DatabaseCorrupt`, every extended code of
+/// it, FTS5's `SQLITE_CORRUPT_VTAB` included) or `SQLITE_NOTADB`
+/// (`ErrorCode::NotADatabase`, what a destroyed header produces: a review
+/// found round 4 reporting that one as a generic [`IndexerError::Sqlite`]
+/// at open, which left the damage with no recovery route at all).
 fn is_corrupt(error: &rusqlite::Error) -> bool {
     matches!(
         error,
-        rusqlite::Error::SqliteFailure(inner, _) if inner.code == ErrorCode::DatabaseCorrupt
+        rusqlite::Error::SqliteFailure(inner, _)
+            if inner.code == ErrorCode::DatabaseCorrupt || inner.code == ErrorCode::NotADatabase
     )
 }
 
@@ -706,16 +968,103 @@ fn is_query_syntax_error(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Maps any `rusqlite` failure to the named refusal it belongs to: a locked
-/// file to [`IndexerError::Locked`], a damaged one to
-/// [`IndexerError::Corrupt`], everything else to [`IndexerError::Sqlite`].
-/// Used for every read and every write this module makes, so the same
-/// failure is classified the same way wherever it happens: an adversarial
-/// review found the previous version reaching this decision differently in
-/// different call sites (`search` folded corruption into
-/// [`IndexerError::InvalidQuery`], `total_indexed` did not check for a lock
-/// at all).
-fn classify_error(path: &Path, context: &str, source: rusqlite::Error) -> IndexerError {
+/// What `PRAGMA quick_check` said about a file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Integrity {
+    /// It returned exactly `ok`.
+    Intact,
+    /// It reported damage, or failed with `SQLITE_CORRUPT`/`SQLITE_NOTADB`.
+    Damaged,
+    /// It could not run to a verdict (busy, locked, out of memory, an FTS5
+    /// format this build does not read, or anything else).
+    Undetermined,
+}
+
+/// Runs `PRAGMA quick_check` on `conn`: a read, never a write, so it needs
+/// no write lock and can neither be refused by a concurrent writer nor lock
+/// one out (the module doc's "What is reported as corrupt, and what is
+/// not"). In the SQLite this workspace bundles it checks every b-tree page
+/// and then runs FTS5's own inverted-index check through the virtual
+/// table's integrity method; a row naming damage found by either is
+/// [`Integrity::Damaged`] even if a later step of the pragma fails.
+///
+/// It runs inside a savepoint (which nests inside whatever transaction
+/// `conn` is already in, or opens one), after first opening a cursor on the
+/// table in that same snapshot. That order is load-bearing: FTS5 keeps a
+/// per-connection cache of the index's structure and refreshes it only when
+/// a cursor opens, and its integrity method reads the cache as it stands.
+/// Measured while building this: after another connection's commits, a
+/// bare `PRAGMA quick_check` on a perfectly healthy index reported "fts5:
+/// checksum mismatch" 133 times in 200; opened this way, 0 in 200
+/// (`tests::ori_t_0035_the_check_never_reads_a_stale_view_of_an_index_another_connection_changed`).
+///
+/// A row that begins "unable to validate" is FTS5 saying it could not run
+/// its check, not that it found damage; the bundled version reports that as
+/// an error rather than a row, and it is read as [`Integrity::Undetermined`]
+/// all the same, so a different SQLite that did report it as a row could
+/// never turn "could not check" into "damaged".
+fn quick_check(conn: &Connection) -> Integrity {
+    if conn.execute_batch("SAVEPOINT ori_quick_check").is_err() {
+        return Integrity::Undetermined;
+    }
+    let verdict = quick_check_in_one_snapshot(conn);
+    if conn.execute_batch("RELEASE ori_quick_check").is_err() {
+        let _ = conn.execute_batch("ROLLBACK TO ori_quick_check; RELEASE ori_quick_check");
+    }
+    verdict
+}
+
+/// [`quick_check`]'s body, run inside its savepoint.
+fn quick_check_in_one_snapshot(conn: &Connection) -> Integrity {
+    match conn.query_row(
+        "SELECT count(*) FROM documents WHERE rowid = 0",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(_) => {}
+        Err(error) if is_corrupt(&error) => return Integrity::Damaged,
+        Err(_) => return Integrity::Undetermined,
+    }
+    let mut statement = match conn.prepare("PRAGMA quick_check") {
+        Ok(statement) => statement,
+        Err(error) if is_corrupt(&error) => return Integrity::Damaged,
+        Err(_) => return Integrity::Undetermined,
+    };
+    let mut rows = match statement.query([]) {
+        Ok(rows) => rows,
+        Err(error) if is_corrupt(&error) => return Integrity::Damaged,
+        Err(_) => return Integrity::Undetermined,
+    };
+    let mut saw_ok = false;
+    loop {
+        match rows.next() {
+            Ok(Some(row)) => match row.get_ref(0) {
+                Ok(ValueRef::Text(b"ok")) => saw_ok = true,
+                Ok(ValueRef::Text(text)) if text.starts_with(b"unable to validate") => {
+                    return Integrity::Undetermined;
+                }
+                Ok(_) => return Integrity::Damaged,
+                Err(_) => return Integrity::Undetermined,
+            },
+            Ok(None) => break,
+            Err(error) if is_corrupt(&error) => return Integrity::Damaged,
+            Err(_) => return Integrity::Undetermined,
+        }
+    }
+    if saw_ok {
+        Integrity::Intact
+    } else {
+        Integrity::Undetermined
+    }
+}
+
+/// Maps a `rusqlite` failure to the refusal it belongs to without asking
+/// the file anything: a locked file to [`IndexerError::Locked`], a failure
+/// SQLite itself called damage to [`IndexerError::Corrupt`], everything
+/// else to [`IndexerError::Sqlite`]. For the two places no connection
+/// exists yet to ask, or nothing has run that could have met damage:
+/// opening the file, and beginning a transaction.
+fn classify_without_check(path: &Path, context: &str, source: rusqlite::Error) -> IndexerError {
     if is_locked(&source) {
         IndexerError::Locked {
             path: path.to_owned(),
@@ -730,94 +1079,61 @@ fn classify_error(path: &Path, context: &str, source: rusqlite::Error) -> Indexe
     }
 }
 
-/// [`Indexer::search`]'s own classifier: the same three cases
-/// [`classify_error`] names, plus [`IndexerError::InvalidQuery`] for a bare
-/// `SQLITE_ERROR` ([`is_query_syntax_error`]), which `classify_error` alone
-/// would fold into [`IndexerError::Sqlite`]. Checked in this order because a
-/// lock or a corrupt page can itself present as a generic `SQLITE_ERROR` in
-/// some SQLite versions, and a real lock or real corruption must never be
-/// misreported as the caller's query being unsafe. Falls back to
-/// [`diagnose_ambiguous_read_error`], not directly to [`IndexerError::Sqlite`],
-/// for the same reason `total_indexed_on` and `current_paths_and_checksums_on`
-/// do: see that function's doc.
+/// The one classifier every read and every write in this module uses once a
+/// connection exists: the module doc's "What is reported as corrupt, and
+/// what is not", as code. A lock is [`IndexerError::Locked`] and
+/// `SQLITE_CORRUPT`/`SQLITE_NOTADB` is [`IndexerError::Corrupt`], directly;
+/// anything else asks [`quick_check`] on `conn` (the same connection, or
+/// the same transaction, which derefs to one) and is `Corrupt` only when
+/// the check reports [`Integrity::Damaged`]. When it reports
+/// [`Integrity::Intact`] or [`Integrity::Undetermined`] the original error is
+/// returned unchanged as [`IndexerError::Sqlite`]: a check that could not
+/// run (out of memory, busy) is never evidence of damage. The original
+/// `source`, never the check's own error, is what either variant carries.
+///
+/// Round 4's version ran FTS5's `integrity-check` command, a write, and
+/// read any failure of it as corruption; the module doc records what that
+/// cost.
+fn classify(
+    conn: &Connection,
+    path: &Path,
+    context: &str,
+    source: rusqlite::Error,
+) -> IndexerError {
+    if is_locked(&source) || is_corrupt(&source) {
+        return classify_without_check(path, context, source);
+    }
+    match quick_check(conn) {
+        Integrity::Damaged => IndexerError::Corrupt {
+            path: path.to_owned(),
+            source,
+        },
+        Integrity::Intact | Integrity::Undetermined => IndexerError::sqlite(context, source),
+    }
+}
+
+/// [`Indexer::search`]'s own classifier: the same cases [`classify`]
+/// names, plus [`IndexerError::InvalidQuery`] for a bare `SQLITE_ERROR`
+/// ([`is_query_syntax_error`]), which `classify` alone would report as
+/// [`IndexerError::Sqlite`]. A lock and `SQLITE_CORRUPT` are checked first,
+/// so a real lock or real corruption is never misreported as the caller's
+/// query being unsafe; everything else falls back to [`classify`], check
+/// included.
 fn search_error(
     conn: &Connection,
     path: &Path,
     query: &str,
     source: rusqlite::Error,
 ) -> IndexerError {
-    if is_locked(&source) {
-        return IndexerError::Locked {
-            path: path.to_owned(),
-        };
-    }
-    if is_corrupt(&source) {
-        return IndexerError::Corrupt {
-            path: path.to_owned(),
-            source,
-        };
+    if is_locked(&source) || is_corrupt(&source) {
+        return classify_without_check(path, "search", source);
     }
     if is_query_syntax_error(&source) {
         return IndexerError::InvalidQuery {
             query: query.to_owned(),
         };
     }
-    diagnose_ambiguous_read_error(conn, path, "search", source)
-}
-
-/// Runs FTS5's own consistency check (`INSERT INTO documents(documents)
-/// VALUES('integrity-check')`, the internal command FTS5 exposes for
-/// exactly this) to settle a read failure that is neither a lock
-/// ([`is_locked`]) nor something [`is_corrupt`] already recognized, rather
-/// than guessing from the error code alone: a re-verification workflow
-/// found that a structural record whose length prefix happens to decode to
-/// an implausible size can make SQLite report `ErrorCode::OutOfMemory`
-/// (`SQLITE_NOMEM`, the allocator refusing an implausible request, not an
-/// actual low-memory condition) instead of `ErrorCode::DatabaseCorrupt` for
-/// the exact same underlying damage; `classify_error` and `search_error`
-/// alone would fold that into [`IndexerError::Sqlite`] and give a caller no
-/// signal to rebuild, the "damage reported as something else" class an
-/// earlier adversarial review already found and fixed once for
-/// [`IndexerError::InvalidQuery`] (round 2, finding 5).
-///
-/// This never infers corruption from the error code alone: a genuine
-/// out-of-memory condition is not corruption and must not be treated as
-/// one, so this asks FTS5 directly, on the same connection (or the same
-/// transaction, which derefs to one) the failing read itself used, and
-/// reports [`IndexerError::Corrupt`] only when FTS5's own check also
-/// fails, keeping the original `source` -- not the integrity check's own
-/// error -- as the diagnostic either way. Checks [`is_locked`] and
-/// [`is_corrupt`] first, the same as [`classify_error`], so this is a
-/// complete drop-in classifier for a read, not just the ambiguous-error
-/// tail of one; [`Indexer::total_indexed_on`] (search's first read) and
-/// [`Indexer::current_paths_and_checksums_on`] (`incremental_sync`'s diff
-/// read) both call this directly, and `search_error` above falls back to
-/// it only after its own query-syntax check, so the two checks this
-/// repeats there are redundant but harmless.
-fn diagnose_ambiguous_read_error(
-    conn: &Connection,
-    path: &Path,
-    context: &str,
-    source: rusqlite::Error,
-) -> IndexerError {
-    if is_locked(&source) {
-        return IndexerError::Locked {
-            path: path.to_owned(),
-        };
-    }
-    if is_corrupt(&source) {
-        return IndexerError::Corrupt {
-            path: path.to_owned(),
-            source,
-        };
-    }
-    match conn.execute_batch("INSERT INTO documents(documents) VALUES('integrity-check');") {
-        Ok(()) => IndexerError::sqlite(context, source),
-        Err(_) => IndexerError::Corrupt {
-            path: path.to_owned(),
-            source,
-        },
-    }
+    classify(conn, path, "search", source)
 }
 
 /// Refuses `documents` if any two elements share a `path`: the identity
@@ -830,7 +1146,7 @@ fn diagnose_ambiguous_read_error(
 /// [`IndexerError::DuplicatePath`] naming the first path seen twice, in
 /// `documents`' own order.
 fn refuse_duplicate_paths(documents: &[IndexableDocument]) -> Result<(), IndexerError> {
-    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     for document in documents {
         if !seen.insert(document.path.as_str()) {
             return Err(IndexerError::DuplicatePath {
@@ -849,201 +1165,177 @@ fn quote_fts5_phrase(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
-/// The largest `query` [`Indexer::search`] accepts, in bytes: an adversarial
-/// review measured 1 MB of a common repeated term costing 4.5 seconds and
-/// 2.18 GB of resident memory, because FTS5 opens one index iterator per
-/// phrase term and repeated tokens are not deduplicated. 1 KiB is generous
-/// for a legitimate search phrase (`spec/API_SPEC.md`'s `aicd_search(query)`
-/// is a short free-text query, never a document body) and keeps the worst
-/// case, even for the cheapest-per-byte common term the review measured
-/// (roughly 8.7 KB of resident memory per repeated `"the "`), in the tens of
-/// megabytes rather than gigabytes.
+/// The largest `query` [`Indexer::search`] accepts, in bytes, and the only
+/// bound on its cost: the module doc's "Query cost is bounded by bytes, and
+/// only by bytes". An adversarial review measured 1 MB of a common
+/// repeated term costing 4.5 seconds and 2.18 GB of resident memory,
+/// because FTS5 opens one index iterator per phrase term and repeated
+/// tokens are not deduplicated. 1 KiB is generous for a legitimate search
+/// phrase (`spec/API_SPEC.md`'s `aicd_search(query)` is a short free-text
+/// query, never a document body) and admits at most 512 FTS5 terms in any
+/// script, since every term is at least one byte and every two are
+/// separated by at least one more.
 const MAX_QUERY_BYTES: usize = 1024;
 
-/// The largest number of tokens [`count_tokens`] may count in `query`: a
-/// second bound, additional to [`MAX_QUERY_BYTES`] and never the one this
-/// module trusts to be exact.
-///
-/// [`MAX_QUERY_BYTES`] alone already bounds `search`'s worst case (an
-/// adversarial review measured it, at this cap, in the tens of milliseconds
-/// and single-digit megabytes even for the specific inputs built to defeat
-/// `count_tokens`, below), so this second cap is belt-and-braces, not the
-/// property this module depends on for safety. A second review found
-/// `count_tokens`'s approximation of `unicode61` wrong in both directions,
-/// for example NFD-normalized Latin text (`"résumé"`, common from macOS
-/// input) over-counting by treating each combining accent as its own token
-/// boundary, and refusing some legitimate queries below the stated cap as
-/// a result. [`is_combining_mark`] closes that specific, common case
-/// (`char::is_alphanumeric` already agrees with `unicode61` on plain ASCII,
-/// which is why the existing byte-repetition tests below are unaffected).
-/// It does not close every case: FTS5's own token/separator boundary for
-/// vowel-sign marks in scripts such as Thai and Devanagari, and for a few
-/// symbol categories such as circled Latin letters, still disagrees with
-/// `char::is_alphanumeric` in the other direction (undercounting, letting
-/// more real FTS5 terms through than this cap's name promises). Closing
-/// that fully would mean either running `unicode61` itself inside `search`
-/// (which the module's own "Reads and writes share one transaction"
-/// section would then have to account for, since tokenizing through a
-/// scratch FTS5 table is a write, not a read) or hand-carrying the Unicode
-/// standard's exact General_Category tables with no crate approved to
-/// supply them (`crates/ori-memory/Cargo.toml`'s own comment scopes this
-/// ticket's dependency to `rusqlite`). Given [`MAX_QUERY_BYTES`] already
-/// bounds the cost this cap exists to bound, that residual gap is accepted
-/// and stated here rather than hidden.
-const MAX_QUERY_TOKENS: usize = 64;
-
-/// Whether `character` is a Unicode combining mark in one of the blocks
-/// dedicated to them (Combining Diacritical Marks and its three
-/// supplements, and Combining Half Marks): not the Unicode standard's full
-/// `Mn`/`Mc` General_Category (which also reaches into many scripts' own
-/// blocks, the residual [`MAX_QUERY_TOKENS`] names), only enough to keep
-/// `count_tokens` from splitting the tokens NFD normalization most often
-/// produces, one base letter followed by one or more combining accents.
-#[rustfmt::skip]
-const fn is_combining_mark(character: char) -> bool {
-    matches!(character as u32,
-        0x0300..=0x036F // Combining Diacritical Marks
-        | 0x1AB0..=0x1AFF // Combining Diacritical Marks Extended
-        | 0x1DC0..=0x1DFF // Combining Diacritical Marks Supplement
-        | 0x20D0..=0x20FF // Combining Diacritical Marks for Symbols
-        | 0xFE20..=0xFE2F // Combining Half Marks
-    )
-}
-
-/// This module's own coarse token count: the number of maximal runs of
-/// `char::is_alphanumeric` characters in `text`, with a run continuing
-/// (never restarting) across a combining mark ([`is_combining_mark`]) so a
-/// base letter plus its accents still counts as the one token `unicode61`
-/// would tokenize it as. Not FTS5's own tokenizer, and not claimed to be
-/// exact in every case; see [`MAX_QUERY_TOKENS`]'s own doc for what this
-/// still gets wrong and why that is accepted.
-fn count_tokens(text: &str) -> usize {
-    let mut count = 0usize;
-    let mut in_token = false;
-    for character in text.chars() {
-        if character.is_alphanumeric() {
-            if !in_token {
-                count += 1;
-                in_token = true;
-            }
-        } else if !is_combining_mark(character) {
-            in_token = false;
-        }
-    }
-    count
+/// Commits `tx`. In test builds only, it then runs the after-commit hook a
+/// test installed on this thread, which is how
+/// `tests::ori_t_0035_index_report_total_is_read_before_commit_never_after_another_writers_commit`
+/// commits a second connection's write in the exact window between this
+/// commit and whatever its caller does next, deterministically rather than
+/// by hoping a race lands there. Compiled out of every other build.
+fn commit(tx: rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    tx.commit()?;
+    #[cfg(test)]
+    tests::run_after_commit_hook();
+    Ok(())
 }
 
 /// The repository indexer: a SQLite FTS5 virtual table over
 /// [`IndexableDocument`]s, keyed by `path`: AICD §25.
-pub struct Indexer {
+///
+/// An on-disk `Indexer<'db>` is opened from, and borrows for its whole life,
+/// the [`ProductDb`] that owns the product directory; the module doc's
+/// "Recovery" is why. `PhantomData<&'db ()>` rather than a stored
+/// `&'db ProductDb` carries that borrow: `ProductDb` holds
+/// `rusqlite::Connection`s, which are not `Sync`, so a stored reference
+/// would make every `Indexer` impossible to hand to another thread for no
+/// gain, while the lifetime alone is what the borrow checker reasons about.
+pub struct Indexer<'db> {
     conn: Connection,
     /// The file this connection is open against, `Some` only for
     /// [`Indexer::open`]; `None` for [`Indexer::open_in_memory`], which has
     /// no path to name in [`IndexerError::Locked`] or a diagnostic.
     path: Option<PathBuf>,
+    product: PhantomData<&'db ()>,
 }
 
-impl Indexer {
-    /// Opens the on-disk index at `<dir>/fts.sqlite` (`<product>/index/` per
-    /// `spec/LLD.md` section 6), creating `dir` and the file if either is
-    /// absent. Never `<dir>/../product.sqlite`; see the module doc's "The
-    /// index is derived".
-    ///
-    /// # Errors
-    ///
-    /// [`IndexerError::Directory`] if `dir` cannot be created or resolved to
-    /// an absolute, canonical path;
-    /// [`IndexerError::Corrupt`] if the file exists and SQLite reports it
-    /// damaged while opening it (a corrupt header, a corrupt
-    /// `sqlite_schema` page, or similar); this is not self-healed, see the
-    /// module doc's "Corruption found while opening";
-    /// [`IndexerError::Sqlite`] if the file cannot be opened or the schema
-    /// cannot be created for another reason.
-    pub fn open(dir: &Path) -> Result<Self, IndexerError> {
-        std::fs::create_dir_all(dir).map_err(|source| IndexerError::Directory {
-            path: dir.to_owned(),
-            source,
-        })?;
-        // Canonical and absolute, resolved once, here: never a caller's
-        // possibly-relative `dir` re-resolved later against whatever the
-        // process's current working directory happens to be by then. See
-        // the module doc's "Corruption found while opening" for why this
-        // matters even though this module no longer deletes files by path.
-        let canonical_dir = dir
-            .canonicalize()
-            .map_err(|source| IndexerError::Directory {
-                path: dir.to_owned(),
-                source,
-            })?;
-        let path = canonical_dir.join("fts.sqlite");
-        let conn =
-            Connection::open(&path).map_err(|source| classify_error(&path, "open", source))?;
-        Self::configure(conn, Some(path))
-    }
+/// Empty, and load-bearing: an explicit `Drop` makes dropping an
+/// `Indexer<'db>` a use of `'db`, so the borrow of the [`ProductDb`] it was
+/// opened from lasts until its connection is actually closed, not merely
+/// until its last method call. Without it, an `Indexer` still in scope but
+/// no longer used would let [`Indexer::recover`] compile and run, and would
+/// then close its connection on the replaced file afterwards, which makes
+/// SQLite delete the `-wal` file at the index's path: by then, the fresh
+/// index's. The second `compile_fail` example on [`Indexer::recover`] pins
+/// this.
+impl Drop for Indexer<'_> {
+    fn drop(&mut self) {}
+}
 
+impl Indexer<'static> {
     /// An index held only in memory, for tests and for any caller that
-    /// wants no on-disk footprint.
+    /// wants no on-disk footprint. It borrows no [`ProductDb`], since it has
+    /// no file anything could need recovering.
     ///
     /// # Errors
     ///
     /// [`IndexerError::Sqlite`] if the schema cannot be created.
     pub fn open_in_memory() -> Result<Self, IndexerError> {
-        let display_path = PathBuf::from(":memory:");
+        let display_path = PathBuf::from(IN_MEMORY_LABEL);
         let conn = Connection::open_in_memory().map_err(|source| {
-            classify_error(&display_path, "open an in-memory database", source)
+            classify_without_check(&display_path, "open an in-memory database", source)
         })?;
         Self::configure(conn, None)
+    }
+}
+
+impl<'db> Indexer<'db> {
+    /// Opens the product's on-disk index, `<product dir>/index/fts.sqlite`
+    /// (`spec/LLD.md` section 6), creating the directory and the file if
+    /// either is absent, and borrows `db` for as long as the returned
+    /// `Indexer` lives. Never `product.sqlite`; see the module doc's "The
+    /// index is derived". Any number of `Indexer`s may be open on one
+    /// product at once.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexerError::Directory`] if `index/` cannot be created or resolved
+    /// to an absolute, canonical path;
+    /// [`IndexerError::Corrupt`] if the file exists and is damaged in a way
+    /// opening it meets (a destroyed header, a damaged schema page, a
+    /// truncated file); [`Indexer::recover`] repairs every such case;
+    /// [`IndexerError::Sqlite`] if the file cannot be opened or the schema
+    /// cannot be created for another reason.
+    pub fn open(db: &'db ProductDb) -> Result<Self, IndexerError> {
+        let index_dir = db.dir().join(INDEX_DIR);
+        std::fs::create_dir_all(&index_dir).map_err(|source| IndexerError::Directory {
+            path: index_dir.clone(),
+            source,
+        })?;
+        // Canonical and absolute, resolved once, here: never a
+        // possibly-relative path re-resolved later against whatever the
+        // process's current working directory happens to be by then.
+        let canonical_dir = index_dir
+            .canonicalize()
+            .map_err(|source| IndexerError::Directory {
+                path: index_dir.clone(),
+                source,
+            })?;
+        Self::open_file(canonical_dir.join(INDEX_FILE))
+    }
+
+    /// Opens (creating if absent) the index file at exactly `path`. Private:
+    /// every caller outside this module reaches a file only through a
+    /// [`ProductDb`], which is what "Recovery" in the module doc rests on.
+    fn open_file(path: PathBuf) -> Result<Self, IndexerError> {
+        let conn = Connection::open(&path)
+            .map_err(|source| classify_without_check(&path, "open", source))?;
+        Self::configure(conn, Some(path))
     }
 
     /// Sets this connection's pragmas and creates the schema if absent.
     ///
-    /// Every failure here is classified with [`classify_error`], not the
-    /// generic [`IndexerError::sqlite`]: an adversarial review found
-    /// `Indexer::open` reporting a corrupt file (`SQLITE_CORRUPT`, most
-    /// often surfacing at the `journal_mode` pragma, the first real
-    /// statement run against it) as a bare [`IndexerError::Sqlite`], which
-    /// made `full_rebuild`'s recovery unreachable for exactly the damage
-    /// shapes (a corrupt header or `sqlite_schema` page, a truncated file)
-    /// that keep the file from opening at all. Classifying it as
-    /// [`IndexerError::Corrupt`] here does not, by itself, repair anything;
-    /// see "Corruption found while opening" in the module doc for what
-    /// this module does and does not do about it.
+    /// Every failure here goes through [`classify`], not the generic
+    /// [`IndexerError::sqlite`]: an adversarial review found `Indexer::open`
+    /// reporting a corrupt file (most often surfacing at the `journal_mode`
+    /// pragma, the first real statement run against it) as a bare
+    /// [`IndexerError::Sqlite`], and a later one found a destroyed header
+    /// (`SQLITE_NOTADB`) still reported that way, which left
+    /// [`Indexer::recover`]'s caller no signal to call it.
     fn configure(conn: Connection, path: Option<PathBuf>) -> Result<Self, IndexerError> {
-        let display_path = path.clone().unwrap_or_else(|| PathBuf::from(":memory:"));
+        let display_path = path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(IN_MEMORY_LABEL));
         // WAL: concurrent readers never block a writer or each other (the
         // same choice `crates/ori-store/src/db.rs`'s `open_connection` makes
         // for `product.sqlite`). A zero busy_timeout is set explicitly,
         // deliberately, rather than left at SQLite's own default: see the
         // module doc's "Concurrency".
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|source| classify_error(&display_path, "set journal_mode", source))?;
+            .map_err(|source| classify(&conn, &display_path, "set journal_mode", source))?;
         conn.busy_timeout(WRITE_BUSY_TIMEOUT)
-            .map_err(|source| classify_error(&display_path, "set busy_timeout", source))?;
+            .map_err(|source| classify(&conn, &display_path, "set busy_timeout", source))?;
         conn.execute_batch(CREATE_TABLE_SQL).map_err(|source| {
-            classify_error(&display_path, "create the documents table", source)
+            classify(&conn, &display_path, "create the documents table", source)
         })?;
-        Ok(Self { conn, path })
+        Ok(Self {
+            conn,
+            path,
+            product: PhantomData,
+        })
     }
 
     /// The path [`IndexerError::Locked`] and [`IndexerError::Sqlite`] name
-    /// for a write refusal: the real file for [`Indexer::open`], or a
-    /// synthetic label for [`Indexer::open_in_memory`], which this module's
-    /// own concurrency test never needs (there is only ever one connection
-    /// to a given in-memory database in this process).
+    /// for a refusal: the real file for [`Indexer::open`], or a synthetic
+    /// label for [`Indexer::open_in_memory`].
     fn display_path(&self) -> PathBuf {
         self.path
             .clone()
-            .unwrap_or_else(|| PathBuf::from(":memory:"))
+            .unwrap_or_else(|| PathBuf::from(IN_MEMORY_LABEL))
     }
 
     /// Every document presently in the index, in path order, each paired
     /// with its stored checksum.
     ///
-    /// The source of truth [`Indexer::incremental_sync`] diffs against and
-    /// this module's rebuild-versus-incremental proof dumps: read fresh from
-    /// the index itself on every call, never from bookkeeping held in
-    /// memory, so it is correct even for an [`Indexer`] freshly opened on an
-    /// existing on-disk file whose history this process never saw.
+    /// The dump this module's rebuild-versus-incremental proof compares:
+    /// read fresh from the index itself on every call, never from
+    /// bookkeeping held in memory, so it is correct even for an [`Indexer`]
+    /// freshly opened on an existing on-disk file whose history this
+    /// process never saw. A row whose stored `kind` is not one of the four
+    /// [`DocumentKind`]s (a row some other writer stored) is not a document
+    /// this build can represent and is left out;
+    /// [`Indexer::incremental_sync`] and [`Indexer::full_rebuild`] both
+    /// rewrite or remove such a row.
     ///
     /// # Errors
     ///
@@ -1053,11 +1345,7 @@ impl Indexer {
         Self::all_documents_on(&self.conn, &self.display_path())
     }
 
-    /// [`Indexer::all_documents`]'s body, taking any `&Connection` (an
-    /// ordinary connection or a `&rusqlite::Transaction`, which derefs to
-    /// one), so [`Indexer::incremental_sync`] can read the diff basis inside
-    /// its own write transaction: the module doc's "Reads and writes share
-    /// one transaction".
+    /// [`Indexer::all_documents`]'s body, taking any `&Connection`.
     fn all_documents_on(
         conn: &Connection,
         display_path: &Path,
@@ -1065,15 +1353,20 @@ impl Indexer {
         let mut statement = conn
             .prepare("SELECT path, kind, title, body, checksum FROM documents ORDER BY path")
             .map_err(|source| {
-                classify_error(display_path, "prepare a full read of documents", source)
+                classify(
+                    conn,
+                    display_path,
+                    "prepare a full read of documents",
+                    source,
+                )
             })?;
         let rows = statement
             .query_map([], Self::row_to_document)
-            .map_err(|source| classify_error(display_path, "read every document back", source))?;
+            .map_err(|source| classify(conn, display_path, "read every document back", source))?;
         let mut out = Vec::new();
         for row in rows {
             let pair = row
-                .map_err(|source| classify_error(display_path, "read one document row", source))?;
+                .map_err(|source| classify(conn, display_path, "read one document row", source))?;
             if let Some(pair) = pair {
                 out.push(pair);
             }
@@ -1114,9 +1407,7 @@ impl Indexer {
     fn total_indexed_on(conn: &Connection, display_path: &Path) -> Result<usize, IndexerError> {
         let total: i64 = conn
             .query_row("SELECT count(*) FROM documents", [], |row| row.get(0))
-            .map_err(|source| {
-                diagnose_ambiguous_read_error(conn, display_path, "count documents", source)
-            })?;
+            .map_err(|source| classify(conn, display_path, "count documents", source))?;
         Ok(total as usize)
     }
 
@@ -1136,41 +1427,31 @@ impl Indexer {
         let tx = self
             .conn
             .transaction()
-            .map_err(|source| classify_error(&path, "begin transaction", source))?;
+            .map_err(|source| classify_without_check(&path, "begin transaction", source))?;
         Self::delete_path(&tx, &document.path, &path)?;
         Self::insert(&tx, document, &path)?;
-        tx.commit()
-            .map_err(|source| classify_error(&path, "commit", source))
+        commit(tx).map_err(|source| classify(&self.conn, &path, "commit", source))
     }
 
     /// Clears the index and indexes exactly `documents`: a full rebuild, the
     /// reconstruction the module doc's "the index is derived" section names.
     ///
-    /// Repairs shadow-table corruption unconditionally, as a side effect of
-    /// doing its own ordinary job, never by deleting a file: inside one
-    /// write transaction, this drops the `documents` table (which drops
-    /// every FTS5 shadow table with it, `documents_data` included, whatever
-    /// state they were in) and recreates it before inserting. SQLite's own
-    /// locking on the transaction serializes this against every other
-    /// connection the ordinary way, so nobody else ever sees, writes into,
-    /// or gets orphaned by a deleted or replaced file, because no file is
-    /// ever deleted or replaced: only its own already-open, already-locked
-    /// database's own tables change. An adversarial review found the
-    /// previous version of this recovery (deleting and recreating the file
-    /// on disk) both failed to repair the exact damage it was built for
-    /// (a write only reads a segment it happens to touch, so most pages'
-    /// damage survived a rebuild that returned `Ok`) and, far more
-    /// seriously, orphaned every other open connection to the file it
-    /// deleted, silently losing their acknowledged writes and defeating the
-    /// module's own "Concurrency" guarantee between them; see the module
-    /// doc's "A corrupt index is repaired in place, never by deleting a
-    /// file" for the full account and why `DROP`/`CREATE` replaces it
-    /// rather than refines it.
+    /// Inside one write transaction, this drops the `documents` table (and
+    /// with it every FTS5 shadow table) and recreates it before inserting,
+    /// so damage done to the shadow tables' rows through SQL is repaired as
+    /// a side effect of its ordinary job, and SQLite's own locking
+    /// serializes it against every other connection the ordinary way; no
+    /// file is ever deleted or replaced here. Damage to a *page* of the file
+    /// makes the `DROP` itself fail, every time: that is
+    /// [`IndexerError::Corrupt`], and the repair is [`Indexer::recover`],
+    /// never a retry of this (the module doc's "Recovery").
     ///
     /// # Errors
     ///
     /// [`IndexerError::DuplicatePath`] if `documents` holds one path twice;
     /// [`IndexerError::Locked`] if another writer holds the lock;
+    /// [`IndexerError::Corrupt`] if the file is damaged beyond what
+    /// rebuilding the table can repair;
     /// [`IndexerError::Sqlite`] if a write fails for another reason.
     pub fn full_rebuild(
         &mut self,
@@ -1181,13 +1462,19 @@ impl Indexer {
         let tx = self
             .conn
             .transaction()
-            .map_err(|source| classify_error(&path, "begin transaction", source))?;
+            .map_err(|source| classify_without_check(&path, "begin transaction", source))?;
         tx.execute_batch("DROP TABLE documents;")
             .map_err(|source| {
-                classify_error(&path, "drop the documents table for a full rebuild", source)
+                classify(
+                    &tx,
+                    &path,
+                    "drop the documents table for a full rebuild",
+                    source,
+                )
             })?;
         tx.execute_batch(CREATE_TABLE_SQL).map_err(|source| {
-            classify_error(
+            classify(
+                &tx,
                 &path,
                 "recreate the documents table for a full rebuild",
                 source,
@@ -1197,11 +1484,9 @@ impl Indexer {
             Self::insert(&tx, document, &path)?;
         }
         // Read inside the transaction, before commit: see the module doc's
-        // "Reads and writes share one transaction" and the incremental_sync
-        // doc below for the same fix to the same shape of bug.
+        // "Reads and writes share one transaction".
         let total = Self::total_indexed_on(&tx, &path)?;
-        tx.commit()
-            .map_err(|source| classify_error(&path, "commit", source))?;
+        commit(tx).map_err(|source| classify(&self.conn, &path, "commit", source))?;
         Ok(IndexReport {
             upserted: documents.len(),
             removed: 0,
@@ -1210,24 +1495,27 @@ impl Indexer {
     }
 
     /// Re-indexes to match `documents` exactly ("re-index on merge", PRD
-    /// K-02): every path in the index but not in `documents` is deleted;
-    /// every path in `documents` that is new, or whose checksum differs from
-    /// what is on disk, is written (delete-then-add); every path present and
-    /// unchanged is left alone.
+    /// K-02), leaving the stored rows exactly as [`Indexer::full_rebuild`]
+    /// of the same target set would: every stored row whose path is not in
+    /// `documents` is deleted; every document in `documents` is written
+    /// (delete-then-add) unless exactly one row is stored at its path, with
+    /// its exact `kind` text and its checksum, in which case it is left
+    /// alone.
     ///
-    /// The diff basis is every stored `path` and `checksum`, decided by
-    /// `path` alone, never by whether the stored `kind` happens to parse:
-    /// an adversarial review found the previous version building the diff
-    /// from `all_documents_on`, which silently drops a row whose
-    /// `kind` text is not one of the four this build knows (a newer build's
-    /// fifth kind, or a stray case change written by something other than
-    /// this API). A dropped row is invisible to the removal loop below, so
-    /// it survived every sync forever while [`Indexer::full_rebuild`]
-    /// correctly dropped it. `current_paths_and_checksums_on`
-    /// reads only `path` and `checksum`, neither of which needs `kind` to
-    /// parse, so such a row is removed exactly like any other absent from
-    /// `documents`, and rewritten (its checksum will not match a real
-    /// target document's) exactly like any other present in it.
+    /// The diff basis is every stored row's `rowid`, `path`, `kind` and
+    /// `checksum`, read without assuming their types, never
+    /// [`Indexer::all_documents`] (which leaves out a row whose `kind` does
+    /// not parse). Reviews found three ways a row some other writer stored
+    /// (a manual edit, an older or newer build) outlived every sync while
+    /// `full_rebuild` replaced it: a `kind` that does not parse, removed by
+    /// round 3 but still skipped when its path *was* in the target and its
+    /// checksum happened to match (the checksum hashes the kind this build
+    /// would store, not the text actually stored); two rows at one path; and
+    /// a `path` or `checksum` of the wrong type, which failed every sync
+    /// outright. Each is now a difference like any other: a row that is not
+    /// exactly what this build would have written is rewritten, and one
+    /// whose path is not text at all is deleted by its `rowid`, since no
+    /// target document can name it.
     ///
     /// Reads the current index inside the same write transaction the deletes
     /// and upserts run in, not before it: an adversarial review found that
@@ -1238,6 +1526,12 @@ impl Indexer {
     /// existing on-disk index in a fresh process, for the same reason
     /// [`Indexer::all_documents`]'s doc gives: nothing here is read from
     /// bookkeeping held in memory.
+    ///
+    /// What it still trusts: that a row whose `kind` and checksum are what
+    /// this build would store also holds the `title` and `body` that
+    /// checksum was computed from. A writer that edits those two columns
+    /// and leaves the checksum alone is not detected here; `full_rebuild`
+    /// replaces it.
     ///
     /// # Errors
     ///
@@ -1256,30 +1550,45 @@ impl Indexer {
         let tx = self
             .conn
             .transaction()
-            .map_err(|source| classify_error(&path, "begin transaction", source))?;
+            .map_err(|source| classify_without_check(&path, "begin transaction", source))?;
 
         // Read inside the transaction just opened, not before it: see the
-        // doc above. Keyed by path and checksum only, not by parsed kind:
-        // see the doc above for why.
-        let current_checksums = Self::current_paths_and_checksums_on(&tx, &path)?;
-        let target_paths: BTreeMap<&str, &IndexableDocument> = documents
+        // doc above.
+        let stored = Self::stored_rows_on(&tx, &path)?;
+        let target_paths: BTreeSet<&str> = documents
             .iter()
-            .map(|document| (document.path.as_str(), document))
+            .map(|document| document.path.as_str())
             .collect();
+        let mut by_path: BTreeMap<&str, Vec<&StoredRow>> = BTreeMap::new();
+        let mut unaddressable: Vec<i64> = Vec::new();
+        for row in &stored {
+            match &row.path {
+                Some(stored_path) => by_path.entry(stored_path.as_str()).or_default().push(row),
+                None => unaddressable.push(row.rowid),
+            }
+        }
 
         let mut removed = 0usize;
-        for existing_path in current_checksums.keys() {
-            if !target_paths.contains_key(existing_path.as_str()) {
-                Self::delete_path(&tx, existing_path, &path)?;
-                removed += 1;
+        for rowid in unaddressable {
+            Self::delete_rowid(&tx, rowid, &path)?;
+            removed += 1;
+        }
+        for (stored_path, rows) in &by_path {
+            if !target_paths.contains(stored_path) {
+                Self::delete_path(&tx, stored_path, &path)?;
+                removed += rows.len();
             }
         }
 
         let mut upserted = 0usize;
         for document in documents {
-            let unchanged = current_checksums
-                .get(document.path.as_str())
-                .is_some_and(|existing| *existing == document.checksum());
+            let unchanged = match by_path.get(document.path.as_str()).map(Vec::as_slice) {
+                Some([only]) => {
+                    only.kind.as_deref() == Some(document.kind.as_str())
+                        && only.checksum == Some(document.checksum() as i64)
+                }
+                _ => false,
+            };
             if unchanged {
                 continue;
             }
@@ -1291,8 +1600,7 @@ impl Indexer {
         // Read inside the transaction, before commit: see full_rebuild's
         // same fix, above.
         let total = Self::total_indexed_on(&tx, &path)?;
-        tx.commit()
-            .map_err(|source| classify_error(&path, "commit", source))?;
+        commit(tx).map_err(|source| classify(&self.conn, &path, "commit", source))?;
         Ok(IndexReport {
             upserted,
             removed,
@@ -1300,74 +1608,73 @@ impl Indexer {
         })
     }
 
-    /// Every stored `path` paired with its `checksum`, regardless of
-    /// whether the row's stored `kind` parses: the diff basis
-    /// [`Indexer::incremental_sync`] uses, deliberately not
-    /// [`Indexer::all_documents_on`] (which silently drops a row with an
-    /// unparseable `kind`; see `incremental_sync`'s own doc for why that
-    /// makes it the wrong source for a removal decision).
-    fn current_paths_and_checksums_on(
+    /// Every stored row, as [`StoredRow`]s: the diff basis
+    /// [`Indexer::incremental_sync`] uses, read without assuming any
+    /// column's type, since a row another writer stored may hold anything.
+    fn stored_rows_on(
         conn: &Connection,
         display_path: &Path,
-    ) -> Result<BTreeMap<String, u64>, IndexerError> {
+    ) -> Result<Vec<StoredRow>, IndexerError> {
         let mut statement = conn
-            .prepare("SELECT path, checksum FROM documents")
+            .prepare("SELECT rowid, path, kind, checksum FROM documents")
             .map_err(|source| {
-                diagnose_ambiguous_read_error(
-                    conn,
-                    display_path,
-                    "prepare a read of paths and checksums",
-                    source,
-                )
+                classify(conn, display_path, "prepare a read of stored rows", source)
             })?;
         let rows = statement
             .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let checksum: i64 = row.get(1)?;
-                Ok((path, checksum as u64))
+                Ok(StoredRow {
+                    rowid: row.get(0)?,
+                    path: text_of(row.get_ref(1)?),
+                    kind: text_of(row.get_ref(2)?),
+                    checksum: integer_of(row.get_ref(3)?),
+                })
             })
-            .map_err(|source| {
-                diagnose_ambiguous_read_error(
-                    conn,
-                    display_path,
-                    "read paths and checksums",
-                    source,
-                )
-            })?;
-        let mut out = BTreeMap::new();
+            .map_err(|source| classify(conn, display_path, "read stored rows", source))?;
+        let mut out = Vec::new();
         for row in rows {
-            let (path, checksum) = row.map_err(|source| {
-                diagnose_ambiguous_read_error(
-                    conn,
-                    display_path,
-                    "read one path/checksum row",
-                    source,
-                )
-            })?;
-            out.insert(path, checksum);
+            out.push(
+                row.map_err(|source| classify(conn, display_path, "read one stored row", source))?,
+            );
         }
         Ok(out)
     }
 
     fn delete_path(
-        tx: &rusqlite::Transaction<'_>,
+        conn: &Connection,
         target_path: &str,
         display_path: &Path,
     ) -> Result<(), IndexerError> {
-        tx.execute(
+        conn.execute(
             "DELETE FROM documents WHERE path = ?1",
             params![target_path],
         )
-        .map_err(|source| classify_error(display_path, "delete one document", source))?;
+        .map_err(|source| classify(conn, display_path, "delete one document", source))?;
+        Ok(())
+    }
+
+    fn delete_rowid(
+        conn: &Connection,
+        rowid: i64,
+        display_path: &Path,
+    ) -> Result<(), IndexerError> {
+        conn.execute("DELETE FROM documents WHERE rowid = ?1", params![rowid])
+            .map_err(|source| {
+                classify(
+                    conn,
+                    display_path,
+                    "delete one row with no text path",
+                    source,
+                )
+            })?;
         Ok(())
     }
 
     fn insert(
-        tx: &rusqlite::Transaction<'_>,
+        conn: &Connection,
         document: &IndexableDocument,
         display_path: &Path,
     ) -> Result<(), IndexerError> {
-        tx.execute(
+        conn.execute(
             "INSERT INTO documents (path, kind, title, body, checksum) VALUES (?1,?2,?3,?4,?5)",
             params![
                 document.path,
@@ -1377,7 +1684,7 @@ impl Indexer {
                 document.checksum() as i64,
             ],
         )
-        .map_err(|source| classify_error(display_path, "insert one document", source))?;
+        .map_err(|source| classify(conn, display_path, "insert one document", source))?;
         Ok(())
     }
 
@@ -1398,9 +1705,9 @@ impl Indexer {
     ///
     /// # Errors
     ///
-    /// [`IndexerError::QueryTooLarge`] if `query` exceeds
-    /// `MAX_QUERY_BYTES` or `MAX_QUERY_TOKENS` (the module doc's
-    /// "Unbounded query cost"), checked before FTS5 ever sees it;
+    /// [`IndexerError::QueryTooLarge`] if `query` is longer than
+    /// `MAX_QUERY_BYTES` (the module doc's "Query cost is bounded by
+    /// bytes"), checked before FTS5 ever sees it;
     /// [`IndexerError::InvalidQuery`] if `query`, even quoted, cannot be
     /// searched safely (the module doc's embedded-`NUL` case);
     /// [`IndexerError::Locked`] if a concurrent write holds the lock;
@@ -1410,20 +1717,12 @@ impl Indexer {
         if query.len() > MAX_QUERY_BYTES {
             return Err(IndexerError::QueryTooLarge {
                 byte_len: query.len(),
-                token_count: count_tokens(query),
-            });
-        }
-        let token_count = count_tokens(query);
-        if token_count > MAX_QUERY_TOKENS {
-            return Err(IndexerError::QueryTooLarge {
-                byte_len: query.len(),
-                token_count,
             });
         }
 
         let path = self.display_path();
         let tx = self.conn.unchecked_transaction().map_err(|source| {
-            classify_error(&path, "begin a read transaction for search", source)
+            classify_without_check(&path, "begin a read transaction for search", source)
         })?;
         let total = Self::total_indexed_on(&tx, &path)?;
         if query.trim().is_empty() {
@@ -1441,7 +1740,7 @@ impl Indexer {
                  FROM documents WHERE documents MATCH ?1 \
                  ORDER BY rank ASC, path ASC LIMIT ?2",
             )
-            .map_err(|source| classify_error(&path, "prepare a search", source))?;
+            .map_err(|source| classify(&tx, &path, "prepare a search", source))?;
         // `query_map` itself only prepares the row-mapping closure; FTS5's
         // own query-syntax errors (the embedded-NUL case this module's
         // tests reach), a locked write and a corrupt page all surface
@@ -1476,41 +1775,330 @@ impl Indexer {
             documents_covered: total,
         })
     }
+}
+
+impl Indexer<'_> {
+    /// Replaces the product's on-disk index with a fresh one rebuilt from
+    /// `documents`, moving the old file and its side files aside into
+    /// `index/quarantine/`, never deleting them: the only file-level
+    /// recovery this module has, and the answer to every
+    /// [`IndexerError::Corrupt`] (the module doc's "Recovery").
+    ///
+    /// `&mut ProductDb` is the whole safety argument. Every on-disk
+    /// [`Indexer`] borrows its `ProductDb` for as long as it lives, so while
+    /// one is alive this does not compile, which is the compiler proving no
+    /// `Indexer` in this process has the file open; the `ProductDb`'s own OS
+    /// lock proves no other engine process does.
+    ///
+    /// A call made while an `Indexer` is still used afterwards is refused
+    /// at compile time:
+    ///
+    /// ```compile_fail,E0502
+    /// # use ori_core::types::Timestamp;
+    /// # use ori_memory::indexer::Indexer;
+    /// # use ori_store::db::ProductDb;
+    /// # fn recover_while_searching(db: &mut ProductDb) {
+    /// let indexer = Indexer::open(db).expect("open");
+    /// let _ = Indexer::recover(db, &[], Timestamp::from_millis(0));
+    /// let _ = indexer.search("still in use", 10);
+    /// # }
+    /// ```
+    ///
+    /// So is one made while an `Indexer` is merely still in scope, never
+    /// used again but not yet dropped (its connection would otherwise close
+    /// on the replaced file after this returned; see the `Drop` impl):
+    ///
+    /// ```compile_fail,E0502
+    /// # use ori_core::types::Timestamp;
+    /// # use ori_memory::indexer::Indexer;
+    /// # use ori_store::db::ProductDb;
+    /// # fn recover_while_in_scope(db: &mut ProductDb) {
+    /// let indexer = Indexer::open(db).expect("open");
+    /// let _ = indexer.search("last use", 10);
+    /// let _ = Indexer::recover(db, &[], Timestamp::from_millis(0));
+    /// # }
+    /// ```
+    ///
+    /// And the same calls compile once the `Indexer` is dropped first, which
+    /// is what shows the two examples above fail for the borrow and for
+    /// nothing else:
+    ///
+    /// ```no_run
+    /// # use ori_core::types::Timestamp;
+    /// # use ori_memory::indexer::Indexer;
+    /// # use ori_store::db::ProductDb;
+    /// # fn recover_after_dropping(db: &mut ProductDb) {
+    /// let indexer = Indexer::open(db).expect("open");
+    /// let _ = indexer.search("last use", 10);
+    /// drop(indexer);
+    /// let _ = Indexer::recover(db, &[], Timestamp::from_millis(0));
+    /// # }
+    /// ```
+    ///
+    /// `recovered_at` names the quarantine directory,
+    /// `<recovered_at in milliseconds, 20 digits>-<n>`, so that directories
+    /// sort in the order recoveries happened and two in one millisecond
+    /// still get distinct names; this module reads no clock itself, for the
+    /// reason `ProductDb::open`'s `opened_at` gives. `documents` is the
+    /// target set the fresh index is rebuilt from, normally
+    /// [`Indexer::collect_from_repo`]'s. The damaged file is never opened,
+    /// so no damage can make this fail. If the rebuild itself fails after
+    /// the move, the old files are already safe in quarantine and the
+    /// product has a fresh, possibly partial index; calling this again, or
+    /// [`Indexer::full_rebuild`], completes it.
+    ///
+    /// # Errors
+    ///
+    /// [`IndexerError::DuplicatePath`] if `documents` holds one path twice,
+    /// checked before anything is moved;
+    /// [`IndexerError::RecoveryRefused`] if `index/` or `index/quarantine/`
+    /// is a symbolic link;
+    /// [`IndexerError::Directory`] or [`IndexerError::Io`] if a directory
+    /// cannot be created or a file cannot be moved;
+    /// any error [`Indexer::full_rebuild`] returns, from rebuilding the
+    /// fresh index.
+    pub fn recover(
+        db: &mut ProductDb,
+        documents: &[IndexableDocument],
+        recovered_at: Timestamp,
+    ) -> Result<RecoveryReport, IndexerError> {
+        refuse_duplicate_paths(documents)?;
+        let db: &ProductDb = db;
+        let index_dir = db.dir().join(INDEX_DIR);
+        std::fs::create_dir_all(&index_dir).map_err(|source| IndexerError::Directory {
+            path: index_dir.clone(),
+            source,
+        })?;
+        refuse_symlink(&index_dir)?;
+
+        let (quarantine, quarantined_files) = quarantine_index_files(&index_dir, recovered_at)?;
+
+        // The fresh index: created, rebuilt and closed before this returns,
+        // so nothing this call opened is still open when the caller's own
+        // Indexers come back.
+        let rebuilt = {
+            let mut fresh = Indexer::open(db)?;
+            fresh.full_rebuild(documents)?
+        };
+        Ok(RecoveryReport {
+            quarantine,
+            quarantined_files,
+            rebuilt,
+        })
+    }
 
     /// Walks `repo_root` for the canonical documents this indexer is
     /// permitted to hold, and returns them ready for [`Indexer::full_rebuild`]
-    /// or [`Indexer::incremental_sync`].
+    /// or [`Indexer::incremental_sync`]: [`Indexer::walk_repo`]'s documents,
+    /// without its list of what was skipped and why. Call `walk_repo` to see
+    /// that list.
+    ///
+    /// # Errors
+    ///
+    /// As [`Indexer::walk_repo`].
+    pub fn collect_from_repo(repo_root: &Path) -> Result<Vec<IndexableDocument>, IndexerError> {
+        Ok(Self::walk_repo(repo_root)?.documents)
+    }
+
+    /// Walks `repo_root/spec` for the canonical documents this indexer is
+    /// permitted to hold, and reports every entry it left out, with the
+    /// reason.
     ///
     /// Only `spec/adr/*.md` (kind [`DocumentKind::Adr`], one document per
     /// file), `spec/criteria/*.md` (kind [`DocumentKind::Criterion`], one
     /// document per table row whose first cell matches
     /// `ORI-[A-Z0-9]+-[0-9]+`, per `spec/criteria/phase-1.md`'s own format
     /// line, "Identifier `ORI-P1-nnn`"), and every other `spec/**/*.md` (kind
-    /// [`DocumentKind::Section`], one document per ATX heading, flat rather
-    /// than level-aware: this module's own splitter, not
-    /// `ori-gates::spec_refs::heading_slug`'s, since `ori-memory` does not
-    /// and must not depend on `ori-gates`, a sideways crate under
-    /// `spec/LLD.md` section 2's dependency direction) are walked.
-    /// `spec/design/` is skipped entirely; see the module doc.
+    /// [`DocumentKind::Section`], one document for any text above the first
+    /// ATX heading and one per heading, flat rather than level-aware: this
+    /// module's own splitter, not `ori-gates::spec_refs::heading_slug`'s,
+    /// since `ori-memory` does not and must not depend on `ori-gates`, a
+    /// sideways crate under `spec/LLD.md` section 2's dependency direction)
+    /// are read. `spec/design/` is skipped entirely; see the module doc.
+    /// Symbolic links, non-regular files, non-UTF-8 paths, unreadable
+    /// entries and repeated document paths are left out and listed in
+    /// [`RepoWalk::skipped`]; see the module doc's "What the repository
+    /// walk never reads". Entries are visited in name order, so the result
+    /// does not depend on the filesystem's own directory order.
     ///
     /// # Errors
     ///
-    /// [`IndexerError::Io`] if a directory or file cannot be read, or if a
-    /// file this walk finds is not actually under `repo_root` (a symlink
-    /// escaping it, most plausibly; the module never synthesizes an
-    /// absolute-path identity as a fallback, see `walk_markdown`'s doc).
-    pub fn collect_from_repo(repo_root: &Path) -> Result<Vec<IndexableDocument>, IndexerError> {
+    /// [`IndexerError::Io`] only if `repo_root/spec` itself exists and
+    /// cannot be read, or if a file this walk reaches is somehow not under
+    /// `repo_root` (the module never synthesizes an absolute-path identity
+    /// as a fallback, see `walk_markdown`'s doc). One unreadable file or
+    /// subdirectory never fails the walk.
+    pub fn walk_repo(repo_root: &Path) -> Result<RepoWalk, IndexerError> {
         let spec_dir = repo_root.join("spec");
-        let mut out = Vec::new();
-        walk_markdown(repo_root, &spec_dir, &mut out)?;
-        Ok(out)
+        let mut walk = RepoWalk::default();
+        match std::fs::symlink_metadata(&spec_dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(walk),
+            Err(source) => {
+                return Err(IndexerError::Io {
+                    path: spec_dir,
+                    source,
+                });
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                walk.skipped.push(SkippedEntry {
+                    path: spec_dir,
+                    reason: SkipReason::Symlink,
+                });
+                return Ok(walk);
+            }
+            Ok(metadata) if !metadata.is_dir() => return Ok(walk),
+            Ok(_) => {}
+        }
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        walk_markdown(repo_root, &spec_dir, &mut walk, &mut seen).map_err(|source| {
+            IndexerError::Io {
+                path: spec_dir.clone(),
+                source,
+            }
+        })?;
+        Ok(walk)
     }
 }
 
+/// One row as [`Indexer::incremental_sync`] reads it: every column it diffs
+/// on, typed as found rather than as this build would have stored it
+/// (`None` for a value of any other type).
+struct StoredRow {
+    rowid: i64,
+    path: Option<String>,
+    kind: Option<String>,
+    checksum: Option<i64>,
+}
+
+/// `value` as a `String` if it is UTF-8 text, else `None`.
+fn text_of(value: ValueRef<'_>) -> Option<String> {
+    match value {
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// `value` as an `i64` if it is an integer, else `None`.
+fn integer_of(value: ValueRef<'_>) -> Option<i64> {
+    match value {
+        ValueRef::Integer(integer) => Some(integer),
+        _ => None,
+    }
+}
+
+/// Refuses `dir` if it is a symbolic link: [`Indexer::recover`] moves files
+/// only inside a directory the product owns outright (the module doc's
+/// "Recovery").
+fn refuse_symlink(dir: &Path) -> Result<(), IndexerError> {
+    let metadata = std::fs::symlink_metadata(dir).map_err(|source| IndexerError::Io {
+        path: dir.to_owned(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(IndexerError::RecoveryRefused {
+            path: dir.to_owned(),
+            reason: "it is a symbolic link, so the files it holds may be another product's",
+        });
+    }
+    Ok(())
+}
+
+/// Moves every file of [`INDEX_FILE_SET`] present in `index_dir` into a new,
+/// uniquely named directory under `index_dir/quarantine/`, side files
+/// first, and checks none of them is left at its live path. Returns the
+/// directory (`None`, and nothing created, when no file was present) and
+/// every moved file's new path. Only [`Indexer::recover`] calls this, under
+/// the proof its doc states.
+fn quarantine_index_files(
+    index_dir: &Path,
+    recovered_at: Timestamp,
+) -> Result<(Option<PathBuf>, Vec<PathBuf>), IndexerError> {
+    let mut present = Vec::new();
+    for name in INDEX_FILE_SET {
+        let live = index_dir.join(name);
+        match std::fs::symlink_metadata(&live) {
+            Ok(_) => present.push(name),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(IndexerError::Io { path: live, source }),
+        }
+    }
+    if present.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+
+    let quarantine_root = index_dir.join(QUARANTINE_DIR);
+    std::fs::create_dir_all(&quarantine_root).map_err(|source| IndexerError::Directory {
+        path: quarantine_root.clone(),
+        source,
+    })?;
+    refuse_symlink(&quarantine_root)?;
+    let destination = unique_quarantine_dir(&quarantine_root, recovered_at)?;
+
+    let mut moved = Vec::new();
+    for name in present {
+        let from = index_dir.join(name);
+        let to = destination.join(name);
+        std::fs::rename(&from, &to).map_err(|source| IndexerError::Io {
+            path: from.clone(),
+            source,
+        })?;
+        moved.push(to);
+    }
+    for name in INDEX_FILE_SET {
+        let live = index_dir.join(name);
+        if std::fs::symlink_metadata(&live).is_ok() {
+            return Err(IndexerError::Io {
+                path: live,
+                source: std::io::Error::other(
+                    "still present after being moved into quarantine; refusing to create a \
+                     fresh index beside it",
+                ),
+            });
+        }
+    }
+    Ok((Some(destination), moved))
+}
+
+/// Creates and returns `quarantine_root/<millis, 20 digits>-<n, 3 digits>`
+/// for the smallest `n` not already taken: `create_dir`, not
+/// `create_dir_all`, so "already taken" is decided by the filesystem
+/// atomically, never by a check that could race a second recovery. A
+/// timestamp before the Unix epoch is written as zero rather than with a
+/// sign, which would break the ordering.
+fn unique_quarantine_dir(
+    quarantine_root: &Path,
+    recovered_at: Timestamp,
+) -> Result<PathBuf, IndexerError> {
+    let millis = u64::try_from(recovered_at.millis()).unwrap_or(0);
+    for sequence in 0..1000u32 {
+        let candidate = quarantine_root.join(format!("{millis:020}-{sequence:03}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(IndexerError::Directory {
+                    path: candidate,
+                    source,
+                });
+            }
+        }
+    }
+    Err(IndexerError::Directory {
+        path: quarantine_root.to_owned(),
+        source: std::io::Error::other(
+            "a thousand recoveries are already recorded at this millisecond",
+        ),
+    })
+}
+
 /// Recursively walks `dir` for `.md` files, skipping the whole `spec/design`
-/// subtree by its exact repository-relative path, and appends every
-/// document found to `out`, with `path` computed relative to `repo_root`,
-/// never to `dir` itself.
+/// subtree by its exact repository-relative path, appending every document
+/// found to `walk.documents` (and every entry left out to `walk.skipped`),
+/// with `path` computed relative to `repo_root`, never to `dir` itself.
+/// Returns an error only when `dir` itself cannot be listed, which
+/// [`Indexer::walk_repo`] turns into [`IndexerError::Io`] for `spec/` and
+/// this function records as [`SkipReason::Unreadable`] for any directory
+/// below it.
 ///
 /// An adversarial review found the previous version stripped each file's
 /// path relative to `dir.parent().parent()`, where `dir` is whichever
@@ -1527,7 +2115,7 @@ impl Indexer {
 /// A second review found two narrower defects this rewrite did not reach.
 /// First, `is_adr`/`is_criteria` (below) still read `relative_path`'s
 /// components for `adr` or `criteria` *anywhere*, not only in the second
-/// position `collect_from_repo`'s own doc names (`spec/adr/*.md`,
+/// position `walk_repo`'s own doc names (`spec/adr/*.md`,
 /// `spec/criteria/*.md`): an ordinary prose document nested under a
 /// `criteria`-named directory that is not `spec/criteria/` was silently
 /// parsed as a criteria table and dropped out of the index entirely when
@@ -1548,25 +2136,48 @@ impl Indexer {
 /// `tests::ori_t_0035_collect_from_repo_excludes_a_nested_markdown_file_under_spec_design`
 /// plants a file two levels deep to prove that directly, not only at the
 /// top level.
+///
+/// A third review found the walk following symbolic links (`is_dir` and
+/// `read_to_string` both follow them), rewriting `\` to `/` on every
+/// platform, and failing the whole walk on one unreadable file. Every
+/// entry is now decided by `DirEntry::file_type`, which never follows a
+/// link; the path is the components joined with `/`; and anything left out
+/// is recorded with a reason: the module doc's "What the repository walk
+/// never reads".
 fn walk_markdown(
     repo_root: &Path,
     dir: &Path,
-    out: &mut Vec<IndexableDocument>,
-) -> Result<(), IndexerError> {
-    if !dir.is_dir() {
-        return Ok(());
+    walk: &mut RepoWalk,
+    seen: &mut BTreeSet<String>,
+) -> std::io::Result<()> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        entries.push(entry?);
     }
-    let entries = std::fs::read_dir(dir).map_err(|source| IndexerError::Io {
-        path: dir.to_owned(),
-        source,
-    })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
     for entry in entries {
-        let entry = entry.map_err(|source| IndexerError::Io {
-            path: dir.to_owned(),
-            source,
-        })?;
         let path = entry.path();
-        if path.is_dir() {
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                walk.skipped.push(SkippedEntry {
+                    path,
+                    reason: SkipReason::Unreadable {
+                        error: error.to_string(),
+                    },
+                });
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            walk.skipped.push(SkippedEntry {
+                path,
+                reason: SkipReason::Symlink,
+            });
+            continue;
+        }
+        if file_type.is_dir() {
             let relative_dir = path.strip_prefix(repo_root).unwrap_or(&path);
             if relative_dir == Path::new("spec").join("design") {
                 // E-0006: spec/design/ is mock data for a fictional product.
@@ -1576,54 +2187,109 @@ fn walk_markdown(
                 // untouched.
                 continue;
             }
-            walk_markdown(repo_root, &path, out)?;
+            if let Err(error) = walk_markdown(repo_root, &path, walk, seen) {
+                walk.skipped.push(SkippedEntry {
+                    path,
+                    reason: SkipReason::Unreadable {
+                        error: error.to_string(),
+                    },
+                });
+            }
             continue;
         }
         if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).map_err(|source| IndexerError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        // Refused, never defaulted to the absolute path: an identity that
-        // silently became absolute the one time stripping failed would
-        // reintroduce exactly the checkout-dependent-identity defect this
-        // rewrite exists to remove.
-        let relative_path = path
-            .strip_prefix(repo_root)
-            .map_err(|_source| IndexerError::Io {
-                path: path.clone(),
-                source: std::io::Error::other(format!(
-                    "{} is not under repo_root {}; refusing to synthesize an absolute-path \
-                     identity for it",
-                    path.display(),
-                    repo_root.display()
-                )),
-            })?;
-        let relative = relative_path.to_string_lossy().replace('\\', "/");
-        let components: Vec<&str> = relative_path
-            .components()
-            .filter_map(|component| component.as_os_str().to_str())
-            .collect();
-        let is_adr = components.len() == 3 && components[0] == "spec" && components[1] == "adr";
-        let is_criteria =
-            components.len() == 3 && components[0] == "spec" && components[1] == "criteria";
-        if is_adr {
-            let title = first_heading(&text).unwrap_or_else(|| relative.clone());
-            out.push(IndexableDocument::new(
-                relative,
-                DocumentKind::Adr,
-                title,
-                text,
-            ));
-        } else if is_criteria {
-            out.extend(criteria_documents(&relative, &text));
-        } else {
-            out.extend(section_documents(&relative, &text));
+        if !file_type.is_file() {
+            walk.skipped.push(SkippedEntry {
+                path,
+                reason: SkipReason::NotARegularFile,
+            });
+            continue;
         }
+        collect_file(repo_root, path, walk, seen);
     }
     Ok(())
+}
+
+/// Reads one regular `.md` file the walk reached and appends its documents
+/// to `walk`, or records why it was left out: [`walk_markdown`]'s per-file
+/// half.
+fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, seen: &mut BTreeSet<String>) {
+    // Never defaulted to the absolute path: an identity that silently
+    // became absolute the one time stripping failed would reintroduce
+    // exactly the checkout-dependent-identity defect `walk_markdown`'s doc
+    // describes. Unreachable in practice (every path here was built by
+    // joining entries onto a directory under `repo_root`), and recorded
+    // rather than failing the walk if it ever is reached.
+    let Ok(relative_path) = path.strip_prefix(repo_root) else {
+        walk.skipped.push(SkippedEntry {
+            reason: SkipReason::Unreadable {
+                error: format!(
+                    "not under repo_root {}; refusing to synthesize an absolute-path identity",
+                    repo_root.display()
+                ),
+            },
+            path,
+        });
+        return;
+    };
+    let Some(components) = relative_path
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<&str>>>()
+    else {
+        walk.skipped.push(SkippedEntry {
+            path,
+            reason: SkipReason::NonUtf8Path,
+        });
+        return;
+    };
+    // `Path::components` splits on `\` only where the platform treats it as
+    // a separator, so this join is the whole normalization: on Unix a `\`
+    // in a file name stays part of that name. See the module doc's
+    // "Document identity".
+    let relative = components.join("/");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            walk.skipped.push(SkippedEntry {
+                path,
+                reason: SkipReason::Unreadable {
+                    error: error.to_string(),
+                },
+            });
+            return;
+        }
+    };
+    let is_adr = components.len() == 3 && components[0] == "spec" && components[1] == "adr";
+    let is_criteria =
+        components.len() == 3 && components[0] == "spec" && components[1] == "criteria";
+    let documents = if is_adr {
+        let title = first_heading(&text).unwrap_or_else(|| relative.clone());
+        vec![IndexableDocument::new(
+            relative,
+            DocumentKind::Adr,
+            title,
+            text,
+        )]
+    } else if is_criteria {
+        criteria_documents(&relative, &text)
+    } else {
+        section_documents(&relative, &text)
+    };
+    for document in documents {
+        if seen.insert(document.path.clone()) {
+            walk.documents.push(document);
+        } else {
+            walk.skipped.push(SkippedEntry {
+                path: path.clone(),
+                reason: SkipReason::DuplicateDocumentPath {
+                    path: document.path,
+                },
+            });
+        }
+    }
 }
 
 /// The text of the first ATX heading in `text`, with leading `#`s and
@@ -1639,35 +2305,36 @@ fn first_heading(text: &str) -> Option<String> {
 
 /// Splits `text` into one [`IndexableDocument`] per ATX heading, flat (every
 /// heading line starts a new section regardless of its level; see
-/// [`Indexer::collect_from_repo`]'s doc for why this does not attempt
-/// `ori-gates`'s level-aware split). Text before the first heading, if any,
-/// is not a document of its own; a file with no heading at all becomes one
-/// document titled by its path.
+/// [`Indexer::walk_repo`]'s doc for why this does not attempt `ori-gates`'s
+/// level-aware split), plus one for any non-blank text above the first
+/// heading, at `relative_path` itself with no anchor, titled by the path. A
+/// file with no heading at all becomes that one document, holding the whole
+/// text. No non-blank line is ever dropped: the module doc's "Text before
+/// the first heading is a document too" records the review that found
+/// every line above a first heading discarded.
 ///
-/// Two defects an adversarial review found are fixed here. First, a line
-/// starting with `#` *inside a fenced code block* (three or more backticks)
-/// is not a heading: a `# install` comment inside a shell snippet no longer
-/// splits the document or contributes an anchor. Second, two headings whose
-/// text produces the same anchor (an exact repeat, such as two `## Steps`
-/// in one file) are disambiguated deterministically, GitHub's own actual
-/// convention: keep incrementing a `-N` suffix until an anchor no earlier
-/// heading in this file has already claimed. A second review found this
-/// module's first attempt at that convention checked only a per-base
-/// counter, not the set of anchors already assigned, so a heading whose
-/// own text already ends in a numeral collided with the suffix a repeat
-/// produced (`Phase 1`, `Phase 1.1`, `Phase 1` gave `phase-1`, `phase-1-1`,
-/// `phase-1-1`, a second collision from the very fix meant to remove the
-/// first one). `used_anchors` below tracks the whole set, so the third
-/// heading here is tried against `phase-1` (taken), then `phase-1-1`
-/// (also taken), then `phase-1-2` (free), matching what GitHub's own
-/// slugger does. Without either fix, two documents could carry the same
-/// `path`, which [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`]
-/// now refuse outright ([`refuse_duplicate_paths`]) rather than silently
-/// keep only one of, so a collision this scheme still produced would fail
-/// indexing the whole target set, not only the one colliding document; see
-/// `ori_t_0035_full_rebuild_and_incremental_sync_agree_on_this_repositorys_own_spec_tree`
-/// for the check that this module's own `spec/` never hits one.
+/// Two defects an earlier adversarial review found are fixed here too.
+/// First, a line starting with `#` *inside a fenced code block* (three or
+/// more backticks) is not a heading: a `# install` comment inside a shell
+/// snippet no longer splits the document or contributes an anchor. Second,
+/// two headings whose text produces the same anchor (an exact repeat, such
+/// as two `## Steps` in one file) are disambiguated deterministically,
+/// GitHub's own actual convention: keep incrementing a `-N` suffix until an
+/// anchor no earlier heading in this file has already claimed. A second
+/// review found this module's first attempt at that convention checked only
+/// a per-base counter, not the set of anchors already assigned, so a
+/// heading whose own text already ends in a numeral collided with the
+/// suffix a repeat produced (`Phase 1`, `Phase 1.1`, `Phase 1` gave
+/// `phase-1`, `phase-1-1`, `phase-1-1`, a second collision from the very fix
+/// meant to remove the first one). `used_anchors` below tracks the whole
+/// set, so the third heading here is tried against `phase-1` (taken), then
+/// `phase-1-1` (also taken), then `phase-1-2` (free), matching what GitHub's
+/// own slugger does. Without either fix, two documents could carry the same
+/// `path`, which [`Indexer::walk_repo`] would then have to leave out; see
+/// `tests::ori_t_0035_collect_from_repo_and_full_rebuild_succeed_on_this_repositorys_own_spec_tree`
+/// for the check that this repository's own `spec/` never hits one.
 fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> {
+    let mut preamble = String::new();
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut current_title: Option<String> = None;
     let mut current_body = String::new();
@@ -1677,21 +2344,20 @@ fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> 
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
-            if current_title.is_some() {
-                current_body.push_str(line);
-                current_body.push('\n');
-            }
-            continue;
-        }
-        if !in_fence && trimmed.starts_with('#') {
+        } else if !in_fence && trimmed.starts_with('#') {
             if let Some(title) = current_title.take() {
                 sections.push((title, std::mem::take(&mut current_body)));
             }
             current_title = Some(trimmed.trim_start_matches('#').trim().to_owned());
-        } else if current_title.is_some() {
-            current_body.push_str(line);
-            current_body.push('\n');
+            continue;
         }
+        let body = if current_title.is_some() {
+            &mut current_body
+        } else {
+            &mut preamble
+        };
+        body.push_str(line);
+        body.push('\n');
     }
     if let Some(title) = current_title {
         sections.push((title, current_body));
@@ -1706,31 +2372,38 @@ fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> 
         )];
     }
 
+    let mut out = Vec::with_capacity(sections.len() + 1);
+    if !preamble.trim().is_empty() {
+        out.push(IndexableDocument::new(
+            relative_path.to_owned(),
+            DocumentKind::Section,
+            relative_path.to_owned(),
+            preamble,
+        ));
+    }
     let mut used_anchors: std::collections::HashSet<String> = std::collections::HashSet::new();
-    sections
-        .into_iter()
-        .map(|(title, body)| {
-            let base = heading_anchor(&title);
-            let mut anchor = base.clone();
-            let mut suffix = 1usize;
-            while used_anchors.contains(&anchor) {
-                anchor = format!("{base}-{suffix}");
-                suffix += 1;
-            }
-            used_anchors.insert(anchor.clone());
-            IndexableDocument::new(
-                format!("{relative_path}#{anchor}"),
-                DocumentKind::Section,
-                title,
-                body,
-            )
-        })
-        .collect()
+    out.extend(sections.into_iter().map(|(title, body)| {
+        let base = heading_anchor(&title);
+        let mut anchor = base.clone();
+        let mut suffix = 1usize;
+        while used_anchors.contains(&anchor) {
+            anchor = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        used_anchors.insert(anchor.clone());
+        IndexableDocument::new(
+            format!("{relative_path}#{anchor}"),
+            DocumentKind::Section,
+            title,
+            body,
+        )
+    }));
+    out
 }
 
 /// A simple, local heading-to-anchor mapping: lower-cased, non-alphanumeric
 /// runs collapsed to one `-`. Deliberately not
-/// `ori-gates::spec_refs::heading_slug` (see [`Indexer::collect_from_repo`]'s
+/// `ori-gates::spec_refs::heading_slug` (see [`Indexer::walk_repo`]'s
 /// doc); this indexer's anchors are its own document identities, never
 /// compared against the citation gate's.
 fn heading_anchor(title: &str) -> String {
@@ -1800,6 +2473,7 @@ fn is_criterion_id(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::fs;
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering;
@@ -1834,6 +2508,49 @@ mod tests {
 
     fn doc(path: &str, kind: DocumentKind, title: &str, body: &str) -> IndexableDocument {
         IndexableDocument::new(path, kind, title, body)
+    }
+
+    /// The product id every on-disk test opens its scratch product under.
+    const PRODUCT: &str = "PRODUCT-T35";
+
+    /// A scratch product, opened and locked the way the engine opens one:
+    /// an on-disk `Indexer` exists only through a `ProductDb`.
+    fn product(scratch: &Scratch) -> ProductDb {
+        ProductDb::open(&scratch.path, PRODUCT, Timestamp::from_millis(1_000))
+            .expect("a scratch product opens")
+    }
+
+    /// `<product dir>/index/`, where `Indexer::open` puts the index.
+    fn index_dir(db: &ProductDb) -> PathBuf {
+        db.dir().join(INDEX_DIR)
+    }
+
+    /// `<product dir>/index/fts.sqlite`, the index file itself.
+    fn index_file(db: &ProductDb) -> PathBuf {
+        index_dir(db).join(INDEX_FILE)
+    }
+
+    // -------------------------------------------------------------------
+    // The after-commit seam `commit` calls in test builds (see its doc).
+    // -------------------------------------------------------------------
+
+    thread_local! {
+        static AFTER_COMMIT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Installs `hook` to run once, on this thread, right after the next
+    /// `commit` returns.
+    fn set_after_commit_hook(hook: impl FnOnce() + 'static) {
+        AFTER_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs and clears this thread's hook, if one is installed: called by
+    /// `commit` in test builds only.
+    pub(super) fn run_after_commit_hook() {
+        let hook = AFTER_COMMIT.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     // -------------------------------------------------------------------
@@ -2186,13 +2903,14 @@ mod tests {
     #[test]
     fn ori_t_0035_an_on_disk_index_survives_being_reopened() {
         let scratch = Scratch::new("on-disk-reopen");
+        let db = product(&scratch);
         {
-            let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
             indexer
                 .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha content")])
                 .expect("full rebuild");
         }
-        let reopened = Indexer::open(&scratch.path).expect("reopen the same directory");
+        let reopened = Indexer::open(&db).expect("reopen the same directory");
         let dump = reopened.all_documents().expect("read back after reopen");
         assert_eq!(dump.len(), 1);
         assert_eq!(dump[0].0.path, "a.md");
@@ -2201,8 +2919,9 @@ mod tests {
     #[test]
     fn ori_t_0035_incremental_sync_after_a_reopen_still_removes_and_upserts_correctly() {
         let scratch = Scratch::new("on-disk-incremental-reopen");
+        let db = product(&scratch);
         {
-            let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
             indexer
                 .full_rebuild(&[
                     doc("a.md", DocumentKind::Section, "A", "alpha"),
@@ -2210,7 +2929,7 @@ mod tests {
                 ])
                 .expect("full rebuild");
         }
-        let mut reopened = Indexer::open(&scratch.path).expect("reopen the same directory");
+        let mut reopened = Indexer::open(&db).expect("reopen the same directory");
         let report = reopened
             .incremental_sync(&[doc("a.md", DocumentKind::Section, "A", "alpha")])
             .expect("incremental sync after reopen, with no in-memory history");
@@ -2230,19 +2949,16 @@ mod tests {
     #[test]
     fn ori_t_0035_the_index_lives_in_its_own_file_never_inside_product_sqlite() {
         let scratch = Scratch::new("own-file");
+        let mut db = product(&scratch);
         {
-            let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
             indexer
                 .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha")])
                 .expect("full rebuild");
         }
         assert!(
-            scratch.path.join("fts.sqlite").is_file(),
+            index_file(&db).is_file(),
             "the index must be its own file, index/fts.sqlite"
-        );
-        assert!(
-            !scratch.path.join("product.sqlite").exists(),
-            "this module must never write into product.sqlite"
         );
 
         // Deleting the index directory's file and rebuilding from the
@@ -2250,12 +2966,12 @@ mod tests {
         // reproduces the identical stored state: the derived-data property
         // the module doc's "The index is derived" names.
         let before = {
-            let indexer = Indexer::open(&scratch.path).expect("reopen before delete");
+            let indexer = Indexer::open(&db).expect("reopen before delete");
             indexer.all_documents().expect("dump before delete")
         };
-        fs::remove_file(scratch.path.join("fts.sqlite")).expect("delete the index file");
+        fs::remove_file(index_file(&db)).expect("delete the index file");
         let after = {
-            let mut indexer = Indexer::open(&scratch.path).expect("reopen after delete");
+            let mut indexer = Indexer::open(&db).expect("reopen after delete");
             indexer
                 .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha")])
                 .expect("rebuild from the repository");
@@ -2265,6 +2981,23 @@ mod tests {
             before, after,
             "deleting index/fts.sqlite and rebuilding from the repository must reproduce the \
              identical state"
+        );
+
+        // product.sqlite exists beside it (ProductDb made it) and holds none
+        // of the index's tables: read through the ProductDb's own connection,
+        // which needs `&mut db`, so every Indexer above is already gone.
+        assert!(db.dir().join("product.sqlite").is_file());
+        let index_tables: i64 = db
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'documents%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read product.sqlite's schema");
+        assert_eq!(
+            index_tables, 0,
+            "this module must never write into product.sqlite"
         );
     }
 
@@ -2411,12 +3144,13 @@ mod tests {
     #[test]
     fn ori_t_0035_a_second_writer_against_the_same_on_disk_index_fails_cleanly_not_corrupting_it() {
         let scratch = Scratch::new("concurrency");
-        let mut first = Indexer::open(&scratch.path).expect("first writer opens");
+        let db = product(&scratch);
+        let mut first = Indexer::open(&db).expect("first writer opens");
         first
             .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha")])
             .expect("seed the index");
 
-        let mut second = Indexer::open(&scratch.path).expect("second connection opens");
+        let mut second = Indexer::open(&db).expect("second connection opens");
 
         // Hold a write transaction open on `first` so `second` contends for
         // the lock.
@@ -2710,24 +3444,6 @@ mod tests {
     }
 
     #[test]
-    fn ori_t_0035_search_refuses_a_query_over_the_token_limit() {
-        let indexer = Indexer::open_in_memory().expect("in-memory index opens");
-        // Short enough in bytes to pass the byte cap, but with more tokens
-        // than MAX_QUERY_TOKENS allows.
-        let query = "a ".repeat(MAX_QUERY_TOKENS + 1);
-        assert!(
-            query.len() <= MAX_QUERY_BYTES,
-            "the byte cap must not be what refuses this"
-        );
-        match indexer.search(&query, 10) {
-            Err(IndexerError::QueryTooLarge { token_count, .. }) => {
-                assert_eq!(token_count, MAX_QUERY_TOKENS + 1);
-            }
-            other => panic!("a query over the token limit must be refused, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn ori_t_0035_search_within_both_limits_still_runs() {
         let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
         indexer
@@ -2758,7 +3474,7 @@ mod tests {
     /// replaces: empirically, and confirmed over hundreds of fresh runs
     /// during this fix, this always yields `ErrorCode::DatabaseCorrupt`, on
     /// every corpus shape this module's tests seed, never `OutOfMemory`.
-    /// [`corrupt_fts5_averages_row_with_an_oversized_length_prefix`] below
+    /// [`corrupt_fts5_structure_row_with_an_oversized_length_prefix`] below
     /// is the companion helper for the `OutOfMemory` case specifically:
     /// this one is deliberately not it.
     fn corrupt_fts5_shadow_table(path: &Path) {
@@ -2780,37 +3496,34 @@ mod tests {
     }
 
     /// The pinned 26-byte replacement this module's own probing found for
-    /// `documents_data`'s row 10 (FTS5's averages record) that makes the
-    /// bundled SQLite report `ErrorCode::OutOfMemory` (`SQLITE_NOMEM`)
-    /// while reading this exact module's 80-document, single-shared-term
-    /// corpus (the same shape
+    /// `documents_data`'s row 10 that makes the bundled SQLite report
+    /// `ErrorCode::OutOfMemory` (`SQLITE_NOMEM`) while reading this exact
+    /// module's 80-document, single-shared-term corpus (the same shape
     /// `tests::ori_t_0035_a_corrupt_index_is_reported_as_corrupt_not_invalid_query`
-    /// seeds): confirmed deterministic over 20 independent fresh runs
-    /// before being pinned here, and stable for the reason
-    /// `diagnose_ambiguous_read_error`'s doc gives (a length prefix
-    /// decoding to an implausible size), not a property of any particular
-    /// corpus content beyond its exact shape. Not a general-purpose
-    /// corruption pattern the way [`corrupt_fts5_shadow_table`] is: it is
-    /// specific to row 10 at this exact length, found empirically rather
-    /// than derived from FTS5's on-disk format, and exists only to prove
-    /// [`diagnose_ambiguous_read_error`] catches the `OutOfMemory` case
-    /// deterministically, not to stand in for corruption generally.
-    const AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX: &str =
+    /// seeds), found empirically rather than derived from FTS5's on-disk
+    /// format. Row 10 is FTS5's structure record (`FTS5_STRUCTURE_ROWID` in
+    /// the bundled `sqlite3.c`; its averages record is row 1, which round 4
+    /// misnamed this after): a length in it decodes to an implausible size,
+    /// and every reader of the index, `PRAGMA quick_check` included, fails
+    /// for want of the memory that size asks for. Not a general-purpose
+    /// corruption pattern the way [`corrupt_fts5_shadow_table`] is; it
+    /// exists to pin the one shape of damage the module doc's "What is
+    /// reported as corrupt, and what is not" says the check cannot settle.
+    const STRUCTURE_ROW_OVERSIZED_LENGTH_PREFIX: &str =
         "556f784c090469b211bcb0a1cc943696ddceafb6a695cb1485d7";
 
     /// Replaces `documents_data`'s row 10 with
-    /// [`AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX`] through a second,
+    /// [`STRUCTURE_ROW_OVERSIZED_LENGTH_PREFIX`] through a second,
     /// independent connection: see that constant's doc for what it is and
-    /// why, and the module doc's "A corrupt index is reported honestly" for
-    /// why this exists as its own helper rather than folded into
+    /// why it is its own helper rather than folded into
     /// [`corrupt_fts5_shadow_table`].
-    fn corrupt_fts5_averages_row_with_an_oversized_length_prefix(path: &Path) {
+    fn corrupt_fts5_structure_row_with_an_oversized_length_prefix(path: &Path) {
         let raw =
             rusqlite::Connection::open(path).expect("open a second, raw connection to the file");
-        let bytes: Vec<u8> = (0..AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX.len())
+        let bytes: Vec<u8> = (0..STRUCTURE_ROW_OVERSIZED_LENGTH_PREFIX.len())
             .step_by(2)
             .map(|i| {
-                u8::from_str_radix(&AVERAGES_ROW_OVERSIZED_LENGTH_PREFIX[i..i + 2], 16)
+                u8::from_str_radix(&STRUCTURE_ROW_OVERSIZED_LENGTH_PREFIX[i..i + 2], 16)
                     .expect("the pinned pattern is valid hex")
             })
             .collect();
@@ -2819,18 +3532,19 @@ mod tests {
                 "UPDATE documents_data SET block = ?1 WHERE rowid = 10",
                 params![bytes],
             )
-            .expect("replace the averages row directly");
+            .expect("replace the structure row directly");
         assert_eq!(
             changed, 1,
             "row 10 must exist and be the one row this replaces, or this test proves nothing \
-             (a schema or FTS5 version change may have moved the averages record)"
+             (a schema or FTS5 version change may have moved the structure record)"
         );
     }
 
     #[test]
     fn ori_t_0035_a_corrupt_index_is_reported_as_corrupt_not_invalid_query() {
         let scratch = Scratch::new("corrupt-search");
-        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
         let seed: Vec<IndexableDocument> = (0..80)
             .map(|n| {
                 doc(
@@ -2850,7 +3564,7 @@ mod tests {
             "the query must genuinely match before corruption"
         );
 
-        corrupt_fts5_shadow_table(&scratch.path.join("fts.sqlite"));
+        corrupt_fts5_shadow_table(&index_file(&db));
 
         match indexer.search("alpha", 10) {
             Err(IndexerError::Corrupt { source, .. }) => {
@@ -2872,16 +3586,20 @@ mod tests {
     }
 
     #[test]
-    fn ori_t_0035_a_corrupt_index_is_reported_as_corrupt_even_when_sqlite_calls_it_out_of_memory() {
-        // The exact gap a re-verification workflow found: classify_error and
-        // search_error alone treated ErrorCode::OutOfMemory as an ordinary
-        // IndexerError::Sqlite, so a corrupted index that happened to
-        // surface that particular SQLite error code gave a caller no signal
-        // to rebuild. diagnose_ambiguous_read_error closes it by asking
-        // FTS5's own integrity-check rather than guessing from the error
-        // code.
+    fn ori_t_0035_an_out_of_memory_error_the_check_cannot_settle_is_never_called_corrupt_and_recover_still_repairs_it()
+     {
+        // Round 4 pinned this shape as Corrupt: its check (FTS5's
+        // integrity-check command) failed here too, and it read any failure
+        // of the check as damage, which is the same rule that called a
+        // genuinely out-of-memory healthy index Corrupt 76 times in 76. Round
+        // 5's check fails here with SQLITE_NOMEM as well, since it must read
+        // the same structure record, and SQLITE_NOMEM is exactly what a real
+        // out-of-memory condition looks like, so the rule is the original
+        // error, unchanged, never Corrupt. What makes that acceptable is the
+        // second half: recover repairs it anyway, because it never reads
+        // the damaged file.
         let scratch = Scratch::new("corrupt-out-of-memory");
-        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let mut db = product(&scratch);
         let seed: Vec<IndexableDocument> = (0..80)
             .map(|n| {
                 doc(
@@ -2892,34 +3610,65 @@ mod tests {
                 )
             })
             .collect();
-        indexer.full_rebuild(&seed).expect("seed a real corpus");
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&seed).expect("seed a real corpus");
+            corrupt_fts5_structure_row_with_an_oversized_length_prefix(&index_file(&db));
 
-        corrupt_fts5_averages_row_with_an_oversized_length_prefix(&scratch.path.join("fts.sqlite"));
-
-        match indexer.search("alpha", 10) {
-            Err(IndexerError::Corrupt { source, .. }) => {
-                assert!(
+            assert_eq!(
+                quick_check(&indexer.conn),
+                Integrity::Undetermined,
+                "the check itself cannot run to a verdict on this damage; that is the case this \
+                 test pins"
+            );
+            match indexer.search("alpha", 10) {
+                Err(IndexerError::Sqlite { source, .. }) => assert!(
                     matches!(
-                        &source,
-                        rusqlite::Error::SqliteFailure(inner, _)
-                            if inner.code == rusqlite::ErrorCode::OutOfMemory
+                        source.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::OutOfMemory)
                     ),
-                    "this test's own pinned pattern must deterministically make SQLite report \
-                     OutOfMemory, or it is not exercising diagnose_ambiguous_read_error's \
-                     reason for existing; got {source:?}"
+                    "the pinned pattern must still make SQLite report OutOfMemory, or this test \
+                     is not exercising the case it names: {source:?}"
+                ),
+                other => panic!(
+                    "an out-of-memory failure the check cannot settle must come back as the \
+                     original error, never as Corrupt: {other:?}"
+                ),
+            }
+            let others: [(&str, Result<(), IndexerError>); 3] = [
+                ("all_documents", indexer.all_documents().map(|_| ())),
+                (
+                    "add_or_replace",
+                    indexer.add_or_replace(&doc("z.md", DocumentKind::Section, "Z", "zulu")),
+                ),
+                (
+                    "incremental_sync",
+                    indexer.incremental_sync(&seed).map(|_| ()),
+                ),
+            ];
+            for (call, result) in others {
+                assert!(
+                    !matches!(result, Err(IndexerError::Corrupt { .. })),
+                    "{call} must not call this Corrupt either: {result:?}"
                 );
             }
-            other => panic!(
-                "a corrupted index that SQLite itself reports as OutOfMemory must still be \
-                 IndexerError::Corrupt, with the query blameless, not {other:?}"
-            ),
         }
+
+        let report = Indexer::recover(&mut db, &seed, Timestamp::from_millis(2_000))
+            .expect("recover never reads the damaged file, so this damage cannot stop it");
+        assert_eq!(report.rebuilt.total, seed.len());
+        let indexer = Indexer::open(&db).expect("the fresh index opens");
+        let hits = indexer
+            .search("alpha", 100)
+            .expect("search works after recovery");
+        assert_eq!(hits.hits.len(), seed.len());
     }
 
     #[test]
     fn ori_t_0035_full_rebuild_recovers_a_corrupt_on_disk_index() {
         let scratch = Scratch::new("corrupt-recover");
-        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
         let seed: Vec<IndexableDocument> = (0..80)
             .map(|n| {
                 doc(
@@ -2932,7 +3681,7 @@ mod tests {
             .collect();
         indexer.full_rebuild(&seed).expect("seed a real corpus");
 
-        corrupt_fts5_shadow_table(&scratch.path.join("fts.sqlite"));
+        corrupt_fts5_shadow_table(&index_file(&db));
         assert!(
             matches!(
                 indexer.search("alpha", 10),
@@ -2963,52 +3712,56 @@ mod tests {
     #[test]
     fn ori_t_0035_search_documents_covered_never_disagrees_with_a_concurrent_writer() {
         let scratch = Scratch::new("race-search");
-        let mut seeder = Indexer::open(&scratch.path).expect("seed connection opens");
+        let db = product(&scratch);
+        let mut seeder = Indexer::open(&db).expect("seed connection opens");
         seeder.full_rebuild(&[]).expect("start empty");
         drop(seeder);
 
-        let writer_path = scratch.path.clone();
-        let writer = std::thread::spawn(move || {
-            let mut writer = Indexer::open(&writer_path).expect("writer opens");
-            for round in 0..250 {
-                let docs: Vec<IndexableDocument> = if round % 2 == 0 {
-                    (0..40)
-                        .map(|n| {
-                            doc(
-                                &format!("w{n}.md"),
-                                DocumentKind::Section,
-                                "W",
-                                "needle content",
-                            )
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let _ = writer.full_rebuild(&docs);
-            }
-        });
+        // Each thread gets its own Indexer, opened here from the one
+        // ProductDb and moved into a scoped thread: an Indexer is `Send`,
+        // and the scope ends before `db` could be borrowed mutably.
+        let mut writer = Indexer::open(&db).expect("writer opens");
+        let reader = Indexer::open(&db).expect("reader opens");
+        let (vacuous, inverse) = std::thread::scope(|scope| {
+            let writer = scope.spawn(move || {
+                for round in 0..250 {
+                    let docs: Vec<IndexableDocument> = if round % 2 == 0 {
+                        (0..40)
+                            .map(|n| {
+                                doc(
+                                    &format!("w{n}.md"),
+                                    DocumentKind::Section,
+                                    "W",
+                                    "needle content",
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let _ = writer.full_rebuild(&docs);
+                }
+            });
 
-        let reader_path = scratch.path.clone();
-        let reader = std::thread::spawn(move || {
-            let reader = Indexer::open(&reader_path).expect("reader opens");
-            let mut vacuous = 0usize;
-            let mut inverse = 0usize;
-            for _ in 0..2000 {
-                if let Ok(report) = reader.search("needle", 1000) {
-                    if report.documents_covered > 0 && report.hits.is_empty() {
-                        vacuous += 1;
-                    }
-                    if report.documents_covered == 0 && !report.hits.is_empty() {
-                        inverse += 1;
+            let reader = scope.spawn(move || {
+                let mut vacuous = 0usize;
+                let mut inverse = 0usize;
+                for _ in 0..2000 {
+                    if let Ok(report) = reader.search("needle", 1000) {
+                        if report.documents_covered > 0 && report.hits.is_empty() {
+                            vacuous += 1;
+                        }
+                        if report.documents_covered == 0 && !report.hits.is_empty() {
+                            inverse += 1;
+                        }
                     }
                 }
-            }
-            (vacuous, inverse)
-        });
+                (vacuous, inverse)
+            });
 
-        writer.join().expect("writer thread must not panic");
-        let (vacuous, inverse) = reader.join().expect("reader thread must not panic");
+            writer.join().expect("writer thread must not panic");
+            reader.join().expect("reader thread must not panic")
+        });
         assert_eq!(
             (vacuous, inverse),
             (0, 0),
@@ -3040,41 +3793,46 @@ mod tests {
         // above, is this same finding's deterministic, precisely-targeted
         // half for `search`.
         let scratch = Scratch::new("race-sync");
-        let mut seeder = Indexer::open(&scratch.path).expect("seed connection opens");
+        let db = product(&scratch);
+        let mut seeder = Indexer::open(&db).expect("seed connection opens");
         seeder
             .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "original")])
             .expect("seed the target document");
         drop(seeder);
 
-        let writer_path = scratch.path.clone();
-        let writer = std::thread::spawn(move || {
-            let mut writer = Indexer::open(&writer_path).expect("writer opens");
-            for _ in 0..300 {
-                let _ = writer.add_or_replace(&doc(
-                    "intruder.md",
-                    DocumentKind::Section,
-                    "I",
-                    "an unrelated document",
-                ));
-            }
-        });
+        let mut writer = Indexer::open(&db).expect("writer opens");
+        let mut syncer = Indexer::open(&db).expect("syncer opens");
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(move || {
+                for _ in 0..300 {
+                    let _ = writer.add_or_replace(&doc(
+                        "intruder.md",
+                        DocumentKind::Section,
+                        "I",
+                        "an unrelated document",
+                    ));
+                }
+            });
 
-        let syncer_path = scratch.path.clone();
-        let syncer = std::thread::spawn(move || {
-            let mut syncer = Indexer::open(&syncer_path).expect("syncer opens");
-            for _ in 0..300 {
-                let _ =
-                    syncer.incremental_sync(&[doc("a.md", DocumentKind::Section, "A", "original")]);
-            }
-        });
+            let syncer = scope.spawn(move || {
+                for _ in 0..300 {
+                    let _ = syncer.incremental_sync(&[doc(
+                        "a.md",
+                        DocumentKind::Section,
+                        "A",
+                        "original",
+                    )]);
+                }
+            });
 
-        writer.join().expect("writer thread must not panic");
-        syncer.join().expect("syncer thread must not panic");
+            writer.join().expect("writer thread must not panic");
+            syncer.join().expect("syncer thread must not panic");
+        });
 
         // Contention has stopped; one final, uncontested sync must converge
         // to exactly the target, proving the index survived the race
         // intact rather than corrupted or permanently stuck.
-        let mut settle = Indexer::open(&scratch.path).expect("settle connection opens");
+        let mut settle = Indexer::open(&db).expect("settle connection opens");
         settle
             .incremental_sync(&[doc("a.md", DocumentKind::Section, "A", "original")])
             .expect("a final, uncontested sync must succeed");
@@ -3194,7 +3952,8 @@ mod tests {
     #[test]
     fn ori_t_0035_full_rebuild_repairs_shadow_table_corruption_unconditionally() {
         let scratch = Scratch::new("corrupt-repair-unconditional");
-        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
         let seed: Vec<IndexableDocument> = (0..80)
             .map(|n| {
                 doc(
@@ -3207,7 +3966,7 @@ mod tests {
             .collect();
         indexer.full_rebuild(&seed).expect("seed a real corpus");
 
-        let fts_path = scratch.path.join("fts.sqlite");
+        let fts_path = index_file(&db);
         let inode_before = file_inode(&fts_path);
         corrupt_fts5_shadow_table(&fts_path);
         assert!(
@@ -3256,12 +4015,13 @@ mod tests {
         // silently losing that connection's acknowledged writes and
         // defeating the module's own concurrency guarantee between them.
         let scratch = Scratch::new("corrupt-no-orphan");
-        let mut a = Indexer::open(&scratch.path).expect("A opens");
+        let db = product(&scratch);
+        let mut a = Indexer::open(&db).expect("A opens");
         a.full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha content")])
             .expect("seed");
-        let mut b = Indexer::open(&scratch.path).expect("B opens the same directory");
+        let mut b = Indexer::open(&db).expect("B opens the same directory");
 
-        corrupt_fts5_shadow_table(&scratch.path.join("fts.sqlite"));
+        corrupt_fts5_shadow_table(&index_file(&db));
         assert!(matches!(
             a.search("alpha", 10),
             Err(IndexerError::Corrupt { .. })
@@ -3283,7 +4043,7 @@ mod tests {
 
         // A fresh connection sees both writes: A's repair and B's add, in
         // one shared file, not two.
-        let fresh = Indexer::open(&scratch.path).expect("a fresh connection opens");
+        let fresh = Indexer::open(&db).expect("a fresh connection opens");
         let dump = fresh.all_documents().expect("read back");
         let paths: std::collections::BTreeSet<&str> = dump
             .iter()
@@ -3299,13 +4059,14 @@ mod tests {
     #[test]
     fn ori_t_0035_open_reports_corrupt_for_a_damaged_header_not_a_generic_sqlite_error() {
         let scratch = Scratch::new("open-time-corrupt");
+        let db = product(&scratch);
         {
-            let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
             indexer
                 .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha content")])
                 .expect("seed");
         }
-        let fts_path = scratch.path.join("fts.sqlite");
+        let fts_path = index_file(&db);
         // Damage the part of page 1 that holds sqlite_schema, not just the
         // FTS5 shadow data: this is corruption Indexer::open itself must
         // fail on, before any Indexer exists to call full_rebuild.
@@ -3321,7 +4082,7 @@ mod tests {
                 .expect("damage sqlite_schema");
         }
 
-        match Indexer::open(&scratch.path) {
+        match Indexer::open(&db) {
             Err(IndexerError::Corrupt { .. }) => {}
             Err(other) => panic!(
                 "a damaged header/schema must be reported as IndexerError::Corrupt, not {other:?}"
@@ -3336,9 +4097,9 @@ mod tests {
     // skipped because the row failed to parse.
     // ---------------------------------------------------------------------
 
-    fn insert_raw_row(dir: &Path, path: &str, kind: &str, title: &str, body: &str, checksum: i64) {
-        let conn = rusqlite::Connection::open(dir.join("fts.sqlite"))
-            .expect("open a raw connection to the on-disk index");
+    fn insert_raw_row(file: &Path, path: &str, kind: &str, title: &str, body: &str, checksum: i64) {
+        let conn =
+            rusqlite::Connection::open(file).expect("open a raw connection to the on-disk index");
         conn.execute(
             "INSERT INTO documents (path, kind, title, body, checksum) VALUES (?1,?2,?3,?4,?5)",
             rusqlite::params![path, kind, title, body, checksum],
@@ -3349,11 +4110,12 @@ mod tests {
     #[test]
     fn ori_t_0035_incremental_sync_removes_an_unparseable_kind_row_absent_from_target() {
         let scratch = Scratch::new("unparseable-removed");
-        let mut indexer = Indexer::open(&scratch.path).expect("open on-disk index");
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
         indexer
             .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "alpha")])
             .expect("seed");
-        insert_raw_row(&scratch.path, "x.md", "prompt", "X", "xray", 7);
+        insert_raw_row(&index_file(&db), "x.md", "prompt", "X", "xray", 7);
 
         let report = indexer
             .incremental_sync(&[doc("a.md", DocumentKind::Section, "A", "alpha")])
@@ -3371,11 +4133,12 @@ mod tests {
     #[test]
     fn ori_t_0035_incremental_sync_rewrites_an_unparseable_kind_row_present_in_target() {
         let scratch = Scratch::new("unparseable-rewritten");
-        let indexer_setup = Indexer::open(&scratch.path).expect("open on-disk index");
+        let db = product(&scratch);
+        let indexer_setup = Indexer::open(&db).expect("open on-disk index");
         drop(indexer_setup);
-        insert_raw_row(&scratch.path, "x.md", "prompt", "X", "xray", 7);
+        insert_raw_row(&index_file(&db), "x.md", "prompt", "X", "xray", 7);
 
-        let mut indexer = Indexer::open(&scratch.path).expect("reopen");
+        let mut indexer = Indexer::open(&db).expect("reopen");
         let report = indexer
             .incremental_sync(&[doc("x.md", DocumentKind::Module, "X", "xray")])
             .expect("sync with the unparseable row's path present in target");
@@ -3587,65 +4350,1436 @@ mod tests {
     #[test]
     fn ori_t_0035_full_rebuild_total_never_disagrees_with_a_concurrent_writer() {
         let scratch = Scratch::new("total-race");
-        let mut seeder = Indexer::open(&scratch.path).expect("seed connection opens");
+        let db = product(&scratch);
+        let mut seeder = Indexer::open(&db).expect("seed connection opens");
         seeder.full_rebuild(&[]).expect("start empty");
         drop(seeder);
 
-        let other_path = scratch.path.clone();
-        let other = std::thread::spawn(move || {
-            let mut other = Indexer::open(&other_path).expect("other writer opens");
+        let mut other = Indexer::open(&db).expect("other writer opens");
+        let mut mine = Indexer::open(&db).expect("this writer opens");
+        std::thread::scope(|scope| {
+            let other = scope.spawn(move || {
+                for _ in 0..600 {
+                    let _ = other.full_rebuild(&[]);
+                }
+            });
+
+            let docs: Vec<IndexableDocument> = (0..400)
+                .map(|n| doc(&format!("w{n}.md"), DocumentKind::Section, "W", "body"))
+                .collect();
+            let mut mismatches = 0usize;
             for _ in 0..600 {
-                let _ = other.full_rebuild(&[]);
+                if let Ok(report) = mine.full_rebuild(&docs)
+                    && report.total != docs.len()
+                {
+                    mismatches += 1;
+                }
             }
-        });
 
-        let mut mine = Indexer::open(&scratch.path).expect("this writer opens");
-        let docs: Vec<IndexableDocument> = (0..400)
-            .map(|n| doc(&format!("w{n}.md"), DocumentKind::Section, "W", "body"))
-            .collect();
-        let mut mismatches = 0usize;
-        for _ in 0..600 {
-            if let Ok(report) = mine.full_rebuild(&docs)
-                && report.total != docs.len()
-            {
-                mismatches += 1;
-            }
-        }
-
-        other.join().expect("other thread must not panic");
-        assert_eq!(
-            mismatches, 0,
-            "full_rebuild(docs).total must always equal docs.len() when it returns Ok, never a \
+            other.join().expect("other thread must not panic");
+            assert_eq!(
+                mismatches, 0,
+                "full_rebuild(docs).total must always equal docs.len() when it returns Ok, never a \
              concurrent writer's own count read after this call's own commit"
-        );
+            );
+        });
+    }
+
+    // =====================================================================
+    // Round 5. One test per item of the round-5 brief (recorded in the pull
+    // request report), each checked to fail against e76ba23 or under the
+    // plant the report names, and to pass after.
+    // =====================================================================
+
+    /// Every stored row exactly as SQLite holds it (no column parsed, no row
+    /// left out, `rowid` excluded since a rewrite changes it), sorted: what
+    /// "stored exactly as `full_rebuild` would store it" is compared by,
+    /// since [`Indexer::all_documents`] leaves out a row whose kind does not
+    /// parse and so cannot see the difference these tests are about.
+    fn raw_rows(file: &Path) -> Vec<String> {
+        let raw = Connection::open(file).expect("open a raw connection to the index");
+        let mut statement = raw
+            .prepare("SELECT path, kind, title, body, checksum FROM documents")
+            .expect("prepare the raw dump");
+        let mut rows: Vec<String> = statement
+            .query_map([], |row| {
+                let mut columns = Vec::new();
+                for index in 0..5 {
+                    columns.push(format!("{:?}", row.get_ref(index)?));
+                }
+                Ok(columns.join(" | "))
+            })
+            .expect("run the raw dump")
+            .collect::<rusqlite::Result<_>>()
+            .expect("read every raw row");
+        rows.sort();
+        rows
+    }
+
+    /// `PRAGMA page_size` and the (b-tree, page type) of every page `dbstat`
+    /// knows, for `file`.
+    fn page_map(file: &Path) -> (usize, BTreeMap<i64, (String, String)>) {
+        let raw = Connection::open(file).expect("open a raw connection to the index");
+        let page_size: i64 = raw
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .expect("read the page size");
+        let mut statement = raw
+            .prepare("SELECT pageno, name, pagetype FROM dbstat")
+            .expect("prepare the dbstat read");
+        let map = statement
+            .query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))))
+            .expect("read dbstat")
+            .collect::<rusqlite::Result<_>>()
+            .expect("read every dbstat row");
+        (
+            usize::try_from(page_size).expect("a positive page size"),
+            map,
+        )
+    }
+
+    /// Checkpoints `file`'s write-ahead log into it and truncates the log,
+    /// so the file alone holds the whole index: what a cleanly closed index
+    /// looks like on disk.
+    fn checkpoint(file: &Path) {
+        let raw = Connection::open(file).expect("open a raw connection to the index");
+        raw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .expect("checkpoint the index");
+    }
+
+    /// A 700-document corpus: large enough that `documents_content`,
+    /// `documents_data` and `documents_docsize` each have an interior page
+    /// as well as leaves, so the page sweep below damages every kind of
+    /// page this index has.
+    fn sweep_corpus() -> Vec<IndexableDocument> {
+        (0..700)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "T",
+                    &format!("needle alpha u{n}"),
+                )
+            })
+            .collect()
     }
 
     // ---------------------------------------------------------------------
-    // Item 4(d) (LOW): count_tokens no longer splits a base letter and its
-    // combining accent into two tokens, so common NFD-normalized text is
-    // not refused below the stated cap.
+    // Item 1 (HIGH): recovery that works, safe by construction.
     // ---------------------------------------------------------------------
 
     #[test]
-    fn ori_t_0035_search_accepts_an_nfd_normalized_query_under_the_token_cap() {
-        // "e" + COMBINING ACUTE ACCENT (U+0301), the NFD spelling of "é",
-        // repeated so the query is well under MAX_QUERY_BYTES but would
-        // have counted as 2 * MAX_QUERY_TOKENS under the old, byte-blind
-        // count.
-        let word = "e\u{0301}"; // NFD "é"
-        let query = format!("{word} ").repeat(MAX_QUERY_TOKENS);
-        assert!(query.len() <= MAX_QUERY_BYTES);
+    fn ori_t_0035_recover_repairs_every_page_of_a_damaged_index_in_a_deterministic_sweep() {
+        // The reviewers' method: overwrite each page in turn with a fixed
+        // pattern, on a fresh copy each time, for 0x00 and for 0xFF. Round
+        // 4's only recovery, full_rebuild, repaired 0 of every such sweep
+        // (its DROP TABLE fails on the damaged page). After recover, every
+        // case must open, pass PRAGMA integrity_check, and find every
+        // rebuilt document; and the damaged file must be in quarantine,
+        // byte for byte, never deleted.
+        let scratch = Scratch::new("page-sweep");
+        let mut db = product(&scratch);
+        let corpus = sweep_corpus();
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&corpus).expect("seed the corpus");
+        }
+        let file = index_file(&db);
+        checkpoint(&file);
+        let pristine = fs::read(&file).expect("read the pristine index");
+        let (page_size, pages_by_number) = page_map(&file);
+        let page_count = pristine.len() / page_size;
+        assert_eq!(pristine.len() % page_size, 0, "a whole number of pages");
+
+        // Non-vacuity: the sweep reaches leaf and interior pages of every
+        // shadow b-tree that has more than one page, and the schema page.
+        let kinds: BTreeSet<(&str, &str)> = pages_by_number
+            .values()
+            .map(|(name, kind)| (name.as_str(), kind.as_str()))
+            .collect();
+        for needed in [
+            ("sqlite_schema", "leaf"),
+            ("documents_config", "leaf"),
+            ("documents_idx", "leaf"),
+            ("documents_content", "internal"),
+            ("documents_content", "leaf"),
+            ("documents_data", "internal"),
+            ("documents_data", "leaf"),
+            ("documents_docsize", "internal"),
+            ("documents_docsize", "leaf"),
+        ] {
+            assert!(
+                kinds.contains(&needed),
+                "the sweep corpus must produce a {needed:?} page, or the sweep does not cover \
+                 it: {kinds:?}"
+            );
+        }
+
+        let mut cases = 0usize;
+        for fill in [0x00u8, 0xFF] {
+            for page in 1..=page_count {
+                let mut damaged = pristine.clone();
+                damaged[(page - 1) * page_size..page * page_size].fill(fill);
+                for name in INDEX_FILE_SET {
+                    let _ = fs::remove_file(index_dir(&db).join(name));
+                }
+                fs::write(&file, &damaged).expect("plant the damaged copy");
+
+                // The check sees every one of these, including the pages an
+                // ordinary search never touches. Through a raw connection,
+                // since page 1 damage stops `Indexer::open`; closed before
+                // `recover` (a raw connection is exactly what the proof in
+                // the module doc's "Recovery" does not cover).
+                {
+                    let raw =
+                        Connection::open(&file).expect("a raw connection to the damaged copy");
+                    assert_eq!(
+                        quick_check(&raw),
+                        Integrity::Damaged,
+                        "page {page} filled with {fill:#04x}: the check reports the damage"
+                    );
+                }
+
+                let at = Timestamp::from_millis(10_000 + i64::try_from(cases).expect("small"));
+                let report = Indexer::recover(&mut db, &corpus, at).unwrap_or_else(|error| {
+                    panic!("page {page} filled with {fill:#04x}: recover must succeed: {error}")
+                });
+                let quarantined = report
+                    .quarantine
+                    .as_ref()
+                    .expect("the damaged file was there to move")
+                    .join(INDEX_FILE);
+                assert_eq!(
+                    fs::read(&quarantined).expect("read the quarantined file"),
+                    damaged,
+                    "page {page} filled with {fill:#04x}: the damaged file must be kept, byte \
+                     for byte, as evidence"
+                );
+                assert_eq!(report.rebuilt.total, corpus.len());
+
+                let indexer = Indexer::open(&db).unwrap_or_else(|error| {
+                    panic!("page {page} filled with {fill:#04x}: the fresh index opens: {error}")
+                });
+                let integrity: String = indexer
+                    .conn
+                    .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                    .expect("run PRAGMA integrity_check");
+                assert_eq!(
+                    integrity, "ok",
+                    "page {page} filled with {fill:#04x}: the fresh index passes integrity_check"
+                );
+                let found = indexer
+                    .search("needle", corpus.len() + 1)
+                    .expect("search the fresh index");
+                assert_eq!(
+                    (found.hits.len(), found.documents_covered),
+                    (corpus.len(), corpus.len()),
+                    "page {page} filled with {fill:#04x}: every rebuilt document is found"
+                );
+                cases += 1;
+            }
+        }
+        assert_eq!(cases, 2 * page_count);
+        let kept = fs::read_dir(index_dir(&db).join(QUARANTINE_DIR))
+            .expect("list the quarantine")
+            .count();
         assert_eq!(
-            count_tokens(&query),
-            MAX_QUERY_TOKENS,
-            "a base letter plus one combining accent must count as one token, matching \
-             unicode61, not two"
+            kept, cases,
+            "every recovery keeps its own quarantine directory; none is reused or deleted"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_a_destroyed_header_is_corrupt_at_open_and_recover_repairs_it() {
+        // Round 4 reported this (SQLITE_NOTADB at the first pragma) as a
+        // generic Sqlite error, and even its Corrupt cases told the caller
+        // to call full_rebuild on an Indexer that could not be opened.
+        let scratch = Scratch::new("destroyed-header");
+        let mut db = product(&scratch);
+        let corpus = vec![doc("a.md", DocumentKind::Section, "A", "alpha content")];
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&corpus).expect("seed");
+        }
+        let file = index_file(&db);
+        checkpoint(&file);
+        {
+            use std::io::Seek;
+            use std::io::Write;
+            let mut raw = fs::OpenOptions::new()
+                .write(true)
+                .open(&file)
+                .expect("open the raw file for writing");
+            raw.seek(std::io::SeekFrom::Start(0)).expect("seek");
+            raw.write_all(&[0xFF; 100]).expect("destroy the header");
+        }
+
+        let message = match Indexer::open(&db) {
+            Err(error @ IndexerError::Corrupt { .. }) => {
+                if let IndexerError::Corrupt { source, .. } = &error {
+                    assert_eq!(
+                        source.sqlite_error_code(),
+                        Some(rusqlite::ErrorCode::NotADatabase),
+                        "this is the SQLITE_NOTADB case: {source:?}"
+                    );
+                }
+                error.to_string()
+            }
+            Err(other) => panic!("a destroyed header must be Corrupt, not {other:?}"),
+            Ok(_) => panic!("a destroyed header must not open"),
+        };
+        assert!(
+            message.contains("Indexer::recover") && !message.contains("full_rebuild"),
+            "the message must name the one operation that can succeed, and never advise one \
+             that cannot: {message}"
         );
 
-        let indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        Indexer::recover(&mut db, &corpus, Timestamp::from_millis(2_000))
+            .expect("recover repairs damage found at open");
+        let indexer = Indexer::open(&db).expect("the fresh index opens");
+        assert_eq!(
+            indexer.search("alpha", 10).expect("search").hits.len(),
+            1,
+            "the rebuilt document is found"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_full_rebuild_on_a_damaged_page_is_corrupt_and_says_to_recover_never_to_retry() {
+        let scratch = Scratch::new("rebuild-page-damage");
+        let mut db = product(&scratch);
+        let corpus = sweep_corpus();
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&corpus).expect("seed");
+        }
+        let file = index_file(&db);
+        checkpoint(&file);
+        let (page_size, pages_by_number) = page_map(&file);
+        let data_leaf = pages_by_number
+            .iter()
+            .find(|(_, (name, kind))| name == "documents_data" && kind == "leaf")
+            .map(|(page, _)| usize::try_from(*page).expect("a positive page number"))
+            .expect("a documents_data leaf page");
+        let mut damaged = fs::read(&file).expect("read the index");
+        damaged[(data_leaf - 1) * page_size..data_leaf * page_size].fill(0xFF);
+        fs::write(&file, &damaged).expect("damage one page");
+
+        {
+            let mut indexer = Indexer::open(&db).expect("page damage does not stop open");
+            for attempt in 0..3 {
+                match indexer.full_rebuild(&corpus) {
+                    Err(error @ IndexerError::Corrupt { .. }) => {
+                        let message = error.to_string();
+                        assert!(
+                            message.contains("Indexer::recover")
+                                && !message.contains("full_rebuild"),
+                            "attempt {attempt}: the message must name recover and never advise \
+                             the rebuild that just failed: {message}"
+                        );
+                    }
+                    other => panic!(
+                        "attempt {attempt}: a DROP that fails on a damaged page is Corrupt, \
+                         every time: {other:?}"
+                    ),
+                }
+            }
+        }
+        Indexer::recover(&mut db, &corpus, Timestamp::from_millis(3_000))
+            .expect("recover repairs what full_rebuild cannot");
+        let indexer = Indexer::open(&db).expect("the fresh index opens");
+        assert_eq!(
+            indexer
+                .search("needle", corpus.len() + 1)
+                .expect("search")
+                .hits
+                .len(),
+            corpus.len()
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_recover_quarantines_a_leftover_write_ahead_log_and_never_replays_it() {
+        // SQLite replays a write-ahead log into whatever database sits
+        // beside it: a log left at the live path would put the old index's
+        // pages into the fresh one. recover moves it with the database.
+        let scratch = Scratch::new("leftover-wal");
+        let mut db = product(&scratch);
+        let stale: Vec<IndexableDocument> = (0..50)
+            .map(|n| {
+                doc(
+                    &format!("old{n}.md"),
+                    DocumentKind::Section,
+                    "Old",
+                    "stale words",
+                )
+            })
+            .collect();
+        let held = scratch.path.join("held");
+        fs::create_dir_all(&held).expect("create a holding directory");
+        {
+            let mut writer = Indexer::open(&db).expect("open on-disk index");
+            writer
+                .conn
+                .execute_batch("PRAGMA wal_autocheckpoint = 0")
+                .expect("keep every commit in the log");
+            writer.full_rebuild(&stale).expect("write the stale index");
+            // Copied while the connection is still open, so the log still
+            // holds committed frames the database file does not.
+            for name in [INDEX_FILE, "fts.sqlite-wal"] {
+                fs::copy(index_dir(&db).join(name), held.join(name)).expect("copy a live file");
+            }
+        }
+        for name in INDEX_FILE_SET {
+            let _ = fs::remove_file(index_dir(&db).join(name));
+        }
+        for name in [INDEX_FILE, "fts.sqlite-wal"] {
+            fs::copy(held.join(name), index_dir(&db).join(name)).expect("plant a live file");
+        }
+        let planted_log = fs::read(held.join("fts.sqlite-wal")).expect("read the planted log");
+        assert!(
+            planted_log.len() > 32,
+            "the planted log must hold frames, not only a header, or this proves nothing"
+        );
+
+        let fresh = vec![doc("new.md", DocumentKind::Section, "New", "fresh words")];
+        let report = Indexer::recover(&mut db, &fresh, Timestamp::from_millis(4_000))
+            .expect("recover succeeds");
+        let quarantine = report.quarantine.expect("files were moved");
+        assert_eq!(
+            fs::read(quarantine.join("fts.sqlite-wal")).expect("the log is in quarantine"),
+            planted_log,
+            "the log is kept, byte for byte, beside the database it belongs to"
+        );
+        assert!(quarantine.join(INDEX_FILE).is_file());
+
+        let indexer = Indexer::open(&db).expect("the fresh index opens");
+        let integrity: String = indexer
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("run PRAGMA integrity_check");
+        assert_eq!(integrity, "ok");
+        assert_eq!(indexer.search("stale", 100).expect("search").hits.len(), 0);
+        let found = indexer.search("fresh", 100).expect("search");
+        assert_eq!((found.hits.len(), found.documents_covered), (1, 1));
+    }
+
+    #[test]
+    fn ori_t_0035_recover_names_quarantine_directories_in_recovery_order_and_never_reuses_one() {
+        let scratch = Scratch::new("quarantine-names");
+        let mut db = product(&scratch);
+        let corpus = vec![doc("a.md", DocumentKind::Section, "A", "alpha")];
+
+        // A product whose index was never opened has nothing to move.
+        let first = Indexer::recover(&mut db, &corpus, Timestamp::from_millis(5))
+            .expect("recover with nothing to move");
+        assert_eq!(first.quarantine, None);
+        assert!(first.quarantined_files.is_empty());
+        assert_eq!(first.rebuilt.total, 1);
+
+        let mut names = Vec::new();
+        for millis in [5, 5, 4] {
+            let report = Indexer::recover(&mut db, &corpus, Timestamp::from_millis(millis))
+                .expect("recover");
+            let quarantine = report.quarantine.expect("the previous index was moved");
+            assert_eq!(
+                report.quarantined_files.last(),
+                Some(&quarantine.join(INDEX_FILE)),
+                "the database itself is moved last, after its side files"
+            );
+            names.push(
+                quarantine
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("a UTF-8 name")
+                    .to_owned(),
+            );
+        }
+        assert_eq!(
+            names,
+            vec![
+                "00000000000000000005-000",
+                "00000000000000000005-001",
+                "00000000000000000004-000",
+            ],
+            "two recoveries in one millisecond get two names; none is reused"
+        );
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec![
+                "00000000000000000004-000",
+                "00000000000000000005-000",
+                "00000000000000000005-001",
+            ],
+            "names sort by recovery time, then by order within a millisecond"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_recover_refuses_an_index_directory_that_is_a_symbolic_link() {
+        let scratch = Scratch::new("recover-symlink");
+        let mut db = product(&scratch);
+        let elsewhere = scratch.path.join("another-products-index");
+        fs::create_dir_all(&elsewhere).expect("create the other directory");
+        fs::write(elsewhere.join(INDEX_FILE), b"another product's index")
+            .expect("write the other product's file");
+        fs::remove_dir(index_dir(&db)).expect("remove the real index directory");
+        std::os::unix::fs::symlink(&elsewhere, index_dir(&db)).expect("link index/ elsewhere");
+
+        match Indexer::recover(&mut db, &[], Timestamp::from_millis(1)) {
+            Err(error @ IndexerError::RecoveryRefused { .. }) => {
+                assert_eq!(error.methodology_ref().section, 25);
+            }
+            other => panic!("a symlinked index/ must be refused: {other:?}"),
+        }
+        assert_eq!(
+            fs::read(elsewhere.join(INDEX_FILE)).expect("the other file is still there"),
+            b"another product's index",
+            "nothing was moved out of a directory this product does not own"
+        );
+        assert!(!elsewhere.join(QUARANTINE_DIR).exists());
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 2 (MEDIUM): diagnosis never calls a healthy index Corrupt.
+    // ---------------------------------------------------------------------
+
+    /// Runs this test binary again as a child process, running only the
+    /// test at `name` with `env` set, and asserts that exactly that one test
+    /// ran and passed. For the tests below that lower SQLite's process-wide
+    /// heap limit, which must never happen inside the process every other
+    /// test in this binary shares: the limit can only be lowered, never
+    /// raised back, without an `unsafe` call this crate does not make.
+    fn run_in_child_process(name: &str, env: &str, extra_env: &[(&str, &str)]) {
+        let exe = std::env::current_exe().expect("the test binary's own path");
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(env, "1");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("the test binary runs as a child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "the child run of {name} failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the child must have run exactly {name}, not zero tests:\n{stdout}"
+        );
+        // The child's own measurements, visible under `--nocapture`.
+        eprint!("{stderr}");
+    }
+
+    #[test]
+    fn ori_t_0035_a_genuine_out_of_memory_condition_on_a_healthy_index_is_never_called_corrupt() {
+        const CHILD: &str = "ORI_T_0035_GENUINE_OOM_CHILD";
+        const ROOT: &str = "ORI_T_0035_GENUINE_OOM_ROOT";
+        let Some(root) = std::env::var_os(ROOT).filter(|_| std::env::var_os(CHILD).is_some())
+        else {
+            // The parent: seed a healthy index, hand it to a child that
+            // starves SQLite of memory, then check it is still healthy.
+            let scratch = Scratch::new("genuine-oom");
+            let corpus: Vec<IndexableDocument> = (0..2000)
+                .map(|n| {
+                    doc(
+                        &format!("d{n}.md"),
+                        DocumentKind::Section,
+                        "D",
+                        &format!("needle alpha{n} shared body text for a real doclist"),
+                    )
+                })
+                .collect();
+            {
+                let db = product(&scratch);
+                let mut indexer = Indexer::open(&db).expect("open on-disk index");
+                indexer.full_rebuild(&corpus).expect("seed");
+            }
+            let root = scratch.path.to_str().expect("a UTF-8 scratch path");
+            run_in_child_process(
+                "indexer::tests::ori_t_0035_a_genuine_out_of_memory_condition_on_a_healthy_index_is_never_called_corrupt",
+                CHILD,
+                &[(ROOT, root)],
+            );
+            let db = product(&scratch);
+            let indexer = Indexer::open(&db).expect("the index still opens");
+            let integrity: String = indexer
+                .conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .expect("run PRAGMA integrity_check");
+            assert_eq!(
+                integrity, "ok",
+                "the index was healthy all along: nothing the child was told was corruption"
+            );
+            return;
+        };
+
+        // The child: every public call, repeated while SQLite's heap limit
+        // steps down from ample to starved. Each outcome is Ok, or a
+        // failure for want of memory; never Corrupt.
+        let db = ProductDb::open(Path::new(&root), PRODUCT, Timestamp::from_millis(2_000))
+            .expect("the child opens the parent's product");
+        let corpus: Vec<IndexableDocument> = (0..2000)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "D",
+                    &format!("needle alpha{n} shared body text for a real doclist"),
+                )
+            })
+            .collect();
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        assert_eq!(quick_check(&indexer.conn), Integrity::Intact);
+        let (mut ok, mut out_of_memory, mut corrupt, mut other) = (0usize, 0usize, 0usize, 0usize);
+        for limit_kib in (32..=8192u32).rev().step_by(32) {
+            let _ = indexer.conn.query_row(
+                &format!("PRAGMA hard_heap_limit = {}", u64::from(limit_kib) * 1024),
+                [],
+                |row| row.get::<_, i64>(0),
+            );
+            let results: [Result<(), IndexerError>; 5] = [
+                indexer.search("needle", 50).map(|_| ()),
+                indexer.search("alpha123", 50).map(|_| ()),
+                indexer.all_documents().map(|_| ()),
+                indexer.add_or_replace(&corpus[7]),
+                indexer.incremental_sync(&corpus).map(|_| ()),
+            ];
+            for result in results {
+                match result {
+                    Ok(()) => ok += 1,
+                    Err(IndexerError::Corrupt { source, .. }) => {
+                        corrupt += 1;
+                        eprintln!("limit {limit_kib} KiB: Corrupt from {source:?}");
+                    }
+                    Err(IndexerError::Sqlite { source, .. })
+                        if source.sqlite_error_code() == Some(rusqlite::ErrorCode::OutOfMemory) =>
+                    {
+                        out_of_memory += 1;
+                    }
+                    Err(error) => {
+                        other += 1;
+                        eprintln!("limit {limit_kib} KiB: {error:?}");
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "genuine out-of-memory sweep: ok {ok}, out of memory {out_of_memory}, corrupt \
+             {corrupt}, other {other}"
+        );
+        assert!(
+            ok > 0 && out_of_memory > 0,
+            "the sweep must reach both an ample and a starved heap, or it proves nothing: ok \
+             {ok}, out of memory {out_of_memory}"
+        );
+        assert_eq!(
+            corrupt, 0,
+            "a genuine out-of-memory condition on a healthy index is never Corrupt"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_a_concurrent_writer_never_turns_a_healthy_index_corrupt() {
+        // The review's reproduction: a row another writer stored with a NULL
+        // kind makes a search that reaches it fail on a healthy index (a
+        // type error, not damage), so the failure goes to the check. Round
+        // 4's check was a write: another connection holding the write lock
+        // made it fail with SQLITE_BUSY, and a writer committing made it
+        // fail with SQLITE_BUSY_SNAPSHOT, and either failure became Corrupt.
+        let scratch = Scratch::new("writer-not-corrupt");
+        let db = product(&scratch);
+        let file = index_file(&db);
+        {
+            let mut seeder = Indexer::open(&db).expect("open on-disk index");
+            let corpus: Vec<IndexableDocument> = (0..200)
+                .map(|n| {
+                    doc(
+                        &format!("d{n}.md"),
+                        DocumentKind::Section,
+                        "D",
+                        "needle body",
+                    )
+                })
+                .collect();
+            seeder.full_rebuild(&corpus).expect("seed");
+        }
+        Connection::open(&file)
+            .expect("a raw connection")
+            .execute(
+                "INSERT INTO documents (path, kind, title, body, checksum) \
+                 VALUES ('foreign.md', NULL, 'F', 'foreign words', 1)",
+                [],
+            )
+            .expect("store a row this build would never write");
+
+        let reader = Indexer::open(&db).expect("the reader opens");
+        let assert_not_corrupt =
+            |result: Result<SearchReport, IndexerError>, when: &str| match result {
+                Err(IndexerError::Sqlite { source, .. }) => assert!(
+                    matches!(source, rusqlite::Error::InvalidColumnType(..)),
+                    "{when}: the original error, unchanged: {source:?}"
+                ),
+                other => panic!("{when}: a healthy index is never Corrupt: {other:?}"),
+            };
+
+        // Deterministic: another connection holds the write lock throughout.
+        let holder = Connection::open(&file).expect("a lock-holding connection");
+        holder
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("take the write lock");
+        assert_not_corrupt(
+            reader.search("foreign", 10),
+            "with the write lock held elsewhere",
+        );
+        holder.execute_batch("ROLLBACK").expect("release it");
+
+        // A writer committing throughout.
+        let mut writer = Indexer::open(&db).expect("the writer opens");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let commits = std::thread::scope(|scope| {
+            let stop = &stop;
+            let churn = scope.spawn(move || {
+                let mut commits = 0usize;
+                let mut round = 0usize;
+                while !stop.load(Ordering::SeqCst) {
+                    round += 1;
+                    let body = format!("churn {round}");
+                    if writer
+                        .add_or_replace(&doc("churn.md", DocumentKind::Section, "C", &body))
+                        .is_ok()
+                    {
+                        commits += 1;
+                    }
+                }
+                commits
+            });
+            for round in 0..300 {
+                assert_not_corrupt(
+                    reader.search("foreign", 10),
+                    &format!("search {round} with a writer committing"),
+                );
+            }
+            stop.store(true, Ordering::SeqCst);
+            churn.join().expect("the writer thread must not panic")
+        });
+        assert!(
+            commits > 0,
+            "the writer must actually have committed during the searches"
+        );
+        assert_eq!(
+            quick_check(&reader.conn),
+            Integrity::Intact,
+            "and the index really is healthy"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_all_documents_reports_damage_it_trips_over_as_corrupt_not_a_generic_error() {
+        // A body replaced through SQL by a blob: all_documents fails reading
+        // it as text (a type error, not SQLITE_CORRUPT), and round 4 passed
+        // that straight through as a generic Sqlite error. The content no
+        // longer matches the inverted index, which the check reports.
+        let scratch = Scratch::new("all-documents-routed");
+        let mut db = product(&scratch);
+        let corpus: Vec<IndexableDocument> = (0..20)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "T",
+                    &format!("needle alpha u{n}"),
+                )
+            })
+            .collect();
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&corpus).expect("seed");
+            Connection::open(index_file(&db))
+                .expect("a raw connection")
+                .execute(
+                    "UPDATE documents_content SET c3 = x'00ff10' WHERE id = 3",
+                    [],
+                )
+                .expect("damage one stored body");
+            match indexer.all_documents() {
+                Err(IndexerError::Corrupt { source, .. }) => assert!(
+                    matches!(source, rusqlite::Error::InvalidColumnType(..)),
+                    "the original error is kept: {source:?}"
+                ),
+                other => panic!("the check reports this damage, so it is Corrupt: {other:?}"),
+            }
+        }
+        Indexer::recover(&mut db, &corpus, Timestamp::from_millis(6_000)).expect("recover");
+        let indexer = Indexer::open(&db).expect("the fresh index opens");
+        assert_eq!(
+            indexer.all_documents().expect("read back").len(),
+            corpus.len()
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_classify_calls_corrupt_exactly_what_the_check_calls_damaged() {
+        // The rule itself, against one synthetic out-of-memory error: the
+        // same error is Corrupt on a damaged file and itself on a healthy
+        // one.
+        let out_of_memory = || {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(7),
+                Some("out of memory".to_owned()),
+            )
+        };
+        let healthy = Indexer::open_in_memory().expect("an in-memory index");
+        assert!(matches!(
+            classify(&healthy.conn, Path::new("h"), "probe", out_of_memory()),
+            IndexerError::Sqlite { .. }
+        ));
+
+        let scratch = Scratch::new("classify-rule");
+        let db = product(&scratch);
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer
+                .full_rebuild(&sweep_corpus())
+                .expect("seed the corpus");
+        }
+        let file = index_file(&db);
+        checkpoint(&file);
+        let (page_size, pages_by_number) = page_map(&file);
+        let content_leaf = pages_by_number
+            .iter()
+            .find(|(_, (name, kind))| name == "documents_content" && kind == "leaf")
+            .map(|(page, _)| usize::try_from(*page).expect("a positive page number"))
+            .expect("a documents_content leaf page");
+        let mut damaged = fs::read(&file).expect("read the index");
+        damaged[(content_leaf - 1) * page_size..content_leaf * page_size].fill(0x00);
+        fs::write(&file, &damaged).expect("damage one page");
+        let damaged_index = Indexer::open(&db).expect("page damage does not stop open");
+        assert_eq!(quick_check(&damaged_index.conn), Integrity::Damaged);
+        assert!(matches!(
+            classify(&damaged_index.conn, &file, "probe", out_of_memory()),
+            IndexerError::Corrupt { .. }
+        ));
+    }
+
+    #[test]
+    fn ori_t_0035_the_check_never_reads_a_stale_view_of_an_index_another_connection_changed() {
+        // Found while building round 5, not by a review: FTS5 caches the
+        // index structure per connection and refreshes it only when a
+        // cursor opens, and PRAGMA quick_check's FTS5 step reads the cache
+        // as it stands, so a bare quick_check on a connection another
+        // connection had written past reported "checksum mismatch" on a
+        // healthy index. quick_check opens a cursor first, in the same
+        // snapshot.
+        let scratch = Scratch::new("stale-check");
+        let db = product(&scratch);
+        let corpus: Vec<IndexableDocument> = (0..300)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "D",
+                    "needle body",
+                )
+            })
+            .collect();
+        let mut writer = Indexer::open(&db).expect("the writer opens");
+        writer.full_rebuild(&corpus).expect("seed");
+        let checker = Indexer::open(&db).expect("the checker opens");
+        assert_eq!(quick_check(&checker.conn), Integrity::Intact);
+        for round in 0..60 {
+            writer
+                .add_or_replace(&doc(
+                    &format!("churn{}.md", round % 7),
+                    DocumentKind::Section,
+                    "C",
+                    &format!("churn {round} words"),
+                ))
+                .expect("a write");
+            if round % 3 == 0 {
+                writer
+                    .full_rebuild(&corpus[..(round % 50) + 1])
+                    .expect("a rebuild");
+            }
+            assert_eq!(
+                quick_check(&checker.conn),
+                Integrity::Intact,
+                "round {round}: a healthy index another connection just wrote is Intact"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 3 (MEDIUM): text before a file's first heading is indexed.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_text_above_the_first_heading_stays_searchable_when_a_role_file_gains_its_first_heading()
+     {
+        // The review's edit: one heading appended to a role file, which is
+        // front matter plus prose with no heading. Round 4 dropped every
+        // line above that heading from the index, and every sync said Ok.
+        let scratch = Scratch::new("preamble");
+        let agents = scratch.path.join("spec").join("agents");
+        fs::create_dir_all(&agents).expect("create spec/agents");
+        let role = agents.join("lead.md");
+        let before = "---\nname: lead\ndescription: The lead / reviewer, a different model than \
+                      the coders.\n---\n\nYou are the **lead** in the Ori Studio fleet. Review \
+                      is a checklist, never a summary.\n";
+        fs::write(&role, before).expect("write the role file");
+        let bare = concat!("spec/agents/", "lead", ".md");
+        let anchored = concat!("spec/agents/", "lead", ".md", "#notes");
+        let phrases = [
+            "different model than the coders",
+            "Review is a checklist, never a summary",
+        ];
+
+        let first = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let first_paths: Vec<&str> = first.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(first_paths, vec![bare]);
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer.full_rebuild(&first).expect("full rebuild");
+        for phrase in phrases {
+            let hits = indexer.search(phrase, 10).expect("search").hits;
+            assert_eq!(hits.len(), 1, "before the edit: {phrase:?}");
+            assert_eq!(hits[0].path, bare);
+        }
+
+        fs::write(&role, format!("{before}\n## Notes\n\nA later note.\n"))
+            .expect("append one heading");
+        let second = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let second_paths: Vec<&str> = second.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            second_paths,
+            vec![bare, anchored],
+            "the text above the heading keeps its bare path; the new section sits beside it"
+        );
+        let report = indexer
+            .incremental_sync(&second)
+            .expect("incremental sync after the edit");
+        assert_eq!(
+            report.removed, 0,
+            "nothing the file still says may leave the index"
+        );
+        for phrase in phrases {
+            let hits = indexer.search(phrase, 10).expect("search").hits;
+            assert_eq!(
+                hits.len(),
+                1,
+                "after the edit: {phrase:?} must still be found"
+            );
+            assert_eq!(hits[0].path, bare);
+        }
+        let later = indexer.search("later note", 10).expect("search").hits;
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].path, anchored);
+
+        let mut rebuilt = Indexer::open_in_memory().expect("in-memory index opens");
+        rebuilt.full_rebuild(&second).expect("full rebuild");
+        assert_eq!(
+            rebuilt.all_documents().expect("dump"),
+            indexer.all_documents().expect("dump"),
+            "and a full rebuild of the edited file agrees"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_no_non_blank_line_of_this_repositorys_own_section_files_is_left_out_of_the_index()
+    {
+        // The property item 3 states, checked on the real tree: every
+        // non-blank line of every file indexed as sections is a heading
+        // (some document's title) or sits in some document's body.
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/ori-memory sits two levels under the repository root")
+            .to_owned();
+        let walk = Indexer::walk_repo(&repo_root).expect("walk this repository");
+        let mut by_file: BTreeMap<&str, Vec<&IndexableDocument>> = BTreeMap::new();
+        for document in &walk.documents {
+            if document.kind == DocumentKind::Section {
+                let file = document.path.split('#').next().expect("a path");
+                by_file.entry(file).or_default().push(document);
+            }
+        }
+        assert!(
+            by_file.len() > 20,
+            "a vacuous walk would pass the check below for the wrong reason: {} files",
+            by_file.len()
+        );
+        let mut checked = 0usize;
+        for (file, documents) in &by_file {
+            let text = fs::read_to_string(repo_root.join(file)).expect("read a walked file");
+            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                let as_title = line.trim_start().trim_start_matches('#').trim();
+                let kept = documents
+                    .iter()
+                    .any(|document| document.body.contains(line) || document.title == as_title);
+                assert!(
+                    kept,
+                    "{file}: this line is in no indexed document: {line:?}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 1000, "only {checked} lines checked");
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 4: correctness residuals.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_incremental_sync_rewrites_any_stored_row_that_is_not_exactly_what_this_build_would_write()
+     {
+        // Each tamper is applied through a raw connection after a full
+        // rebuild of `target`, and leaves the stored checksum alone. Round 4
+        // skipped the first one forever (checksum equal, so "unchanged"),
+        // failed every sync on the last two, and kept the duplicate.
+        let target = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("x.md", DocumentKind::Section, "X", "xray"),
+        ];
+        let tampers = [
+            (
+                "an unparseable kind, checksum unchanged",
+                "UPDATE documents SET kind = 'prompt' WHERE path = 'x.md'",
+            ),
+            (
+                "a kind in another case, checksum unchanged",
+                "UPDATE documents SET kind = 'Section' WHERE path = 'x.md'",
+            ),
+            (
+                "another valid kind, checksum unchanged",
+                "UPDATE documents SET kind = 'adr' WHERE path = 'x.md'",
+            ),
+            (
+                "a second row at the same path",
+                "INSERT INTO documents (path, kind, title, body, checksum) \
+                 VALUES ('x.md', 'prompt', 'X', 'xray', 7)",
+            ),
+            (
+                "a checksum that is not an integer",
+                "UPDATE documents SET checksum = 'deadbeef' WHERE path = 'x.md'",
+            ),
+            (
+                "a row with no text path",
+                "INSERT INTO documents (path, kind, title, body, checksum) \
+                 VALUES (NULL, 'section', 'N', 'nothing', 1)",
+            ),
+        ];
+        for (label, tamper) in tampers {
+            let scratch = Scratch::new("tamper");
+            let db = product(&scratch);
+            let file = index_file(&db);
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&target).expect("full rebuild");
+            let expected = raw_rows(&file);
+            Connection::open(&file)
+                .expect("a raw connection")
+                .execute_batch(tamper)
+                .expect("apply the tamper");
+            assert_ne!(
+                raw_rows(&file),
+                expected,
+                "{label}: the tamper must change what is stored, or this case proves nothing"
+            );
+
+            let first = indexer
+                .incremental_sync(&target)
+                .unwrap_or_else(|error| panic!("{label}: incremental_sync must succeed: {error}"));
+            assert_eq!(
+                raw_rows(&file),
+                expected,
+                "{label}: incremental_sync must leave exactly what full_rebuild stores"
+            );
+            assert!(first.upserted + first.removed >= 1, "{label}: {first:?}");
+            assert_eq!(first.total, target.len(), "{label}");
+            let second = indexer.incremental_sync(&target).expect("resync");
+            assert_eq!(
+                (second.upserted, second.removed),
+                (0, 0),
+                "{label}: and then it settles"
+            );
+            let hits = indexer.search("xray", 10).expect("search").hits;
+            assert_eq!(hits.len(), 1, "{label}: x.md is searchable again");
+            assert_eq!(hits[0].kind, DocumentKind::Section, "{label}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_the_walk_never_follows_a_symbolic_link_into_spec_design_or_out_of_the_repository()
+    {
+        let scratch = Scratch::new("walk-symlinks");
+        let spec = scratch.path.join("spec");
+        let design = spec.join("design");
+        fs::create_dir_all(design.join("screens")).expect("create spec/design/screens");
+        fs::write(
+            design.join("DESIGN.md"),
+            "# Design\n\nLedgerline mock content\n",
+        )
+        .expect("write a design file");
+        fs::write(
+            design.join("screens").join("S.md"),
+            "# Screen\n\nLedgerline screen mock\n",
+        )
+        .expect("write a nested design file");
+        fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
+        let outside = scratch.path.join("outside");
+        fs::create_dir_all(&outside).expect("create a directory outside spec/");
+        fs::write(
+            outside.join("secret.md"),
+            "# Secret\n\nprivate words outside spec\n",
+        )
+        .expect("write a file outside spec/");
+        fs::create_dir_all(spec.join("runbooks")).expect("create spec/runbooks");
+
+        let links = [
+            (PathBuf::from("design"), spec.join("mockups")),
+            (outside.clone(), spec.join("elsewhere")),
+            (design.join("DESIGN.md"), spec.join("linked.md")),
+            (
+                PathBuf::from("../design/screens"),
+                spec.join("runbooks").join("screens"),
+            ),
+        ];
+        for (target, link) in &links {
+            std::os::unix::fs::symlink(target, link).expect("create a symbolic link");
+        }
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        assert!(
+            walk.documents
+                .iter()
+                .any(|document| document.body.contains("real content")),
+            "the real document is still collected: {walk:?}"
+        );
+        assert!(
+            walk.documents.iter().all(|document| {
+                !document.body.contains("Ledgerline") && !document.body.contains("private words")
+            }),
+            "no link may bring spec/design/ or anything outside spec/ into the index: {:?}",
+            walk.documents
+        );
+        let skipped_links: BTreeSet<PathBuf> = walk
+            .skipped
+            .iter()
+            .filter(|entry| entry.reason == SkipReason::Symlink)
+            .map(|entry| entry.path.clone())
+            .collect();
+        let expected: BTreeSet<PathBuf> = links.iter().map(|(_, link)| link.clone()).collect();
+        assert_eq!(
+            skipped_links, expected,
+            "every link is reported as skipped, with its reason"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_a_spec_directory_that_is_itself_a_symbolic_link_is_never_walked() {
+        let scratch = Scratch::new("spec-symlink");
+        let real = scratch.path.join("somewhere-else");
+        fs::create_dir_all(&real).expect("create the link target");
+        fs::write(real.join("PRD.md"), "# PRD\n\nwords from outside\n").expect("write a file");
+        let repo = scratch.path.join("repo");
+        fs::create_dir_all(&repo).expect("create the repository root");
+        std::os::unix::fs::symlink(&real, repo.join("spec")).expect("link spec/ elsewhere");
+
+        let walk = Indexer::walk_repo(&repo).expect("walk");
+        assert!(walk.documents.is_empty(), "{walk:?}");
+        assert_eq!(
+            walk.skipped,
+            vec![SkippedEntry {
+                path: repo.join("spec"),
+                reason: SkipReason::Symlink,
+            }]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_a_backslash_in_a_unix_file_name_is_part_of_the_name_never_a_separator() {
+        // Round 4 rewrote every backslash to a slash, so this file took the
+        // real runbook's identity and DuplicatePath then refused indexing
+        // the whole repository.
+        let scratch = Scratch::new("backslash-name");
+        let spec = scratch.path.join("spec");
+        fs::create_dir_all(spec.join("runbooks")).expect("create spec/runbooks");
+        fs::write(
+            spec.join("runbooks").join("restore.md"),
+            "# Restore\n\nreal steps\n",
+        )
+        .expect("write the real runbook");
+        fs::write(
+            spec.join("runbooks\\restore.md"),
+            "# Restore\n\nimpostor steps\n",
+        )
+        .expect("write a file whose name holds a backslash");
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        assert!(
+            walk.skipped.is_empty(),
+            "neither file collides with the other: {walk:?}"
+        );
+        let real = concat!("spec/runbooks/restore", ".md", "#restore");
+        let odd = concat!("spec/runbooks\\restore", ".md", "#restore");
+        let paths: BTreeSet<&str> = walk.documents.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, BTreeSet::from([real, odd]));
+
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
         indexer
-            .search(&query, 10)
-            .expect("an NFD query at exactly the token cap must not be refused");
+            .full_rebuild(&walk.documents)
+            .expect("one odd file name never refuses the whole index");
+        let found = indexer.search("real steps", 10).expect("search").hits;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, real);
+        let found = indexer.search("impostor", 10).expect("search").hits;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, odd);
+    }
+
+    #[test]
+    fn ori_t_0035_a_repeated_criterion_id_is_skipped_with_a_reason_and_never_refuses_the_whole_walk()
+     {
+        let scratch = Scratch::new("repeated-criterion");
+        let criteria = scratch.path.join("spec").join("criteria");
+        fs::create_dir_all(&criteria).expect("create spec/criteria");
+        let table = criteria.join("phase-1.md");
+        fs::write(
+            &table,
+            "| ID | Expected |\n|---|---|\n| ORI-P1-001 | first wording |\n\
+             | ORI-P1-001 | second wording |\n| ORI-P1-002 | other |\n",
+        )
+        .expect("write a table repeating one ID");
+        fs::write(
+            scratch.path.join("spec").join("PRD.md"),
+            "# PRD\n\nreal content\n",
+        )
+        .expect("write a real document");
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        let repeated = concat!("spec/criteria/phase-1", ".md", "#ORI-P1-001");
+        assert_eq!(
+            walk.skipped,
+            vec![SkippedEntry {
+                path: table,
+                reason: SkipReason::DuplicateDocumentPath {
+                    path: repeated.to_owned(),
+                },
+            }],
+            "the repeat is left out and reported, naming its file"
+        );
+        let kept = walk
+            .documents
+            .iter()
+            .find(|document| document.path == repeated)
+            .expect("the first row is kept");
+        assert!(kept.body.contains("first wording"));
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        let report = indexer
+            .full_rebuild(&walk.documents)
+            .expect("the walk's set never fails the rebuild wholesale");
+        assert_eq!(report.total, 3);
+    }
+
+    #[test]
+    fn ori_t_0035_one_unreadable_file_is_skipped_with_a_reason_and_never_fails_the_walk() {
+        // Round 4 read every file with `?`, so one file that is not UTF-8
+        // text failed the whole walk.
+        let scratch = Scratch::new("unreadable-file");
+        let spec = scratch.path.join("spec");
+        fs::create_dir_all(&spec).expect("create spec/");
+        fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
+        let binary = spec.join("binary.md");
+        fs::write(&binary, [0xFFu8, 0xFE, 0x00, 0x80]).expect("write bytes that are not UTF-8");
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("one odd file never fails the walk");
+        assert_eq!(walk.documents.len(), 1);
+        assert_eq!(walk.skipped.len(), 1);
+        assert_eq!(walk.skipped[0].path, binary);
+        assert!(matches!(
+            walk.skipped[0].reason,
+            SkipReason::Unreadable { .. }
+        ));
+    }
+
+    #[test]
+    fn ori_t_0035_the_most_expensive_query_within_the_byte_cap_stays_bounded_in_time_and_memory() {
+        // The byte cap is the only bound on a query's cost now (the token
+        // cap is gone). The most expensive shape found within it: a
+        // one-letter term repeated 512 times (1024 bytes, the most terms
+        // the cap admits), against documents that each repeat it 600
+        // times, so the phrase matches every document and FTS5 walks every
+        // position of every term. Run in a child process, because it caps
+        // SQLite's heap for the whole process.
+        const CHILD: &str = "ORI_T_0035_BOUNDED_QUERY_CHILD";
+        const HEAP_LIMIT: u64 = 32 * 1024 * 1024;
+        const TIME_LIMIT: Duration = Duration::from_secs(20);
+        if std::env::var_os(CHILD).is_none() {
+            run_in_child_process(
+                "indexer::tests::ori_t_0035_the_most_expensive_query_within_the_byte_cap_stays_bounded_in_time_and_memory",
+                CHILD,
+                &[],
+            );
+            return;
+        }
+
+        let scratch = Scratch::new("bounded-query");
+        let db = product(&scratch);
+        let body = "a ".repeat(600);
+        let corpus: Vec<IndexableDocument> = (0..300)
+            .map(|n| doc(&format!("d{n}.md"), DocumentKind::Section, "T", &body))
+            .collect();
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&corpus).expect("seed");
+        }
+        let indexer = Indexer::open(&db).expect("reopen");
+        let worst = "a ".repeat(MAX_QUERY_BYTES / 2);
+        assert_eq!(worst.len(), MAX_QUERY_BYTES);
+
+        let limit: i64 = indexer
+            .conn
+            .query_row(
+                &format!("PRAGMA hard_heap_limit = {HEAP_LIMIT}"),
+                [],
+                |row| row.get(0),
+            )
+            .expect("cap SQLite's heap");
+        assert_eq!(
+            u64::try_from(limit).expect("a positive limit"),
+            HEAP_LIMIT,
+            "the cap took effect"
+        );
+
+        let started = std::time::Instant::now();
+        let report = indexer
+            .search(&worst, 10)
+            .expect("the worst query within the byte cap runs inside the heap cap");
+        let elapsed = started.elapsed();
+        eprintln!("worst query within the byte cap: {elapsed:?}");
+        assert_eq!(
+            (report.hits.len(), report.documents_covered),
+            (10, corpus.len()),
+            "it really matched: the phrase was walked against every document"
+        );
+        assert!(
+            elapsed < TIME_LIMIT,
+            "the worst query within the byte cap took {elapsed:?}"
+        );
+
+        // Control: the same term 64 times past the cap. search refuses it,
+        // so it goes to FTS5 directly, as an uncapped search would, and the
+        // same heap cap stops it: the byte cap is what keeps a query inside.
+        let over = "a ".repeat(32 * MAX_QUERY_BYTES);
+        assert!(matches!(
+            indexer.search(&over, 10),
+            Err(IndexerError::QueryTooLarge { .. })
+        ));
+        let uncapped: rusqlite::Result<Vec<String>> = indexer
+            .conn
+            .prepare("SELECT path FROM documents WHERE documents MATCH ?1 LIMIT 10")
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![quote_fts5_phrase(&over)], |row| row.get(0))?
+                    .collect()
+            });
+        match uncapped {
+            Err(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OutOfMemory) => {}
+            other => panic!(
+                "the control must exhaust the same heap cap, or the cap proves nothing: \
+                 {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn ori_t_0035_a_query_of_many_short_terms_within_the_byte_cap_is_accepted() {
+        // The token cap refused this (512 terms against a cap of 64) and,
+        // in the other direction, accepted 341 FTS5 terms spelled with
+        // U+0336 as one. Now the byte length alone decides.
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer
+            .full_rebuild(&[doc("a.md", DocumentKind::Section, "A", "a a a")])
+            .expect("full rebuild");
+        let many = "a ".repeat(MAX_QUERY_BYTES / 2);
+        assert_eq!(many.len(), MAX_QUERY_BYTES);
+        indexer
+            .search(&many, 10)
+            .expect("512 short terms within the byte cap are accepted");
+        let struck = "a\u{0336}".repeat(341);
+        assert!(struck.len() <= MAX_QUERY_BYTES);
+        indexer
+            .search(&struck, 10)
+            .expect("341 struck-through letters within the byte cap are accepted");
+        let over = "a\u{0336}".repeat(342);
+        assert!(over.len() > MAX_QUERY_BYTES);
+        assert!(matches!(
+            indexer.search(&over, 10),
+            Err(IndexerError::QueryTooLarge { byte_len }) if byte_len == over.len()
+        ));
+    }
+
+    #[test]
+    fn ori_t_0035_index_report_total_is_read_before_commit_never_after_another_writers_commit() {
+        // Deterministic: the after-commit seam (see `commit`) commits a
+        // second connection's row at the exact moment this call's own
+        // commit returns. Read before commit, `total` is the target's size;
+        // read after, it would count the intruder too. The round-4 stress
+        // test passed 20 of 20 against that mutant.
+        let scratch = Scratch::new("total-window");
+        let db = product(&scratch);
+        let file = index_file(&db);
+        let mut mine = Indexer::open(&db).expect("open on-disk index");
+        let target = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("b.md", DocumentKind::Section, "B", "beta"),
+            doc("c.md", DocumentKind::Section, "C", "gamma"),
+        ];
+        for method in ["full_rebuild", "incremental_sync"] {
+            mine.full_rebuild(&[]).expect("start empty");
+            let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+            let hook_fired = std::rc::Rc::clone(&fired);
+            let intruder_file = file.clone();
+            set_after_commit_hook(move || {
+                Connection::open(&intruder_file)
+                    .expect("the intruder's own connection")
+                    .execute(
+                        "INSERT INTO documents (path, kind, title, body, checksum) \
+                         VALUES ('intruder.md', 'section', 'I', 'intruder', 1)",
+                        [],
+                    )
+                    .expect("the intruder commits");
+                hook_fired.set(true);
+            });
+            let report = if method == "full_rebuild" {
+                mine.full_rebuild(&target)
+            } else {
+                mine.incremental_sync(&target)
+            }
+            .expect("the call succeeds");
+            assert!(
+                fired.get(),
+                "{method}: the intruder must have committed, or this proves nothing"
+            );
+            assert_eq!(
+                report.total,
+                target.len(),
+                "{method}: total is read inside the transaction, before commit, never after \
+                 another writer's commit"
+            );
+            assert_eq!(
+                mine.all_documents().expect("read back").len(),
+                target.len() + 1,
+                "{method}: the intruder's commit really did land right after this one"
+            );
+        }
     }
 
     /// The inode (Unix) a path currently names, for asserting that a file
