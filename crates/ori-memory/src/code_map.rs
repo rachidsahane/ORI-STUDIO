@@ -6171,28 +6171,33 @@ mod tests {
     }
 
     /// Item 2 (HIGH), end to end, the long-line document the review of round
-    /// 3 built, scaled down to fit a unit test: 64 modules named
-    /// `("as" x 20) + "aNNNN.rs"` and three `spec/` documents, each a single
-    /// line of `"as"` repeated to just under the 8 MiB cap, so every search
-    /// is slow and there are only 192 line searches in all (the round-3
-    /// scan's first check came at the 4096th, so it never checked). The
-    /// round-3 scan ran every search, about 8 s in this ticket's debug build
-    /// (2 s in release), and reported itself complete; with a 250 ms budget
-    /// the scan must stop and say so.
+    /// 3 built, scaled down to fit a unit test: 192 modules named
+    /// `("as" x 20) + "aNNNN.rs"` and one `spec/` document, a single line of
+    /// `"as"` repeated to just under the 8 MiB cap, so every search is slow
+    /// and there are only 192 line searches in all (the round-3 scan's first
+    /// check came at the 4096th, so it never checked). The round-3 scan ran
+    /// every search, about 8 s in this ticket's debug build (2 s in
+    /// release), and reported itself complete; with a 250 ms budget the scan
+    /// must stop and say so. One document, not several (round 4 used three
+    /// of 64 modules each): since round 5 the scan also reads the clock
+    /// before each document, which would cap a lines-only check's overrun
+    /// at one document's worth of searches and hide it here; with all the
+    /// work in one document, only the check inside the scan can stop it.
     #[test]
     fn ori_t_0036_a_spec_document_of_long_lines_cannot_overrun_the_scan_deadline() {
         let dir = temp_dir("spec-long-lines");
         let guard = DropGuard(dir.clone());
         let prefix = "as".repeat(20);
-        for n in 0..64 {
+        for n in 0..192 {
             write(&dir, &format!("{prefix}a{n:04}.rs"), "pub fn f() {}\n");
         }
-        let line = "as".repeat(4_194_300);
-        for n in 0..3 {
-            // Assembled, not written whole: see the fixture-path comment
-            // earlier in this file.
-            write(&dir, &format!("spec/{}{n}.md", "long"), &line);
-        }
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(
+            &dir,
+            &format!("spec/{}.md", "long"),
+            &"as".repeat(4_194_300),
+        );
         let options = CodeMapOptions {
             file_timeout: Duration::from_millis(250),
             ..CodeMapOptions::default()
@@ -6201,7 +6206,7 @@ mod tests {
         let map = build_code_map_with_options(&dir, &options).expect("maps");
         let elapsed = start.elapsed();
         assert!(
-            map.modules.len() >= 32,
+            map.modules.len() >= 96,
             "the modules themselves must map, or there is nothing to scan: {:?}",
             map.coverage
         );
@@ -6217,6 +6222,7 @@ mod tests {
         );
         drop(guard);
     }
+
     /// `from <dots> import a, a, ..., a`, the statement shape the review of
     /// round 3 used against `python_import_from_edges`.
     fn python_relative_import(dots: usize, names: usize) -> String {
