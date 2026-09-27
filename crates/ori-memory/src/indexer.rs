@@ -84,7 +84,9 @@
 //! citations. That file is all E-0006 is about, and the walk never reads
 //! it: it reads only `.md` files, and records the HTML file in
 //! [`RepoWalk::skipped`] with [`SkipReason::NotMarkdown`], like any other
-//! file that is not Markdown.
+//! file that is not Markdown. Not being Markdown, it is not specification
+//! text either, so it never makes anything freshness unknown and never
+//! refuses readiness ([`SkipReason::leaves_out_specification`]).
 //!
 //! Earlier rounds went further and never entered `spec/design/` at all, on
 //! a reading of E-0006 that the lead has since corrected as a mistake: what
@@ -193,7 +195,9 @@
 //! index holds its path, with the earlier document, but the later
 //! document's text is in no index, so its file is freshness unknown and
 //! readiness is refused until the repeat is resolved ("A file left out is
-//! not a file removed", below).
+//! not a file removed", below). A repeat is listed with every other entry
+//! at its path, a repeat past the document cap and a third repeat
+//! included, each with its own reason.
 //!
 //! # What the repository walk never reads
 //!
@@ -233,6 +237,11 @@
 //!   past its budget of documents or of bytes
 //!   ([`SkipReason::WalkDocumentLimit`], [`SkipReason::WalkByteLimit`]):
 //!   "What one walk costs", below.
+//!
+//! Every kind of entry above but two leaves out specification text, or
+//! may, and makes its file freshness unknown; a file not named `.md` and
+//! an entry that is not a regular file hold none, and do not ("A file left
+//! out is not a file removed", below).
 //!
 //! Nothing else is left out; no directory under `spec/` is skipped by
 //! name. Every other line of every file the walk reads is in some
@@ -277,19 +286,39 @@
 //! against, text the file may no longer hold (a file turned unreadable by
 //! one byte, or grown past a cap, has changed).
 //!
-//! Its freshness is unknown, and that is reported whether or not anything
-//! is on record for it: the rule is about content, not records.
+//! When what it left out is specification text, its freshness is unknown,
+//! and that is reported whether or not anything is on record for it: the
+//! rule is about content, not records.
 //! [`crate::freshness::FreshnessTracker::list_stale`] takes, beside the
-//! index's corpus, the walk's [`RepoWalk::not_indexed`], every entry the
-//! walk left out with the reason for each, a repeated document path and a
-//! path that is not UTF-8 included, and its report carries every file,
-//! link or directory any content of which the walk left out, as freshness
-//! unknown with the walk's reasons
-//! ([`crate::freshness::StaleReport::freshness_unknown`]). The report's
-//! one readiness answer, [`crate::freshness::StaleReport::is_ready`], is
-//! false while that list is not empty or any record is stale. A file
-//! genuinely deleted is in no walk, so it is neither unknown nor listed
+//! index's corpus ([`Indexer::freshness_corpus`]), the walk's
+//! [`RepoWalk::not_indexed`], every entry the walk left out with the
+//! reason for each, a repeated document path and a path that is not UTF-8
+//! included, none merged with another at the same key, and its report
+//! carries every file, link or directory any specification text of which
+//! the walk left out, as freshness unknown with every reason the walk gave
+//! for it ([`crate::freshness::StaleReport::freshness_unknown`]). The
+//! report's one readiness answer,
+//! [`crate::freshness::StaleReport::is_ready`], is false while that list is
+//! not empty or any record is stale. A file genuinely deleted is in no
+//! walk, so it is neither unknown nor listed
 //! (`tests::ori_p1_026_a_deleted_file_is_neither_freshness_unknown_nor_listed`).
+//!
+//! Only specification text counts, and which entries may hold some is
+//! decided once, per reason, by [`SkipReason::leaves_out_specification`],
+//! whose match names every reason: Markdown the walk could not index (a
+//! document or file past a cap, a file of too many documents, a repeated
+//! document path, a `.md` file unreadable, not UTF-8 or under a path that
+//! is not, a `.md` file past what the walk had left), and an entry that
+//! could hold Markdown the walk did not read (a directory it could not
+//! list, an entry whose type it could not read, a symbolic link). A file
+//! not named `.md` and an entry that is not a regular file hold no
+//! specification text: the tracker reads such an entry as if the walk had
+//! never met it, so it never makes anything freshness unknown, never covers
+//! a record, and never refuses readiness. A review found round 12 reading
+//! every entry as specification text, so this repository, whose
+//! `spec/design/` holds `Ori Studio.html` (and, on a Mac, a `.DS_Store`),
+//! could never read as ready
+//! (`tests::ori_p1_026_a_copy_of_this_repositorys_spec_tree_with_every_document_verified_is_ready`).
 //! Rounds 8 to 11 listed records on what the walk left out, shape by
 //! shape, and each review found content no record reached; round 11's
 //! found three, each read as ready: a file whose own path is also an
@@ -304,11 +333,12 @@
 //!
 //! The file's freshness records survive as well.
 //! [`crate::freshness::FreshnessTracker`] never deletes a record, and every
-//! record on something the walk left out, a divergence the drift audit
-//! filed included, is listed as
+//! record on specification text the walk left out, a divergence the drift
+//! audit filed included, is listed as
 //! [`crate::freshness::StaleReason::NotIndexed`], carrying the walk's
 //! reason and the divergence. Only a record whose file is neither in the
-//! corpus nor left out reads as removed. A review found round 8 dropping
+//! corpus nor left out as specification text reads as removed. A review
+//! found round 8 dropping
 //! the divergence: [`Indexer::collect_from_repo`] threw the skip list away,
 //! and one Windows-1252 byte in a specification file, or an ADR grown past
 //! the document cap, took the file out of the index and its divergence out
@@ -1055,6 +1085,28 @@ impl IndexableDocument {
     fn indexed_byte_len(&self) -> usize {
         self.title.len() + self.body.len()
     }
+
+    /// The text a freshness verification of this document covers, and the
+    /// text [`crate::freshness::FreshnessTracker`] compares against the one
+    /// on record: the title's length in bytes, a line feed, the title, a
+    /// line feed, then the body. AICD §25.
+    ///
+    /// The title is part of it because a section's heading is not in its
+    /// body: the walk keeps a heading's text as the section's title, and the
+    /// text under it as the body. A review of round 12 found the tracker
+    /// comparing bodies alone, so an edit to a heading that kept its anchor
+    /// (`# Retry, then stop` to `# Retry then stop!`, both
+    /// `#retry-then-stop`) read as ready over a verification of the old
+    /// heading
+    /// (`tests::ori_p1_026_a_heading_edited_without_moving_its_anchor_is_changed_since_verification`).
+    /// The length comes first so that no two pairs of title and body give
+    /// the same text, a line moved from one into the other included.
+    /// [`Indexer::freshness_corpus`] gives every document of an index in
+    /// this form; a caller recording a verification records this text.
+    #[must_use]
+    pub fn freshness_text(&self) -> String {
+        format!("{}\n{}\n{}", self.title.len(), self.title, self.body)
+    }
 }
 
 /// One hit from [`Indexer::search`].
@@ -1284,12 +1336,68 @@ impl SkipReason {
             | Self::WalkByteLimit { .. } => SkipScope::File,
         }
     }
+
+    /// Whether an entry left out for this reason may hold specification
+    /// text nobody checked, so that the file it names is freshness unknown
+    /// and readiness is refused while it is there (the module doc's "A file
+    /// left out is not a file removed"): AICD §25.
+    ///
+    /// Specification text is Markdown under `spec/`. An entry leaves some
+    /// out when it is Markdown the walk could not index, or an entry that
+    /// could hold Markdown the walk did not read:
+    ///
+    /// - Markdown the walk could not index: a document past the document
+    ///   cap ([`SkipReason::DocumentTooLarge`]), a `.md` file past the file
+    ///   cap ([`SkipReason::FileTooLarge`]) or split into too many documents
+    ///   ([`SkipReason::FileDocumentLimit`]), a repeated document path
+    ///   ([`SkipReason::DuplicateDocumentPath`]), a `.md` file whose path is
+    ///   not UTF-8 ([`SkipReason::NonUtf8Path`]), and a `.md` file past what
+    ///   the walk had left ([`SkipReason::WalkDocumentLimit`],
+    ///   [`SkipReason::WalkByteLimit`]).
+    /// - Unread, and possibly Markdown: an entry that could not be read
+    ///   ([`SkipReason::Unreadable`]: a `.md` file unreadable or not UTF-8,
+    ///   a directory that could not be listed, or an entry whose type could
+    ///   not be read), and a symbolic link ([`SkipReason::Symlink`]). A link
+    ///   named `*.md` and a link to a directory could hold Markdown; the
+    ///   walk never looks at what a link points at, so it cannot tell any
+    ///   other link from those two, and every link counts.
+    ///
+    /// The rest is not specification text, and never refuses readiness: a
+    /// regular file not named `.md` ([`SkipReason::NotMarkdown`], such as
+    /// `spec/design/Ori Studio.html` or a `.DS_Store`), and an entry that
+    /// is not a regular file, a directory or a link
+    /// ([`SkipReason::NotARegularFile`], such as a named pipe or a socket),
+    /// which holds no stored text at all. A review of round 12 found every
+    /// entry the walk left out refusing readiness, so this repository, whose
+    /// `spec/design/` holds that HTML file, could never read as ready
+    /// (`tests::ori_p1_026_a_copy_of_this_repositorys_spec_tree_with_every_document_verified_is_ready`).
+    ///
+    /// The match names every reason, with no wildcard, so a reason added
+    /// later has to choose before it compiles.
+    #[must_use]
+    pub const fn leaves_out_specification(&self) -> bool {
+        match self {
+            Self::DocumentTooLarge { .. }
+            | Self::FileTooLarge { .. }
+            | Self::FileDocumentLimit { .. }
+            | Self::DuplicateDocumentPath { .. }
+            | Self::NonUtf8Path
+            | Self::WalkDocumentLimit { .. }
+            | Self::WalkByteLimit { .. }
+            | Self::Unreadable { .. }
+            | Self::Symlink => true,
+            Self::NotMarkdown | Self::NotARegularFile => false,
+        }
+    }
 }
 
 /// What one entry of [`RepoWalk::not_indexed`] covers, the one thing
 /// [`crate::freshness::FreshnessTracker::list_stale`] matches a record
 /// against it by ([`SkipReason::scope`]; the module doc's "A file left out
-/// is not a file removed"): AICD §25.
+/// is not a file removed"): AICD §25. Only an entry that leaves out
+/// specification text ([`SkipReason::leaves_out_specification`]) covers
+/// anything, or makes anything freshness unknown; the tracker reads every
+/// other entry as if the walk had never met it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkipScope {
     /// One document of a file the walk read and split, left out on its
@@ -1326,13 +1434,15 @@ pub struct RepoWalk {
 }
 
 impl RepoWalk {
-    /// Every entry this walk left out, every one of them, keyed the way a
-    /// document path names it, with the reason: the input
+    /// Every entry this walk left out, every one of them, in walk order,
+    /// each with the path a record names it by, the file whose content it
+    /// left out, and the reason: the input
     /// [`crate::freshness::FreshnessTracker::list_stale`] takes beside the
-    /// index's corpus, so that every file some content of which the walk
-    /// left out is reported as freshness unknown, whether or not any
-    /// record names it, and readiness is refused while one is (the module
-    /// doc's "A file left out is not a file removed"): AICD §25.
+    /// index's corpus, so that every file some specification text of which
+    /// the walk left out is reported as freshness unknown, with every
+    /// reason, whether or not any record names it, and readiness is refused
+    /// while one is (the module doc's "A file left out is not a file
+    /// removed"): AICD §25.
     ///
     /// A document the walk split and then left out, for its size
     /// ([`SkipReason::DocumentTooLarge`]) or because an earlier document
@@ -1341,36 +1451,181 @@ impl RepoWalk {
     /// ([`SkipScope::Document`]); every other entry, a file, a link or a
     /// directory, is keyed by its path under the repository root,
     /// `/`-joined, as a document path is, and covers everything at or under
-    /// that path ([`SkipScope::File`]). Each value's
+    /// that path ([`SkipScope::File`]). Each entry's
     /// [`SkipReason::scope`] says which, so a document key that is a file's
     /// bare path (the text above its first heading) is never read as the
-    /// whole file.
+    /// whole file. Every entry's file is the entry's own path in
+    /// [`RepoWalk::skipped`], the file a document-scoped entry's document
+    /// belongs to included.
     ///
-    /// Nothing the walk left out is dropped here. A repeated document path
-    /// is here although the index holds that path, with the earlier
-    /// document: the later document's text is in no index, and a review
-    /// found round 11 dropping it, so an edit to a criteria file's repeated
-    /// row read as ready. An entry whose path is not UTF-8 is here, each
-    /// component that is not converted lossily (every invalid sequence
-    /// becomes U+FFFD): no record can name it, but its file's content was
-    /// left out all the same. Two entries share a key when one document
+    /// Nothing the walk left out is dropped here, and no two entries are
+    /// merged, even where they share a key. A repeated document path is
+    /// here although the index holds that path, with the earlier document:
+    /// the later document's text is in no index, and a review found round
+    /// 11 dropping it, so an edit to a criteria file's repeated row read as
+    /// ready. An entry whose path is not UTF-8 is here, each component that
+    /// is not converted lossily (every invalid sequence becomes U+FFFD) in
+    /// its key and its file: no record can name it, but its file's content
+    /// was left out all the same. Two entries share a key when one document
     /// path is left out twice (a repeat past the cap, then another repeat),
-    /// or when such a conversion, or a file whose own name holds a `#`,
-    /// makes them; the first in walk order is kept, and a key is kept
-    /// either way, so the walk's list is never empty while anything was
-    /// left out.
+    /// when a file's sibling is named as one of its documents (`a.md#big`
+    /// beside the `#big` section of `a.md`), or when such a conversion
+    /// makes them. A review found round 12 keeping only the first entry of
+    /// each key here, so a reason, or a whole file, went unlisted
+    /// (`tests::ori_p1_026_entries_that_share_a_key_list_every_file_and_every_reason`).
     #[must_use]
-    pub fn not_indexed(&self) -> BTreeMap<String, SkipReason> {
-        let mut out = BTreeMap::new();
-        for entry in &self.skipped {
-            let key = match &entry.reason {
-                SkipReason::DocumentTooLarge { path, .. }
-                | SkipReason::DuplicateDocumentPath { path } => path.clone(),
-                _ => repository_key(&self.root, &entry.path),
-            };
-            out.entry(key).or_insert_with(|| entry.reason.clone());
-        }
-        out
+    pub fn not_indexed(&self) -> NotIndexed {
+        let entries = self
+            .skipped
+            .iter()
+            .map(|entry| {
+                let file = repository_key(&self.root, &entry.path);
+                let key = match &entry.reason {
+                    SkipReason::DocumentTooLarge { path, .. }
+                    | SkipReason::DuplicateDocumentPath { path } => path.clone(),
+                    _ => file.clone(),
+                };
+                NotIndexedEntry {
+                    key,
+                    file,
+                    origin: entry
+                        .path
+                        .strip_prefix(&self.root)
+                        .unwrap_or(&entry.path)
+                        .to_owned(),
+                    reason: entry.reason.clone(),
+                }
+            })
+            .collect();
+        NotIndexed { entries }
+    }
+}
+
+/// Every entry one repository walk left out, in walk order, none merged
+/// and none dropped: what [`RepoWalk::not_indexed`] returns and
+/// [`crate::freshness::FreshnessTracker::list_stale`] takes. AICD §25.
+///
+/// It is read two ways. [`NotIndexed::entries`] is every entry, which is
+/// what the tracker lists freshness unknown from, so that every file and
+/// every reason is listed even where two entries share a key. The lookups
+/// by key ([`NotIndexed::get`], [`NotIndexed::contains_key`],
+/// [`NotIndexed::keys`] and indexing by a key) read it as a map from each
+/// key to the reason of the first entry at that key, in walk order, for a
+/// caller asking why one path was left out.
+///
+/// A list with no walk behind it (a test's, or a caller's with a list of
+/// its own) is collected from pairs of a key and a reason: each entry's
+/// file is its key when the reason is file-scoped, and the file its key's
+/// document belongs to (the key up to its anchor) when the reason is
+/// document-scoped.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NotIndexed {
+    entries: Vec<NotIndexedEntry>,
+}
+
+/// One entry of a [`NotIndexed`]: AICD §25.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotIndexedEntry {
+    /// The path a record names what was left out by: a document path for a
+    /// document-scoped reason, and the path of the file, link or directory
+    /// under the repository root for a file-scoped one
+    /// ([`SkipReason::scope`]), `/`-joined as a document path is.
+    pub key: String,
+    /// The file, link or directory whose content was left out, under the
+    /// repository root and `/`-joined: the entry's own path in
+    /// [`RepoWalk::skipped`], for a document-scoped entry too, never read
+    /// off the key.
+    pub file: String,
+    /// The entry's path under the repository root, unconverted, so that
+    /// two files whose names differ only in bytes that are not UTF-8, which
+    /// `file` spells alike, are still two files; `file` as a path, for an
+    /// entry collected from a key and a reason.
+    pub(crate) origin: PathBuf,
+    /// Why the walk left it out.
+    pub reason: SkipReason,
+}
+
+impl NotIndexed {
+    /// Every entry, in walk order.
+    #[must_use]
+    pub fn entries(&self) -> &[NotIndexedEntry] {
+        &self.entries
+    }
+
+    /// How many entries there are, every one counted, those sharing a key
+    /// included.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the walk left nothing out at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The reason of the first entry at `key`, in walk order, if any entry
+    /// is keyed there.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&SkipReason> {
+        self.entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| &entry.reason)
+    }
+
+    /// Whether any entry is keyed at `key`.
+    #[must_use]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.entries.iter().any(|entry| entry.key == key)
+    }
+
+    /// Every key some entry has, once each, in key order.
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.entries
+            .iter()
+            .map(|entry| &entry.key)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+    }
+}
+
+impl<Q: AsRef<str> + ?Sized> std::ops::Index<&Q> for NotIndexed {
+    type Output = SkipReason;
+
+    /// The reason of the first entry at `key`, as [`NotIndexed::get`].
+    ///
+    /// # Panics
+    ///
+    /// If no entry is keyed at `key`, as a map's index does.
+    fn index(&self, key: &Q) -> &SkipReason {
+        let key = key.as_ref();
+        self.get(key)
+            .unwrap_or_else(|| panic!("no entry the walk left out is keyed {key}"))
+    }
+}
+
+impl FromIterator<(String, SkipReason)> for NotIndexed {
+    /// Entries named by a key and a reason, in the order given, each with
+    /// the file [`NotIndexed`]'s doc gives it.
+    fn from_iter<I: IntoIterator<Item = (String, SkipReason)>>(pairs: I) -> Self {
+        let entries = pairs
+            .into_iter()
+            .map(|(key, reason)| {
+                let file = match reason.scope() {
+                    SkipScope::File => key.clone(),
+                    SkipScope::Document => document_file(&key).to_owned(),
+                };
+                NotIndexedEntry {
+                    origin: PathBuf::from(&file),
+                    key,
+                    file,
+                    reason,
+                }
+            })
+            .collect();
+        Self { entries }
     }
 }
 
@@ -2288,6 +2543,26 @@ impl<'db> Indexer<'db> {
         Self::all_documents_on(&self.conn, &self.display_path())
     }
 
+    /// Every document presently in the index, keyed by path, with the text
+    /// a freshness verification of it covers
+    /// ([`IndexableDocument::freshness_text`], its title and its body): the
+    /// corpus [`crate::freshness::FreshnessTracker::list_stale`] takes, read
+    /// as [`Indexer::all_documents`] reads it. AICD §25.
+    ///
+    /// # Errors
+    ///
+    /// As [`Indexer::all_documents`].
+    pub fn freshness_corpus(&self) -> Result<BTreeMap<String, String>, IndexerError> {
+        Ok(self
+            .all_documents()?
+            .into_iter()
+            .map(|(document, _)| {
+                let text = document.freshness_text();
+                (document.path, text)
+            })
+            .collect())
+    }
+
     /// [`Indexer::all_documents`]'s body, taking any `&Connection`.
     fn all_documents_on(
         conn: &Connection,
@@ -3022,8 +3297,10 @@ impl Indexer<'_> {
     /// [`Indexer::full_rebuild`] or [`Indexer::incremental_sync`], and every
     /// entry it left out, whose [`RepoWalk::not_indexed`] is what
     /// [`crate::freshness::FreshnessTracker::list_stale`] takes beside the
-    /// index's corpus. The documented pairing is this walk's documents to
-    /// the sync, and the same walk's `not_indexed` to `list_stale`.
+    /// index's corpus ([`Indexer::freshness_corpus`]). The documented
+    /// pairing is this walk's documents to the sync, the synced index's
+    /// `freshness_corpus` and the same walk's `not_indexed` to
+    /// `list_stale`.
     ///
     /// A walk its own budget cut short is refused, never returned: a file
     /// left out because the walk ran out of documents or bytes before
@@ -10769,15 +11046,11 @@ mod tests {
     // whole file, link or directory.
     // ---------------------------------------------------------------------
 
-    /// Every document `indexer` holds, path to body: the corpus
-    /// `FreshnessTracker::list_stale` is handed.
+    /// Every document `indexer` holds, path to the text a verification of
+    /// it covers, its title and its body: the corpus
+    /// `FreshnessTracker::list_stale` is handed, `Indexer::freshness_corpus`.
     fn indexed_corpus(indexer: &Indexer<'_>) -> BTreeMap<String, String> {
-        indexer
-            .all_documents()
-            .expect("read the corpus back")
-            .into_iter()
-            .map(|(document, _)| (document.path, document.body))
-            .collect()
+        indexer.freshness_corpus().expect("read the corpus back")
     }
 
     /// Walks `scratch` and syncs `indexer` to it, returning the walk.
@@ -10866,8 +11139,9 @@ mod tests {
         );
         assert!(
             not_indexed
-                .values()
-                .all(|reason| reason.scope() == SkipScope::Document),
+                .entries()
+                .iter()
+                .all(|entry| entry.reason.scope() == SkipScope::Document),
             "{not_indexed:?}"
         );
         let current = indexed_corpus(&indexer);
@@ -11401,15 +11675,15 @@ mod tests {
     // not a record names it, and the report is not ready while one is.
     // ---------------------------------------------------------------------
 
-    /// The corpus a sync of `walk` leaves the index holding, path to body,
-    /// built from the walk's documents without an index, for walks too
-    /// large to be worth indexing in a test.
+    /// The corpus a sync of `walk` leaves the index holding, path to the
+    /// text a verification covers, built from the walk's documents without
+    /// an index, for walks too large to be worth indexing in a test.
     /// `tests::ori_p1_026_a_fully_indexed_fully_verified_corpus_is_ready`
     /// pins it equal to what the index reads back after a sync.
     fn walk_corpus(walk: &RepoWalk) -> BTreeMap<String, String> {
         walk.documents
             .iter()
-            .map(|document| (document.path.clone(), document.body.clone()))
+            .map(|document| (document.path.clone(), document.freshness_text()))
             .collect()
     }
 
@@ -11533,6 +11807,56 @@ mod tests {
         assert!(report.is_ready(), "{report:?}");
     }
 
+    /// Asserts what `walk`, which left out one entry and nothing else, the
+    /// entry `file` for a reason `kind` accepts and that holds no
+    /// specification text, reads as with every document the walk did index
+    /// verified at its text: ready, nothing stale, nothing freshness
+    /// unknown, though the entry is in the walk's list; and still ready
+    /// with a verification, or a divergence, on record at the entry's
+    /// path. Returns the tracker holding the documents' verifications.
+    fn assert_not_specification_with_no_record(
+        walk: &RepoWalk,
+        file: &str,
+        kind: fn(&SkipReason) -> bool,
+    ) -> crate::freshness::FreshnessTracker {
+        let [entry] = walk.skipped.as_slice() else {
+            panic!("the precondition: one entry left out: {:?}", walk.skipped);
+        };
+        assert!(kind(&entry.reason), "the precondition: {entry:?}");
+        let not_indexed = walk.not_indexed();
+        assert_eq!(
+            not_indexed.get(file),
+            Some(&entry.reason),
+            "the precondition: the entry is in the walk's list, keyed at its path: \
+             {not_indexed:?}"
+        );
+        let current = walk_corpus(walk);
+        assert!(
+            !current.is_empty(),
+            "the precondition: the walk indexed documents to verify"
+        );
+        let tracker = every_document_verified(&current);
+        let mut on_record = tracker.clone();
+        on_record.record_verification(file, Timestamp::from_millis(1_000), "its text");
+        let mut diverged = on_record.clone();
+        diverged.record_divergence(file, "drifted", Timestamp::from_millis(2_000));
+        for (label, records) in [
+            ("no record on it", &tracker),
+            ("a verification on it", &on_record),
+            ("a divergence on it", &diverged),
+        ] {
+            let report = records.list_stale(&current, &not_indexed);
+            assert_eq!(report.documents_covered, current.len(), "{label}");
+            assert!(
+                report.freshness_unknown.is_empty() && report.stale.is_empty(),
+                "{label}: not specification text, so read as if the walk had never met it: \
+                 {report:?}"
+            );
+            assert!(report.is_ready(), "{label}: {report:?}");
+        }
+        tracker
+    }
+
     /// Every [`SkipReason`] and its no-record test, by name. The match
     /// names every reason, so a reason added later does not compile until
     /// it has a test of its own here.
@@ -11544,11 +11868,11 @@ mod tests {
             ),
             SkipReason::NotARegularFile => (
                 "not a regular file",
-                ori_p1_026_with_no_record_an_entry_that_is_not_a_regular_file_is_freshness_unknown_and_not_ready,
+                ori_p1_026_with_no_record_an_entry_that_is_not_a_regular_file_is_not_specification_and_is_ready,
             ),
             SkipReason::NotMarkdown => (
                 "not named .md",
-                ori_p1_026_with_no_record_a_file_not_named_md_is_freshness_unknown_and_not_ready,
+                ori_p1_026_with_no_record_a_file_not_named_md_is_not_specification_and_is_ready,
             ),
             SkipReason::NonUtf8Path => (
                 "a path that is not UTF-8",
@@ -11582,6 +11906,26 @@ mod tests {
                 "past the walk's bytes",
                 ori_p1_026_with_no_record_a_file_past_the_walks_bytes_is_freshness_unknown_and_not_ready,
             ),
+        }
+    }
+
+    /// Whether an entry left out for `reason` may hold specification text:
+    /// the rule [`SkipReason::leaves_out_specification`] implements,
+    /// restated by hand for the oracles below so that none of them reads
+    /// the answer off the code under test. No wildcard, so a reason added
+    /// later does not compile until it is placed here too.
+    fn holds_specification(reason: &SkipReason) -> bool {
+        match reason {
+            SkipReason::NotMarkdown | SkipReason::NotARegularFile => false,
+            SkipReason::Symlink
+            | SkipReason::NonUtf8Path
+            | SkipReason::Unreadable { .. }
+            | SkipReason::DuplicateDocumentPath { .. }
+            | SkipReason::FileTooLarge { .. }
+            | SkipReason::DocumentTooLarge { .. }
+            | SkipReason::WalkDocumentLimit { .. }
+            | SkipReason::FileDocumentLimit { .. }
+            | SkipReason::WalkByteLimit { .. } => true,
         }
     }
 
@@ -11651,8 +11995,11 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_026_with_no_record_an_entry_that_is_not_a_regular_file_is_freshness_unknown_and_not_ready()
+    fn ori_p1_026_with_no_record_an_entry_that_is_not_a_regular_file_is_not_specification_and_is_ready()
      {
+        // Round 12 read this entry as freshness unknown. It holds no stored
+        // text at all, whatever its name, so it is not specification text
+        // and never refuses readiness.
         let scratch = one_indexed_file("nr-sock");
         let socket = ["spec", "s.md"].join("/");
         #[cfg(unix)]
@@ -11671,7 +12018,7 @@ mod tests {
                 reason: SkipReason::NotARegularFile,
             },
         );
-        let tracker = assert_freshness_unknown_with_no_record(&walk, &socket, |reason| {
+        let tracker = assert_not_specification_with_no_record(&walk, &socket, |reason| {
             matches!(reason, SkipReason::NotARegularFile)
         });
         #[cfg(unix)]
@@ -11680,12 +12027,16 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_026_with_no_record_a_file_not_named_md_is_freshness_unknown_and_not_ready() {
+    fn ori_p1_026_with_no_record_a_file_not_named_md_is_not_specification_and_is_ready() {
+        // Round 12 read this entry as freshness unknown, and so this
+        // repository, whose spec/design/ holds an HTML file, as never ready.
+        // A file the walk does not read as Markdown is not specification
+        // text, and never refuses readiness.
         let scratch = one_indexed_file("nr-yaml");
         let yaml = ["spec", "openapi.yaml"].join("/");
         fs::write(scratch.path.join(&yaml), "openapi: 3.1.0\n").expect("write a YAML file");
         let walk = Indexer::walk_repo(&scratch.path).expect("walk");
-        let tracker = assert_freshness_unknown_with_no_record(&walk, &yaml, |reason| {
+        let tracker = assert_not_specification_with_no_record(&walk, &yaml, |reason| {
             matches!(reason, SkipReason::NotMarkdown)
         });
         fs::remove_file(scratch.path.join(&yaml)).expect("delete the file");
@@ -12068,7 +12419,18 @@ mod tests {
              first row"
         );
         let corpus = indexed_corpus(&indexer);
-        assert_eq!(corpus[&repeated], "| ORI-P9-001 | first |");
+        // The corpus holds the text a verification covers, the row's title
+        // (its identifier) and its body (the row).
+        assert_eq!(
+            corpus[&repeated],
+            IndexableDocument::new(
+                repeated.clone(),
+                DocumentKind::Criterion,
+                "ORI-P9-001",
+                "| ORI-P9-001 | first |",
+            )
+            .freshness_text()
+        );
         assert!(
             !corpus.contains_key(&criteria),
             "the precondition: the file's own path is not a document"
@@ -12406,7 +12768,13 @@ mod tests {
             }
         }
         let report = tracker.list_stale(&corpus, &walk.not_indexed());
-        let mut expected: Vec<&str> = left_out.iter().map(|(path, _)| path.as_str()).collect();
+        // Each is freshness unknown but the YAML file, which is not
+        // specification text.
+        let mut expected: Vec<&str> = left_out
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .filter(|path| !path.ends_with(".yaml"))
+            .collect();
         expected.sort_unstable();
         assert_eq!(
             report
@@ -12528,13 +12896,17 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_026_readiness_is_false_exactly_when_the_walk_left_something_out_or_a_record_is_stale()
-    {
+    fn ori_p1_026_readiness_is_false_exactly_when_the_walk_left_specification_text_out_or_a_record_is_stale()
+     {
         // Generated walks, every skip reason injected at random into a
         // generated corpus with generated records, some files deleted since
         // their records were made: the report is ready exactly when the walk
-        // left nothing out and no record is stale, and the files freshness
-        // unknown are exactly those the walk left content of out.
+        // left no specification text out and no record is stale, and the
+        // files freshness unknown are exactly those the walk left
+        // specification text of out. An entry holding none (a file not named
+        // .md, an entry that is not a regular file) is read as if the walk
+        // had never met it, so its file's records are gone, as the model
+        // reads them.
         let root = std::env::temp_dir().join("ori-t-0035-generated-never-created");
         let dirs = [
             "spec".to_owned(),
@@ -12631,7 +13003,10 @@ mod tests {
                                 SkipReason::NotMarkdown => format!("f{i}.MD").into(),
                                 _ => format!("f{i}.md").into(),
                             };
-                            expected_unknown.insert(format!("{dir}/{}", name.to_string_lossy()));
+                            if holds_specification(&reason) {
+                                expected_unknown
+                                    .insert(format!("{dir}/{}", name.to_string_lossy()));
+                            }
                             skipped.push(SkippedEntry {
                                 path: root.join(dir).join(&name),
                                 reason,
@@ -12700,13 +13075,16 @@ mod tests {
             };
             let report = tracker.list_stale(&current, &walk.not_indexed());
 
-            let left_out = !walk.skipped.is_empty();
+            let left_out = walk
+                .skipped
+                .iter()
+                .any(|entry| holds_specification(&entry.reason));
             let stale = modelled_stale(&model, &current);
             assert_eq!(
                 report.is_ready(),
                 !left_out && !stale,
-                "case {case}: ready exactly when nothing is left out and no record is stale: \
-                 {walk:?} {report:?}"
+                "case {case}: ready exactly when no specification text is left out and no \
+                 record is stale: {walk:?} {report:?}"
             );
             let unknown: BTreeSet<String> = report
                 .freshness_unknown
@@ -12731,7 +13109,7 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_026_on_generated_repositories_readiness_is_false_exactly_when_the_walk_left_something_out_or_a_record_is_stale()
+    fn ori_p1_026_on_generated_repositories_readiness_is_false_exactly_when_the_walk_left_specification_text_out_or_a_record_is_stale()
      {
         use crate::freshness::FreshnessTracker;
 
@@ -12826,10 +13204,10 @@ mod tests {
             }
             match cases.below(6) {
                 0 => {
+                    // Not specification text: never freshness unknown.
                     let added = ["spec", "NOTES.MD"].join("/");
                     fs::write(scratch.path.join(&added), "# Notes\n")
                         .expect("a file not named .md");
-                    expected_unknown.insert(added);
                 }
                 #[cfg(unix)]
                 1 => {
@@ -12848,7 +13226,10 @@ mod tests {
 
             let (walk, current) = sync(&mut indexer);
             let report = tracker.list_stale(&current, &walk.not_indexed());
-            let left_out = !walk.skipped.is_empty();
+            let left_out = walk
+                .skipped
+                .iter()
+                .any(|entry| holds_specification(&entry.reason));
             let stale = current
                 .iter()
                 .any(|(path, text)| verified_corpus.get(path) != Some(text));
@@ -12879,5 +13260,404 @@ mod tests {
             seen.iter().all(|count| *count > 0),
             "ready, left out, stale and both are all generated: {seen:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 13: only specification text is freshness unknown, every entry
+    // the walk left out is listed, those sharing a key included, and a
+    // verification covers a document's title.
+    // ---------------------------------------------------------------------
+
+    /// Copies the tree at `from` to `to`, directories, regular files and
+    /// (on Unix) symbolic links as they are, never following a link.
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("create a directory of the copy");
+        for entry in fs::read_dir(from).expect("list a directory to copy") {
+            let entry = entry.expect("read a directory entry");
+            let target = to.join(entry.file_name());
+            let file_type = entry.file_type().expect("read an entry's type");
+            if file_type.is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else if file_type.is_file() {
+                fs::copy(entry.path(), &target).expect("copy a file");
+            } else {
+                #[cfg(unix)]
+                if file_type.is_symlink() {
+                    let link = fs::read_link(entry.path()).expect("read a link");
+                    std::os::unix::fs::symlink(link, &target).expect("copy a link");
+                    continue;
+                }
+                panic!("an entry this copy does not make: {:?}", entry.path());
+            }
+        }
+    }
+
+    #[test]
+    fn ori_p1_026_a_copy_of_this_repositorys_spec_tree_with_every_document_verified_is_ready() {
+        // The review's shape: this repository's own spec/, whose design
+        // directory holds an HTML file and, on a Mac, .DS_Store files, read
+        // as never ready under round 12's rule, since every entry the walk
+        // left out refused readiness. A copy of it, with a .DS_Store in
+        // each directory that has none, an image, and (on Unix) a socket
+        // added, every document verified: ready.
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("crates/ori-memory sits two levels under the repository root")
+            .join("spec");
+        let scratch = Scratch::new("own-spec");
+        let spec = scratch.path.join("spec");
+        copy_tree(&source, &spec);
+        let html = ["spec", "design", "Ori Studio.html"].join("/");
+        assert!(
+            scratch.path.join(&html).is_file(),
+            "the precondition: the copy holds the design artifact"
+        );
+        let mut added = Vec::new();
+        for directory in ["", "design", "agents"] {
+            let store = spec.join(directory).join(".DS_Store");
+            if !store.exists() {
+                fs::write(&store, b"\0\0\0\x01Bud1\0\0\x10\0").expect("write a .DS_Store");
+            }
+            added.push(store);
+        }
+        let image = spec.join("design").join("logo.png");
+        fs::write(&image, b"\x89PNG\r\n\x1a\n").expect("write an image");
+        added.push(image);
+        #[cfg(unix)]
+        let _socket = {
+            // Short: a socket's path is bounded (104 bytes on macOS).
+            let socket = spec.join("s.sock");
+            let listener =
+                std::os::unix::net::UnixListener::bind(&socket).expect("a socket in the copy");
+            added.push(socket);
+            listener
+        };
+
+        added.push(scratch.path.join(&html));
+        let mut indexer = Indexer::open_in_memory().expect("an in-memory index opens");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let skipped: BTreeSet<PathBuf> = walk.skipped.iter().map(|e| e.path.clone()).collect();
+        assert!(
+            added.iter().all(|path| skipped.contains(path)),
+            "the precondition: every entry that is not Markdown is left out: {:?}",
+            walk.skipped
+        );
+        assert!(
+            walk.skipped
+                .iter()
+                .all(|entry| !holds_specification(&entry.reason)),
+            "the precondition: this repository's spec/ leaves no specification text out: {:?}",
+            walk.skipped
+        );
+        let not_indexed = walk.not_indexed();
+        assert_eq!(
+            not_indexed.len(),
+            walk.skipped.len(),
+            "the walk's list is not empty, so ready is not read off an empty list"
+        );
+        let corpus = indexed_corpus(&indexer);
+        assert!(corpus.len() > 100, "a vacuous corpus: {}", corpus.len());
+        let tracker = every_document_verified(&corpus);
+        let report = tracker.list_stale(&corpus, &not_indexed);
+        assert_eq!(report.documents_covered, corpus.len());
+        assert!(
+            report.stale.is_empty() && report.freshness_unknown.is_empty(),
+            "{report:?}"
+        );
+        assert!(report.is_ready(), "{report:?}");
+
+        // Not vacuously: one byte that is not UTF-8 in one specification
+        // file, and the same copy is not ready, that file alone unknown.
+        let prd = ["spec", "PRD.md"].join("/");
+        let mut bytes = fs::read(scratch.path.join(&prd)).expect("read a spec file");
+        bytes.extend_from_slice(b"it\x92s\n");
+        fs::write(scratch.path.join(&prd), bytes).expect("a byte that is not UTF-8");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let report = tracker.list_stale(&indexed_corpus(&indexer), &walk.not_indexed());
+        assert_eq!(
+            report
+                .freshness_unknown
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            [prd.as_str()]
+        );
+        assert!(!report.is_ready());
+    }
+
+    #[test]
+    fn ori_p1_026_entries_that_share_a_key_list_every_file_and_every_reason() {
+        use crate::freshness::FreshnessUnknown;
+        use crate::freshness::StaleDocument;
+        use crate::freshness::StaleReason;
+
+        // The review's shapes. First, a file with a section past the cap,
+        // keyed a.md#big, beside a sibling entry named a.md#big: round 12
+        // kept one entry per key, so the sibling went unlisted.
+        let scratch = one_indexed_file("shared-key");
+        let file = ["spec", "a.md"].join("/");
+        let big = format!("{file}#big");
+        fs::write(
+            scratch.path.join(&file),
+            format!(
+                "# Small\n\nthe small text\n\n# Big\n\n{}\n",
+                past_the_document_cap("big")
+            ),
+        )
+        .expect("write a file with a section past the cap");
+        let too_large = |walk: &RepoWalk| {
+            walk.skipped
+                .iter()
+                .find(|entry| matches!(entry.reason, SkipReason::DocumentTooLarge { .. }))
+                .map(|entry| entry.reason.clone())
+                .expect("the section past the cap is left out")
+        };
+        let expect_both = |walk: &RepoWalk, sibling: SkipReason| {
+            let not_indexed = walk.not_indexed();
+            assert_eq!(
+                (not_indexed.len(), not_indexed.keys().count()),
+                (2, 1),
+                "the precondition: two entries at one key: {not_indexed:?}"
+            );
+            let corpus = walk_corpus(walk);
+            let report = every_document_verified(&corpus).list_stale(&corpus, &not_indexed);
+            assert_eq!(
+                report.freshness_unknown,
+                [
+                    FreshnessUnknown {
+                        path: file.clone(),
+                        skipped: vec![too_large(walk)],
+                    },
+                    FreshnessUnknown {
+                        path: big.clone(),
+                        skipped: vec![sibling],
+                    },
+                ],
+                "each file, with its own reason"
+            );
+            assert!(!report.is_ready());
+            report
+        };
+
+        // A link named as the section.
+        #[cfg(unix)]
+        let walk = {
+            std::os::unix::fs::symlink("PRD.md", scratch.path.join(&big)).expect("a link");
+            let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+            fs::remove_file(scratch.path.join(&big)).expect("remove the link");
+            walk
+        };
+        #[cfg(not(unix))]
+        let walk = {
+            let mut walk = Indexer::walk_repo(&scratch.path).expect("walk");
+            walk.skipped.push(SkippedEntry {
+                path: scratch.path.join("spec").join("a.md#big"),
+                reason: SkipReason::Symlink,
+            });
+            walk
+        };
+        expect_both(&walk, SkipReason::Symlink);
+
+        // A directory named as the section, that cannot be listed, with a
+        // divergence on record on a runbook in it: covered by the
+        // directory, though the section's entry holds the same key first.
+        #[cfg(unix)]
+        {
+            let directory = scratch.path.join(&big);
+            fs::create_dir_all(&directory).expect("create a directory");
+            fs::write(directory.join("deploy.md"), "# Deploy\n\nthe steps\n")
+                .expect("write a runbook");
+            let locked = LockedDirectory::new(directory.clone());
+            let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+            drop(locked);
+            fs::remove_dir_all(&directory).expect("remove the directory");
+            let denied = walk
+                .skipped
+                .iter()
+                .find(|entry| matches!(entry.reason, SkipReason::Unreadable { .. }))
+                .map(|entry| entry.reason.clone())
+                .expect("the directory is left out");
+            expect_both(&walk, denied.clone());
+            let corpus = walk_corpus(&walk);
+            let mut tracker = every_document_verified(&corpus);
+            let deploy = format!("{big}/deploy.md");
+            let found = Timestamp::from_millis(2_000);
+            tracker.record_divergence(deploy.clone(), "DEPLOY-DIVERGENCE", found);
+            let report = tracker.list_stale(&corpus, &walk.not_indexed());
+            assert_eq!(
+                report.stale,
+                [StaleDocument {
+                    path: deploy,
+                    reason: StaleReason::NotIndexed {
+                        skipped: denied,
+                        divergence: Some(("DEPLOY-DIVERGENCE".to_owned(), found)),
+                    },
+                }]
+            );
+        }
+
+        // Second, a criterion row repeated twice, once past the cap: two
+        // entries at the row's path, both on the criteria file, and both
+        // reasons listed. Round 12 listed the first alone.
+        let criteria = ["spec", "criteria", "phase-9.md"].join("/");
+        let row = format!("{criteria}#ORI-P9-001");
+        fs::create_dir_all(scratch.path.join("spec").join("criteria")).expect("create a directory");
+        fs::write(
+            scratch.path.join(&criteria),
+            format!(
+                "| ORI-P9-001 | first |\n| ORI-P9-001 | {} |\n| ORI-P9-001 | third |\n",
+                past_the_document_cap("repeated")
+            ),
+        )
+        .expect("write a table repeating one identifier twice");
+        fs::remove_file(scratch.path.join(&file)).expect("remove the first shape");
+        let mut indexer = Indexer::open_in_memory().expect("an in-memory index opens");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let reasons: Vec<&SkipReason> = walk.skipped.iter().map(|entry| &entry.reason).collect();
+        assert!(
+            matches!(
+                reasons.as_slice(),
+                [
+                    SkipReason::DocumentTooLarge { path: first, .. },
+                    SkipReason::DuplicateDocumentPath { path: second },
+                ] if *first == row && *second == row
+            ),
+            "the precondition: two entries at the row's path: {reasons:?}"
+        );
+        let corpus = indexed_corpus(&indexer);
+        let report = every_document_verified(&corpus).list_stale(&corpus, &walk.not_indexed());
+        assert_eq!(
+            report.freshness_unknown,
+            [FreshnessUnknown {
+                path: criteria,
+                skipped: reasons.into_iter().cloned().collect(),
+            }],
+            "the file, with both reasons"
+        );
+        assert!(!report.is_ready());
+
+        // Third, two files whose names differ only in bytes that are not
+        // UTF-8, spelled alike in the list: two files, each listed.
+        let spec = scratch.path.join("spec");
+        let other_name = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt;
+                std::ffi::OsString::from_vec(b"caf\xE8.md".to_vec())
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStringExt;
+                let mut wide: Vec<u16> = "caf".encode_utf16().collect();
+                wide.push(0xDC00);
+                wide.extend(".md".encode_utf16());
+                std::ffi::OsString::from_wide(&wide)
+            }
+        };
+        let walk = RepoWalk {
+            documents: Vec::new(),
+            skipped: [non_utf8_file_name("caf"), other_name]
+                .into_iter()
+                .map(|name| SkippedEntry {
+                    path: spec.join(name),
+                    reason: SkipReason::NonUtf8Path,
+                })
+                .collect(),
+            root: scratch.path.clone(),
+        };
+        let lossy = ["spec", "caf\u{FFFD}.md"].join("/");
+        let report = crate::freshness::FreshnessTracker::new()
+            .list_stale(&BTreeMap::new(), &walk.not_indexed());
+        assert_eq!(
+            report.freshness_unknown,
+            [
+                FreshnessUnknown {
+                    path: lossy.clone(),
+                    skipped: vec![SkipReason::NonUtf8Path],
+                },
+                FreshnessUnknown {
+                    path: lossy,
+                    skipped: vec![SkipReason::NonUtf8Path],
+                },
+            ]
+        );
+        assert!(!report.is_ready());
+    }
+
+    #[test]
+    fn ori_p1_026_a_heading_edited_without_moving_its_anchor_is_changed_since_verification() {
+        use crate::freshness::StaleDocument;
+        use crate::freshness::StaleReason;
+
+        // The review's shape: a heading edited so its anchor stays the
+        // same, "Retry, then stop" to "Retry then stop!", both
+        // #retry-then-stop, the text under it unchanged. Round 12 compared
+        // bodies alone, and read it as ready.
+        let scratch = one_indexed_file("title-edit");
+        fs::create_dir_all(scratch.path.join("spec").join("runbooks")).expect("create a directory");
+        let runbook = ["spec", "runbooks", "retry.md"].join("/");
+        let path = format!("{runbook}#retry-then-stop");
+        fs::write(
+            scratch.path.join(&runbook),
+            "# Retry, then stop\n\nthe steps\n",
+        )
+        .expect("write a runbook");
+        let mut indexer = Indexer::open_in_memory().expect("an in-memory index opens");
+        walk_and_sync(&scratch, &mut indexer);
+        let document = |indexer: &Indexer<'_>| {
+            indexer
+                .all_documents()
+                .expect("read the index")
+                .into_iter()
+                .map(|(document, _)| document)
+                .find(|document| document.path == path)
+                .expect("the section is indexed at its anchor")
+        };
+        let before = document(&indexer);
+        let corpus = indexed_corpus(&indexer);
+        let mut tracker = every_document_verified(&corpus);
+        assert!(
+            tracker
+                .list_stale(&corpus, &NotIndexed::default())
+                .is_ready()
+        );
+
+        fs::write(
+            scratch.path.join(&runbook),
+            "# Retry then stop!\n\nthe steps\n",
+        )
+        .expect("edit the heading");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let after = document(&indexer);
+        assert_eq!(
+            (&after.path, &after.body),
+            (&before.path, &before.body),
+            "the precondition: the path and the body are unchanged"
+        );
+        assert_ne!(
+            after.title, before.title,
+            "the precondition: the title is not"
+        );
+        let current = indexed_corpus(&indexer);
+        let report = tracker.list_stale(&current, &walk.not_indexed());
+        assert_eq!(
+            report.stale,
+            [StaleDocument {
+                path: path.clone(),
+                reason: StaleReason::ChangedSinceVerification {
+                    verified_at: Timestamp::from_millis(1_000),
+                },
+            }]
+        );
+        assert!(!report.is_ready());
+
+        // Verified again at the new heading: ready.
+        tracker.record_verification(
+            path.clone(),
+            Timestamp::from_millis(2_000),
+            current[&path].clone(),
+        );
+        assert!(tracker.list_stale(&current, &walk.not_indexed()).is_ready());
     }
 }
