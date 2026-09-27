@@ -238,6 +238,13 @@
 //! in the acceptance-criterion template's two-column form, a whole
 //! criteria file of another shape) is split into sections like any other
 //! specification file. A review found all of that dropped with no record.
+//! And every file the walk reads yields at least one document: a file with
+//! no heading, even an empty one, is one document at its bare path, and a
+//! criteria file with no criterion row, an empty or blank placeholder
+//! included, is split exactly as the same file is anywhere else. A later
+//! review found such a placeholder under `spec/criteria/` yielding no
+//! document and no record, while the same empty file under
+//! `spec/runbooks/` was one document.
 //!
 //! A static repository is the scope: an entry swapped for a link between the
 //! walk's type check and its read is a race this does not claim to close.
@@ -3282,6 +3289,14 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, budget: &m
         })
     } else if is_criteria {
         criteria_documents(&relative, &text, limit).and_then(|(mut rows, rest)| {
+            // A criteria file with no criterion row in it is split exactly
+            // as the same file is anywhere else, so it is never left with
+            // no document: a review found an empty or blank-only file here
+            // producing none and no record, while the same file under
+            // spec/runbooks/ was one document at its bare path.
+            if rows.is_empty() {
+                return section_documents(&relative, &text, limit);
+            }
             if !rest.trim().is_empty() {
                 rows.extend(section_documents(&relative, &rest, limit - rows.len())?);
             }
@@ -9291,5 +9306,84 @@ mod tests {
                 .expect("the other product's second event");
             assert_eq!(probe_rows(&other_dir), 2, "{name}: its event log is live");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 8, item 6 (LOW): an empty criteria file yielded no document and
+    // no record.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_a_criteria_file_with_no_criterion_row_is_a_document_like_the_same_file_anywhere_else()
+     {
+        // The review's placeholders: an empty spec/criteria/personas file
+        // and a blank-only phase-2 file walked to no document and no skip
+        // entry, while the same files under spec/runbooks/ were one
+        // document each. A file with no trailing newline is here too: its
+        // text is the same document wherever it sits.
+        let scratch = Scratch::new("empty-criteria");
+        let spec = scratch.path.join("spec");
+        let shapes = [
+            ("empty", ""),
+            ("blank", "\n\n"),
+            ("unterminated", "prose with no newline"),
+        ];
+        for directory in ["criteria", "runbooks"] {
+            fs::create_dir_all(spec.join(directory)).expect("create a directory");
+            for (name, text) in shapes {
+                fs::write(spec.join(directory).join(format!("{name}.md")), text)
+                    .expect("write a file");
+            }
+        }
+        fs::write(
+            spec.join("criteria").join("rows.md"),
+            "| ORI-P9-001 | F | first |\n\n",
+        )
+        .expect("write a criteria file of rows and blank lines only");
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        assert!(walk.skipped.is_empty(), "{:?}", walk.skipped);
+        assert_eq!(
+            assert_every_entry_is_indexed_or_skipped(&scratch.path, &walk),
+            2 * shapes.len() + 1
+        );
+        let by_path: BTreeMap<&str, &IndexableDocument> = walk
+            .documents
+            .iter()
+            .map(|document| (document.path.as_str(), document))
+            .collect();
+        for (name, text) in shapes {
+            let criteria = format!("spec/criteria/{name}.md");
+            let runbooks = format!("spec/runbooks/{name}.md");
+            let (Some(criteria_document), Some(runbooks_document)) = (
+                by_path.get(criteria.as_str()),
+                by_path.get(runbooks.as_str()),
+            ) else {
+                panic!("{name}: one document each: {by_path:?}");
+            };
+            assert_eq!(criteria_document.kind, DocumentKind::Section, "{name}");
+            assert_eq!(criteria_document.title, criteria, "{name}");
+            assert_eq!(criteria_document.body, text, "{name}");
+            assert_eq!(
+                (&criteria_document.body, criteria_document.kind),
+                (&runbooks_document.body, runbooks_document.kind),
+                "{name}: the same text is the same document wherever it sits"
+            );
+        }
+        let rows: Vec<&str> = walk
+            .documents
+            .iter()
+            .filter(|document| {
+                document
+                    .path
+                    .starts_with(concat!("spec/criteria/rows", ".md"))
+            })
+            .map(|document| document.path.as_str())
+            .collect();
+        assert_eq!(
+            rows,
+            [concat!("spec/criteria/rows", ".md", "#ORI-P9-001")],
+            "a file of rows and blank lines is its rows, with no empty document beside them"
+        );
     }
 }
