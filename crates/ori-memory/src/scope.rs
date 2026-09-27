@@ -175,10 +175,13 @@
 //!
 //! [`Actor::Human`] is the operator: `spec/ENV_SETUP.md` section 5's operator
 //! row reads "Everything", and `spec/adr/ADR-0002-single-operator.md` records
-//! one human holding every seat. `ori-rpc` authenticates that human with the
-//! installation token before any call reaches here. The operator reads every
-//! source of the product the call is made against, raw evidence through an
-//! explicit request only, logged like anyone else's.
+//! one human holding every seat. Authenticating that human is the client
+//! transport's job, not this module's: `spec/SECURITY_NOTES.md` "Trust
+//! boundaries" has local clients authenticate "with a per-installation token
+//! stored in the keychain", and `ori-rpc`, which will carry it, is not built
+//! yet. Whoever builds an operator [`Principal`] owns that check. The
+//! operator reads every source of the product the call is made against, raw
+//! evidence through an explicit request only, logged like anyone else's.
 //!
 //! [`Actor::System`] reads nothing through this module. `spec/DATA_MODEL.md`
 //! section 4 admits `system` "only for scheduled triggers and watchers"; a
@@ -252,7 +255,7 @@
 //!   Agent->>Mcp: aicd_context, aicd_search or aicd_evidence
 //!   Mcp->>Mcp: Principal from the authenticated session, never from arguments
 //!   Mcp->>Enf: authorize(db, at, principal, request)
-//!   Enf->>Log: read identity.created, ticket.filed, lock.claimed, lock.released
+//!   Enf->>Log: read identity.created, ticket.filed, lock and credential events
 //!   alt refused
 //!     Enf->>Log: append memory.access_refused
 //!     Enf-->>Mcp: ScopeError, carrying its MethodologyRef
