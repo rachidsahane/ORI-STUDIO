@@ -344,3 +344,19 @@ ORI-T-0112 to ORI-T-0117 all edit `code_map.rs`, and ORI-T-0118 to ORI-T-0121 al
 **A constraint, not a ticket.** The readiness check `ori-flows` will build must call `freshness::StaleReport::is_ready()` and never re-derive readiness from the stale list: a file whose specification text the walk left out is freshness unknown, may carry no record at all, and still makes the product not ready (pull request 71). The backlog already holds that work, so no identifier is allocated for it. It is recorded against **ORI-T-0061**, readiness computation, `crates/ori-flows/src/readiness.rs`, batch 12, criteria ORI-P1-002 and ORI-P1-026 (ORI-P1-026 is the criterion whose action is `ori readiness`). ORI-T-0071, which builds the `ori` commands, exposes that computation and must not compute readiness itself.
 
 **State after this section:** the claims held are 20, 60 and 61. The next free identifier is ORI-T-0123.
+
+---
+
+## Claim 62, and claim 61 extended
+
+Written by the lead at dispatch, 2026-09-27, under [[R31]] rule 2.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 62 | ORI-T-0040, the citation checker and the drift audit | `crates/ori-memory/src/citation.rs`, `crates/ori-memory/src/drift.rs`, `crates/ori-memory/src/lib.rs` (queue); `crates/ori-memory/src/freshness.rs` only additively, and only if persisting the freshness tracker needs it | 1, `spec/RISK_MAP.md` (drift, citation) | `feat/ORI-T-0040-memory` | 2026-09-27 | **held** | 2026-09-27, at dispatch |
+
+The citation checker's rule set, which `ops/phase-1-backlog.md` batch 6 listed as undecided, was decided by the operator on 2026-09-27 in [[E-0006]]: everything under `spec/`, HTML included, with the design mockup excluded by name and its marker asserted on every run.
+
+**Claim 61 extended.** ORI-T-0039's targeted repair round writes `crates/ori-memory/src/barrier.rs`, additively: the barrier records which fields its cap cut in the `memory.record_created` payload, so the operational log can say a claim field was cut instead of parsing half an entry as a path. `spec/RISK_MAP.md` tiers `barrier.rs` 2, so that change is tier 2 whatever the rest of ORI-T-0039 is. No other claim holds `barrier.rs`: ORI-T-0037's claim was released when pull request 66 merged. No existing test of `barrier.rs` may change; a change that would need one stops as `test_modified`.
+
+**State after this section:** the claims held are 20, 60, 61 and 62. The next free identifier is ORI-T-0123.
