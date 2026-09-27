@@ -99,6 +99,15 @@
 //!   `incident`; closing reports, blocked reports and escalation decisions are
 //!   `operational_record`.
 //!
+//! One conflict between two texts is not decided here but met in the
+//! refusing direction. `spec/API_SPEC.md` section 3 lists `aicd_context` for
+//! "all", and AICD §17's permission matrix gives product signal's Tickets
+//! cell as "Create product signal", with no read. A context request is a
+//! ticket read (the coder's "Read own" is enforced on it the same way), so
+//! product signal's is refused, `ticket_read_not_granted`, until the
+//! specification says which text governs. Its `aicd_search` is not a ticket
+//! read and is granted over its row.
+//!
 //! The table in this doc comment is itself checked against [`grant`] by
 //! `tests::ori_t_0038_module_doc_table_matches_the_grant_function`, and
 //! [`grant`] against the specification by
@@ -143,6 +152,15 @@
 //!   value the log's must be exactly one; anything else is refused. The
 //!   ticket must be filed in this product either way, and its declared scope
 //!   is read from the log, never supplied with it.
+//! - **What the engine does not record yet**: no module writes
+//!   `ticket.filed` or `lock.claimed` outside tests today; only the
+//!   `ori-store` tests append them. Until the engine records `ticket.filed`,
+//!   every context request and every coder request is refused,
+//!   `ticket_not_in_product`. Until it records `lock.claimed`, a coder's
+//!   declared scope is empty, so its scope-filtered sources admit nothing but
+//!   its own ticket's records. Both fail closed, and writing either event is
+//!   not this module's work: the grants above are reachable in a product only
+//!   once the engine records them.
 //! - **Whether the product is being migrated**: the log records no phase
 //!   either, so it is engine-supplied too, as [`ScopeEnforcer::new`]'s
 //!   [`ProductStage`], owned by the composition root that reads it from
@@ -164,9 +182,12 @@
 //! roles; a role or a source the table does not name; a log that does not
 //! verify; a coder with no ticket from the log or the engine, an engine
 //! ticket the log contradicts, two log tickets and no engine ticket, a
-//! credential event that does not parse, a ticket not filed in this product,
+//! credential event that does not parse, a live session of the identity the
+//! log also issues to another identity, a ticket not filed in this product,
 //! or a live lock claim of it that does not parse; a ticket read limit from
-//! AICD §17 this module cannot check. Results are filtered by the same
+//! AICD §17 this module cannot check; an evidence request for a record id
+//! more than one record carries, or whose evidence cannot be told apart from
+//! another submission's. Results are filtered by the same
 //! rule as requests ([`Authorization::filter`]): a result this module cannot
 //! classify, cannot place in the product, or cannot place inside a coder's
 //! declared scope is dropped.
@@ -213,6 +234,55 @@
 //! every case-sensitive checkout, which is the direction a scope may not be
 //! wrong in.
 //!
+//! # Which records are inside a declared scope
+//!
+//! An operational record carries the ticket it was filed on and no module,
+//! so a coder's scope-filtered record sources (`operational_record`,
+//! `operational_defect`, `incident`) are filtered by ticket. A record is
+//! inside the declared scope when its ticket is the coder's own, or when its
+//! ticket claimed at least one module and every module it ever claimed,
+//! released or not, lies within the declared scope. A ticket that also
+//! claimed anything outside it is outside, a parent directory such as
+//! `crates` included, and so is a ticket with a claim that does not parse, a
+//! ticket that claimed nothing, and a record with no ticket. Containment is
+//! the refusing direction: such a ticket's records may be about modules the
+//! coder may not read, and a record cannot be split into the part that is
+//! about M and the part that is not. Past tickets that worked only inside
+//! the declared scope are its operational history, which is what ORI-P1-022
+//! calls the records "for M".
+//!
+//! # Raw evidence, and which blobs are a record's
+//!
+//! An evidence request names a record, and `barrier::NewReport`'s
+//! `record_id` is supplied by the caller: nothing makes it unique. The
+//! enforcer refuses when more than one `memory.record_created` event in this
+//! product's log carries the id (`record_id_ambiguous`), checks that one
+//! record against the reader's scope, and hands over only the blobs that
+//! record was submitted with, never every blob that names the id.
+//!
+//! The log records no submission, so which `memory.evidence_stored` events
+//! are a record's is read from how `barrier::submit_report` writes them: one
+//! per field, appended immediately before the record's own event, by the
+//! same actor, stamped with the same time, through the single writer task
+//! `spec/LLD.md` section 5 describes. The record's blobs are that run. An
+//! evidence event naming the id anywhere else, such as one left by a
+//! submission that failed after storing some of its evidence, is not the
+//! record's and is never handed over. The request is refused
+//! (`evidence_not_attributable`) when the run cannot be the record's alone:
+//! it holds more events than the record has fields, which is what a failed
+//! submission by the same actor at the same time leaves immediately before
+//! it; an evidence id in it is named by any other evidence event, since the
+//! evidence file is named by that id and may hold another submission's raw
+//! text; or an evidence event does not parse. Were a record's evidence ever
+//! appended apart from it, the run would come up short and the read would be
+//! refused, never widened.
+//!
+//! What the log cannot show is not checked here: `barrier::submit_report`
+//! writes an evidence file before it appends the event, so a submission that
+//! failed between the two may have overwritten a file with no event to say
+//! so. Closing that belongs to `barrier.rs`, whose evidence ids are
+//! caller-supplied too.
+//!
 //! # What is logged
 //!
 //! Every refusal appends exactly one [`REFUSAL_EVENT_KIND`] event to the log
@@ -244,6 +314,18 @@
 //! returning it. The retrieval queries only [`Authorization::sources`], and
 //! filters anyway, because a check on the request alone would let a broad
 //! search return what the request could not have named.
+//!
+//! Three labels on a [`Candidate`] are the retrieval's word, not facts this
+//! module can check: the `product_id` of a [`Candidate::Document`], a
+//! [`Candidate::Module`] or a [`Candidate::Unproduced`], and the `source` of
+//! a [`Candidate::Unproduced`]. `SearchHit` and `code_map::Module` carry no
+//! product, and no module produces the unproduced sources yet, so the
+//! retrieval sets them. The cross-product check and the unproduced-source
+//! check on those three variants are therefore only as good as ORI-T-0039's
+//! labeling, and that ticket's review has to check that each label is set
+//! from the index, code map or store the item was read from, never from the
+//! item's own content. A [`Candidate::Record`] is classified by its own
+//! product, kind and ticket, and a [`Candidate::Evidence`] is never admitted.
 //!
 //! ```mermaid
 //! sequenceDiagram
@@ -352,6 +434,8 @@ const LOCK_CLAIMED: &str = "lock.claimed";
 const LOCK_RELEASED: &str = "lock.released";
 const CREDENTIAL_ISSUED: &str = "credential.issued";
 const CREDENTIAL_REVOKED: &str = "credential.revoked";
+const RECORD_CREATED: &str = "memory.record_created";
+const EVIDENCE_STORED: &str = "memory.evidence_stored";
 
 /// The brief's file, as components, so no path string is written here whole.
 const BRIEF_FILE: [&str; 2] = ["spec", "PROJECT_BRIEF.md"];
@@ -1175,6 +1259,22 @@ pub enum RefusalReason {
         /// The source the record belongs to.
         source: Source,
     },
+    /// More than one `memory.record_created` event in this product's log
+    /// carries the record id, so which record's evidence is asked for cannot
+    /// be told.
+    RecordIdAmbiguous {
+        /// The record id.
+        record_id: Id,
+    },
+    /// The evidence stored with the record cannot be told apart from another
+    /// submission's; see the module doc comment, "Raw evidence, and which
+    /// blobs are a record's".
+    EvidenceNotAttributable {
+        /// The record.
+        record_id: Id,
+        /// What could not be told apart.
+        detail: String,
+    },
     /// The evidence read could not be logged, so it is not granted.
     EvidenceAccessNotLogged {
         /// What failed.
@@ -1210,6 +1310,8 @@ impl RefusalReason {
             Self::EvidenceNotGranted => "evidence_not_granted",
             Self::RecordNotInProduct { .. } => "record_not_in_product",
             Self::RecordNotInScope { .. } => "record_not_in_scope",
+            Self::RecordIdAmbiguous { .. } => "record_id_ambiguous",
+            Self::EvidenceNotAttributable { .. } => "evidence_not_attributable",
             Self::EvidenceAccessNotLogged { .. } => "evidence_access_not_logged",
         }
     }
@@ -1295,6 +1397,14 @@ impl fmt::Display for RefusalReason {
             Self::RecordNotInScope { record_id, source } => write!(
                 f,
                 "record {record_id} is {source}, outside this reader's memory scope"
+            ),
+            Self::RecordIdAmbiguous { record_id } => write!(
+                f,
+                "more than one record in this product's log carries the id {record_id}, so whose evidence is asked for cannot be told"
+            ),
+            Self::EvidenceNotAttributable { record_id, detail } => write!(
+                f,
+                "the evidence stored with record {record_id} cannot be told apart from another submission's: {detail}"
             ),
             Self::EvidenceAccessNotLogged { detail } => write!(
                 f,
@@ -1463,8 +1573,10 @@ struct DeclaredScope {
     ticket_id: Id,
     scope: Scope,
     modules: Vec<ModulePath>,
-    /// Every ticket whose lock claims, released or not, overlap `modules`:
-    /// the tickets whose operational records are "for M".
+    /// The tickets whose operational records are "for M": the coder's own,
+    /// and every other ticket that claimed at least one module and whose
+    /// every claim, released or not, lies within `modules`. See the module
+    /// doc comment, "Which records are inside a declared scope".
     in_scope_tickets: BTreeSet<Id>,
 }
 
@@ -1919,7 +2031,7 @@ impl ScopeEnforcer {
                 Ok(Decided::Granted(authorization))
             }
             Query::Evidence { record_id } => {
-                self.grant_evidence(db, &mut authorization, record_id)?;
+                self.grant_evidence(db, &events, &mut authorization, record_id)?;
                 Ok(Decided::Evidence(authorization))
             }
         }
@@ -1981,11 +2093,14 @@ impl ScopeEnforcer {
     }
 
     /// Checks an evidence request and fills `authorization` with the blobs it
-    /// grants: the reader must be granted raw evidence, the record must be in
-    /// this product, and the reader must be able to read the record itself.
+    /// grants: the reader must be granted raw evidence, exactly one record in
+    /// this product's log must carry the id, the reader must be able to read
+    /// that record, and only the blobs stored with it are handed over. See
+    /// the module doc comment, "Raw evidence, and which blobs are a record's".
     fn grant_evidence(
         &self,
         db: &mut ProductDb,
+        events: &[Event],
         authorization: &mut Authorization,
         record_id: &Id,
     ) -> Result<(), RefusalReason> {
@@ -1995,15 +2110,34 @@ impl ScopeEnforcer {
                 return Err(RefusalReason::EvidenceNotGranted);
             }
         }
-        let records = barrier::read_records(db).map_err(barrier_unreadable)?;
-        let record = records
+        let not_in_product = || RefusalReason::RecordNotInProduct {
+            record_id: record_id.clone(),
+        };
+        let ambiguous = || RefusalReason::RecordIdAmbiguous {
+            record_id: record_id.clone(),
+        };
+        // Every record event carrying the id, whichever product its payload
+        // names: two of them is a refusal, never the first one found.
+        let record_event = match record_events(events, record_id)?.as_slice() {
+            [] => return Err(not_in_product()),
+            [one] => *one,
+            _ => return Err(ambiguous()),
+        };
+        // The record itself, read through the barrier; a second read, so it
+        // is held to the same count.
+        let mut records: Vec<MemoryRecord> = barrier::read_records(db)
+            .map_err(barrier_unreadable)?
             .into_iter()
-            .find(|record| {
-                record.id() == record_id && record.product_id() == &authorization.product_id
-            })
-            .ok_or_else(|| RefusalReason::RecordNotInProduct {
-                record_id: record_id.clone(),
-            })?;
+            .filter(|record| record.id() == record_id)
+            .collect();
+        let record = match (records.pop(), records.is_empty()) {
+            (None, _) => return Err(not_in_product()),
+            (Some(record), true) => record,
+            (Some(_), false) => return Err(ambiguous()),
+        };
+        if record.product_id() != &authorization.product_id {
+            return Err(not_in_product());
+        }
         let source = record_source(record.kind());
         let readable = match authorization.reader.access(source) {
             Access::Granted(Filter::Whole) => true,
@@ -2020,15 +2154,150 @@ impl ScopeEnforcer {
                 source,
             });
         }
-        authorization.evidence = barrier::read_evidence(db)
-            .map_err(barrier_unreadable)?
-            .into_iter()
-            .filter(|blob| blob.record_id() == record_id)
-            .collect();
+        authorization.evidence = attributed_evidence(db, events, record_event, &record)?;
         authorization.ticket_id = record.provenance().ticket_id().cloned();
         authorization.sources = BTreeMap::new();
         Ok(())
     }
+}
+
+/// `memory.record_created`'s payload, the field this module reads, as
+/// `barrier.rs` writes it.
+#[derive(Deserialize)]
+struct RecordCreatedWire {
+    id: String,
+}
+
+/// `memory.evidence_stored`'s payload, the fields this module reads, as
+/// `barrier.rs` writes them.
+#[derive(Deserialize)]
+struct EvidenceStoredWire {
+    id: String,
+    record_id: String,
+}
+
+/// Every `memory.record_created` event in `events` whose record id is
+/// `record_id`. A record event that does not parse is a refusal: whose it is
+/// cannot be told.
+fn record_events<'e>(events: &'e [Event], record_id: &Id) -> Result<Vec<&'e Event>, RefusalReason> {
+    let mut found = Vec::new();
+    for event in events.iter().filter(|event| event.kind() == RECORD_CREATED) {
+        let malformed = || RefusalReason::LogUnreadable {
+            detail: format!("the record event at seq {} does not parse", event.seq()),
+        };
+        let wire: RecordCreatedWire =
+            serde_json::from_str(event.payload()).map_err(|_| malformed())?;
+        if &Id::parse(&wire.id).map_err(|_| malformed())? == record_id {
+            found.push(event);
+        }
+    }
+    Ok(found)
+}
+
+/// One `memory.evidence_stored` event, read: its blob's id and the record it
+/// names.
+struct StoredEvidence {
+    blob_id: Id,
+    record_id: Id,
+}
+
+/// The blobs `record` was submitted with, and no others: the run of
+/// `memory.evidence_stored` events immediately before `record_event` that
+/// name the record and share its actor and time. Refused when that run
+/// cannot be the record's alone. See the module doc comment, "Raw evidence,
+/// and which blobs are a record's".
+fn attributed_evidence(
+    db: &mut ProductDb,
+    events: &[Event],
+    record_event: &Event,
+    record: &MemoryRecord,
+) -> Result<Vec<EvidenceBlob>, RefusalReason> {
+    let record_id = record.id();
+    let refuse = |detail: String| RefusalReason::EvidenceNotAttributable {
+        record_id: record_id.clone(),
+        detail,
+    };
+
+    // Every evidence event in the log, by seq: one that does not parse could
+    // be anyone's, this record's included.
+    let mut stored: BTreeMap<u64, StoredEvidence> = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.kind() == EVIDENCE_STORED)
+    {
+        let malformed = || {
+            refuse(format!(
+                "the evidence event at seq {} does not parse",
+                event.seq()
+            ))
+        };
+        let wire: EvidenceStoredWire =
+            serde_json::from_str(event.payload()).map_err(|_| malformed())?;
+        stored.insert(
+            event.seq(),
+            StoredEvidence {
+                blob_id: Id::parse(&wire.id).map_err(|_| malformed())?,
+                record_id: Id::parse(&wire.record_id).map_err(|_| malformed())?,
+            },
+        );
+    }
+
+    // The run: walk back from the record's own event while each event is
+    // evidence for this record, by the same actor, at the same time.
+    let mut run: Vec<&StoredEvidence> = Vec::new();
+    for event in events
+        .iter()
+        .rev()
+        .skip_while(|event| event.seq() != record_event.seq())
+        .skip(1)
+    {
+        let Some(entry) = stored.get(&event.seq()) else {
+            break;
+        };
+        if &entry.record_id != record_id
+            || event.actor() != record_event.actor()
+            || event.at() != record_event.at()
+        {
+            break;
+        }
+        run.push(entry);
+    }
+    run.reverse();
+
+    if run.len() != record.structured().len() {
+        return Err(refuse(format!(
+            "{} evidence events precede the record, which has {} fields",
+            run.len(),
+            record.structured().len()
+        )));
+    }
+    for entry in &run {
+        let naming = stored
+            .values()
+            .filter(|other| other.blob_id == entry.blob_id)
+            .count();
+        if naming != 1 {
+            return Err(refuse(format!(
+                "evidence {} is named by {naming} evidence events",
+                entry.blob_id
+            )));
+        }
+    }
+
+    // The blobs themselves, read through the barrier; a second read, so each
+    // one is held to appearing exactly once, for this record.
+    let wanted: BTreeSet<&Id> = run.iter().map(|entry| &entry.blob_id).collect();
+    let blobs: Vec<EvidenceBlob> = barrier::read_evidence(db)
+        .map_err(barrier_unreadable)?
+        .into_iter()
+        .filter(|blob| wanted.contains(blob.id()))
+        .collect();
+    if blobs.len() != run.len() || blobs.iter().any(|blob| blob.record_id() != record_id) {
+        return Err(refuse(
+            "the evidence read back does not match the record's run".to_owned(),
+        ));
+    }
+    Ok(blobs)
 }
 
 /// A barrier read failure, as the refusal it becomes.
@@ -2140,14 +2409,19 @@ struct CredentialRevokedWire {
 /// log today (see the module doc comment, "Where every fact comes from").
 ///
 /// A credential event that does not parse is a refusal, because which
-/// sessions the identity holds cannot then be told. A lock claim that does
-/// not parse ties nothing to anyone; [`declared_scope`] refuses a live one of
-/// the assigned ticket.
+/// sessions the identity holds cannot then be told, and so is a live session
+/// of the identity that the log also issues to another identity: a session
+/// id is not unique by construction, and a claim under a shared session
+/// cannot be told to be this identity's. A lock claim that does not parse
+/// ties nothing to anyone; [`declared_scope`] refuses a live one of the
+/// assigned ticket.
 fn logged_assignments(events: &[Event], identity: &Id) -> Result<BTreeSet<Id>, RefusalReason> {
     let malformed = |event: &Event| RefusalReason::AssignmentRecordMalformed {
         detail: format!("the event at seq {} does not parse", event.seq()),
     };
     let mut live_sessions: BTreeSet<Id> = BTreeSet::new();
+    // Every identity each session was ever issued to.
+    let mut holders: BTreeMap<Id, BTreeSet<Id>> = BTreeMap::new();
     for event in events {
         match event.kind() {
             CREDENTIAL_ISSUED => {
@@ -2155,6 +2429,10 @@ fn logged_assignments(events: &[Event], identity: &Id) -> Result<BTreeSet<Id>, R
                     serde_json::from_str(event.payload()).map_err(|_| malformed(event))?;
                 let holder = Id::parse(&wire.identity_id).map_err(|_| malformed(event))?;
                 let session = Id::parse(&wire.session_id).map_err(|_| malformed(event))?;
+                holders
+                    .entry(session.clone())
+                    .or_default()
+                    .insert(holder.clone());
                 if &holder == identity {
                     live_sessions.insert(session);
                 }
@@ -2166,6 +2444,16 @@ fn logged_assignments(events: &[Event], identity: &Id) -> Result<BTreeSet<Id>, R
                 live_sessions.remove(&session);
             }
             _ => {}
+        }
+    }
+    for session in &live_sessions {
+        if holders
+            .get(session)
+            .is_some_and(|issued_to| issued_to.len() > 1)
+        {
+            return Err(RefusalReason::AssignmentRecordMalformed {
+                detail: format!("session {session} is issued to more than one identity"),
+            });
         }
     }
     let mut tickets = BTreeSet::new();
@@ -2206,15 +2494,18 @@ fn assignment(engine: Option<&Id>, logged: &BTreeSet<Id>) -> Result<Id, RefusalR
     }
 }
 
-/// The declared scope of `ticket_id`: its live lock claims, and every ticket
-/// whose claims ever overlapped them.
+/// The declared scope of `ticket_id`: its live lock claims, and the tickets
+/// whose records are inside them (see the module doc comment, "Which records
+/// are inside a declared scope").
 fn declared_scope(events: &[Event], ticket_id: &Id) -> Result<DeclaredScope, RefusalReason> {
     if !ticket_filed(events, ticket_id) {
         return Err(RefusalReason::TicketNotInProduct {
             ticket_id: ticket_id.clone(),
         });
     }
-    let mut ever: BTreeMap<Id, Vec<ModulePath>> = BTreeMap::new();
+    // Every claim each ticket ever made, `None` where the claim does not
+    // parse, so that one unreadable claim keeps its ticket out.
+    let mut ever: BTreeMap<Id, Vec<Option<ModulePath>>> = BTreeMap::new();
     let mut live: Vec<Option<ModulePath>> = Vec::new();
     for event in events {
         let Some(holder) = event.ticket_id() else {
@@ -2225,9 +2516,7 @@ fn declared_scope(events: &[Event], ticket_id: &Id) -> Result<DeclaredScope, Ref
                 let parsed = serde_json::from_str::<LockClaimWire>(event.payload())
                     .ok()
                     .and_then(|wire| ModulePath::parse(&wire.module).ok());
-                if let Some(path) = &parsed {
-                    ever.entry(holder.clone()).or_default().push(path.clone());
-                }
+                ever.entry(holder.clone()).or_default().push(parsed.clone());
                 if holder == ticket_id {
                     live.push(parsed);
                 }
@@ -2252,15 +2541,19 @@ fn declared_scope(events: &[Event], ticket_id: &Id) -> Result<DeclaredScope, Ref
             ticket_id: ticket_id.clone(),
         }
     })?;
-    let in_scope_tickets = ever
+    let mut in_scope_tickets: BTreeSet<Id> = ever
         .into_iter()
         .filter(|(_, claimed)| {
-            claimed
-                .iter()
-                .any(|path| modules.iter().any(|module| path.overlaps(module)))
+            !claimed.is_empty()
+                && claimed.iter().all(|claim| {
+                    claim
+                        .as_ref()
+                        .is_some_and(|path| modules.iter().any(|module| path.is_within(module)))
+                })
         })
         .map(|(ticket, _)| ticket)
         .collect();
+    in_scope_tickets.insert(ticket_id.clone());
     Ok(DeclaredScope {
         ticket_id: ticket_id.clone(),
         scope,
@@ -2625,6 +2918,7 @@ mod tests {
     use crate::barrier::FieldName;
     use crate::barrier::NewReport;
     use crate::barrier::NewReportField;
+    use crate::barrier::Submission;
     use crate::barrier::submit_report;
     use crate::code_map::Language;
 
@@ -3228,10 +3522,32 @@ mod tests {
                 "{role}'s raw evidence grant disagrees with the aicd_evidence row"
             );
         }
-        // Context and search are open to every role in the same table, so no
-        // role is refused either tool by role alone.
+        // Context and search are listed for every role in the same table.
+        // Search is granted every role over its row
+        // (tests::ori_t_0038_every_role_reaches_exactly_its_env_setup_row).
+        // Context is a ticket read, and AICD §17 grants product signal no
+        // ticket read, so context is refused it by role alone
+        // (tests::ori_t_0038_context_authorizes_each_roles_whole_row_and_never_raw_evidence):
+        // the conflict the module doc comment records. Should either text
+        // change, this test fails, and the refusal is to be revisited.
         assert_eq!(api_spec_tool_roles("`aicd_context("), "all");
         assert_eq!(api_spec_tool_roles("`aicd_search("), "all");
+        for role in Role::ALL {
+            let reads_tickets = matches!(
+                permission::permits(
+                    &Actor::Agent(identity_of(*role)),
+                    *role,
+                    Resource::Tickets,
+                    Action::Read,
+                ),
+                Decision::Allowed { .. }
+            );
+            assert_eq!(
+                reads_tickets,
+                *role != Role::ProductSignal,
+                "{role}'s ticket read in AICD section 17's matrix"
+            );
+        }
     }
 
     #[test]
@@ -3345,6 +3661,39 @@ mod tests {
         "code_map",
     ];
 
+    /// A role's literal row with the filter each source is read under, as
+    /// the retrieval must receive it: the coder's four scope-filtered
+    /// sources under `DeclaredScope`, qa's code read added under
+    /// `MigrationOnly` during a migration, everything else `Whole`.
+    fn row_map(role: Role, stage: ProductStage) -> BTreeMap<Source, Filter> {
+        let mut out: BTreeMap<Source, Filter> = env_setup_row(role)
+            .iter()
+            .map(|name| {
+                let source = Source::parse(name).expect("a source name");
+                let filter = if role == Role::Coder && CODER_SCOPE_FILTERED.contains(name) {
+                    Filter::DeclaredScope
+                } else {
+                    Filter::Whole
+                };
+                (source, filter)
+            })
+            .collect();
+        if role == Role::Qa && stage == ProductStage::Migration {
+            out.insert(Source::CodeRead, Filter::MigrationOnly);
+        }
+        out
+    }
+
+    /// The operator's row: every source whole, raw evidence only on an
+    /// explicit request.
+    fn operator_row() -> BTreeMap<Source, Filter> {
+        Source::ALL
+            .into_iter()
+            .filter(|source| *source != Source::RawEvidence)
+            .map(|source| (source, Filter::Whole))
+            .collect()
+    }
+
     #[test]
     fn ori_t_0038_every_role_reaches_exactly_its_env_setup_row() {
         let mut w = world("sweep");
@@ -3397,7 +3746,9 @@ mod tests {
                 }
             }
 
-            // A search naming no source reaches the whole row at once.
+            // A search naming no source reaches the whole row at once, and so
+            // does one naming the whole row: each source under the same
+            // filter a read of it gets, never a wider one.
             let authorization = granted(&mut w.p, standard(), &principal, &search("x", &[]));
             let names: BTreeSet<&str> = authorization
                 .sources()
@@ -3406,6 +3757,17 @@ mod tests {
                 .collect();
             let expected: BTreeSet<&str> = row.iter().copied().collect();
             assert_eq!(names, expected, "{role}'s whole-row search");
+            assert_eq!(
+                authorization.sources(),
+                &row_map(role, ProductStage::Standard),
+                "{role}'s whole-row search, filters included"
+            );
+            let authorization = granted(&mut w.p, standard(), &principal, &search("x", row));
+            assert_eq!(
+                authorization.sources(),
+                &row_map(role, ProductStage::Standard),
+                "{role}'s search naming its row, filters included"
+            );
         }
     }
 
@@ -3434,6 +3796,11 @@ mod tests {
                 .collect();
             let expected: BTreeSet<&str> = env_setup_row(role).iter().copied().collect();
             assert_eq!(names, expected, "{role}'s context sources");
+            assert_eq!(
+                authorization.sources(),
+                &row_map(role, ProductStage::Standard),
+                "{role}'s context sources, filters included"
+            );
             assert!(!authorization.allows(Source::RawEvidence));
             assert!(authorization.evidence().is_empty());
             assert_eq!(authorization.ticket_id(), Some(&ticket));
@@ -3445,9 +3812,14 @@ mod tests {
             authorization.sources().get(&Source::CodeRead),
             Some(&Filter::MigrationOnly)
         );
+        assert_eq!(
+            authorization.sources(),
+            &row_map(Role::Qa, ProductStage::Migration)
+        );
 
         let authorization = granted(&mut w.p, standard(), &operator(), &context(&ticket));
         assert_eq!(authorization.sources().len(), Source::ALL.len() - 1);
+        assert_eq!(authorization.sources(), &operator_row());
         assert!(!authorization.allows(Source::RawEvidence));
         assert_eq!(authorization.role(), None);
     }
@@ -3467,6 +3839,10 @@ mod tests {
             ["analytics_summary", "brief"]
                 .into_iter()
                 .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            authorization.sources(),
+            &row_map(Role::ProductSignal, ProductStage::Standard)
         );
         refused(
             &mut w.p,
@@ -3964,6 +4340,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ori_t_0038_a_session_issued_to_two_identities_ties_no_ticket_to_either() {
+        let mut w = world("shared-session");
+        let coder = identity_of(Role::Coder);
+        let ticket_m = w.ticket_m.clone();
+        let ticket_o = w.ticket_o.clone();
+        // Another identity's session, and a claim of ticket O made under it.
+        let shared = id("SESSIONSHARED");
+        issue(&mut w.p, &identity_of(Role::Qa), &shared);
+        claim_in_session(&mut w.p, &ticket_o, "crates/other", &shared);
+        // The coder's own session ties ticket M to it.
+        let own = id("SESSIONOWN");
+        issue(&mut w.p, &coder, &own);
+        claim_in_session(&mut w.p, &ticket_m, "crates/m", &own);
+        let unassigned = agent(&coder);
+        let authorization = granted(&mut w.p, standard(), &unassigned, &read("code_map"));
+        assert_eq!(authorization.ticket_id(), Some(&ticket_m));
+
+        // The same session id issued to the coder too: which ticket is the
+        // coder's cannot be told, and O's claim must not become its own.
+        revoke(&mut w.p, &own);
+        issue(&mut w.p, &coder, &shared);
+        for principal in [
+            agent(&coder),
+            agent(&coder).with_assigned_ticket(ticket_o.clone()),
+        ] {
+            refused(
+                &mut w.p,
+                standard(),
+                &principal,
+                &context(&ticket_o),
+                "assignment_record_malformed",
+            );
+        }
+        // Revoked, the shared session ties nothing again.
+        revoke(&mut w.p, &shared);
+        let on_m = agent(&coder).with_assigned_ticket(ticket_m.clone());
+        granted(&mut w.p, standard(), &on_m, &context(&ticket_m));
+    }
+
     // -------------------------------------------------------------------
     // ORI-P1-022: the coder's package, filtered.
     // -------------------------------------------------------------------
@@ -4189,7 +4605,7 @@ mod tests {
             (
                 "escalation on M's parent",
                 Candidate::Record(escalation_w),
-                true,
+                false,
                 true,
             ),
             (
@@ -4293,6 +4709,516 @@ mod tests {
                 .all(|candidate| candidate.product_id() == Some(&a)),
             "nothing from another product"
         );
+    }
+
+    #[test]
+    fn ori_p1_022_records_are_inside_the_declared_scope_only_when_every_claim_of_their_ticket_is() {
+        let mut w = world("containment");
+        let ticket_m = w.ticket_m.clone();
+        // (ticket label, its claims, released afterwards, inside `crates/m`)
+        let tickets: [(&str, &[&str], bool, bool); 8] = [
+            ("TICKETINSIDE", &["crates/m/src"], true, true),
+            ("TICKETEXACT", &["crates/m"], true, true),
+            (
+                "TICKETTWOIN",
+                &["crates/m/src", "crates/m/tests"],
+                false,
+                true,
+            ),
+            ("TICKETPARENT", &["crates"], true, false),
+            ("TICKETBOTH", &["crates/m/src", "crates/other"], true, false),
+            ("TICKETSIBLING", &["crates/m-evil"], true, false),
+            (
+                "TICKETBADCLAIM",
+                &["crates/m/src", "crates/m/../x"],
+                true,
+                false,
+            ),
+            ("TICKETNOCLAIM", &[], false, false),
+        ];
+        let mut cases: Vec<(String, Candidate, bool)> = Vec::new();
+        for (label, claims, released, inside) in tickets {
+            let ticket = id(label);
+            file_ticket(&mut w.p, &ticket);
+            for module in claims {
+                claim(&mut w.p, &ticket, module);
+            }
+            if released {
+                release(&mut w.p, &ticket);
+            }
+            let rec = record(
+                &mut w.p,
+                &format!("REC{label}"),
+                RecordKind::ClosingReport,
+                Some(&ticket),
+                None,
+            );
+            cases.push((label.to_owned(), Candidate::Record(rec), inside));
+        }
+        let own = record(
+            &mut w.p,
+            "RECOWN",
+            RecordKind::Finding,
+            Some(&ticket_m),
+            None,
+        );
+        cases.push(("own ticket".to_owned(), Candidate::Record(own), true));
+
+        let coder = principal_for(Role::Coder, &ticket_m);
+        let check = |w: &mut World, cases: &[(String, Candidate, bool)], moment: &str| {
+            for request in [
+                context(&ticket_m),
+                search("q", &[]),
+                search("q", &["operational_record", "operational_defect"]),
+                read("operational_record"),
+                read("operational_defect"),
+            ] {
+                let authorization = granted(&mut w.p, standard(), &coder, &request);
+                for (label, candidate, inside) in cases {
+                    let source_asked = candidate
+                        .classify()
+                        .is_some_and(|source| authorization.allows(source));
+                    assert_eq!(
+                        authorization.admits(candidate),
+                        *inside && source_asked,
+                        "{moment}, {request:?}: {label}"
+                    );
+                }
+            }
+        };
+        check(&mut w, &cases, "M on crates/m");
+
+        // M moves to crates/q: its own records stay in, and the tickets that
+        // worked only inside crates/m are no longer inside its scope.
+        release(&mut w.p, &ticket_m);
+        claim(&mut w.p, &ticket_m, "crates/q");
+        let moved: Vec<(String, Candidate, bool)> = cases
+            .into_iter()
+            .map(|(label, candidate, _)| {
+                let inside = label == "own ticket";
+                (label, candidate, inside)
+            })
+            .collect();
+        check(&mut w, &moved, "M on crates/q");
+    }
+
+    /// One gathered result, labeled by the test itself rather than by
+    /// `Candidate::classify`, so the filter is checked against an oracle
+    /// that does not share its code.
+    struct Labeled {
+        label: &'static str,
+        candidate: Candidate,
+        /// From product A, the product every authorization is granted in.
+        home: bool,
+        /// Its source, `None` for what nothing may classify.
+        source: Option<Source>,
+        /// Inside the coder's declared scope, `crates/m`.
+        in_m: bool,
+    }
+
+    /// Whether `item` must be admitted to a reader holding `row` who asked
+    /// for `asked`.
+    fn oracle_admits(
+        row: &BTreeMap<Source, Filter>,
+        asked: &BTreeSet<Source>,
+        item: &Labeled,
+    ) -> bool {
+        let Some(source) = item.source else {
+            return false;
+        };
+        if !item.home || !asked.contains(&source) {
+            return false;
+        }
+        match row.get(&source) {
+            None => false,
+            Some(Filter::DeclaredScope) => item.in_m,
+            Some(Filter::Whole | Filter::MigrationOnly) => true,
+        }
+    }
+
+    #[test]
+    fn ori_p1_022_every_query_kind_filters_its_results_by_the_rule_its_request_was_granted_under() {
+        let mut w = world("oracle");
+        let mut other = product("oracle-other", "PRODUCTB");
+        let (a, b) = (w.p.id.clone(), other.id.clone());
+        let ticket_m = w.ticket_m.clone();
+        let ticket_o = w.ticket_o.clone();
+        let ticket_i = id("TICKETI");
+        let ticket_w = id("TICKETW");
+        file_ticket(&mut w.p, &ticket_i);
+        claim(&mut w.p, &ticket_i, "crates/m/src");
+        release(&mut w.p, &ticket_i);
+        file_ticket(&mut w.p, &ticket_w);
+        claim(&mut w.p, &ticket_w, "crates");
+
+        let rec = |p: &mut Product, label: &str, kind: RecordKind, ticket: Option<&Id>| {
+            Candidate::Record(record(p, label, kind, ticket, None))
+        };
+        let closing_m = rec(&mut w.p, "OCM", RecordKind::ClosingReport, Some(&ticket_m));
+        let finding_m = rec(&mut w.p, "OFM", RecordKind::Finding, Some(&ticket_m));
+        let incident_i = rec(&mut w.p, "OII", RecordKind::Incident, Some(&ticket_i));
+        let blocked_i = rec(&mut w.p, "OBI", RecordKind::BlockedReport, Some(&ticket_i));
+        let closing_o = rec(&mut w.p, "OCO", RecordKind::ClosingReport, Some(&ticket_o));
+        let finding_o = rec(&mut w.p, "OFO", RecordKind::Finding, Some(&ticket_o));
+        let postmortem_o = rec(&mut w.p, "OPO", RecordKind::PostMortem, Some(&ticket_o));
+        let escalation_w = rec(
+            &mut w.p,
+            "OEW",
+            RecordKind::EscalationDecision,
+            Some(&ticket_w),
+        );
+        let finding_w = rec(&mut w.p, "OFW", RecordKind::Finding, Some(&ticket_w));
+        let blocked_none = rec(&mut w.p, "OBN", RecordKind::BlockedReport, None);
+        let finding_b = rec(&mut other, "OFB", RecordKind::Finding, Some(&ticket_m));
+        let submitted = record(
+            &mut w.p,
+            "OEVIDENCE",
+            RecordKind::Finding,
+            Some(&ticket_m),
+            Some("OEVBLOB"),
+        );
+        let blob = barrier::read_evidence(&mut w.p.db)
+            .expect("evidence reads back")
+            .into_iter()
+            .find(|blob| blob.record_id() == submitted.id())
+            .expect("the finding's field stored one blob");
+
+        let item = |label: &'static str,
+                    candidate: Candidate,
+                    home: bool,
+                    source: Option<Source>,
+                    in_m: bool| Labeled {
+            label,
+            candidate,
+            home,
+            source,
+            in_m,
+        };
+        use Source as S;
+        let items: Vec<Labeled> = vec![
+            item(
+                "section",
+                doc(&a, DocumentKind::Section, &spec_doc("LLD.md", "x")),
+                true,
+                Some(S::CanonicalSection),
+                false,
+            ),
+            item(
+                "adr",
+                doc(
+                    &a,
+                    DocumentKind::Adr,
+                    &spec_doc("adr/ADR-0001-stack.md", "d"),
+                ),
+                true,
+                Some(S::Adr),
+                false,
+            ),
+            item(
+                "criterion",
+                doc(
+                    &a,
+                    DocumentKind::Criterion,
+                    &spec_doc("criteria/phase-1.md", "c"),
+                ),
+                true,
+                Some(S::Criterion),
+                false,
+            ),
+            item(
+                "brief",
+                doc(
+                    &a,
+                    DocumentKind::Section,
+                    &spec_doc("PROJECT_BRIEF.md", "p"),
+                ),
+                true,
+                Some(S::Brief),
+                false,
+            ),
+            item(
+                "runbook",
+                doc(
+                    &a,
+                    DocumentKind::Section,
+                    &spec_doc("runbooks/restore.md", "s"),
+                ),
+                true,
+                Some(S::Runbook),
+                false,
+            ),
+            item(
+                "section outside spec",
+                doc(
+                    &a,
+                    DocumentKind::Section,
+                    &format!("notes/{}#i", "readme.md"),
+                ),
+                true,
+                None,
+                false,
+            ),
+            item(
+                "module hit in M",
+                doc(&a, DocumentKind::Module, "crates/m/src/lib.rs"),
+                true,
+                Some(S::CodeMap),
+                true,
+            ),
+            item(
+                "module hit sharing M's prefix",
+                doc(&a, DocumentKind::Module, "crates/m-evil/src/lib.rs"),
+                true,
+                Some(S::CodeMap),
+                false,
+            ),
+            item(
+                "module hit elsewhere",
+                doc(&a, DocumentKind::Module, "crates/other/src/lib.rs"),
+                true,
+                Some(S::CodeMap),
+                false,
+            ),
+            item(
+                "code map in M",
+                code_module(&a, "crates/m/src/a.rs"),
+                true,
+                Some(S::CodeMap),
+                true,
+            ),
+            item(
+                "code map elsewhere",
+                code_module(&a, "crates/other/src/b.rs"),
+                true,
+                Some(S::CodeMap),
+                false,
+            ),
+            item(
+                "closing report for M",
+                closing_m,
+                true,
+                Some(S::OperationalRecord),
+                true,
+            ),
+            item(
+                "finding for M",
+                finding_m,
+                true,
+                Some(S::OperationalDefect),
+                true,
+            ),
+            item(
+                "incident inside M",
+                incident_i,
+                true,
+                Some(S::Incident),
+                true,
+            ),
+            item(
+                "blocked report inside M",
+                blocked_i,
+                true,
+                Some(S::OperationalRecord),
+                true,
+            ),
+            item(
+                "closing report elsewhere",
+                closing_o,
+                true,
+                Some(S::OperationalRecord),
+                false,
+            ),
+            item(
+                "finding elsewhere",
+                finding_o,
+                true,
+                Some(S::OperationalDefect),
+                false,
+            ),
+            item(
+                "post-mortem elsewhere",
+                postmortem_o,
+                true,
+                Some(S::Incident),
+                false,
+            ),
+            item(
+                "escalation on M's parent",
+                escalation_w,
+                true,
+                Some(S::OperationalRecord),
+                false,
+            ),
+            item(
+                "finding on M's parent",
+                finding_w,
+                true,
+                Some(S::OperationalDefect),
+                false,
+            ),
+            item(
+                "blocked report with no ticket",
+                blocked_none,
+                true,
+                Some(S::OperationalRecord),
+                false,
+            ),
+            item(
+                "evidence blob",
+                Candidate::Evidence(blob),
+                true,
+                Some(S::RawEvidence),
+                false,
+            ),
+            item(
+                "organizational",
+                unproduced(&a, S::Organizational),
+                true,
+                Some(S::Organizational),
+                false,
+            ),
+            item(
+                "infrastructure adr",
+                unproduced(&a, S::InfrastructureAdr),
+                true,
+                Some(S::InfrastructureAdr),
+                false,
+            ),
+            item(
+                "merged diff",
+                unproduced(&a, S::MergedDiff),
+                true,
+                Some(S::MergedDiff),
+                false,
+            ),
+            item(
+                "analytics summary",
+                unproduced(&a, S::AnalyticsSummary),
+                true,
+                Some(S::AnalyticsSummary),
+                false,
+            ),
+            item(
+                "code read",
+                unproduced(&a, S::CodeRead),
+                true,
+                Some(S::CodeRead),
+                false,
+            ),
+            item(
+                "a typed source relabelled",
+                unproduced(&a, S::Incident),
+                true,
+                None,
+                true,
+            ),
+            item(
+                "another product's finding",
+                finding_b,
+                false,
+                Some(S::OperationalDefect),
+                true,
+            ),
+            item(
+                "another product's code map",
+                code_module(&b, "crates/m/src/a.rs"),
+                false,
+                Some(S::CodeMap),
+                true,
+            ),
+            item(
+                "another product's section",
+                doc(&b, DocumentKind::Section, &spec_doc("LLD.md", "x")),
+                false,
+                Some(S::CanonicalSection),
+                false,
+            ),
+            item(
+                "another product's organizational",
+                unproduced(&b, S::Organizational),
+                false,
+                Some(S::Organizational),
+                false,
+            ),
+        ];
+        let all: Vec<Candidate> = items.iter().map(|item| item.candidate.clone()).collect();
+
+        let readers: Vec<Option<Role>> = Role::ALL
+            .iter()
+            .copied()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .collect();
+        let mut checked = 0usize;
+        for stage in [ProductStage::Standard, ProductStage::Migration] {
+            let enforcer = ScopeEnforcer::new(stage);
+            for reader in &readers {
+                let (principal, row) = match reader {
+                    Some(role) => (principal_for(*role, &ticket_m), row_map(*role, stage)),
+                    None => (operator(), operator_row()),
+                };
+                let whole: BTreeSet<Source> = row.keys().copied().collect();
+                let names: Vec<&str> = row.keys().map(|source| source.as_str()).collect();
+                let mut shapes: Vec<(String, MemoryRequest, BTreeSet<Source>)> = vec![
+                    (
+                        "search naming nothing".to_owned(),
+                        search("q", &[]),
+                        whole.clone(),
+                    ),
+                    (
+                        "search naming the row".to_owned(),
+                        search("q", &names),
+                        whole.clone(),
+                    ),
+                ];
+                if *reader != Some(Role::ProductSignal) {
+                    shapes.push(("context".to_owned(), context(&ticket_m), whole.clone()));
+                }
+                for source in row.keys() {
+                    let one: BTreeSet<Source> = [*source].into_iter().collect();
+                    shapes.push((format!("read {source}"), read(source.as_str()), one.clone()));
+                    shapes.push((
+                        format!("search {source}"),
+                        search("q", &[source.as_str()]),
+                        one,
+                    ));
+                }
+                for (shape, request, asked) in shapes {
+                    let authorization = granted(&mut w.p, enforcer, &principal, &request);
+                    let context = format!("{reader:?} in {stage:?}, {shape}");
+                    for item in &items {
+                        assert_eq!(
+                            authorization.admits(&item.candidate),
+                            oracle_admits(&row, &asked, item),
+                            "{context}: {}",
+                            item.label
+                        );
+                    }
+                    let expected: Vec<&Labeled> = items
+                        .iter()
+                        .filter(|item| oracle_admits(&row, &asked, item))
+                        .collect();
+                    assert_eq!(
+                        authorization.filter(all.clone()),
+                        expected
+                            .iter()
+                            .map(|item| item.candidate.clone())
+                            .collect::<Vec<_>>(),
+                        "{context}"
+                    );
+                    // Every source asked for is reachable through the filter:
+                    // it admits something, not nothing.
+                    for source in &asked {
+                        assert!(
+                            expected.iter().any(|item| item.source == Some(*source)),
+                            "{context}: nothing of {source} is admitted"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 300, "only {checked} authorizations were checked");
     }
 
     // -------------------------------------------------------------------
@@ -4829,6 +5755,286 @@ mod tests {
             .execute_batch("PRAGMA query_only = OFF;")
             .expect("the connection goes writable again");
         assert_eq!(tip(&mut e.w.p), before);
+    }
+
+    #[test]
+    fn ori_t_0038_evidence_for_a_record_id_two_records_carry_is_refused_whichever_comes_first() {
+        // (label, the reader, a kind it reads, a kind it does not)
+        let pairs = [
+            (
+                "qa",
+                Role::Qa,
+                RecordKind::Finding,
+                RecordKind::ClosingReport,
+            ),
+            (
+                "operations",
+                Role::Operations,
+                RecordKind::Incident,
+                RecordKind::Finding,
+            ),
+        ];
+        for (label, role, readable, unreadable) in pairs {
+            for (order, first, second) in [
+                ("readable-first", readable, unreadable),
+                ("unreadable-first", unreadable, readable),
+            ] {
+                let mut w = world(&format!("reused-{label}-{order}"));
+                let ticket = w.ticket_m.clone();
+                let shared = id("RECSHARED");
+                record(&mut w.p, "RECSHARED", first, Some(&ticket), Some("EVFIRST"));
+                record(
+                    &mut w.p,
+                    "RECSHARED",
+                    second,
+                    Some(&ticket),
+                    Some("EVSECOND"),
+                );
+                // A record the reader reads, alone under its id, is granted:
+                // the refusal below is the reuse, not the reader.
+                let alone = record(
+                    &mut w.p,
+                    "RECALONE",
+                    readable,
+                    Some(&ticket),
+                    Some("EVALONE"),
+                );
+                let principal = principal_for(role, &ticket);
+                evidence_granted(&mut w.p, &principal, &alone);
+                for asking in [principal, principal_for(Role::Lead, &ticket), operator()] {
+                    refused(
+                        &mut w.p,
+                        standard(),
+                        &asking,
+                        &evidence(&shared),
+                        "record_id_ambiguous",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Submits a report by `author` at `when`, one field per `(name,
+    /// evidence label)`, each field's raw text naming the record and field.
+    fn submit(
+        p: &mut Product,
+        when: i64,
+        author: &str,
+        label: &str,
+        kind: RecordKind,
+        fields: &[(&str, &str)],
+    ) -> Result<Submission, BarrierError> {
+        let ticket = id("TICKETM");
+        let fields = fields
+            .iter()
+            .map(|(name, evidence)| NewReportField {
+                name: FieldName::parse(name).expect("a field name"),
+                raw_text: format!("raw text of {label}, field {name}"),
+                evidence_id: id(evidence),
+            })
+            .collect();
+        submit_report(
+            &mut p.db,
+            at(when),
+            Actor::Agent(id(author)),
+            NewReport {
+                record_id: id(label),
+                kind,
+                ticket_id: Some(ticket),
+                fields,
+            },
+            &BarrierConfig::default(),
+        )
+    }
+
+    /// Puts a directory where the evidence file `evidence` would be written,
+    /// so the barrier fails on that field after storing the ones before it:
+    /// the submission that failed half way.
+    fn block_evidence_file(p: &Product, evidence: &str) {
+        let path =
+            p.db.dir()
+                .join("evidence")
+                .join(format!("{}.txt", id(evidence)));
+        fs::create_dir_all(&path).expect("a directory where the evidence file would go");
+    }
+
+    fn evidence_ids(authorization: &Authorization) -> Vec<Id> {
+        authorization
+            .evidence()
+            .iter()
+            .map(|blob| blob.id().clone())
+            .collect()
+    }
+
+    #[test]
+    fn ori_t_0038_evidence_is_only_the_blobs_stored_with_the_record() {
+        let one_field = [("summary", "EVX")];
+
+        // Two fields, right after another record by the same author at the
+        // same time: exactly the record's two blobs, in order.
+        let mut w = world("evidence-run");
+        let qa = principal_for(Role::Qa, &w.ticket_m);
+        submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECY",
+            RecordKind::Finding,
+            &[("summary", "EVY")],
+        )
+        .expect("a submission");
+        let x = submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECX",
+            RecordKind::Finding,
+            &[("summary", "EVX1"), ("detail", "EVX2")],
+        )
+        .expect("a submission")
+        .record()
+        .clone();
+        let authorization = evidence_granted(&mut w.p, &qa, &x);
+        assert_eq!(evidence_ids(&authorization), vec![id("EVX1"), id("EVX2")]);
+
+        // A submission under the same id that failed after the record, and
+        // one that failed before it by another author at another time: their
+        // evidence is not the record's and is not handed over.
+        for (label, failed_first, when, author) in [
+            ("evidence-orphan-after", false, 200, "AUTHOR"),
+            ("evidence-orphan-before", true, 150, "AUTHORTWO"),
+        ] {
+            let mut w = world(label);
+            let qa = principal_for(Role::Qa, &w.ticket_m);
+            let fail = |p: &mut Product| {
+                block_evidence_file(p, "EVB");
+                submit(
+                    p,
+                    when,
+                    author,
+                    "RECX",
+                    RecordKind::ClosingReport,
+                    &[("summary", "EVA"), ("detail", "EVB")],
+                )
+                .expect_err("the second field cannot be stored");
+            };
+            if failed_first {
+                fail(&mut w.p);
+            }
+            let x = submit(
+                &mut w.p,
+                200,
+                "AUTHOR",
+                "RECX",
+                RecordKind::Finding,
+                &one_field,
+            )
+            .expect("a submission")
+            .record()
+            .clone();
+            if !failed_first {
+                fail(&mut w.p);
+            }
+            let orphans = barrier::read_evidence(&mut w.p.db)
+                .expect("evidence reads back")
+                .into_iter()
+                .filter(|blob| blob.id() == &id("EVA") && blob.record_id() == x.id())
+                .count();
+            assert_eq!(orphans, 1, "{label}: the failed submission left its blob");
+            let authorization = evidence_granted(&mut w.p, &qa, &x);
+            assert_eq!(evidence_ids(&authorization), vec![id("EVX")], "{label}");
+        }
+
+        // The same failure by the same author at the same time, right before
+        // the record, cannot be told apart from the record's own: refused.
+        let mut w = world("evidence-orphan-adjacent");
+        let qa = principal_for(Role::Qa, &w.ticket_m);
+        block_evidence_file(&w.p, "EVB");
+        submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECX",
+            RecordKind::ClosingReport,
+            &[("summary", "EVA"), ("detail", "EVB")],
+        )
+        .expect_err("the second field cannot be stored");
+        submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECX",
+            RecordKind::Finding,
+            &one_field,
+        )
+        .expect("a submission");
+        refused(
+            &mut w.p,
+            standard(),
+            &qa,
+            &evidence(&id("RECX")),
+            "evidence_not_attributable",
+        );
+
+        // A later record storing evidence under the same evidence id
+        // overwrote the file: the record's blob may hold the other's raw
+        // text, so it is refused.
+        let mut w = world("evidence-id-reused");
+        let qa = principal_for(Role::Qa, &w.ticket_m);
+        submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECX",
+            RecordKind::Finding,
+            &[("summary", "EVSHARED")],
+        )
+        .expect("a submission");
+        submit(
+            &mut w.p,
+            300,
+            "AUTHOR",
+            "RECZ",
+            RecordKind::ClosingReport,
+            &[("summary", "EVSHARED")],
+        )
+        .expect("a submission");
+        refused(
+            &mut w.p,
+            standard(),
+            &qa,
+            &evidence(&id("RECX")),
+            "evidence_not_attributable",
+        );
+
+        // An evidence event that does not parse could be anyone's.
+        let mut w = world("evidence-garbage");
+        let qa = principal_for(Role::Qa, &w.ticket_m);
+        let x = submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECX",
+            RecordKind::Finding,
+            &one_field,
+        )
+        .expect("a submission")
+        .record()
+        .clone();
+        evidence_granted(&mut w.p, &qa, &x);
+        append(
+            &mut w.p,
+            "memory.evidence_stored",
+            None,
+            "not json".to_owned(),
+        );
+        refused(
+            &mut w.p,
+            standard(),
+            &qa,
+            &evidence(x.id()),
+            "evidence_not_attributable",
+        );
     }
 
     // -------------------------------------------------------------------
