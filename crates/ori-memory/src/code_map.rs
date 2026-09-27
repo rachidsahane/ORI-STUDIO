@@ -182,13 +182,26 @@
 //!   - **The `spec/` citation scan**, once per [`build_code_map`] call, not
 //!     once per file (it runs after every file's [`Module`] already
 //!     exists): its own deadline, sized by the same `file_timeout`
-//!     configuration value, checked across every module and document it
-//!     scans by the work done, after every 4096 lines or every 1 MiB of
-//!     search, whichever comes first (`CitationScan::scan_document`), once
-//!     per entry while documents are listed (`list_markdown`), and once per
-//!     document before it is read (`scan_spec_directory`). By lines alone,
-//!     one line can be a whole 8 MiB document: the review of round 3 ran the
-//!     round-3 scan 5 to 9 times past its budget that way.
+//!     configuration value, checked by the work done, inside a line as well
+//!     as between lines, after every 4096 lines or every 1 MiB of search,
+//!     whichever comes first (`CitationScan::scan_document`,
+//!     `PathMatcher::find_all`), once per directory and per entry while
+//!     documents are listed (`list_markdown`), and once per document before
+//!     it is read (`scan_spec_directory`). By lines alone, one line can be
+//!     a whole document: the review of round 3 ran the round-3 scan 5 to 9
+//!     times past its budget that way. And a fixed budget is only as good
+//!     as the work it bounds: until round 7 each line was searched once per
+//!     module, modules times lines, so on an ordinary product repository
+//!     (the review of round 6 used one of 2394 modules and 41 documents)
+//!     the scan never finished inside its 5 seconds, and reached different
+//!     documents from run to run. Each line is now searched once for every
+//!     module together, through a trie of their paths (`PathMatcher`), so
+//!     the work is about the corpus's length: 20,000 lines of prose citing
+//!     4000 modules (80 million line searches the old way) take well under
+//!     a second in a debug build
+//!     (`tests::ori_t_0036_the_spec_scan_finishes_an_ordinary_product_repository_in_its_budget`).
+//!     Only paths chosen to make the search long, repeated in the text,
+//!     reach the deadline now, and are recorded when they do.
 //!     [`Coverage::spec_citation_scan`] is where its own incompleteness is
 //!     recorded, with the reason, not a demotion of an already-successful
 //!     `Module`; see that field's doc for why.
@@ -289,7 +302,11 @@
 //!     many as `spec/` has entries, the one quantity here bounded only the
 //!     way the walk itself is; see "What is not bounded"), per module the
 //!     (document, heading) pairs it
-//!     has been cited under (at most 500), and the output below, whose
+//!     has been cited under (at most 500) and the last line it was found
+//!     on, the trie of module paths the lines are searched with (at most
+//!     two nodes per module plus one, each a few integers and its children's
+//!     indices, labelled by position in the modules' own paths, never a
+//!     copy of them), and the output below, whose
 //!     heading text is held twice while the scan runs (the table and its
 //!     lookup index) and once after.
 //!   - *The whole corpus:* at most [`CodeMapOptions::max_spec_bytes`] read
@@ -587,7 +604,10 @@
 //! before then depends on the host's speed and load, so a file whose work
 //! lands near its budget can map on one run and time out on the next.
 //! What is the same on every run is that such a map says so; the claim
-//! above is for a repository whose stages all finish inside their bounds.
+//! above is for a repository whose stages all finish inside their bounds,
+//! which the bounds are sized for an ordinary repository to do (see
+//! "Time": until round 7 the `spec/` scan was not, and an ordinary product
+//! repository gave a different map on most runs).
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -4211,30 +4231,26 @@ const MAX_SPEC_CITATIONS_PER_MODULE: usize = 500;
 const MAX_HEADING_BYTES: usize = 4096;
 
 /// How many lines [`CitationScan::scan_document`] searches, across every
-/// module and document together, before it reads the clock again, unless
+/// document together, before it reads the clock again, unless
 /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] comes first. Checking every single
-/// line would itself cost real time at the scale a `spec/` scan can reach
-/// (modules times documents times lines), so this amortizes that cost on the
-/// ordinary shape, many short lines.
+/// line would itself cost real time at the scale a `spec/` scan can reach,
+/// so this amortizes that cost on the ordinary shape, many short lines.
 const SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES: u64 = 4096;
 
-/// How many bytes of work [`CitationScan::scan_document`] does before it
+/// How many units of work [`CitationScan::scan_document`] does before it
 /// reads the clock again, unless [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`]
-/// comes first: each line is charged its own length plus the module path
-/// searched for in it, which is what one `str::contains` call costs, linear
-/// in both.
+/// comes first: each position of a line a match can start at is charged one,
+/// plus the length of every piece of a module path compared there
+/// ([`PathMatcher::find_all`]), which is what that search costs. Checked
+/// inside a line, not only between lines: one line can be a whole document,
+/// and its search is not linear in its length alone.
 ///
-/// Why bytes and not lines alone: a line can be as long as a whole document,
-/// up to [`CodeMapOptions::max_file_bytes`], so a line count says nothing
-/// about how much work was done between two checks. The review of this
-/// ticket's third round built exactly that document (256 modules, 17
-/// documents of one 8 MiB line each, with module paths chosen to make each
-/// search slow) and measured the round-3 scan, which checked every 4096
-/// lines only, running 27 to 45 seconds against its 5 second budget,
-/// because the first check came at line 4096 and the whole scan was 4352
-/// line searches. Charged by bytes, the scan now reads the clock after every
-/// line at least 1 MiB long, so it overruns its deadline by at most one
-/// line's search.
+/// Why work and not lines alone: the review of this ticket's third round
+/// built a document of 8 MiB lines (256 modules, 17 documents of one line
+/// each, with module paths chosen to make each search slow) and measured
+/// the round-3 scan, which checked every 4096 lines only, running 27 to 45
+/// seconds against its 5 second budget, because the first check came at
+/// line 4096 and the whole scan was 4352 line searches.
 const SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES: u64 = 1024 * 1024;
 
 fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
@@ -4288,8 +4304,205 @@ fn spec_citation_sort_key<'s>(
     )
 }
 
+/// Every module's path in one compressed trie (each edge labelled with a
+/// piece of one module's own path, borrowed by position, never copied), so
+/// that one pass over a line finds every module path that occurs in it,
+/// wherever it starts, rather than one search of the line per module.
+///
+/// Until round 7 [`CitationScan::scan_document`] searched every line once
+/// per module, work that grew as modules times lines against a fixed
+/// deadline, so on an ordinary product repository (2394 modules, 41
+/// documents, 1.25 MB of `spec/`, the review of round 6 measured) the scan
+/// always ran out of time, and which documents it reached before then
+/// changed from run to run: five different maps in eight runs of one tree.
+/// Searched this way, the work is the line's length plus what the trie
+/// matches along it, which for prose that names a path now and then is
+/// close to one step per byte.
+///
+/// Bounded in memory by the number of modules, not by their paths' length:
+/// a compressed trie of `n` paths has at most `2n + 1` nodes, and a node
+/// holds three integers, its children's indices and at most one module
+/// index.
+struct PathMatcher {
+    nodes: Vec<PathNode>,
+    /// The root's children by the first byte of their label, `u32::MAX` for
+    /// none: most positions of a line start no module path, and this is
+    /// what rejects them in one step.
+    root: Box<[u32; 256]>,
+}
+
+/// One node of [`PathMatcher`]: the edge into it is labelled with bytes
+/// `start..end` of the path of module `path`.
+struct PathNode {
+    path: u32,
+    start: u32,
+    end: u32,
+    /// Sorted by the first byte of their labels, which are all different.
+    children: Vec<u32>,
+    /// The module whose whole path ends where this node's label does.
+    module: Option<u32>,
+}
+
+impl PathMatcher {
+    /// Builds the trie for `modules`' paths, checking `deadline` every 256
+    /// modules; `None` when it passed first (module paths are names the
+    /// repository chose, and there can be very many of them).
+    fn build(modules: &[Module], deadline: Instant) -> Option<Self> {
+        let mut nodes = vec![PathNode {
+            path: 0,
+            start: 0,
+            end: 0,
+            children: Vec::new(),
+            module: None,
+        }];
+        for (index, module) in modules.iter().enumerate() {
+            if index.is_multiple_of(256) && Instant::now() >= deadline {
+                return None;
+            }
+            let (Ok(module_index), Ok(path_length)) =
+                (u32::try_from(index), u32::try_from(module.path.len()))
+            else {
+                // More modules than a `u32` counts, or a path that long:
+                // neither is a repository this module maps; no citation.
+                continue;
+            };
+            let path = module.path.as_bytes();
+            let mut node = 0usize;
+            let mut position = 0usize;
+            loop {
+                if position == path.len() {
+                    nodes[node].module = Some(module_index);
+                    break;
+                }
+                match Self::child_slot(&nodes, modules, node, path[position]) {
+                    Err(slot) => {
+                        let leaf = u32::try_from(nodes.len()).ok()?;
+                        nodes.push(PathNode {
+                            path: module_index,
+                            start: u32::try_from(position).ok()?,
+                            end: path_length,
+                            children: Vec::new(),
+                            module: Some(module_index),
+                        });
+                        nodes[node].children.insert(slot, leaf);
+                        break;
+                    }
+                    Ok(slot) => {
+                        let child = nodes[node].children[slot] as usize;
+                        let label = Self::label(&nodes[child], modules);
+                        let common = label
+                            .iter()
+                            .zip(&path[position..])
+                            .take_while(|(a, b)| a == b)
+                            .count();
+                        if common < label.len() {
+                            // Split the edge where this path leaves it: the
+                            // shared part becomes a node of its own, and the
+                            // old child hangs below it, its label shortened.
+                            let middle = u32::try_from(nodes.len()).ok()?;
+                            let shared = u32::try_from(common).ok()?;
+                            let old = &nodes[child];
+                            let split = PathNode {
+                                path: old.path,
+                                start: old.start,
+                                end: old.start + shared,
+                                children: vec![nodes[node].children[slot]],
+                                module: None,
+                            };
+                            nodes[child].start += shared;
+                            nodes.push(split);
+                            nodes[node].children[slot] = middle;
+                            node = middle as usize;
+                        } else {
+                            node = child;
+                        }
+                        position += common;
+                    }
+                }
+            }
+        }
+        let mut root = Box::new([u32::MAX; 256]);
+        for &child in &nodes[0].children {
+            let first = Self::label(&nodes[child as usize], modules)[0];
+            root[usize::from(first)] = child;
+        }
+        Some(Self { nodes, root })
+    }
+
+    /// The bytes an edge into `node` is labelled with.
+    fn label<'m>(node: &PathNode, modules: &'m [Module]) -> &'m [u8] {
+        &modules[node.path as usize].path.as_bytes()[node.start as usize..node.end as usize]
+    }
+
+    /// Where among `parent`'s children the one whose label starts with
+    /// `byte` is (`Ok`), or would go (`Err`).
+    fn child_slot(
+        nodes: &[PathNode],
+        modules: &[Module],
+        parent: usize,
+        byte: u8,
+    ) -> std::result::Result<usize, usize> {
+        nodes[parent]
+            .children
+            .binary_search_by_key(&byte, |&child| {
+                Self::label(&nodes[child as usize], modules)[0]
+            })
+    }
+
+    /// Calls `found` with every module whose path occurs in `line`, once
+    /// per occurrence, and returns `false` when `deadline` passed first.
+    /// Every position a match could start at is tried, following the trie
+    /// as far as `line` agrees with it. Each position is charged one unit
+    /// of work, plus the length of every label compared there, to
+    /// `work_since_check`, and the clock is read whenever that reaches
+    /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`], inside the line: a line
+    /// can be a whole document, and a hostile set of module paths (long,
+    /// alike, and repeated in the text) can make a search from every
+    /// position of it long.
+    fn find_all(
+        &self,
+        modules: &[Module],
+        line: &[u8],
+        work_since_check: &mut u64,
+        deadline: Instant,
+        mut found: impl FnMut(usize),
+    ) -> bool {
+        for start in 0..line.len() {
+            let mut work = 1u64;
+            let mut position = start;
+            let mut next = self.root[usize::from(line[start])];
+            while next != u32::MAX {
+                let node = &self.nodes[next as usize];
+                let label = Self::label(node, modules);
+                work = work.saturating_add(label.len() as u64);
+                if !line[position..].starts_with(label) {
+                    break;
+                }
+                position += label.len();
+                if let Some(module) = node.module {
+                    found(module as usize);
+                }
+                next = match line.get(position) {
+                    Some(&byte) => Self::child_slot(&self.nodes, modules, next as usize, byte)
+                        .map_or(u32::MAX, |slot| node.children[slot]),
+                    None => u32::MAX,
+                };
+            }
+            *work_since_check = work_since_check.saturating_add(work);
+            if *work_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES {
+                *work_since_check = 0;
+                if Instant::now() >= deadline {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
 /// The citation scan's state, carried from one document to the next: the
-/// output tables, and per module what it has already been cited under.
+/// output tables, the matcher every document is searched with, and per
+/// module what it has already been cited under.
 ///
 /// Documents are scanned one at a time, each from one owned buffer that is
 /// dropped before the next is read, and every line is searched in place as
@@ -4311,10 +4524,17 @@ struct CitationScan {
     /// most [`MAX_SPEC_CITATIONS_PER_MODULE`] each.
     seen: Vec<HashSet<(usize, Option<usize>)>>,
     /// Per module, whether it reached [`MAX_SPEC_CITATIONS_PER_MODULE`] and
-    /// is no longer searched for.
+    /// is no longer recorded.
     done: Vec<bool>,
+    /// Built on the first document, so a repository with no `spec/` pays
+    /// nothing for it.
+    matcher: Option<PathMatcher>,
+    /// Per module, the last line (counted across the whole scan) it was
+    /// found on, so a line naming it many times lists it once.
+    last_line: Vec<u64>,
+    lines_scanned: u64,
     lines_since_check: u64,
-    bytes_since_check: u64,
+    work_since_check: u64,
 }
 
 impl CitationScan {
@@ -4325,8 +4545,11 @@ impl CitationScan {
             heading_ids: [HashMap::new(), HashMap::new()],
             seen: vec![HashSet::new(); modules],
             done: vec![false; modules],
+            matcher: None,
+            last_line: vec![0; modules],
+            lines_scanned: 0,
             lines_since_check: 0,
-            bytes_since_check: 0,
+            work_since_check: 0,
         }
     }
 
@@ -4348,19 +4571,22 @@ impl CitationScan {
     }
 
     /// Searches `content`, the whole of one document, for every module's
-    /// path, line by line, in place: each line is a slice of `content`, and
-    /// the heading above it is tracked as a slice too, so nothing is copied
-    /// per line. A heading's text is copied only when a citation under it is
-    /// recorded for the first time, and a document's path only when it is
-    /// first cited. Returns `false` when `deadline` passed first.
+    /// path, line by line, in place: each line is a slice of `content`,
+    /// searched once for all modules together ([`PathMatcher::find_all`]),
+    /// and the heading above it is tracked as a slice too, so nothing is
+    /// copied per line. A heading's text is copied only when a citation
+    /// under it is recorded for the first time, and a document's path only
+    /// when it is first cited. `modules` must be the modules the scan was
+    /// created for, in the same order. Returns `false` when `deadline`
+    /// passed first; the citations found before then are kept (the caller
+    /// records this document as not scanned in full).
     ///
-    /// The deadline is checked by work done, not by lines alone: after
-    /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`] lines or
-    /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] bytes of search, whichever
-    /// comes first. The check comes after a line's search, never before the
-    /// first one, so an already-expired deadline still lets exactly one
-    /// bounded amount of work run; what it never allows is an unbounded
-    /// amount.
+    /// The deadline is checked by work done, not by lines alone: inside
+    /// each line, whenever [`SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES`] units of
+    /// search have been done, and after every
+    /// [`SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES`] lines. So an already-expired
+    /// deadline still lets exactly one bounded amount of work run, and
+    /// never an unbounded one.
     fn scan_document(
         &mut self,
         rel: &str,
@@ -4368,72 +4594,94 @@ impl CitationScan {
         modules: &mut [Module],
         deadline: Instant,
     ) -> bool {
+        if self.matcher.is_none() {
+            let Some(matcher) = PathMatcher::build(modules, deadline) else {
+                return false;
+            };
+            self.matcher = Some(matcher);
+        }
         let mut doc_index: Option<usize> = None;
-        for (m, module) in modules.iter_mut().enumerate() {
-            if self.done[m] {
-                continue;
+        // The heading above the current line, and whether it was cut.
+        let mut heading: Option<(&str, bool)> = None;
+        // Its index in `headings`, once looked up: `Some(None)` when it has
+        // not been cited yet, `None` when not looked up since the heading
+        // last changed.
+        let mut heading_id: Option<Option<usize>> = None;
+        let mut found_on_line: Vec<usize> = Vec::new();
+        for line in content.lines() {
+            if let Some(full) = markdown_heading(line) {
+                let text = truncate_at_char_boundary(full, MAX_HEADING_BYTES);
+                heading = Some((text, text.len() < full.len()));
+                heading_id = None;
             }
-            // The heading above the current line, and whether it was cut.
-            let mut heading: Option<(&str, bool)> = None;
-            // Its index in `headings`, once looked up: `Some(None)` when it
-            // has not been cited yet, `None` when not looked up since the
-            // heading last changed.
-            let mut heading_id: Option<Option<usize>> = None;
-            for line in content.lines() {
-                if let Some(full) = markdown_heading(line) {
-                    let text = truncate_at_char_boundary(full, MAX_HEADING_BYTES);
-                    heading = Some((text, text.len() < full.len()));
-                    heading_id = None;
-                }
-                if line.contains(module.path.as_str()) {
-                    // The pair's key, if both halves have been cited before;
-                    // `None` means this pair is certainly new.
-                    let heading_key: Option<Option<usize>> = match heading {
-                        None => Some(None),
-                        Some((text, truncated)) => (*heading_id.get_or_insert_with(|| {
-                            self.heading_ids[usize::from(truncated)].get(text).copied()
-                        }))
-                        .map(Some),
-                    };
-                    let is_new = match (doc_index, heading_key) {
-                        (Some(doc), Some(key)) => !self.seen[m].contains(&(doc, key)),
-                        _ => true,
-                    };
-                    if is_new {
-                        if module.spec_sections.len() >= MAX_SPEC_CITATIONS_PER_MODULE {
-                            module.spec_sections_truncated = true;
-                            self.done[m] = true;
-                            break;
-                        }
-                        let doc = *doc_index.get_or_insert_with(|| {
-                            self.docs.push(rel.to_owned());
-                            self.docs.len() - 1
-                        });
-                        let key = heading.map(|(text, truncated)| {
-                            let id = self.intern_heading(text, truncated);
-                            heading_id = Some(Some(id));
-                            id
-                        });
-                        self.seen[m].insert((doc, key));
-                        module.spec_sections.push(SpecCitation {
-                            doc_index: doc,
-                            heading_index: key,
-                        });
+            self.lines_scanned += 1;
+            let line_number = self.lines_scanned;
+            found_on_line.clear();
+            let Some(matcher) = self.matcher.as_ref() else {
+                return false;
+            };
+            let last_line = &mut self.last_line;
+            let completed = matcher.find_all(
+                modules,
+                line.as_bytes(),
+                &mut self.work_since_check,
+                deadline,
+                |module| {
+                    if last_line[module] != line_number {
+                        last_line[module] = line_number;
+                        found_on_line.push(module);
                     }
+                },
+            );
+            for &m in &found_on_line {
+                if self.done[m] {
+                    continue;
                 }
-                self.lines_since_check += 1;
-                self.bytes_since_check = self
-                    .bytes_since_check
-                    .saturating_add(line.len() as u64)
-                    .saturating_add(module.path.len() as u64);
-                if self.lines_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES
-                    || self.bytes_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_BYTES
-                {
-                    self.lines_since_check = 0;
-                    self.bytes_since_check = 0;
-                    if Instant::now() >= deadline {
-                        return false;
-                    }
+                // The pair's key, if both halves have been cited before;
+                // `None` means this pair is certainly new.
+                let heading_key: Option<Option<usize>> = match heading {
+                    None => Some(None),
+                    Some((text, truncated)) => (*heading_id.get_or_insert_with(|| {
+                        self.heading_ids[usize::from(truncated)].get(text).copied()
+                    }))
+                    .map(Some),
+                };
+                let is_new = match (doc_index, heading_key) {
+                    (Some(doc), Some(key)) => !self.seen[m].contains(&(doc, key)),
+                    _ => true,
+                };
+                if !is_new {
+                    continue;
+                }
+                let module = &mut modules[m];
+                if module.spec_sections.len() >= MAX_SPEC_CITATIONS_PER_MODULE {
+                    module.spec_sections_truncated = true;
+                    self.done[m] = true;
+                    continue;
+                }
+                let doc = *doc_index.get_or_insert_with(|| {
+                    self.docs.push(rel.to_owned());
+                    self.docs.len() - 1
+                });
+                let key = heading.map(|(text, truncated)| {
+                    let id = self.intern_heading(text, truncated);
+                    heading_id = Some(Some(id));
+                    id
+                });
+                self.seen[m].insert((doc, key));
+                modules[m].spec_sections.push(SpecCitation {
+                    doc_index: doc,
+                    heading_index: key,
+                });
+            }
+            if !completed {
+                return false;
+            }
+            self.lines_since_check += 1;
+            if self.lines_since_check >= SPEC_SCAN_DEADLINE_CHECK_EVERY_LINES {
+                self.lines_since_check = 0;
+                if Instant::now() >= deadline {
+                    return false;
                 }
             }
         }
@@ -5048,9 +5296,11 @@ mod tests {
         let elapsed = start.elapsed();
 
         let debug_bytes = format!("{map:?}").len();
+        let citations: usize = map.modules.iter().map(|m| m.spec_sections.len()).sum();
         eprintln!(
             "ORI-P1-030 measurement: generated_lines={total_lines} files_seen={} modules={} \
-             interfaces={} edges={} entry_points={} elapsed={elapsed:?} debug_rendering_bytes={debug_bytes}",
+             interfaces={} edges={} entry_points={} spec_scan={:?} spec_docs={} citations={citations} \
+             elapsed={elapsed:?} debug_rendering_bytes={debug_bytes}",
             map.coverage.files_seen,
             map.modules.len(),
             map.modules
@@ -5065,6 +5315,8 @@ mod tests {
                 .iter()
                 .map(|m| m.entry_points.len())
                 .sum::<usize>(),
+            map.coverage.spec_citation_scan,
+            map.spec_docs.len(),
         );
         assert!(!map.modules.is_empty());
         drop(guard);
@@ -5124,6 +5376,33 @@ mod tests {
             "gen/go/entry/main.go",
             "package main\n\nimport \"fmt\"\n\nfunc main() {\n    fmt.Println(\"done\")\n}\n",
         );
+
+        // A `spec/` for the citation scan to measure at this scale too
+        // (until round 7 this generator wrote none, so the scan was never
+        // measured here): one document per language, a heading per ten
+        // generated files, each file cited once among lines of prose.
+        for extension in ["rs", "ts", "py", "go"] {
+            let mut document = format!("# Generated {extension} modules\n\n");
+            let mut index = 0usize;
+            while root
+                .join(format!("gen/{extension}/file_{index}.{extension}"))
+                .exists()
+            {
+                if index.is_multiple_of(10) {
+                    document.push_str(&format!("\n## Files from {index}\n\n"));
+                }
+                document.push_str(&format!(
+                    "Prose about the module, then its path: gen/{extension}/file_{index}.{extension}\n\
+                     More prose that names no module at all, as most of a document does.\n"
+                ));
+                index += 1;
+            }
+            write(
+                root,
+                &format!("spec/generated_{extension}.{}", "md"),
+                &document,
+            );
+        }
 
         total
     }
@@ -7365,93 +7644,135 @@ mod tests {
         }
     }
 
+    /// A scan over `modules` whose matcher is already built (by scanning an
+    /// empty document with time to spare), so that a test's expired
+    /// deadline meets the checks inside the document, not the one before
+    /// the matcher is built.
+    fn primed_scan(modules: &mut [Module]) -> CitationScan {
+        let mut scan = CitationScan::new(modules.len());
+        let rel = format!("spec/{}.md", "empty");
+        assert!(scan.scan_document(&rel, "", modules, Instant::now() + Duration::from_secs(60)));
+        scan
+    }
+
     /// Item 2 (HIGH), the check itself, deterministically: four lines of
     /// just over 1 MiB each is far fewer than the 4096 lines the round-3
     /// scan waited for before its first check, so with an already-expired
     /// deadline that scan read the clock zero times and reported itself
-    /// complete. Charged by bytes, the scan must check after the first
-    /// line and stop.
+    /// complete. Charged by work, the scan must stop within the first line.
+    /// Since round 7 the work is checked inside a line too, not only after
+    /// it (one line can be a whole document, and since round 7 its search
+    /// is not linear in its length alone): a module named past the first
+    /// MiB of a single line is not reached, so not recorded.
     #[test]
     fn ori_t_0036_the_spec_scan_checks_its_deadline_by_bytes_scanned_not_only_by_lines() {
-        // Round 5: driven through `CitationScan::scan_document`, the
-        // per-document scan that replaced round 4's all-documents-at-once
-        // `scan_spec_citations`; the check itself is the same code.
         let long_line = "x".repeat(1024 * 1024 + 1);
         let content = format!("{long_line}\n{long_line}\n{long_line}\n{long_line}\n");
         let rel = format!("spec/{}.md", "long");
-        let mut modules = vec![bare_module("a.rs")];
         let already_past = Instant::now() - Duration::from_secs(1);
+        let mut modules = vec![bare_module("a.rs")];
         assert!(
-            !CitationScan::new(1).scan_document(&rel, &content, &mut modules, already_past),
+            !primed_scan(&mut modules).scan_document(&rel, &content, &mut modules, already_past),
             "four 1 MiB lines past an expired deadline must stop the scan, not complete it"
+        );
+
+        let one_line = format!("{} a.rs\n", "x".repeat(2 * 1024 * 1024));
+        let mut modules = vec![bare_module("a.rs")];
+        assert!(!primed_scan(&mut modules).scan_document(
+            &rel,
+            &one_line,
+            &mut modules,
+            already_past
+        ));
+        assert!(
+            modules[0].spec_sections.is_empty(),
+            "the check inside the line stops it before the name 2 MiB in"
         );
 
         // The line count still bounds the ordinary shape, many short lines.
         let short_lines = "a.rs\n".repeat(5000);
         let mut modules = vec![bare_module("a.rs")];
         assert!(
-            !CitationScan::new(1).scan_document(&rel, &short_lines, &mut modules, already_past),
+            !primed_scan(&mut modules).scan_document(
+                &rel,
+                &short_lines,
+                &mut modules,
+                already_past
+            ),
             "5000 short lines past an expired deadline must stop the scan too"
         );
 
-        // And a scan with time left completes.
+        // And a scan with time left completes, and finds the name.
         let mut modules = vec![bare_module("a.rs")];
         assert!(CitationScan::new(1).scan_document(
             &rel,
-            &content,
+            &one_line,
             &mut modules,
             Instant::now() + Duration::from_secs(60)
         ));
+        assert_eq!(modules[0].spec_sections.len(), 1);
     }
 
-    /// Item 2 (HIGH), end to end, the long-line document the review of round
-    /// 3 built, scaled down to fit a unit test: 192 modules named
-    /// `("as" x 20) + "aNNNN.rs"` and one `spec/` document, a single line of
-    /// `"as"` repeated to just under the 8 MiB cap, so every search is slow
-    /// and there are only 192 line searches in all (the round-3 scan's first
-    /// check came at the 4096th, so it never checked). The round-3 scan ran
-    /// every search, about 8 s in this ticket's debug build (2 s in
-    /// release), and reported itself complete; with a 250 ms budget the scan
-    /// must stop and say so. One document, not several (round 4 used three
-    /// of 64 modules each): since round 5 the scan also reads the clock
-    /// before each document, which would cap a lines-only check's overrun
-    /// at one document's worth of searches and hide it here; with all the
-    /// work in one document, only the check inside the scan can stop it.
+    /// The slowest document for the `spec/` scan this module's own tests
+    /// know of, written into `dir` with its modules, and the options it is
+    /// mapped with. 64 modules at `s/s/.../s/mNNNN.rs`, 350 directories
+    /// deep, so their paths share a 700-byte prefix (as long as a path can
+    /// safely be under macOS's 1024-byte limit, with the temporary
+    /// directory in front), and one document named `name`, a single line
+    /// of `s/` repeated to just under 8 MiB: every other position of the
+    /// line starts a match of that whole prefix, which then fails on the
+    /// `m`, about 2.9 billion bytes compared in all (the whole map, with
+    /// no deadline to stop it, took 0.44 s in this ticket's debug build
+    /// and 0.09 s in release). The scan's budget is 50 ms, with the
+    /// per-file cap raised to let the document be read.
+    fn write_slowest_spec_repo(dir: &Path, name: &str) -> CodeMapOptions {
+        let prefix = "s/".repeat(350);
+        for n in 0..64 {
+            write(dir, &format!("{prefix}m{n:04}.rs"), "pub fn f() {}\n");
+        }
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(dir, &format!("spec/{name}.md"), &"s/".repeat(4_194_000));
+        CodeMapOptions {
+            file_timeout: Duration::from_millis(50),
+            max_file_bytes: 8 * 1024 * 1024,
+            ..CodeMapOptions::default()
+        }
+    }
+
+    /// Item 2 (HIGH) of round 3, end to end: a document whose search is
+    /// slow, in one line, so that only a check inside the scan can stop it
+    /// (the round-3 scan's first check came at the 4096th line). Round 3's
+    /// document was a line of `as` against paths full of `as`, which since
+    /// round 7 is fast: the scan searches a line once for every module
+    /// together, not once per module. This is the shape that is slow for
+    /// that search (`write_slowest_spec_repo`), and since round 7 the check
+    /// is inside the line as well. With a 50 ms budget the scan must stop
+    /// and say so, and the map come back near that budget. The same 50 ms
+    /// is each module's own budget, which a file of one line needs far
+    /// less of, but a loaded host can take it from a few: at least half
+    /// the modules must map.
     #[test]
     fn ori_t_0036_a_spec_document_of_long_lines_cannot_overrun_the_scan_deadline() {
         let dir = temp_dir("spec-long-lines");
         let guard = DropGuard(dir.clone());
-        let prefix = "as".repeat(20);
-        for n in 0..192 {
-            write(&dir, &format!("{prefix}a{n:04}.rs"), "pub fn f() {}\n");
-        }
-        // Assembled, not written whole: see the fixture-path comment earlier
-        // in this file.
-        write(
-            &dir,
-            &format!("spec/{}.md", "long"),
-            &"as".repeat(4_194_300),
-        );
-        let options = CodeMapOptions {
-            file_timeout: Duration::from_millis(250),
-            ..CodeMapOptions::default()
-        };
+        let options = write_slowest_spec_repo(&dir, "long");
         let start = Instant::now();
         let map = build_code_map_with_options(&dir, &options).expect("maps");
         let elapsed = start.elapsed();
         assert!(
-            map.modules.len() >= 96,
+            map.modules.len() >= 32,
             "the modules themselves must map, or there is nothing to scan: {:?}",
             map.coverage
         );
         assert!(
             map.coverage.spec_citation_scan == SpecScan::TimedOut,
-            "192 slow 8 MiB line searches cannot finish in 250 ms; the scan must stop at its \
+            "billions of bytes of search cannot finish in 50 ms; the scan must stop at its \
              deadline and say so (took {elapsed:?})"
         );
         assert!(
             elapsed < Duration::from_secs(4),
-            "the whole map must come back near the scan's 250 ms budget, not after every search; \
+            "the whole map must come back near the scan's 50 ms budget, not after every search; \
              took {elapsed:?}"
         );
         drop(guard);
@@ -8595,29 +8916,19 @@ mod tests {
     }
 
     /// A scan the deadline cut short records the document it was in, not
-    /// only its own status.
+    /// only its own status (on the slowest document the tests know of,
+    /// `write_slowest_spec_repo`, since round 7).
     #[test]
     fn ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded() {
         let dir = temp_dir("spec-skip-deadline");
         let guard = DropGuard(dir.clone());
-        let prefix = "as".repeat(20);
-        for n in 0..192 {
-            write(&dir, &format!("{prefix}a{n:04}.rs"), "pub fn f() {}\n");
-        }
-        // Assembled, not written whole: see the fixture-path comment earlier
-        // in this file.
-        let long = format!("spec/{}.md", "long");
-        write(&dir, &long, &"as".repeat(4_194_300));
-        let options = CodeMapOptions {
-            file_timeout: Duration::from_millis(250),
-            ..CodeMapOptions::default()
-        };
+        let options = write_slowest_spec_repo(&dir, "long");
         let map = build_code_map_with_options(&dir, &options).expect("maps");
         assert_eq!(map.coverage.spec_citation_scan, SpecScan::TimedOut);
         assert_eq!(
             map.coverage.spec_docs_skipped,
             vec![SkippedFile {
-                path: long,
+                path: format!("spec/{}.md", "long"),
                 reason: SkipReason::TimedOut,
             }]
         );
@@ -9906,6 +10217,168 @@ mod tests {
             open_regular_file(&dir.join("sock.rs"), false).map(|_| ()),
             Err(SkipReason::NotARegularFile),
             "an open the socket refuses gives the reason its type does"
+        );
+        drop(guard);
+    }
+
+    /// Item 6 (MEDIUM), the equivalence the new search must keep: since
+    /// round 7 a line is searched once for every module together, and it
+    /// must find exactly what searching it once per module with
+    /// `str::contains` found. Module paths that are prefixes, suffixes and
+    /// infixes of one another, a path that is the whole line, paths
+    /// overlapping in one line, and a line naming one path many times.
+    #[test]
+    fn ori_t_0036_the_spec_scan_finds_exactly_what_a_search_per_module_finds() {
+        let paths = [
+            "a.rs",
+            "b/a.rs",
+            "ab/a.rs",
+            "b/a.rs.rs",
+            "src/lib.rs",
+            "src/lib.rsx.rs",
+            "x/src/lib.rs",
+            "src/l.rs",
+            "rs",
+            "s/s/s.py",
+            "s/s.py",
+            "e\u{e9}/\u{e9}t\u{e9}.go",
+        ];
+        let lines = [
+            "# Heading one",
+            "see a.rs and b/a.rs.rs and x/src/lib.rs",
+            "src/lib.rsx.rs",
+            "rs",
+            "## Heading two",
+            "s/s/s/s.py s/s.py ab/a.rs",
+            "nothing here at all, not even a dot r s",
+            "a.rsa.rsa.rsa.rs",
+            "\u{e9}t\u{e9}.go e\u{e9}/\u{e9}t\u{e9}.go src/l.r src/l.rs",
+            "b/a.r",
+            "",
+            "### Third",
+            "rs.rs",
+        ];
+        let content = lines.join("\n");
+        let mut modules: Vec<Module> = paths.iter().map(|path| bare_module(path)).collect();
+        let rel = format!("spec/{}.md", "same");
+        let mut scan = CitationScan::new(modules.len());
+        assert!(scan.scan_document(
+            &rel,
+            &content,
+            &mut modules,
+            Instant::now() + Duration::from_secs(60)
+        ));
+        for module in &modules {
+            let mut expected: Vec<Option<&str>> = Vec::new();
+            let mut heading = None;
+            for line in &lines {
+                if let Some(text) = markdown_heading(line) {
+                    heading = Some(text);
+                }
+                if line.contains(module.path.as_str()) && !expected.contains(&heading) {
+                    expected.push(heading);
+                }
+            }
+            let found: Vec<Option<&str>> = module
+                .spec_sections
+                .iter()
+                .map(|citation| {
+                    citation
+                        .heading_index
+                        .map(|index| scan.headings[index].text.as_str())
+                })
+                .collect();
+            assert_eq!(found, expected, "{}", module.path);
+        }
+        assert!(
+            modules
+                .iter()
+                .all(|module| !module.spec_sections.is_empty()),
+            "every path in this fixture is named somewhere"
+        );
+    }
+
+    /// Item 6 (MEDIUM): each line was searched once per module, work that
+    /// grows as modules times lines against one fixed deadline, so on an
+    /// ordinary product repository the scan ran out of time on every run
+    /// (the review's: 2394 modules, 41 documents, 20,945 lines) and reached
+    /// a different set of documents each time, five different maps in eight
+    /// runs of one tree. 4000 modules and 20 documents of 1000 lines here:
+    /// 80 million searches of a line, far more than the default 5 s budget
+    /// allows in a debug build. The scan must finish inside that budget,
+    /// find every citation, and give the same result twice.
+    #[test]
+    fn ori_t_0036_the_spec_scan_finishes_an_ordinary_product_repository_in_its_budget() {
+        let dir = temp_dir("spec-ordinary-product");
+        let guard = DropGuard(dir.clone());
+        let module_count = 4000;
+        let path_of = |m: usize| format!("backend/app/svc{m:04}/handler.py");
+        let mut expected: Vec<Vec<(String, String)>> = vec![Vec::new(); module_count];
+        for d in 0..20 {
+            let doc = format!("spec/doc{d:02}.{}", "md");
+            let mut text = String::new();
+            for j in 0..1000 {
+                if j % 50 == 0 {
+                    text.push_str(&format!("## D{d} S{}\n", j / 50));
+                    continue;
+                }
+                let m = (d * 1000 + j) % module_count;
+                text.push_str(&format!(
+                    "Prose line {j}: the handler at {} answers the request.\n",
+                    path_of(m)
+                ));
+                let pair = (doc.clone(), format!("D{d} S{}", j / 50));
+                if !expected[m].contains(&pair) {
+                    expected[m].push(pair);
+                }
+            }
+            write(&dir, &doc, &text);
+        }
+        let run = || {
+            let mut modules: Vec<Module> = (0..module_count)
+                .map(|m| bare_module(&path_of(m)))
+                .collect();
+            let options = CodeMapOptions::default();
+            let deadline = Instant::now() + options.file_timeout;
+            let output = attach_spec_citations(&dir, &mut modules, &options, deadline);
+            (output, modules)
+        };
+        let start = Instant::now();
+        let (output, modules) = run();
+        let elapsed = start.elapsed();
+        assert_eq!(
+            output.status,
+            SpecScan::Complete,
+            "took {elapsed:?}: {:?}",
+            output.skipped
+        );
+        for (m, module) in modules.iter().enumerate() {
+            let mut found: Vec<(String, String)> = module
+                .spec_sections
+                .iter()
+                .map(|citation| {
+                    (
+                        output.docs[citation.doc_index].clone(),
+                        citation
+                            .heading_index
+                            .map(|index| output.headings[index].text.clone())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+            found.sort();
+            let mut wanted = expected[m].clone();
+            wanted.sort();
+            assert_eq!(found, wanted, "{}", module.path);
+        }
+        let (again, modules_again) = run();
+        assert_eq!(
+            (again.docs, again.headings, again.status, again.skipped),
+            (output.docs, output.headings, output.status, output.skipped)
+        );
+        assert_eq!(
+            modules_again, modules,
+            "the same tree gives the same citations"
         );
         drop(guard);
     }
