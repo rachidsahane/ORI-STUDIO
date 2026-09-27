@@ -214,7 +214,8 @@
 //!   [`SpecScan::Partial`], not complete. A
 //!   symlinked *file* is read only when [`std::fs::canonicalize`] resolves it
 //!   to a path inside the repository root and outside any directory named
-//!   `.git`; otherwise it is [`SkipReason::SymlinkOutsideRoot`] or
+//!   `.git` in any case (see "Traversal"); otherwise it is
+//!   [`SkipReason::SymlinkOutsideRoot`] or
 //!   [`SkipReason::GitMetadata`] and is never opened. It is reported under
 //!   its own in-root path, never its target's, so a link and its target are
 //!   two distinct entries in [`Coverage`], the way two distinct files always
@@ -236,15 +237,21 @@
 //! - **Traversal.** The directory walk is iterative (an explicit stack of
 //!   pending directories), never recursive, so a pathologically deep
 //!   directory tree cannot overflow the call stack the way a naive recursive
-//!   walker would. A directory literally named `.git` is not descended into
-//!   at any depth, by the walk or by the `spec/` citation scan (which
-//!   records each one it passes over in [`Coverage::spec_docs_skipped`];
-//!   until round 6 it descended them), because it is version-control
-//!   metadata, never source; this is one of two filesystem conventions this
-//!   module hard-codes (the other is `spec`, above), and both are documented
-//!   here because they are real exclusions, not oversights (a repo that
-//!   keeps source inside a directory named `.git` is not one this module
-//!   claims to map, and none does).
+//!   walker would. A directory named `.git`, in any ASCII case, is not
+//!   descended into at any depth, by the walk or by the `spec/` citation
+//!   scan (which records each one it passes over in
+//!   [`Coverage::spec_docs_skipped`]; until round 6 it descended them),
+//!   because it is version-control metadata, never source. Any case, on
+//!   every platform, since round 7: on a case-insensitive filesystem
+//!   (macOS and Windows by default) `.GIT` is the directory git itself
+//!   uses, and the round-6 exact match walked into it and read its files
+//!   through a symlink spelled `.git`; matching every case everywhere also
+//!   keeps the map the same across platforms. This is one of two
+//!   filesystem conventions this module hard-codes (the other is `spec`,
+//!   above, matched exactly), and both are documented here because they
+//!   are real exclusions, not oversights (a repo that keeps source inside
+//!   a directory named `.git` is not one this module claims to map, and
+//!   none does).
 //! - **Every entry accounted for.** A directory this module cannot read
 //!   (permissions, a transient I/O error) is recorded as one
 //!   [`SkipReason::Unreadable`] entry for the directory itself, not silently
@@ -507,7 +514,21 @@
 //! those are used only for membership lookups
 //! (`tests::ori_t_0036_output_order_does_not_follow_directory_iteration_order`
 //! and `tests::ori_p1_030_the_same_repository_gives_byte_identical_output_regardless_of_iteration_order`
-//! are what this claim is checked against).
+//! are what this claim is checked against). Nor is anything that decides
+//! an output: until round 7 the `use crate::` index was built by iterating
+//! the walk's path set, whose hasher is seeded afresh for every set, and
+//! two paths could claim one slot of it, so one repository resolved an
+//! edge to either file from run to run; it is now built in sorted order
+//! from paths that cannot collide
+//! (`tests::ori_t_0036_the_rust_index_is_the_same_whatever_order_the_path_set_yields`).
+//!
+//! One input is not the repository: time. A stage that reaches its
+//! deadline records that it did ([`SkipReason::TimedOut`] for a file,
+//! [`SpecScan::TimedOut`] for the citation scan), and how far it got
+//! before then depends on the host's speed and load, so a file whose work
+//! lands near its budget can map on one run and time out on the next.
+//! What is the same on every run is that such a map says so; the claim
+//! above is for a repository whose stages all finish inside their bounds.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -859,7 +880,8 @@ pub enum SkipReason {
     /// handle's own metadata, after an open that does not block and before
     /// anything is read; see the module doc's "File type" bound.
     NotARegularFile,
-    /// A symlink resolves inside a directory named `.git`, or, in
+    /// A symlink resolves inside a directory named `.git` (in any ASCII
+    /// case, as everywhere in this module), or, in
     /// [`Coverage::spec_docs_skipped`], a directory named `.git` under
     /// `spec/` that the citation scan did not descend. This module never
     /// descends `.git` directly; in [`Coverage::files_skipped`] this reason
@@ -1410,22 +1432,36 @@ fn lossy_rel_path_string(root: &Path, abs: &Path) -> String {
     parts.join("/")
 }
 
-/// Whether a directory entry's name is literally `.git`: the one rule for
-/// version-control metadata, which neither the walk ([`walk_repository`])
-/// nor the `spec/` scan ([`list_markdown`]) ever descends. Exact and
-/// case-sensitive, like the `spec` match, on every platform.
+/// Whether a directory entry's name is `.git`, in any ASCII case: the one
+/// rule for version-control metadata, which neither the walk
+/// ([`walk_repository`]) nor the `spec/` scan ([`list_markdown`]) ever
+/// descends, and which a symlink's target may not enter
+/// ([`resolved_path_enters_git`]). Any case, on every platform: on a
+/// case-insensitive filesystem (macOS and Windows by default) `.GIT` is
+/// the directory git itself uses, which round 6's exact match walked
+/// into, and read through a link spelled `.git` (the filesystem finds it;
+/// `realpath` then reports the on-disk `.GIT`). Matching every case on
+/// every platform also keeps the map the same across them; on a
+/// case-sensitive one it passes over a directory named `.GIT` that git
+/// does not use, which no repository keeps source in. The `spec` match is
+/// the opposite choice, exact on every platform, for the reason
+/// [`attach_spec_citations`] gives.
 fn is_git_directory_name(name: &std::ffi::OsStr) -> bool {
-    name == ".git"
+    name.as_encoded_bytes().eq_ignore_ascii_case(b".git")
 }
 
 /// Whether `resolved` (already confirmed inside `root_canon`) has a path
-/// component literally named `.git`. Only meaningful for a symlink target: a
-/// direct (non-symlink) entry under `.git` is never reached at all, because
-/// [`walk_repository`] never descends a directory named `.git`.
+/// component named `.git` in any case ([`is_git_directory_name`]). Only
+/// meaningful for a symlink target: a direct (non-symlink) entry under
+/// `.git` is never reached at all, because [`walk_repository`] never
+/// descends such a directory.
 fn resolved_path_enters_git(root_canon: &Path, resolved: &Path) -> bool {
     resolved
         .strip_prefix(root_canon)
-        .map(|rel| rel.components().any(|c| c.as_os_str() == ".git"))
+        .map(|rel| {
+            rel.components()
+                .any(|c| is_git_directory_name(c.as_os_str()))
+        })
         .unwrap_or(false)
 }
 
@@ -2367,22 +2403,40 @@ impl Drop for RustModuleIndex {
 }
 
 impl RustModuleIndex {
+    /// Built from `known` in sorted order, and from no path that could
+    /// share a node with another: the same repository gives the same index
+    /// whatever order the set iterates in, which differs between runs
+    /// (its hasher is seeded per process). Until round 7 a file named
+    /// `.rs` (`src/foo/.rs`, stem `src/foo/`) had its empty last segment
+    /// filtered out and landed on `src/foo.rs`'s node as a file too, and
+    /// whichever the set yielded last won, so `use crate::foo::X;` resolved
+    /// to one or the other from run to run. A stem with an empty segment
+    /// names no module (a module's name is an identifier), so such a path
+    /// is left out; with none left, two paths never share a node's slot,
+    /// and the sorted order is a second guard, not the first.
     fn build(known: &KnownPaths) -> Self {
         let mut root = Self::default();
-        for path in known {
-            if let Some(stem) = path.strip_suffix("/mod.rs") {
-                root.insert(stem.split('/').filter(|s| !s.is_empty()), path, false);
+        let mut paths: Vec<&Arc<str>> = known.iter().collect();
+        paths.sort();
+        for path in paths {
+            let (stem, is_file) = if let Some(stem) = path.strip_suffix("/mod.rs") {
+                (stem, false)
             } else if let Some(stem) = path.strip_suffix(".rs") {
-                if stem.is_empty() || stem == "mod" {
-                    // A bare top-level `mod.rs` or `.rs` names the crate
-                    // root itself, not a segment any `use crate::...` path
-                    // could name (Rust's grammar does not allow `mod` as a
-                    // path segment; harmless either way, excluded for
-                    // clarity of intent).
+                // A bare top-level `mod.rs` names the crate root itself,
+                // not a segment any `use crate::...` path could name
+                // (Rust's grammar does not allow `mod` as a path segment;
+                // harmless either way, excluded for clarity of intent).
+                if stem == "mod" {
                     continue;
                 }
-                root.insert(stem.split('/').filter(|s| !s.is_empty()), path, true);
+                (stem, true)
+            } else {
+                continue;
+            };
+            if stem.split('/').any(str::is_empty) {
+                continue;
             }
+            root.insert(stem.split('/'), path, is_file);
         }
         root
     }
@@ -8632,6 +8686,135 @@ mod tests {
             .map(|(name, _, _)| name)
             .collect();
         assert_eq!(names, vec!["open", "Shown", "api"]);
+        drop(guard);
+    }
+
+    /// Item 4 (MEDIUM), the index: `src/foo/.rs`, a file named `.rs`, had
+    /// its empty last segment filtered out and landed on `src/foo.rs`'s
+    /// trie node, and whichever of the two the path set yielded last won.
+    /// The set's hasher is seeded afresh for every set, so the same
+    /// repository resolved `use crate::foo::X;` to either file from run to
+    /// run (the review saw both, 5 and 7 times in 12). Twenty-four maps of
+    /// one tree, and twenty-four indexes built from sets filled in rotated
+    /// orders, must all give `src/foo.rs`; with two equally likely answers,
+    /// the round-6 build gives the same one every time with a probability
+    /// of about one in eight million.
+    #[test]
+    fn ori_t_0036_the_rust_index_is_the_same_whatever_order_the_path_set_yields() {
+        let dir = temp_dir("rust-index-order");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "src/lib.rs", "pub mod foo;\npub mod user;\n");
+        write(&dir, "src/foo.rs", "pub struct X;\n");
+        write(&dir, "src/foo/.rs", "pub struct Y;\n");
+        write(&dir, "src/user.rs", "use crate::foo::X;\n");
+        for run in 0..24 {
+            let map = build_code_map(&dir).expect("maps");
+            let user = map
+                .modules
+                .iter()
+                .find(|m| m.path == "src/user.rs")
+                .expect("present");
+            let targets: Vec<&str> = user
+                .dependency_edges
+                .iter()
+                .map(|e| e.to.as_str())
+                .collect();
+            assert_eq!(targets, vec!["src/foo.rs"], "run {run}");
+        }
+        let paths = ["src/lib.rs", "src/foo.rs", "src/foo/.rs", "src/user.rs"];
+        for rotation in 0..24 {
+            let mut rotated = paths.to_vec();
+            rotated.rotate_left(rotation % paths.len());
+            let index = RustModuleIndex::build(&known_paths(&rotated));
+            let resolved = index.longest_prefix(
+                "src",
+                ["foo", "X"].into_iter(),
+                Instant::now() + Duration::from_secs(60),
+            );
+            assert_eq!(
+                resolved.as_deref(),
+                Some("src/foo.rs"),
+                "rotation {rotation}"
+            );
+        }
+        drop(guard);
+    }
+
+    /// Item 4 (MEDIUM), `.git` in another case: on a case-insensitive
+    /// filesystem `.GIT` is the directory git itself uses, and the round-6
+    /// exact match walked into it (its files seen and parsed) and read its
+    /// files through a symlink. Any case of the name is now metadata on
+    /// every platform: nothing under `sub/.GIT` is seen, a link into it is
+    /// `GitMetadata`, and so is a `.Git` under `spec/`. The link spelled in
+    /// lower case resolves only where the filesystem folds case; wherever
+    /// it resolves, it must not be read.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_git_directory_in_another_case_is_never_walked_or_read_through() {
+        let dir = temp_dir("git-case");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "ok.py", "def ok():\n    pass\n");
+        write(
+            &dir,
+            "sub/.GIT/hook.py",
+            "def leaked_from_git():\n    pass\n",
+        );
+        write(&dir, "sub/.GIT/config", "[core]\n");
+        std::os::unix::fs::symlink(dir.join("sub/.GIT/hook.py"), dir.join("leak.py"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(dir.join("sub/.git/hook.py"), dir.join("lower.py"))
+            .expect("symlink");
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        write(&dir, &format!("spec/{}.md", "a"), "# A\n\nok.py\n");
+        write(
+            &dir,
+            &format!("spec/.Git/{}.md", "b"),
+            "# Inside\n\nok.py\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let modules: Vec<&str> = map.modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(modules, vec!["ok.py"], "{:?}", map.coverage);
+        assert!(
+            map.modules
+                .iter()
+                .flat_map(|m| m.interfaces.iter())
+                .all(|i| i.name != "leaked_from_git"),
+            "nothing inside a .GIT directory may be read"
+        );
+        let reason_of = |path: &str| {
+            map.coverage
+                .files_skipped
+                .iter()
+                .find(|f| f.path == path)
+                .map(|f| f.reason.clone())
+        };
+        assert_eq!(reason_of("leak.py"), Some(SkipReason::GitMetadata));
+        assert!(
+            matches!(
+                reason_of("lower.py"),
+                Some(SkipReason::GitMetadata | SkipReason::Unreadable(_))
+            ),
+            "{:?}",
+            map.coverage
+        );
+        assert!(
+            map.coverage
+                .files_skipped
+                .iter()
+                .all(|f| !f.path.starts_with("sub/.GIT/")),
+            "nothing under .GIT is seen: {:?}",
+            map.coverage
+        );
+        assert!(
+            map.coverage.spec_docs_skipped.contains(&SkippedFile {
+                path: "spec/.Git".to_owned(),
+                reason: SkipReason::GitMetadata,
+            }),
+            "{:?}",
+            map.coverage
+        );
+        assert_eq!(map.spec_docs, vec![format!("spec/{}.md", "a")]);
         drop(guard);
     }
 }
