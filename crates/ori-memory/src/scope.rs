@@ -125,15 +125,24 @@
 //!   ticket and total) and in the path form
 //!   `crates/ori-orchestrator/src/lock_table.rs` claims. What the agent says
 //!   its scope is never enters the decision.
-//! - **Which ticket a coder works**: the log records no assignment today (no
-//!   module writes an `AgentSession` row of `spec/DATA_MODEL.md` section 2,
-//!   and no event names one), so it is an engine-supplied value,
+//! - **Which ticket a coder works**: from the log where the log records it,
+//!   from the engine otherwise. The log can record it through two events:
+//!   `credential.issued` ties an identity to a session
+//!   (`crates/ori-broker/src/issuance.rs`), and `lock.claimed` may carry the
+//!   `session_id` holding the claim (`spec/DATA_MODEL.md` section 2's
+//!   `LockEntry`). A ticket claimed under a session the identity holds a
+//!   credential for, not revoked, is a ticket the log assigns it. Today no
+//!   module writes `lock.claimed` at all (`LockTable` is a pure function, and
+//!   no `AgentSession` row of `spec/DATA_MODEL.md` section 2 is recorded), so
+//!   in practice the ticket is the engine-supplied value,
 //!   [`Principal::with_assigned_ticket`]. Whoever builds the principal owns
-//!   it: `ori-mcp`, whose tool scopes are tier 2 (`spec/RISK_MAP.md`), sets
-//!   it from the session the engine spawned for the ticket and never from a
-//!   tool argument. This module still checks it against the log: the ticket
-//!   must be filed in this product, and its declared scope is read from the
-//!   log, never supplied with it.
+//!   that value: `ori-mcp`, whose tool scopes are tier 2 (`spec/RISK_MAP.md`),
+//!   sets it from the session the engine spawned for the ticket and never
+//!   from a tool argument. When the log does record tickets for the
+//!   identity, the engine's value must be one of them, and with no engine
+//!   value the log's must be exactly one; anything else is refused. The
+//!   ticket must be filed in this product either way, and its declared scope
+//!   is read from the log, never supplied with it.
 //! - **Whether the product is being migrated**: the log records no phase
 //!   either, so it is engine-supplied too, as [`ScopeEnforcer::new`]'s
 //!   [`ProductStage`], owned by the composition root that reads it from
@@ -153,9 +162,11 @@
 //! event whose payload does not parse (it cannot be told whose it is); an
 //! identity recorded under a product other than this one, or under two
 //! roles; a role or a source the table does not name; a log that does not
-//! verify; a coder with no engine-supplied ticket, or one not filed in this
-//! product, or whose live lock claim does not parse; a ticket read limit
-//! from AICD §17 this module cannot check. Results are filtered by the same
+//! verify; a coder with no ticket from the log or the engine, an engine
+//! ticket the log contradicts, two log tickets and no engine ticket, a
+//! credential event that does not parse, a ticket not filed in this product,
+//! or a live lock claim of it that does not parse; a ticket read limit from
+//! AICD §17 this module cannot check. Results are filtered by the same
 //! rule as requests ([`Authorization::filter`]): a result this module cannot
 //! classify, cannot place in the product, or cannot place inside a coder's
 //! declared scope is dropped.
@@ -211,8 +222,9 @@
 //! becomes an allow.
 //!
 //! No payload carries agent free text. A search query is recorded by its
-//! length, never its text, and a source or role name the table does not know
-//! is recorded as a count: `spec/SECURITY_NOTES.md` "Secrets" says secrets are
+//! length, never its text; a source or role name the table does not know is
+//! recorded as a count, and a claimed declared scope by its number of
+//! entries: `spec/SECURITY_NOTES.md` "Secrets" says secrets are
 //! "never serialized into events", and an agent's free text can carry a
 //! credential it was issued.
 //!
@@ -335,6 +347,8 @@ const IDENTITY_CREATED: &str = "identity.created";
 const TICKET_FILED: &str = "ticket.filed";
 const LOCK_CLAIMED: &str = "lock.claimed";
 const LOCK_RELEASED: &str = "lock.released";
+const CREDENTIAL_ISSUED: &str = "credential.issued";
+const CREDENTIAL_REVOKED: &str = "credential.revoked";
 
 /// The brief's file, as components, so no path string is written here whole.
 const BRIEF_FILE: [&str; 2] = ["spec", "PROJECT_BRIEF.md"];
@@ -344,12 +358,6 @@ const RUNBOOK_DIR: [&str; 2] = ["spec", "runbooks"];
 
 /// The directory every canonical document the indexer walks sits under.
 const CANONICAL_ROOT: [&str; 1] = ["spec"];
-
-/// How many claimed declared-scope entries a refusal event records.
-const MAX_LOGGED_CLAIMED_MODULES: usize = 64;
-
-/// How long one claimed declared-scope entry may be and still be recorded.
-const MAX_LOGGED_MODULE_CHARS: usize = 256;
 
 /// The reference every refusal of this module carries: AICD §25.
 const fn memory_service_ref() -> MethodologyRef {
@@ -1094,9 +1102,21 @@ pub enum RefusalReason {
         /// Its position among the requested sources, from zero.
         position: usize,
     },
-    /// The reader's scope is filtered to a declared scope, and the engine
-    /// supplied no ticket to read one from.
+    /// The reader's scope is filtered to a declared scope, and neither the
+    /// log nor the engine names a ticket to read one from.
     NoAssignment,
+    /// The engine-supplied ticket is not among the tickets the log ties to
+    /// the identity's live sessions.
+    AssignmentContradicted,
+    /// The log ties the identity's live sessions to more than one ticket and
+    /// the engine supplied none to choose between them.
+    AssignmentAmbiguous,
+    /// A `credential.issued` or `credential.revoked` event does not parse,
+    /// so which sessions the identity holds cannot be told.
+    AssignmentRecordMalformed {
+        /// Which event.
+        detail: String,
+    },
     /// The ticket is not filed in this product's log.
     TicketNotInProduct {
         /// The ticket.
@@ -1173,6 +1193,9 @@ impl RefusalReason {
             Self::IdentityAmbiguous => "identity_ambiguous",
             Self::UnknownSource { .. } => "unknown_source",
             Self::NoAssignment => "no_assignment",
+            Self::AssignmentContradicted => "assignment_contradicted",
+            Self::AssignmentAmbiguous => "assignment_ambiguous",
+            Self::AssignmentRecordMalformed { .. } => "assignment_record_malformed",
             Self::TicketNotInProduct { .. } => "ticket_not_in_product",
             Self::TicketNotOwn { .. } => "ticket_not_own",
             Self::TicketReadNotGranted { .. } => "ticket_read_not_granted",
@@ -1222,7 +1245,17 @@ impl fmt::Display for RefusalReason {
                 "requested source {position} is not a source the scope table names"
             ),
             Self::NoAssignment => f.write_str(
-                "the scope is filtered to a declared scope and no ticket assignment was supplied",
+                "the scope is filtered to a declared scope and neither the log nor the engine names the ticket",
+            ),
+            Self::AssignmentContradicted => f.write_str(
+                "the engine-supplied ticket is not one this product's log ties to the identity's live sessions",
+            ),
+            Self::AssignmentAmbiguous => f.write_str(
+                "this product's log ties the identity's live sessions to more than one ticket",
+            ),
+            Self::AssignmentRecordMalformed { detail } => write!(
+                f,
+                "a credential event in this product's log cannot be relied on: {detail}"
             ),
             Self::TicketNotInProduct { ticket_id } => {
                 write!(f, "ticket {ticket_id} is not filed in this product")
@@ -1423,6 +1456,8 @@ impl std::error::Error for ScopeError {}
 /// A coder's declared scope, read from the log.
 #[derive(Debug)]
 struct DeclaredScope {
+    /// The ticket the scope is declared for: the coder's assignment.
+    ticket_id: Id,
     scope: Scope,
     modules: Vec<ModulePath>,
     /// Every ticket whose lock claims, released or not, overlap `modules`:
@@ -1835,10 +1870,9 @@ impl ScopeEnforcer {
             .iter()
             .any(|source| reader.access(*source) == Access::Granted(Filter::DeclaredScope));
         let declared = if needs_declared_scope {
-            let ticket_id = principal
-                .assigned_ticket()
-                .ok_or(RefusalReason::NoAssignment)?;
-            Some(declared_scope(&events, ticket_id)?)
+            let logged = logged_assignments(&events, &principal_id)?;
+            let ticket_id = assignment(principal.assigned_ticket(), &logged)?;
+            Some(declared_scope(&events, &ticket_id)?)
         } else {
             None
         };
@@ -1848,11 +1882,7 @@ impl ScopeEnforcer {
             reader,
             product_id,
             query: request.query.clone(),
-            ticket_id: if declared.is_some() {
-                principal.assigned_ticket().cloned()
-            } else {
-                None
-            },
+            ticket_id: declared.as_ref().map(|declared| declared.ticket_id.clone()),
             declared,
             sources: BTreeMap::new(),
             evidence: Vec::new(),
@@ -1866,7 +1896,11 @@ impl ScopeEnforcer {
                         ticket_id: ticket_id.clone(),
                     });
                 }
-                check_ticket_read(&authorization.reader, ticket_id, principal)?;
+                let assigned = authorization
+                    .declared
+                    .as_ref()
+                    .map(|declared| &declared.ticket_id);
+                check_ticket_read(&authorization.reader, ticket_id, assigned)?;
                 authorization.ticket_id = Some(ticket_id.clone());
                 authorization.sources = self.readable_sources(&authorization.reader);
                 Ok(Decided::Granted(authorization))
@@ -2074,10 +2108,99 @@ fn ticket_filed(events: &[Event], ticket_id: &Id) -> bool {
         .any(|event| event.kind() == TICKET_FILED && event.ticket_id() == Some(ticket_id))
 }
 
-/// `lock.claimed`'s payload, the field this module reads.
+/// `lock.claimed`'s payload, the fields this module reads. `session_id` is
+/// optional, as `crates/ori-store/src/projections/lock.rs` reads it.
 #[derive(Deserialize)]
 struct LockClaimWire {
     module: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+/// `credential.issued`'s payload, the fields this module reads, as
+/// `crates/ori-broker/src/issuance.rs` writes them.
+#[derive(Deserialize)]
+struct CredentialIssuedWire {
+    identity_id: String,
+    session_id: String,
+}
+
+/// `credential.revoked`'s payload, the field this module reads.
+#[derive(Deserialize)]
+struct CredentialRevokedWire {
+    session_id: String,
+}
+
+/// Every ticket this product's log ties to `identity`: the tickets whose
+/// `lock.claimed` events name a session the identity holds a credential for
+/// that has not been revoked. Empty when the log records none, which is every
+/// log today (see the module doc comment, "Where every fact comes from").
+///
+/// A credential event that does not parse is a refusal, because which
+/// sessions the identity holds cannot then be told. A lock claim that does
+/// not parse ties nothing to anyone; [`declared_scope`] refuses a live one of
+/// the assigned ticket.
+fn logged_assignments(events: &[Event], identity: &Id) -> Result<BTreeSet<Id>, RefusalReason> {
+    let malformed = |event: &Event| RefusalReason::AssignmentRecordMalformed {
+        detail: format!("the event at seq {} does not parse", event.seq()),
+    };
+    let mut live_sessions: BTreeSet<Id> = BTreeSet::new();
+    for event in events {
+        match event.kind() {
+            CREDENTIAL_ISSUED => {
+                let wire: CredentialIssuedWire =
+                    serde_json::from_str(event.payload()).map_err(|_| malformed(event))?;
+                let holder = Id::parse(&wire.identity_id).map_err(|_| malformed(event))?;
+                let session = Id::parse(&wire.session_id).map_err(|_| malformed(event))?;
+                if &holder == identity {
+                    live_sessions.insert(session);
+                }
+            }
+            CREDENTIAL_REVOKED => {
+                let wire: CredentialRevokedWire =
+                    serde_json::from_str(event.payload()).map_err(|_| malformed(event))?;
+                let session = Id::parse(&wire.session_id).map_err(|_| malformed(event))?;
+                live_sessions.remove(&session);
+            }
+            _ => {}
+        }
+    }
+    let mut tickets = BTreeSet::new();
+    if live_sessions.is_empty() {
+        return Ok(tickets);
+    }
+    for event in events.iter().filter(|event| event.kind() == LOCK_CLAIMED) {
+        let Some(ticket_id) = event.ticket_id() else {
+            continue;
+        };
+        let session = serde_json::from_str::<LockClaimWire>(event.payload())
+            .ok()
+            .and_then(|wire| wire.session_id)
+            .and_then(|text| Id::parse(&text).ok());
+        if session.is_some_and(|session| live_sessions.contains(&session)) {
+            tickets.insert(ticket_id.clone());
+        }
+    }
+    Ok(tickets)
+}
+
+/// The coder's ticket: the log's, where the log records one, and the
+/// engine's otherwise. The engine's value must be one the log records when
+/// the log records any; two the log records with no engine value to choose
+/// between them is a refusal, and so is neither.
+fn assignment(engine: Option<&Id>, logged: &BTreeSet<Id>) -> Result<Id, RefusalReason> {
+    match engine {
+        Some(ticket_id) if logged.is_empty() || logged.contains(ticket_id) => Ok(ticket_id.clone()),
+        Some(_) => Err(RefusalReason::AssignmentContradicted),
+        None => {
+            let mut recorded = logged.iter();
+            match (recorded.next(), recorded.next()) {
+                (Some(ticket_id), None) => Ok(ticket_id.clone()),
+                (Some(_), Some(_)) => Err(RefusalReason::AssignmentAmbiguous),
+                (None, _) => Err(RefusalReason::NoAssignment),
+            }
+        }
+    }
 }
 
 /// The declared scope of `ticket_id`: its live lock claims, and every ticket
@@ -2136,6 +2259,7 @@ fn declared_scope(events: &[Event], ticket_id: &Id) -> Result<DeclaredScope, Ref
         .map(|(ticket, _)| ticket)
         .collect();
     Ok(DeclaredScope {
+        ticket_id: ticket_id.clone(),
         scope,
         modules,
         in_scope_tickets,
@@ -2202,11 +2326,11 @@ fn parse_sources(names: &[String]) -> Result<Vec<Source>, RefusalReason> {
 
 /// AICD §17's ticket read, for a context request: the operator reads any
 /// ticket of the product; an agent reads what the matrix grants its role,
-/// and "own" is the engine-supplied assignment.
+/// and "own" is the assignment [`assignment`] settled on.
 fn check_ticket_read(
     reader: &Reader,
     ticket_id: &Id,
-    principal: &Principal,
+    assigned: Option<&Id>,
 ) -> Result<(), RefusalReason> {
     let (identity, role) = match reader {
         Reader::Operator { .. } => return Ok(()),
@@ -2222,7 +2346,7 @@ fn check_ticket_read(
         Decision::Allowed {
             limit: Some(Constraint::Own),
         } => {
-            if principal.assigned_ticket() == Some(ticket_id) {
+            if assigned == Some(ticket_id) {
                 Ok(())
             } else {
                 Err(RefusalReason::TicketNotOwn {
@@ -2325,8 +2449,7 @@ struct ClaimsWire {
     identity: Option<String>,
     role: Option<&'static str>,
     role_unrecognized: bool,
-    declared_scope: Option<Vec<String>>,
-    declared_scope_unrecognized: usize,
+    declared_scope_entries: Option<usize>,
 }
 
 /// A request, as a payload records it: no free text.
@@ -2402,25 +2525,6 @@ fn request_wire(request: &MemoryRequest) -> RequestWire {
 
 fn claims_wire(claims: &Claims) -> ClaimsWire {
     let parsed_role = claims.role.as_deref().map(str::parse::<Role>);
-    let (declared_scope, declared_scope_unrecognized) = match &claims.declared_scope {
-        None => (None, 0),
-        Some(entries) => {
-            let mut kept = Vec::new();
-            let mut unrecognized = 0usize;
-            for entry in entries {
-                match ModulePath::parse(entry) {
-                    Ok(path)
-                        if path.as_str().chars().count() <= MAX_LOGGED_MODULE_CHARS
-                            && kept.len() < MAX_LOGGED_CLAIMED_MODULES =>
-                    {
-                        kept.push(path.as_str().to_owned());
-                    }
-                    Ok(_) | Err(_) => unrecognized += 1,
-                }
-            }
-            (Some(kept), unrecognized)
-        }
-    };
     ClaimsWire {
         product_id: claims.product_id.as_ref().map(ToString::to_string),
         identity: claims.identity.as_ref().map(ToString::to_string),
@@ -2429,8 +2533,7 @@ fn claims_wire(claims: &Claims) -> ClaimsWire {
             Some(Err(_)) | None => None,
         },
         role_unrecognized: matches!(parsed_role, Some(Err(_))),
-        declared_scope,
-        declared_scope_unrecognized,
+        declared_scope_entries: claims.declared_scope.as_ref().map(Vec::len),
     }
 }
 
@@ -3757,6 +3860,107 @@ mod tests {
         granted(&mut w.p, standard(), &coder, &read("code_map"));
     }
 
+    /// The payload `crates/ori-broker/src/issuance.rs` writes for
+    /// `credential.issued`, field for field.
+    fn issue(p: &mut Product, identity: &Id, session: &Id) {
+        let payload = format!(
+            "{{\"id\":\"{}\",\"identity_id\":\"{identity}\",\"session_id\":\"{session}\",\"scope\":\"branch\",\"issued_at\":100,\"expires_at\":null}}",
+            id("ISSUANCE")
+        );
+        append(p, "credential.issued", None, payload);
+    }
+
+    fn revoke(p: &mut Product, session: &Id) {
+        let payload =
+            format!("{{\"session_id\":\"{session}\",\"revoked_at\":300,\"issuance_ids\":[]}}");
+        append(p, "credential.revoked", None, payload);
+    }
+
+    fn claim_in_session(p: &mut Product, ticket: &Id, module: &str, session: &Id) {
+        let payload =
+            serde_json::json!({ "module": module, "session_id": session.as_str() }).to_string();
+        append(p, "lock.claimed", Some(ticket), payload);
+    }
+
+    #[test]
+    fn ori_t_0038_the_assignment_is_read_from_the_log_where_the_log_records_it() {
+        let mut w = world("logged-assignment");
+        let coder = identity_of(Role::Coder);
+        let ticket_m = w.ticket_m.clone();
+        let ticket_o = w.ticket_o.clone();
+        let session_m = id("SESSIONM");
+        issue(&mut w.p, &coder, &session_m);
+        claim_in_session(&mut w.p, &ticket_m, "crates/m", &session_m);
+
+        // No engine value: the log's ticket, and "read own" is that ticket.
+        let unassigned = agent(&coder);
+        let authorization = granted(&mut w.p, standard(), &unassigned, &context(&ticket_m));
+        assert_eq!(authorization.ticket_id(), Some(&ticket_m));
+        refused(
+            &mut w.p,
+            standard(),
+            &unassigned,
+            &context(&ticket_o),
+            "ticket_not_own",
+        );
+        // The engine agreeing with the log, and contradicting it.
+        let on_m = agent(&coder).with_assigned_ticket(ticket_m.clone());
+        let on_o = agent(&coder).with_assigned_ticket(ticket_o.clone());
+        granted(&mut w.p, standard(), &on_m, &read("code_map"));
+        refused(
+            &mut w.p,
+            standard(),
+            &on_o,
+            &read("code_map"),
+            "assignment_contradicted",
+        );
+
+        // Another identity's session ties nothing to this one.
+        let session_x = id("SESSIONX");
+        issue(&mut w.p, &identity_of(Role::Qa), &session_x);
+        claim_in_session(&mut w.p, &ticket_o, "crates/other", &session_x);
+        let authorization = granted(&mut w.p, standard(), &unassigned, &read("code_map"));
+        assert_eq!(authorization.ticket_id(), Some(&ticket_m));
+
+        // Two live sessions on two tickets: the engine must choose, and may
+        // choose only one the log records.
+        let session_o = id("SESSIONO");
+        issue(&mut w.p, &coder, &session_o);
+        claim_in_session(&mut w.p, &ticket_o, "crates/other", &session_o);
+        refused(
+            &mut w.p,
+            standard(),
+            &unassigned,
+            &read("code_map"),
+            "assignment_ambiguous",
+        );
+        let authorization = granted(&mut w.p, standard(), &on_o, &read("code_map"));
+        assert_eq!(authorization.ticket_id(), Some(&ticket_o));
+
+        // Revoked sessions tie nothing: the engine's value alone again.
+        revoke(&mut w.p, &session_m);
+        revoke(&mut w.p, &session_o);
+        refused(
+            &mut w.p,
+            standard(),
+            &unassigned,
+            &read("code_map"),
+            "no_assignment",
+        );
+        granted(&mut w.p, standard(), &on_o, &read("code_map"));
+
+        // A credential event that does not parse leaves whose sessions are
+        // whose unknown.
+        append(&mut w.p, "credential.issued", None, "not json".to_owned());
+        refused(
+            &mut w.p,
+            standard(),
+            &on_m,
+            &read("code_map"),
+            "assignment_record_malformed",
+        );
+    }
+
     // -------------------------------------------------------------------
     // ORI-P1-022: the coder's package, filtered.
     // -------------------------------------------------------------------
@@ -4421,10 +4625,7 @@ mod tests {
         assert!(!event.payload().contains(marker), "{}", event.payload());
         let payload = payload_json(&event);
         assert_eq!(payload["request"]["claims"]["role_unrecognized"], true);
-        assert_eq!(
-            payload["request"]["claims"]["declared_scope_unrecognized"],
-            1
-        );
+        assert_eq!(payload["request"]["claims"]["declared_scope_entries"], 1);
     }
 
     // -------------------------------------------------------------------
