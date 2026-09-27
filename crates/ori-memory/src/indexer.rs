@@ -166,7 +166,7 @@
 //! # Duplicate paths: skipped by the walk, refused by the writers
 //!
 //! [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] both call
-//! `refuse_duplicate_paths` before writing anything: a target set holding
+//! `refuse_invalid_target` before writing anything: a target set holding
 //! two [`IndexableDocument`]s at one `path` is refused with
 //! [`IndexerError::DuplicatePath`], not written with whichever one happens
 //! to survive. An adversarial review found that, without this, the two
