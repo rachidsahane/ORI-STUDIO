@@ -151,7 +151,9 @@
 //!     bounded through [`tree_sitter::Parser::parse_with_options`]'s
 //!     progress callback, which tree-sitter polls periodically. Extraction
 //!     is bounded by this module's own traversal helpers (`for_each_node`,
-//!     `for_each_sibling_group`) and every language's top-level scan loop,
+//!     `for_each_sibling_group`, and, since round 7, the walk that finds
+//!     Rust `use` and `mod` declarations at any depth,
+//!     `rust_declaration_edges`) and every language's top-level scan loop,
 //!     each of which checks the same deadline. `use crate::...` resolution
 //!     (`RustModuleIndex::advance`) checks it too, periodically during its
 //!     own walk, not only between the `use` items around it: a single
@@ -430,10 +432,59 @@
 //! edge carrying the grouped text, and a prefixed group as one edge to the
 //! prefix's own file (`src/net.rs` for the example above), a
 //! complete-looking edge to the wrong module, which the review of round 3
-//! found. The text spent spelling out unresolved members is capped (a long
-//! prefix over many members would otherwise cost their product); past the
-//! cap, the rest are recorded once, together, as the declaration exactly as
-//! written.
+//! found. A `self` member stands for its group's prefix, resolved as the
+//! prefix is and written as the prefix (with its ` as` alias, if any);
+//! until round 7 it was walked as a path segment named `self`, so a file
+//! named `self.rs` beside the prefix's own file took its place. The text
+//! spent spelling out unresolved members is capped (a long prefix over many
+//! members would otherwise cost their product); past the cap, the rest are
+//! recorded once, together, as the declaration exactly as written, in one
+//! [`EdgeResolution::Folded`] edge: that is the one case in which a grouped
+//! declaration's edges are not its ungrouped equivalent's, and the edge
+//! says so (until round 7 it looked like any other unresolved edge).
+//!
+//! # Dependency edges, per language
+//!
+//! Every edge says how its target was placed ([`EdgeResolution`]): a file
+//! of this map, looked for and not found, or never looked for. Until round
+//! 7 there were two states, and "external", documented as outside the
+//! repository, covered most imports of the repository's own files, which
+//! were never looked for at all. What is looked up, by language, and what
+//! is not:
+//!
+//! - **Rust.** `mod name;` is looked up where Rust looks: `name.rs` or
+//!   `name/mod.rs` in the declaring file's directory, below its stem unless
+//!   it is `mod.rs`, `lib.rs` or `main.rs`, below each enclosing inline
+//!   module's name. A `use` path starting with `crate`, `self` or `super` is
+//!   walked from the file's crate root (the nearest directory above it
+//!   holding `lib.rs` or `main.rs`), from the module it is written
+//!   in, or one module up per `super`, and resolves to the deepest file
+//!   along it; the module a file is, is its path below its crate root. Any
+//!   other path (`std::`, another crate's name, a member of the same
+//!   workspace included, a name in scope) is not looked up. Declarations are found at any depth,
+//!   inside inline modules and function bodies as well as at the top level.
+//!   Not followed: `#[path]` attributes, `include!`, and a binary under
+//!   `src/bin/`, which is read as a module of the library beside it.
+//! - **TypeScript.** A relative specifier (`./`, `../`) is looked up as
+//!   `.ts`, `.tsx`, `index.ts` or `index.tsx`; any other (a package, a
+//!   `tsconfig` path alias, an absolute path) is not, since the
+//!   `tsconfig.json` and `node_modules` that decide it are not read. Only
+//!   top-level `import` and `export ... from` statements are read; a
+//!   dynamic `import()` or a `require` call is not an edge.
+//! - **Python.** A relative import (`from . import a`, `from ..pkg import
+//!   b`, `from . import *`) is looked up against the importing file's own
+//!   directory, the mapped root counting as a package, and never above it.
+//!   An absolute import (`import app.core`, `from app.core import cache`)
+//!   is not looked up: which directory is on `sys.path` is not in the
+//!   source. Only top-level statements are read, so an import inside a
+//!   function, a `try` block or an `if TYPE_CHECKING:` block is not an edge.
+//! - **Go.** No import is looked up: a Go import path names a package, a
+//!   directory, and placing one inside the repository needs its `go.mod`,
+//!   which is not read.
+//!
+//! So an edge that is [`EdgeResolution::NotAttempted`] may well name a file
+//! of this repository, and a consumer that needs the in-repository graph
+//! to be complete has to resolve those itself or treat it as incomplete.
 //!
 //! The same shape, in Python: `from <K dots> import <M names>` rebuilt its
 //! K-dot prefix once per name, K times M work inside one statement with no
@@ -664,8 +715,9 @@ pub struct Interface {
     pub line: usize,
 }
 
-/// One dependency edge from a module to another module, or to something
-/// outside the mapped repository.
+/// One dependency edge from a module: a file of this repository it
+/// imports, or an import target this module did not place in the
+/// repository, with [`DependencyEdge::resolution`] saying which, and why.
 ///
 /// The importing module is the [`Module`] whose [`Module::dependency_edges`]
 /// holds this edge; the edge itself holds no copy of that module's path.
@@ -674,30 +726,80 @@ pub struct Interface {
 /// see the module doc's "Memory" bound.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DependencyEdge {
-    /// When [`DependencyEdge::external`] is `false`, the path of another
-    /// file the walk found in this same repository (a [`Module::path`] when
-    /// that file was parsed), shared with every other edge that resolves to
-    /// the same file rather than copied per edge; see [`EdgeTarget`].
-    /// Otherwise, the import target as written in the source (a crate name,
-    /// a bare specifier, a dotted absolute import, a Go import path), because
-    /// it could not be resolved to a file in the mapped repository. Three
-    /// bounded departures from "as written": a member of a grouped Rust `use`
-    /// is written as its own full path (its group's prefix, `::`, the
-    /// member), which is what its ungrouped form records; a Python relative
-    /// import with more than 32 leading dots writes them as a count (`[N
-    /// leading dots]name`); and text longer than 1024 bytes is cut to 1024
-    /// (back to a UTF-8 character boundary) and marked
+    /// When [`DependencyEdge::resolution`] is [`EdgeResolution::Resolved`],
+    /// the path of another file the walk found in this same repository (a
+    /// [`Module::path`] when that file was parsed), shared with every other
+    /// edge that resolves to the same file rather than copied per edge; see
+    /// [`EdgeTarget`]. Otherwise, the import target as written in the source
+    /// (a crate name, a `crate::` or `super::` path, a bare or relative
+    /// specifier, a dotted import, a Go import path). Five bounded
+    /// departures from "as written": a member of a grouped Rust `use` is
+    /// written as its own full path (its group's prefix, `::`, the member),
+    /// and a `self` member as its group's prefix (followed by its ` as`
+    /// alias, if any), which is what its ungrouped form records; an
+    /// [`EdgeResolution::Folded`] edge is the whole grouped declaration; a
+    /// Python relative import with more than 32 leading dots writes them as
+    /// a count (`[N leading dots]name`), and a relative `import *` of a
+    /// package is its dots alone (`.`, `..`); and text longer than 1024
+    /// bytes is cut to 1024 (back to a UTF-8 character boundary) and marked
     /// [`DependencyEdge::to_truncated`]. See the module doc's "Quadratic
     /// extraction" and "Memory" for why.
     pub to: EdgeTarget,
-    /// Whether `to` names something outside the mapped repository (or
-    /// something this module's resolver did not attempt, see the module
-    /// doc's per-language notes; Go edges are always external).
-    pub external: bool,
+    /// How `to` was resolved, or why it was not: only
+    /// [`EdgeResolution::Resolved`] makes `to` a path in this map, and
+    /// [`EdgeResolution::NotAttempted`] says nothing about where it points.
+    /// Until round 7 this was `external: bool`, documented as "outside the
+    /// mapped repository" while most in-repository imports (Python absolute
+    /// imports, TypeScript path aliases, a Go module's own packages, Rust
+    /// `super::` paths and workspace crates) were set to it without ever
+    /// being looked for.
+    pub resolution: EdgeResolution,
     /// Whether `to` is the first 1024 bytes of a longer unresolved target
     /// rather than all of it. Never `true` for a resolved edge, whose `to`
     /// is always a whole path.
     pub to_truncated: bool,
+}
+
+impl DependencyEdge {
+    /// Whether `to` is the path of a file in this map
+    /// ([`EdgeResolution::Resolved`]).
+    #[must_use]
+    pub fn is_resolved(&self) -> bool {
+        self.resolution == EdgeResolution::Resolved
+    }
+}
+
+/// How a [`DependencyEdge`]'s target was placed in the mapped repository,
+/// or why it was not: the dependency edges AICD §25 asks the code map for,
+/// with what this module looked for and did not find kept apart from what
+/// it never looks for. The module doc's "Dependency edges, per language"
+/// says which targets each language resolves. Ordered as declared, which
+/// is the first key [`Module::dependency_edges`] is sorted by.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[non_exhaustive]
+pub enum EdgeResolution {
+    /// `to` is the path of a file the walk found in this repository.
+    Resolved,
+    /// This module's resolver looked for the target among the files the
+    /// walk found and none matched, so `to` is the target as written: a
+    /// `mod`, `crate::`, `self::` or `super::` path naming no file here, a
+    /// relative TypeScript or Python import naming none, or a Python
+    /// relative import climbing out of the mapped root.
+    NotFound,
+    /// This module's resolver does not look for this kind of target, so
+    /// `to` is the target as written, and it may name a file in this same
+    /// repository as well as something outside it: a Python absolute
+    /// import, a TypeScript bare specifier or path alias, any Go import, a
+    /// Rust path through another crate (a workspace member's included).
+    NotAttempted,
+    /// Several members of one grouped Rust `use` that did not resolve,
+    /// recorded together as one edge whose `to` is the whole declaration as
+    /// written, because spelling each out would have cost more than the
+    /// declaration's text budget (see the module doc's "Quadratic
+    /// extraction"). Each member it stands for is `NotFound` or
+    /// `NotAttempted`; which, and how many, is not recorded. Until round 7
+    /// this edge looked like any other unresolved one.
+    Folded,
 }
 
 /// Where a [`DependencyEdge`] points, as text: read it as a `&str` (it
@@ -826,7 +928,7 @@ pub struct Module {
     pub parsed_with_errors: bool,
     /// The module's public interfaces, sorted by (line, name).
     pub interfaces: Vec<Interface>,
-    /// The module's outgoing dependency edges, sorted by (external, to), at
+    /// The module's outgoing dependency edges, sorted by (resolution, to), at
     /// most 4096 of them.
     pub dependency_edges: Vec<DependencyEdge>,
     /// Whether the file had more than 4096 dependency edges, so that
@@ -1195,7 +1297,7 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
             .sort_by(|a, b| (a.line, &a.name).cmp(&(b.line, &b.name)));
         module
             .dependency_edges
-            .sort_by(|a, b| (a.external, &a.to).cmp(&(b.external, &b.to)));
+            .sort_by(|a, b| (a.resolution, &a.to).cmp(&(b.resolution, &b.to)));
         module
             .entry_points
             .sort_by(|a, b| (a.line, &a.name).cmp(&(b.line, &b.name)));
@@ -2185,7 +2287,7 @@ const MAX_EDGE_TARGET_BYTES: usize = 1024;
 
 /// Where one module's dependency edges are collected while its file is
 /// extracted: every edge-producing site in every language goes through
-/// [`EdgeSink::push_resolved`] or [`EdgeSink::push_external`], which are
+/// [`EdgeSink::push_resolved`] or [`EdgeSink::push_unresolved`], which are
 /// what hold the edge cap and the target text cap, so no site can keep more
 /// than they allow, and none holds a copy of the importing file's path.
 struct EdgeSink {
@@ -2232,34 +2334,39 @@ impl EdgeSink {
         }
         self.edges.push(DependencyEdge {
             to: EdgeTarget(Arc::clone(target)),
-            external: false,
+            resolution: EdgeResolution::Resolved,
             to_truncated: false,
         });
         true
     }
 
-    /// Records an unresolved edge whose target is `text`, keeping at most
-    /// [`MAX_EDGE_TARGET_BYTES`] of it. `false` when the sink is full, and
-    /// the caller should stop producing edges.
-    fn push_external(&mut self, text: &str) -> bool {
+    /// Records an edge whose target is `text`, not placed in the map for
+    /// the reason `resolution` gives (never [`EdgeResolution::Resolved`]:
+    /// only [`EdgeSink::push_resolved`] records that), keeping at most
+    /// [`MAX_EDGE_TARGET_BYTES`] of the text. `false` when the sink is full,
+    /// and the caller should stop producing edges.
+    fn push_unresolved(&mut self, text: &str, resolution: EdgeResolution) -> bool {
+        debug_assert!(resolution != EdgeResolution::Resolved);
         if !self.has_room() {
             return false;
         }
         let kept = truncate_at_char_boundary(text, MAX_EDGE_TARGET_BYTES);
         self.edges.push(DependencyEdge {
             to: EdgeTarget(Arc::from(kept)),
-            external: true,
+            resolution,
             to_truncated: kept.len() < text.len(),
         });
         true
     }
 
+    /// The outcome of a lookup that was attempted:
     /// [`EdgeSink::push_resolved`] when `resolved` names a file, otherwise
-    /// [`EdgeSink::push_external`] of `text`.
-    fn push(&mut self, resolved: Option<&Arc<str>>, text: &str) -> bool {
+    /// [`EdgeSink::push_unresolved`] of `text` as
+    /// [`EdgeResolution::NotFound`].
+    fn push_looked_up(&mut self, resolved: Option<&Arc<str>>, text: &str) -> bool {
         match resolved {
             Some(target) => self.push_resolved(target),
-            None => self.push_external(text),
+            None => self.push_unresolved(text, EdgeResolution::NotFound),
         }
     }
 }
@@ -2295,23 +2402,6 @@ fn rust_is_public(node: Node) -> bool {
         })
 }
 
-fn resolve_rust_mod<'k>(rel: &str, name: &str, known: &'k KnownPaths) -> Option<&'k Arc<str>> {
-    let mut dir = dir_components(rel);
-    let stem = rel
-        .rsplit('/')
-        .next()
-        .unwrap_or(rel)
-        .trim_end_matches(".rs");
-    if !matches!(stem, "mod" | "lib" | "main") {
-        dir.push(stem.to_owned());
-    }
-    dir.push(name.to_owned());
-    let base = dir.join("/");
-    known
-        .get(format!("{base}.rs").as_str())
-        .or_else(|| known.get(format!("{base}/mod.rs").as_str()))
-}
-
 /// The directory `use crate::...` paths in `rel` resolve against: the
 /// nearest ancestor of `rel` (walking up towards the mapped root, `rel`'s own
 /// directory included) that itself directly contains a `lib.rs` or
@@ -2319,9 +2409,9 @@ fn resolve_rust_mod<'k>(rel: &str, name: &str, known: &'k KnownPaths) -> Option<
 ///
 /// `None` when no such ancestor exists among the files this map saw, which
 /// happens when the mapped root is neither a crate's own `src/` directory
-/// nor an ancestor of one (an arbitrary subdirectory, say); `use crate::...`
-/// is then always recorded as external text rather than resolved against a
-/// guess. Searching from the *importing file's own path* upward, rather than
+/// nor an ancestor of one (an arbitrary subdirectory, say); a `crate::`,
+/// `self::` or `super::` path is then recorded as
+/// [`EdgeResolution::NotFound`] rather than resolved against a guess. Searching from the *importing file's own path* upward, rather than
 /// from a single fixed location, is what makes this correct both when the
 /// mapped root is one crate's `src/` directory directly and when it is a
 /// whole repository (or workspace) with `src/` one or more levels down: each
@@ -2556,7 +2646,7 @@ impl RustModuleIndex {
     }
 }
 
-/// Where a `use crate::...` path's walk through [`RustModuleIndex`] stands.
+/// Where a `use` path's walk through [`RustModuleIndex`] stands.
 #[derive(Clone, Copy)]
 struct TrieCursor<'i> {
     /// The trie node the segments so far lead to; `None` once one had no
@@ -2567,66 +2657,236 @@ struct TrieCursor<'i> {
     best: Option<&'i Arc<str>>,
 }
 
+impl TrieCursor<'_> {
+    /// A walk that can resolve nothing: the start of a path whose module is
+    /// not in the index (no crate root, or a `super` past it).
+    const DEAD: Self = Self {
+        node: None,
+        best: None,
+    };
+}
+
+/// One module a Rust `use` or `mod` declaration can be written in, or one
+/// of that module's ancestors: the file's own module, each module above it
+/// up to its crate root, and each inline `mod name { ... }` inside the
+/// file. `self::` names the scope a declaration is written in, and each
+/// leading `super::` that scope's parent.
+#[derive(Clone, Copy)]
+struct RustScope<'i> {
+    /// The enclosing module: `None` for the crate root, and for the file's
+    /// own module when its crate root is unknown.
+    parent: Option<usize>,
+    /// Where the walk of `crate::` followed by this module's own path
+    /// stands, so that `self::a` in this module resolves as `crate::<its
+    /// path>::a` would; `None` when the file's crate root is unknown.
+    crate_cursor: Option<TrieCursor<'i>>,
+    /// The trie node of the directory a `mod name;` written in this module
+    /// names its file in (`name.rs` or `name/mod.rs` below it): the file's
+    /// own directory, plus its stem unless it is `mod.rs`, `lib.rs` or
+    /// `main.rs`, plus each enclosing inline module's name. `None` for an
+    /// ancestor, where no declaration of this file is written, and when no
+    /// Rust file lives under that directory.
+    mod_node: Option<&'i RustModuleIndex>,
+}
+
+/// The scopes of `rel`'s own module and of each ancestor up to its crate
+/// root (the root first, `rel`'s own last), and the index of its own;
+/// `None` when `deadline` passed while they were built. `crate_root` is
+/// what [`rust_crate_root`] found for `rel`, and `crate_start` that
+/// directory's trie node. The module path below the crate root is the
+/// file's directories there, then its stem, except that `mod.rs` owns its
+/// directory and `lib.rs` or `main.rs` directly in the crate root is the
+/// crate root itself. Without a crate root there is one scope, with no
+/// ancestor and no crate walk, so `crate::`, `self::` and `super::` paths
+/// all resolve to nothing, and only `mod name;` is looked up.
+fn rust_file_scopes<'i>(
+    rel: &str,
+    crate_root: Option<&str>,
+    crate_start: Option<&'i RustModuleIndex>,
+    index: &'i RustModuleIndex,
+    deadline: Instant,
+) -> Option<(Vec<RustScope<'i>>, usize)> {
+    let (dir, file_name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let stem = file_name.strip_suffix(".rs").unwrap_or(file_name);
+    let owns_directory = matches!(stem, "mod" | "lib" | "main");
+    let mut mod_node = Some(index);
+    for segment in dir
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .chain((!owns_directory).then_some(stem))
+    {
+        mod_node = mod_node.and_then(|node| node.children.get(segment));
+    }
+    let Some(crate_root) = crate_root else {
+        let own = RustScope {
+            parent: None,
+            crate_cursor: None,
+            mod_node,
+        };
+        return Some((vec![own], 0));
+    };
+    let below = if crate_root.is_empty() {
+        dir
+    } else {
+        dir.strip_prefix(crate_root)
+            .map_or("", |rest| rest.trim_start_matches('/'))
+    };
+    let is_crate_root_file = below.is_empty() && matches!(stem, "lib" | "main");
+    let mut scopes = vec![RustScope {
+        parent: None,
+        crate_cursor: Some(TrieCursor {
+            node: crate_start,
+            best: None,
+        }),
+        mod_node: None,
+    }];
+    for segment in below
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .chain((stem != "mod" && !is_crate_root_file).then_some(stem))
+    {
+        let parent = scopes.len() - 1;
+        let from = scopes[parent].crate_cursor.unwrap_or(TrieCursor::DEAD);
+        let (cursor, completed) =
+            RustModuleIndex::advance(from, std::iter::once(segment), deadline);
+        if !completed {
+            return None;
+        }
+        scopes.push(RustScope {
+            parent: Some(parent),
+            crate_cursor: Some(cursor),
+            mod_node: None,
+        });
+    }
+    let own = scopes.len() - 1;
+    scopes[own].mod_node = mod_node;
+    Some((scopes, own))
+}
+
+/// What one `use` declaration's paths are resolved against: its file's
+/// scopes ([`RustScope`]), the one it is written in, and the trie node of
+/// its file's crate root.
+#[derive(Clone, Copy)]
+struct UseContext<'a, 'i> {
+    scopes: &'a [RustScope<'i>],
+    scope: usize,
+    crate_start: Option<&'i RustModuleIndex>,
+}
+
 /// What a `use` path's leading segments have decided so far.
 #[derive(Clone, Copy)]
 enum UseRoot<'i> {
     /// No segment seen yet: a top-level group, `use {a, b};`, whose members
     /// each decide for themselves.
     Undecided,
-    /// The path starts with something other than `crate` (a crate name,
-    /// `std`, `self`, `super`): never resolved, recorded as written.
-    NotCrate,
-    /// The path starts with `crate`, and its walk has reached this far.
-    Crate(TrieCursor<'i>),
+    /// The path starts with something other than `crate`, `self` or
+    /// `super`: another crate's name (a member of the same workspace
+    /// included), `std`, or a name in scope. Never looked up:
+    /// [`EdgeResolution::NotAttempted`].
+    Untracked,
+    /// The path starts with `crate`, `self` or `super`, and its walk
+    /// through the index has reached this far.
+    Tracked(TrieCursor<'i>),
 }
 
-/// Extends `root` with `segments`: the first segment of an undecided path
-/// decides whether it is `crate`-rooted, and a `crate`-rooted path advances
-/// its trie walk (see [`RustModuleIndex::advance`]). The `bool` is `false`
-/// when `deadline` cut the walk short.
-fn extend_use_root<'i, 's>(
+impl<'i> UseRoot<'i> {
+    /// The file a path whose segments are all taken names, or why it names
+    /// none.
+    fn outcome(self) -> std::result::Result<&'i Arc<str>, EdgeResolution> {
+        match self {
+            Self::Tracked(TrieCursor {
+                best: Some(resolved),
+                ..
+            }) => Ok(resolved),
+            Self::Tracked(_) => Err(EdgeResolution::NotFound),
+            Self::Undecided | Self::Untracked => Err(EdgeResolution::NotAttempted),
+        }
+    }
+}
+
+/// Extends `root` with `segments`. The first segments of an undecided path
+/// decide how it is rooted: `crate` starts at the file's crate root; a run
+/// of `self` and `super` starts at the scope the declaration is written in,
+/// one scope up per `super` (past the crate root, a walk that resolves
+/// nothing); anything else is not tracked. A tracked path then advances
+/// its walk through the index (see [`RustModuleIndex::advance`]). The
+/// `bool` is `false` when `deadline` cut the walk short. Until round 7 only
+/// `crate` was tracked, and a `self::` or `super::` path was recorded as
+/// if it named something outside the repository.
+fn extend_use_root<'i>(
     root: UseRoot<'i>,
-    segments: impl IntoIterator<Item = &'s str>,
-    crate_start: Option<&'i RustModuleIndex>,
+    segments: &[&str],
+    context: UseContext<'_, 'i>,
     deadline: Instant,
 ) -> (UseRoot<'i>, bool) {
-    let mut segments = segments.into_iter();
-    let root = match root {
-        UseRoot::Undecided => match segments.next() {
+    let (root, rest) = match root {
+        UseRoot::Undecided => match segments.first().copied() {
             None => return (UseRoot::Undecided, true),
-            Some("crate") => UseRoot::Crate(TrieCursor {
-                node: crate_start,
-                best: None,
-            }),
-            Some(_) => return (UseRoot::NotCrate, true),
+            Some("crate") => (
+                UseRoot::Tracked(TrieCursor {
+                    node: context.crate_start,
+                    best: None,
+                }),
+                &segments[1..],
+            ),
+            Some("self" | "super") => {
+                let mut scope = Some(context.scope);
+                let mut taken = 0usize;
+                for &segment in segments {
+                    if taken.is_multiple_of(256) && Instant::now() >= deadline {
+                        return (UseRoot::Undecided, false);
+                    }
+                    match segment {
+                        "self" => {}
+                        "super" => {
+                            scope = scope.and_then(|index| context.scopes[index].parent);
+                        }
+                        _ => break,
+                    }
+                    taken += 1;
+                }
+                let cursor = scope
+                    .and_then(|index| context.scopes[index].crate_cursor)
+                    .unwrap_or(TrieCursor::DEAD);
+                (UseRoot::Tracked(cursor), &segments[taken..])
+            }
+            Some(_) => return (UseRoot::Untracked, true),
         },
-        decided => decided,
+        decided => (decided, segments),
     };
     match root {
-        UseRoot::Crate(cursor) => {
-            let (cursor, completed) = RustModuleIndex::advance(cursor, segments, deadline);
-            (UseRoot::Crate(cursor), completed)
+        UseRoot::Tracked(cursor) => {
+            let (cursor, completed) =
+                RustModuleIndex::advance(cursor, rest.iter().copied(), deadline);
+            (UseRoot::Tracked(cursor), completed)
         }
         other => (other, true),
     }
 }
 
+/// An identifier as a file is named after it: a raw identifier (`r#type`)
+/// without its `r#`.
+fn rust_identifier(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
+}
+
 /// The `::`-separated segments of a path node as the parser gives them
 /// (`scoped_identifier`, `identifier`, `crate`, `self`, `super`), read from
 /// the tree rather than split out of the text, so whitespace or a comment
-/// between segments changes nothing. Iterative: a `scoped_identifier` nests
-/// one level per segment, and a path can have hundreds of thousands.
+/// between segments changes nothing, and each raw identifier without its
+/// `r#`. Iterative: a `scoped_identifier` nests one level per segment, and
+/// a path can have hundreds of thousands.
 fn rust_path_segments<'s>(path: Node<'s>, source: &'s [u8]) -> Vec<&'s str> {
     let mut reversed = Vec::new();
     let mut current = Some(path);
     while let Some(node) = current {
         if node.kind() == "scoped_identifier" {
             if let Some(name) = node.child_by_field_name("name") {
-                reversed.push(text(name, source));
+                reversed.push(rust_identifier(text(name, source)));
             }
             current = node.child_by_field_name("path");
         } else {
-            reversed.push(text(node, source));
+            reversed.push(rust_identifier(text(node, source)));
             current = None;
         }
     }
@@ -2655,13 +2915,36 @@ fn rust_use_leaf_segments<'s>(leaf: Node<'s>, source: &'s [u8]) -> Vec<&'s str> 
     }
 }
 
+/// For a `self` member of a grouped `use` (`self`, or `self as name`), what
+/// is written after its `self` (empty for `self` alone); `None` for any
+/// other member. A `self` member stands for its group's prefix, as in Rust,
+/// so it is resolved exactly as the prefix is, never as a path segment
+/// named `self`: until round 7 it was walked as one, and resolved to a file
+/// named `self.rs` whenever the repository held one where the prefix's own
+/// file was meant.
+fn rust_self_member_tail<'s>(member: Node<'s>, source: &'s [u8]) -> Option<&'s str> {
+    match member.kind() {
+        "self" => Some(""),
+        "use_as_clause" => {
+            let path = member.child_by_field_name("path")?;
+            (path.kind() == "self").then(|| {
+                source
+                    .get(path.end_byte()..member.end_byte())
+                    .and_then(|tail| std::str::from_utf8(tail).ok())
+                    .unwrap_or("")
+            })
+        }
+        _ => None,
+    }
+}
+
 /// How much text, as a multiple of the whole declaration's own length, one
 /// grouped `use` may spend spelling out its unresolved members (plus
 /// [`USE_GROUP_TEXT_SLACK`]). A member's text repeats its group's prefix, so
 /// a long prefix over many members would otherwise cost prefix length times
-/// member count: `use crate::a::...::a::{b, b, ...}` inside one 8 MiB file
-/// could ask for hundreds of GB. Ordinary code spends two or three times its
-/// own length at most, far inside this.
+/// member count: `use crate::a::...::a::{b, b, ...}` inside one file at the
+/// size cap could ask for tens of GB. Ordinary code spends two or three
+/// times its own length at most, far inside this.
 const USE_GROUP_TEXT_FACTOR: usize = 16;
 
 /// See [`USE_GROUP_TEXT_FACTOR`].
@@ -2679,12 +2962,15 @@ struct UsePrefix<'s> {
 }
 
 /// The text of an unresolved grouped member: its group's prefix chain and
-/// its own text, joined with `::`; a `self` member is its prefix itself.
+/// its own text, joined with `::`, which is what its ungrouped form
+/// records. A `self` member (`self_tail` is what follows its `self`, see
+/// [`rust_self_member_tail`]) is its prefix itself followed by that tail,
+/// so `serde::{self as s}` is `serde as s`, as `use serde as s;` records.
 fn render_use_member(
     prefixes: &[UsePrefix<'_>],
     prefix: Option<usize>,
     member: &str,
-    is_self: bool,
+    self_tail: Option<&str>,
 ) -> String {
     let mut parts: Vec<&str> = Vec::new();
     let mut current = prefix;
@@ -2693,21 +2979,35 @@ fn render_use_member(
         current = prefixes[index].parent;
     }
     parts.reverse();
-    if !(is_self && !parts.is_empty()) {
-        parts.push(member);
+    match self_tail {
+        Some(tail) => {
+            let mut rendered = if parts.is_empty() {
+                "self".to_owned()
+            } else {
+                parts.join("::")
+            };
+            rendered.push_str(tail);
+            rendered
+        }
+        None => {
+            parts.push(member);
+            parts.join("::")
+        }
     }
-    parts.join("::")
 }
 
 /// Records into `sink` the dependency edges of one Rust `use` declaration,
-/// given its `argument` node, and returns whether it finished before
-/// `deadline`. A full `sink` ends the declaration early and is not a
-/// deadline miss: the sink itself records the truncation.
+/// given its `argument` node and what its paths resolve against
+/// (`context`), and returns whether it finished before `deadline`. A full
+/// `sink` ends the declaration early and is not a deadline miss: the sink
+/// itself records the truncation.
 ///
-/// A declaration without a group is one path: an edge to the file its
-/// longest `crate::` prefix names, or, when it does not start with `crate`
-/// or no prefix names a file, one external edge carrying the argument
-/// exactly as written.
+/// A declaration without a group is one path: an edge to the file the
+/// longest prefix of its `crate::`, `self::` or `super::` walk names
+/// ([`extend_use_root`]); when no prefix names a file, one
+/// [`EdgeResolution::NotFound`] edge carrying the argument exactly as
+/// written; when it starts with anything else, one
+/// [`EdgeResolution::NotAttempted`] edge carrying it.
 ///
 /// A grouped declaration (`use crate::{a::A, b::B};`,
 /// `use crate::net::{http::Client, tcp::Stream};`, nested groups, a
@@ -2715,27 +3015,29 @@ fn render_use_member(
 /// ungrouped equivalent would: the parser's own tree is walked, each member
 /// is resolved on its own, from the trie position its group's prefix
 /// reached (so a shared prefix is walked once, not once per member), and an
-/// unresolved member is recorded as its own external edge, its text the
-/// member's path with its group's prefix (`crate::net::Missing`), which is
-/// what the ungrouped `use` would have recorded. A `self` member stands for
-/// its group's prefix, as in Rust. No member is ever represented by its
-/// group's prefix alone: the round-3 version cut the text at the first `{`
-/// and resolved what was left, so `use crate::net::{http::Client,
-/// tcp::Stream};` came out as one edge to `src/net.rs`, a complete-looking
-/// edge to the wrong file.
+/// unresolved member is recorded as its own edge, its text the member's
+/// path with its group's prefix (`crate::net::Missing`), which is what the
+/// ungrouped `use` would have recorded. A `self` member stands for its
+/// group's prefix, as in Rust ([`rust_self_member_tail`]). No member is
+/// ever represented by its group's prefix alone: the round-3 version cut
+/// the text at the first `{` and resolved what was left, so `use
+/// crate::net::{http::Client, tcp::Stream};` came out as one edge to
+/// `src/net.rs`, a complete-looking edge to the wrong file.
 ///
 /// Bounded: every tree node visited checks `deadline`, and the text spent on
 /// unresolved members is capped at [`USE_GROUP_TEXT_FACTOR`] times the
 /// declaration's own length plus [`USE_GROUP_TEXT_SLACK`]. Past that cap, the
-/// members not yet spelled out are recorded once, together, as one external
-/// edge carrying the whole argument as written (itself cut to
-/// [`MAX_EDGE_TARGET_BYTES`] by the sink, like every unresolved target):
-/// honest about what was not resolved, and never a partial edge that looks
-/// complete.
+/// unresolved members not yet spelled out are recorded once, together, as
+/// one [`EdgeResolution::Folded`] edge carrying the whole argument as
+/// written (itself cut to [`MAX_EDGE_TARGET_BYTES`] by the sink, like every
+/// unresolved target). That is the one case in which a grouped declaration
+/// does not give its ungrouped equivalent's edges, and the edge says so:
+/// until round 7 it looked like an ordinary unresolved edge, a partial
+/// record that looked complete.
 fn rust_use_edges(
     argument: Node,
     source: &[u8],
-    crate_start: Option<&RustModuleIndex>,
+    context: UseContext<'_, '_>,
     sink: &mut EdgeSink,
     deadline: Instant,
 ) -> bool {
@@ -2744,15 +3046,14 @@ fn rust_use_edges(
     if !matches!(argument.kind(), "use_list" | "scoped_use_list") {
         let (root, completed) = extend_use_root(
             UseRoot::Undecided,
-            rust_use_leaf_segments(argument, source),
-            crate_start,
+            &rust_use_leaf_segments(argument, source),
+            context,
             deadline,
         );
-        let resolved = match root {
-            UseRoot::Crate(cursor) => cursor.best,
-            _ => None,
+        match root.outcome() {
+            Ok(resolved) => sink.push_resolved(resolved),
+            Err(resolution) => sink.push_unresolved(raw, resolution),
         };
-        sink.push(resolved, raw);
         return completed;
     }
 
@@ -2795,12 +3096,8 @@ fn rust_use_edges(
                     stack.push((list, root, prefix));
                     continue;
                 };
-                let (root, completed) = extend_use_root(
-                    root,
-                    rust_path_segments(path, source),
-                    crate_start,
-                    deadline,
-                );
+                let (root, completed) =
+                    extend_use_root(root, &rust_path_segments(path, source), context, deadline);
                 if !completed {
                     return false;
                 }
@@ -2815,49 +3112,148 @@ fn rust_use_edges(
                 stack.push((list, root, Some(prefixes.len() - 1)));
             }
             _ => {
-                let (root, completed) = extend_use_root(
-                    root,
-                    rust_use_leaf_segments(node, source),
-                    crate_start,
-                    deadline,
-                );
-                if !completed {
-                    return false;
-                }
-                if let UseRoot::Crate(TrieCursor {
-                    best: Some(resolved),
-                    ..
-                }) = root
-                {
-                    if !sink.push_resolved(resolved) {
-                        return true;
+                let self_tail = rust_self_member_tail(node, source);
+                let root = if self_tail.is_some() {
+                    root
+                } else {
+                    let (root, completed) = extend_use_root(
+                        root,
+                        &rust_use_leaf_segments(node, source),
+                        context,
+                        deadline,
+                    );
+                    if !completed {
+                        return false;
                     }
-                    continue;
-                }
+                    root
+                };
+                let resolution = match root.outcome() {
+                    Ok(resolved) => {
+                        if !sink.push_resolved(resolved) {
+                            return true;
+                        }
+                        continue;
+                    }
+                    Err(resolution) => resolution,
+                };
                 if over_budget {
                     continue;
                 }
                 let member = text(node, source);
-                let is_self = node.kind() == "self";
                 let prefix_len = prefix.map_or(0, |index| prefixes[index].rendered_len);
-                let rendered_len = match prefix {
-                    Some(_) if is_self => prefix_len,
-                    Some(_) => prefix_len + 2 + member.len(),
-                    None => member.len(),
+                let rendered_len = match (prefix, self_tail) {
+                    (Some(_), Some(tail)) => prefix_len + tail.len(),
+                    (None, Some(tail)) => "self".len() + tail.len(),
+                    (Some(_), None) => prefix_len + 2 + member.len(),
+                    (None, None) => member.len(),
                 };
                 if rendered_len > text_budget {
                     over_budget = true;
                     continue;
                 }
                 text_budget -= rendered_len;
-                if !sink.push_external(&render_use_member(&prefixes, prefix, member, is_self)) {
+                let rendered = render_use_member(&prefixes, prefix, member, self_tail);
+                if !sink.push_unresolved(&rendered, resolution) {
                     return true;
                 }
             }
         }
     }
     if over_budget {
-        sink.push_external(raw);
+        sink.push_unresolved(raw, EdgeResolution::Folded);
+    }
+    true
+}
+
+/// Records into `sink` the edges of every `use` and `mod` declaration in
+/// the file whose tree `root` is, at any depth, each resolved from the
+/// scope it is written in (see [`RustScope`]): the file's own module for a
+/// top-level item and for one inside a function body or any other block
+/// (which, as in Rust, are not modules of their own), and an inline `mod
+/// name { ... }`'s own scope, pushed onto `scopes` as the walk enters it,
+/// for what is inside that. Returns whether it finished before `deadline`,
+/// checked before every node and every child gathered. Once the sink has
+/// refused an edge, the walk stops early; that is not a deadline miss, and
+/// the sink records the truncation.
+///
+/// Until round 7 only the file's top level was read, so a `use` inside a
+/// function or inside `mod tests { ... }` gave no edge at all, in a module
+/// still reported as parsed clean.
+fn rust_declaration_edges<'i>(
+    root: Node,
+    source: &[u8],
+    scopes: &mut Vec<RustScope<'i>>,
+    file_scope: usize,
+    crate_start: Option<&'i RustModuleIndex>,
+    sink: &mut EdgeSink,
+    deadline: Instant,
+) -> bool {
+    let mut stack: Vec<(Node, usize)> = vec![(root, file_scope)];
+    while let Some((node, scope)) = stack.pop() {
+        if sink.truncated {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let mut descend_into = node;
+        let mut inner_scope = scope;
+        match node.kind() {
+            "use_declaration" => {
+                if let Some(argument) = node.child_by_field_name("argument") {
+                    let context = UseContext {
+                        scopes: scopes.as_slice(),
+                        scope,
+                        crate_start,
+                    };
+                    if !rust_use_edges(argument, source, context, sink, deadline) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            "mod_item" => {
+                let Some(name_node) = node.child_by_field_name("name") else {
+                    continue;
+                };
+                let written = text(name_node, source);
+                let name = rust_identifier(written);
+                let enclosing = scopes[scope];
+                let Some(body) = node.child_by_field_name("body") else {
+                    let resolved = enclosing
+                        .mod_node
+                        .and_then(|directory| directory.children.get(name))
+                        .and_then(RustModuleIndex::resolved);
+                    sink.push_looked_up(resolved, &format!("mod {written}"));
+                    continue;
+                };
+                let crate_cursor = match enclosing.crate_cursor {
+                    Some(cursor) => {
+                        let (cursor, completed) =
+                            RustModuleIndex::advance(cursor, std::iter::once(name), deadline);
+                        if !completed {
+                            return false;
+                        }
+                        Some(cursor)
+                    }
+                    None => None,
+                };
+                scopes.push(RustScope {
+                    parent: Some(scope),
+                    crate_cursor,
+                    mod_node: enclosing
+                        .mod_node
+                        .and_then(|directory| directory.children.get(name)),
+                });
+                descend_into = body;
+                inner_scope = scopes.len() - 1;
+            }
+            _ => {}
+        }
+        let Some(children) = gather_children(descend_into, deadline) else {
+            return false;
+        };
+        stack.extend(children.into_iter().rev().map(|child| (child, inner_scope)));
     }
     true
 }
@@ -2871,9 +3267,19 @@ fn extract_rust(
     deadline: Instant,
 ) -> (Extracted, bool) {
     let mut out = Extracted::new();
-    let crate_start = rust_crate_root(rel, known)
+    let crate_root = rust_crate_root(rel, known);
+    let crate_start = crate_root
         .as_deref()
         .and_then(|crate_root| rust_index.crate_root_node(crate_root));
+    let Some((mut scopes, file_scope)) = rust_file_scopes(
+        rel,
+        crate_root.as_deref(),
+        crate_start,
+        rust_index,
+        deadline,
+    ) else {
+        return (out, false);
+    };
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
         if Instant::now() >= deadline {
@@ -2881,31 +3287,14 @@ fn extract_rust(
         }
         match child.kind() {
             "mod_item" => {
-                let Some(name_node) = child.child_by_field_name("name") else {
-                    continue;
-                };
-                let name = text(name_node, source);
-                let is_declaration = child.child_by_field_name("body").is_none();
-                if is_declaration {
-                    match resolve_rust_mod(rel, name, known) {
-                        Some(resolved) => out.edges.push_resolved(resolved),
-                        None => out.edges.push_external(&format!("mod {name}")),
-                    };
-                }
-                if rust_is_public(child) {
+                if let Some(name_node) = child.child_by_field_name("name")
+                    && rust_is_public(child)
+                {
                     out.interfaces.push(Interface {
-                        name: name.to_owned(),
+                        name: text(name_node, source).to_owned(),
                         kind: InterfaceKind::Module,
                         line: line_of(child),
                     });
-                }
-            }
-            "use_declaration" => {
-                let Some(argument) = child.child_by_field_name("argument") else {
-                    continue;
-                };
-                if !rust_use_edges(argument, source, crate_start, &mut out.edges, deadline) {
-                    return (out, false);
                 }
             }
             "function_item" => {
@@ -2954,7 +3343,16 @@ fn extract_rust(
             _ => {}
         }
     }
-    (out, true)
+    let completed = rust_declaration_edges(
+        root,
+        source,
+        &mut scopes,
+        file_scope,
+        crate_start,
+        &mut out.edges,
+        deadline,
+    );
+    (out, completed)
 }
 
 fn rust_attribute_last_segment(attribute_item: Node, source: &[u8]) -> Option<String> {
@@ -3057,16 +3455,17 @@ fn resolve_ts_relative<'k>(
     .find_map(|candidate| known.get(candidate.as_str()))
 }
 
-/// Records one TypeScript import or re-export's edge into `sink`: resolved
-/// when it is a relative specifier naming a file in the map, otherwise the
-/// specifier as written.
+/// Records one TypeScript import or re-export's edge into `sink`: a
+/// relative specifier (`./`, `../`) is looked up among the files in the
+/// map, [`EdgeResolution::Resolved`] or [`EdgeResolution::NotFound`]; any
+/// other (a package, a `tsconfig` path alias such as `@/lib`, an absolute
+/// path) is [`EdgeResolution::NotAttempted`], the specifier as written.
 fn ts_import_edge(rel: &str, specifier: &str, known: &KnownPaths, sink: &mut EdgeSink) {
-    let resolved = if specifier.starts_with("./") || specifier.starts_with("../") {
-        resolve_ts_relative(rel, specifier, known)
+    if specifier.starts_with("./") || specifier.starts_with("../") {
+        sink.push_looked_up(resolve_ts_relative(rel, specifier, known), specifier);
     } else {
-        None
-    };
-    sink.push(resolved, specifier);
+        sink.push_unresolved(specifier, EdgeResolution::NotAttempted);
+    }
 }
 
 /// Pushes onto `items` the interfaces one exported TypeScript declaration
@@ -3235,9 +3634,17 @@ const MAX_SPELLED_RELATIVE_IMPORT_DOTS: usize = 32;
 /// `sink` ends the statement early and is not a deadline miss: the sink
 /// itself records the truncation.
 ///
-/// A relative import (`from . import a`, `from ..pkg import b`) resolves
-/// against the importing file's own directory, climbing one level per dot
-/// beyond the first. What makes this bounded in the size of the statement,
+/// An absolute import (`from app.core import cache`) is one
+/// [`EdgeResolution::NotAttempted`] edge, the module as written, as in
+/// [`python_import_edges`]. A relative import (`from . import a`, `from
+/// ..pkg import b`) is looked up against the importing file's own
+/// directory, climbing one level per dot beyond the first:
+/// [`EdgeResolution::Resolved`], or [`EdgeResolution::NotFound`] when no
+/// file in the map matches. A relative `import *` with no module after its
+/// dots (`from . import *`) imports the package itself, so its edge is to
+/// that directory's `__init__.py`, written as its dots when there is none;
+/// until round 7 it gave no edge at all. What makes this bounded in the
+/// size of the statement,
 /// which the round-3 version was not (the review of that round measured one
 /// 8 MiB statement of `K` dots and `M` names costing `K x M`, over two
 /// minutes, because the dot prefix was rebuilt for every name and nothing
@@ -3272,7 +3679,7 @@ fn python_import_from_edges(
     };
 
     if module_name.kind() != "relative_import" {
-        sink.push_external(text(module_name, source));
+        sink.push_unresolved(text(module_name, source), EdgeResolution::NotAttempted);
         return true;
     }
 
@@ -3318,10 +3725,39 @@ fn python_import_from_edges(
 
     if let Some(dotted) = dotted {
         let segments: Vec<&str> = dotted.split('.').collect();
-        match resolve(&segments) {
-            Some(resolved) => sink.push_resolved(resolved),
-            None => sink.push_external(&format!("{prefix}{dotted}")),
-        };
+        sink.push_looked_up(resolve(&segments), &format!("{prefix}{dotted}"));
+        return true;
+    }
+
+    // `from . import *`: the package itself, whose file is its directory's
+    // `__init__.py` (a module file named after the directory is not it).
+    // Only the first thing after `import` is looked at, with a check per
+    // child: a statement of a million names must not be walked to find out
+    // it has no `*` (round 7's first version did, 270 ms past an expired
+    // deadline in a debug build).
+    let mut wildcard = false;
+    let mut after_import = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if after_import && child.is_named() && !child.is_extra() {
+            wildcard = child.kind() == "wildcard_import";
+            break;
+        }
+        after_import |= child.kind() == "import";
+    }
+    if wildcard {
+        let package = base.as_ref().and_then(|base| {
+            let candidate = if base.is_empty() {
+                "__init__.py".to_owned()
+            } else {
+                format!("{}/__init__.py", base.join("/"))
+            };
+            known.get(candidate.as_str())
+        });
+        sink.push_looked_up(package, &prefix);
         return true;
     }
 
@@ -3342,11 +3778,7 @@ fn python_import_from_edges(
             Some(text(name_node, source))
         };
         let Some(name_text) = name_text else { continue };
-        let recorded = match resolve(&[name_text]) {
-            Some(resolved) => sink.push_resolved(resolved),
-            None => sink.push_external(&format!("{prefix}{name_text}")),
-        };
-        if !recorded {
+        if !sink.push_looked_up(resolve(&[name_text]), &format!("{prefix}{name_text}")) {
             return true;
         }
     }
@@ -3354,7 +3786,9 @@ fn python_import_from_edges(
 }
 
 /// Records into `sink` the edges of one Python `import a, b.c as d`
-/// statement (each external: an absolute import is never resolved here),
+/// statement (each [`EdgeResolution::NotAttempted`]: an absolute import is
+/// never looked up here, since which directory is on `sys.path` is not in
+/// the repository's source),
 /// and returns whether it finished before `deadline`, checked before every
 /// name. The names are walked in place, never collected first; see
 /// [`python_import_from_edges`] for why. A full `sink` ends the statement
@@ -3378,7 +3812,7 @@ fn python_import_edges(
             Some(text(name_node, source))
         };
         if let Some(name_text) = name_text
-            && !sink.push_external(name_text)
+            && !sink.push_unresolved(name_text, EdgeResolution::NotAttempted)
         {
             return true;
         }
@@ -3485,7 +3919,10 @@ fn python_test_names(root: Node, source: &[u8], deadline: Instant) -> (Vec<Strin
 // ---------------------------------------------------------------------------
 
 /// Records into `sink` one edge per `import_spec` under `import_declaration`,
-/// each external (see the module doc). Once `sink` is full, the rest of the
+/// each [`EdgeResolution::NotAttempted`]: a Go import path names a package,
+/// a directory, and resolving one inside the repository would need its
+/// `go.mod`, which this module does not read (see the module doc's
+/// "Dependency edges, per language"). Once `sink` is full, the rest of the
 /// declaration is still visited (under `deadline`) but records nothing.
 fn go_import_spec_edges(
     import_declaration: Node,
@@ -3508,7 +3945,7 @@ fn go_import_spec_edges(
                 || text(path_node, source).trim_matches('"'),
                 |content| text(content, source),
             );
-        sink.push_external(content);
+        sink.push_unresolved(content, EdgeResolution::NotAttempted);
     });
 }
 
@@ -4712,7 +5149,7 @@ mod tests {
         let (_guard, map) = built_fixture();
         for module in &map.modules {
             let mut edges_sorted = module.dependency_edges.clone();
-            edges_sorted.sort_by(|a, b| (a.external, &a.to).cmp(&(b.external, &b.to)));
+            edges_sorted.sort_by(|a, b| (a.resolution, &a.to).cmp(&(b.resolution, &b.to)));
             assert_eq!(
                 module.dependency_edges, edges_sorted,
                 "{} edges not sorted",
@@ -4898,7 +5335,7 @@ mod tests {
             .iter()
             .find(|e| e.to == "rust/src/foo.rs")
             .expect("mod foo; resolves to rust/src/foo.rs");
-        assert!(!mod_edge.external);
+        assert_eq!(mod_edge.resolution, EdgeResolution::Resolved);
     }
 
     #[test]
@@ -4912,25 +5349,25 @@ mod tests {
         let use_edge = lib
             .dependency_edges
             .iter()
-            .find(|e| e.to == "rust/src/foo.rs" && !e.external);
+            .find(|e| e.to == "rust/src/foo.rs" && e.is_resolved());
         assert!(
             use_edge.is_some(),
             "use crate::foo::Foo; should resolve to rust/src/foo.rs"
         );
-        let external = lib
+        let not_attempted = lib
             .dependency_edges
             .iter()
-            .any(|e| e.external && e.to.contains("HashMap"));
+            .any(|e| e.resolution == EdgeResolution::NotAttempted && e.to.contains("HashMap"));
         assert!(
-            external,
-            "use std::collections::HashMap; should be external"
+            not_attempted,
+            "use std::collections::HashMap; is a path this module does not look up"
         );
     }
 
     /// Defect 5 from this ticket's adversarial review: the test above,
     /// `tests::ori_t_0036_rust_use_crate_path_resolves_when_the_target_exists`,
     /// passes even when `use crate::foo::Foo;` never resolves, because its
-    /// `.find(|e| e.to == "rust/src/foo.rs" && !e.external)` also matches
+    /// `.find(|e| e.to == "rust/src/foo.rs" && e.is_resolved())` also matches
     /// the unrelated `mod foo;` edge to the same target. CLAUDE.md's
     /// absolute rule 3 ("never modify or delete an existing test") is why
     /// that test's body is untouched here rather than tightened in place;
@@ -4938,7 +5375,7 @@ mod tests {
     /// (`resolve_rust_crate_path` before this fix) tried candidates
     /// relative to the mapped root directly (`foo.rs`, `foo/mod.rs`), which
     /// never matched `rust/src/foo.rs` in this crate's real `src/` layout,
-    /// so `use crate::foo::Foo;` was always external before the fix in
+    /// so `use crate::foo::Foo;` was always unresolved before the fix in
     /// `rust_crate_root`; asserting the resolved-edge count is 2, not 1,
     /// is what distinguishes "both `mod foo;` and `use crate::foo::Foo;`
     /// resolved" from "only the `mod` edge happens to share the target".
@@ -4953,7 +5390,7 @@ mod tests {
         let resolved_to_foo = lib
             .dependency_edges
             .iter()
-            .filter(|e| e.to == "rust/src/foo.rs" && !e.external)
+            .filter(|e| e.to == "rust/src/foo.rs" && e.is_resolved())
             .count();
         assert_eq!(
             resolved_to_foo, 2,
@@ -4967,7 +5404,7 @@ mod tests {
             .any(|e| e.to.contains("crate::foo::Foo"));
         assert!(
             !still_unresolved_text,
-            "use crate::foo::Foo; must not still be recorded as unresolved external text: {:?}",
+            "use crate::foo::Foo; must not still be recorded as unresolved text: {:?}",
             lib.dependency_edges
         );
     }
@@ -5053,7 +5490,7 @@ mod tests {
             .iter()
             .find(|e| e.to == "web/util.ts")
             .expect("resolved");
-        assert!(!edge.external);
+        assert_eq!(edge.resolution, EdgeResolution::Resolved);
         assert!(
             index
                 .interfaces
@@ -5094,7 +5531,7 @@ mod tests {
             .iter()
             .find(|e| e.to == "py/pkg/core.py")
             .expect("from . import core; resolves");
-        assert!(!edge.external);
+        assert_eq!(edge.resolution, EdgeResolution::Resolved);
 
         let core = map
             .modules
@@ -5142,9 +5579,9 @@ mod tests {
         let import = main.dependency_edges.iter().find(|e| e.to == "fmt");
         assert!(
             import.is_some(),
-            "Go edges are always external; see the module doc"
+            "a Go import is an edge, never resolved; see the module doc"
         );
-        assert!(import.unwrap().external);
+        assert_eq!(import.unwrap().resolution, EdgeResolution::NotAttempted);
 
         let test_file = map
             .modules
@@ -6089,7 +6526,7 @@ mod tests {
         assert_eq!(
             edge_targets,
             vec!["aaa_pkg::Thing", "mmm_pkg::Thing", "zzz_pkg::Thing"],
-            "dependency edges must be sorted by (external, to), not source order"
+            "dependency edges must be sorted by (resolution, to), not source order"
         );
 
         let mm = map
@@ -6446,19 +6883,19 @@ mod tests {
             .iter()
             .find(|m| m.path == "src/lib.rs")
             .expect("present");
-        let edges: Vec<(&str, bool)> = lib
+        let edges: Vec<(&str, EdgeResolution)> = lib
             .dependency_edges
             .iter()
-            .map(|e| (e.to.as_str(), e.external))
+            .map(|e| (e.to.as_str(), e.resolution))
             .collect();
         // Two from `mod foo; mod bar;`, two from the grouped `use`.
         assert_eq!(
             edges,
             vec![
-                ("src/bar.rs", false),
-                ("src/bar.rs", false),
-                ("src/foo.rs", false),
-                ("src/foo.rs", false),
+                ("src/bar.rs", EdgeResolution::Resolved),
+                ("src/bar.rs", EdgeResolution::Resolved),
+                ("src/foo.rs", EdgeResolution::Resolved),
+                ("src/foo.rs", EdgeResolution::Resolved),
             ],
             "each member of the group must resolve on its own, and nothing may carry the \
              grouped text"
@@ -7028,7 +7465,8 @@ mod tests {
         assert!(
             m.dependency_edges
                 .iter()
-                .all(|e| e.external && e.to.starts_with("[20000 leading dots]")),
+                .all(|e| e.resolution == EdgeResolution::NotFound
+                    && e.to.starts_with("[20000 leading dots]")),
             "an import climbing past the root is unresolved, and its count is still stated: {:?}",
             &m.dependency_edges[..3]
         );
@@ -7095,23 +7533,26 @@ mod tests {
         );
         write(&dir, "top.py", "from .. import b\n");
         let map = build_code_map(&dir).expect("maps");
-        let edges_of = |path: &str| -> Vec<(String, bool)> {
+        let edges_of = |path: &str| -> Vec<(String, EdgeResolution)> {
             map.modules
                 .iter()
                 .find(|m| m.path == path)
                 .expect("present")
                 .dependency_edges
                 .iter()
-                .map(|e| (e.to.to_string(), e.external))
+                .map(|e| (e.to.to_string(), e.resolution))
                 .collect()
         };
         assert_eq!(
             edges_of("pkg/sub/m.py"),
-            vec![("pkg/b.py".to_owned(), false), ("...gone".to_owned(), true)],
+            vec![
+                ("pkg/b.py".to_owned(), EdgeResolution::Resolved),
+                ("...gone".to_owned(), EdgeResolution::NotFound)
+            ],
         );
         assert_eq!(
             edges_of("top.py"),
-            vec![("..b".to_owned(), true)],
+            vec![("..b".to_owned(), EdgeResolution::NotFound)],
             "from .. in a top-level file climbs out of the map; it must not resolve to the \
              root's own b.py"
         );
@@ -7133,16 +7574,16 @@ mod tests {
         write(dir, "src/net/tcp.rs", "pub struct Stream;\n");
     }
 
-    /// `module`'s dependency edges as sorted `(to, external)` pairs.
-    fn edge_pairs(map: &CodeMap, module: &str) -> Vec<(String, bool)> {
-        let mut pairs: Vec<(String, bool)> = map
+    /// `module`'s dependency edges as sorted `(to, resolution)` pairs.
+    fn edge_pairs(map: &CodeMap, module: &str) -> Vec<(String, EdgeResolution)> {
+        let mut pairs: Vec<(String, EdgeResolution)> = map
             .modules
             .iter()
             .find(|m| m.path == module)
             .unwrap_or_else(|| panic!("{module} present"))
             .dependency_edges
             .iter()
-            .map(|e| (e.to.to_string(), e.external))
+            .map(|e| (e.to.to_string(), e.resolution))
             .collect();
         pairs.sort();
         pairs
@@ -7190,10 +7631,10 @@ mod tests {
         assert!(
             grouped
                 .iter()
-                .any(|(to, ext)| to == "src/net/http.rs" && !ext)
+                .any(|(to, how)| to == "src/net/http.rs" && *how == EdgeResolution::Resolved)
                 && grouped
                     .iter()
-                    .any(|(to, ext)| to == "src/net/tcp.rs" && !ext),
+                    .any(|(to, how)| to == "src/net/tcp.rs" && *how == EdgeResolution::Resolved),
             "the prefixed and nested members must resolve past their prefix: {grouped:?}"
         );
         assert!(
@@ -7222,8 +7663,8 @@ mod tests {
         assert_eq!(
             edge_pairs(&map, "src/user.rs"),
             vec![
-                ("src/net/http.rs".to_owned(), false),
-                ("src/net/tcp.rs".to_owned(), false),
+                ("src/net/http.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/net/tcp.rs".to_owned(), EdgeResolution::Resolved),
             ]
         );
         drop(guard);
@@ -7246,11 +7687,11 @@ mod tests {
         assert_eq!(
             edge_pairs(&map, "src/user.rs"),
             vec![
-                ("src/foo.rs".to_owned(), false),
-                ("src/net/http.rs".to_owned(), false),
-                ("src/net/http.rs".to_owned(), false),
-                ("src/net/tcp.rs".to_owned(), false),
-                ("src/net/tcp.rs".to_owned(), false),
+                ("src/foo.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/net/http.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/net/http.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/net/tcp.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/net/tcp.rs".to_owned(), EdgeResolution::Resolved),
             ],
             "Gone is under tcp, so, like its ungrouped form, it resolves to tcp.rs by its \
              longest prefix"
@@ -7310,7 +7751,7 @@ mod tests {
             "the members past the budget must be recorded, once: {rest:?}"
         );
         assert!(
-            rest[0].external
+            rest[0].resolution == EdgeResolution::Folded
                 && rest[0].to_truncated
                 && rest[0].to.len() == MAX_EDGE_TARGET_BYTES
                 && argument.starts_with(rest[0].to.as_str()),
@@ -7330,10 +7771,27 @@ mod tests {
         assert!(
             spelled
                 .iter()
-                .all(|e| e.external && !e.to_truncated && expected.contains(e.to.as_str())),
+                .all(|e| e.resolution == EdgeResolution::NotFound
+                    && !e.to_truncated
+                    && expected.contains(e.to.as_str())),
             "every member spelled out before the budget ran out is its own full path, whole"
         );
         drop(guard);
+    }
+
+    /// What a `use` in a file with no crate root resolves against: one
+    /// scope, no crate walk.
+    fn no_crate_root() -> UseContext<'static, 'static> {
+        const LONE: [RustScope<'static>; 1] = [RustScope {
+            parent: None,
+            crate_cursor: None,
+            mod_node: None,
+        }];
+        UseContext {
+            scopes: &LONE,
+            scope: 0,
+            crate_start: None,
+        }
     }
 
     /// Item 5 (LOW), the walk's own deadline: a grouped import is walked
@@ -7358,14 +7816,20 @@ mod tests {
             .expect("an argument");
         let already_past = Instant::now() - Duration::from_secs(1);
         let mut sink = EdgeSink::new();
-        let completed = rust_use_edges(argument, source.as_bytes(), None, &mut sink, already_past);
+        let completed = rust_use_edges(
+            argument,
+            source.as_bytes(),
+            no_crate_root(),
+            &mut sink,
+            already_past,
+        );
         assert!(!completed, "an expired deadline must stop the walk");
         assert!(sink.edges.is_empty(), "{:?}", sink.edges);
         let mut sink = EdgeSink::new();
         let completed = rust_use_edges(
             argument,
             source.as_bytes(),
-            None,
+            no_crate_root(),
             &mut sink,
             Instant::now() + Duration::from_secs(60),
         );
@@ -8174,7 +8638,7 @@ mod tests {
             .iter()
             .map(|edge| {
                 std::mem::size_of::<DependencyEdge>()
-                    + if edge.external {
+                    + if !edge.is_resolved() {
                         header + edge.to.len()
                     } else {
                         0
@@ -8269,7 +8733,7 @@ mod tests {
                 .collect();
             assert_eq!(cut.len(), 1, "{file}: {cut:?}");
             assert!(
-                cut[0].external
+                !cut[0].is_resolved()
                     && cut[0].to.len() == MAX_EDGE_TARGET_BYTES
                     && long_name.starts_with(cut[0].to.as_str()),
                 "{file}: the long target is its first {MAX_EDGE_TARGET_BYTES} bytes, marked"
@@ -8277,7 +8741,7 @@ mod tests {
             let resolved: Vec<&DependencyEdge> = module
                 .dependency_edges
                 .iter()
-                .filter(|e| !e.external)
+                .filter(|e| e.is_resolved())
                 .collect();
             match resolved_target {
                 Some(target) => {
@@ -8290,7 +8754,7 @@ mod tests {
                         "{file}: every edge to {target} must share one allocation of its path"
                     );
                 }
-                None => assert!(resolved.is_empty(), "Go edges are always external"),
+                None => assert!(resolved.is_empty(), "a Go import is never resolved"),
             }
         }
         drop(guard);
@@ -8816,5 +9280,351 @@ mod tests {
         );
         assert_eq!(map.spec_docs, vec![format!("spec/{}.md", "a")]);
         drop(guard);
+    }
+
+    /// Item 3 (MEDIUM), `self` members: a `self` member stands for its
+    /// group's prefix, but round 6 walked it as a path segment named
+    /// `self`, so with `src/foo/self.rs` present `use crate::foo::{self};`
+    /// resolved to that file while `use crate::foo;` resolved to
+    /// `src/foo.rs`. And `use serde::{self as s};` was recorded as
+    /// `serde::self as s`, where `use serde as s;` records `serde as s`.
+    /// Each grouped form must give exactly its ungrouped form's edges.
+    #[test]
+    fn ori_t_0036_a_self_member_stands_for_its_prefix_even_beside_a_file_named_self() {
+        let dir = temp_dir("grouped-self");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "src/lib.rs", "pub mod foo;\n");
+        write(&dir, "src/foo.rs", "pub mod bar;\npub struct Bar;\n");
+        write(&dir, "src/foo/self.rs", "pub struct S;\n");
+        write(&dir, "src/foo/bar.rs", "pub struct B;\n");
+        write(
+            &dir,
+            "src/grouped.rs",
+            "use crate::foo::{self};\nuse crate::foo::{self as f};\nuse serde::{self as s};\n\
+             use crate::foo::{self, bar::B};\nuse crate::missing::{self};\n\
+             use crate::missing::{self as m};\n",
+        );
+        write(
+            &dir,
+            "src/ungrouped.rs",
+            "use crate::foo;\nuse crate::foo as f;\nuse serde as s;\n\
+             use crate::foo;\nuse crate::foo::bar::B;\nuse crate::missing;\n\
+             use crate::missing as m;\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let grouped = edge_pairs(&map, "src/grouped.rs");
+        assert_eq!(grouped, edge_pairs(&map, "src/ungrouped.rs"));
+        assert_eq!(
+            grouped,
+            vec![
+                ("crate::missing".to_owned(), EdgeResolution::NotFound),
+                ("crate::missing as m".to_owned(), EdgeResolution::NotFound),
+                ("serde as s".to_owned(), EdgeResolution::NotAttempted),
+                ("src/foo.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/foo.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/foo.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/foo/bar.rs".to_owned(), EdgeResolution::Resolved),
+            ]
+        );
+        drop(guard);
+    }
+
+    /// Item 3 (MEDIUM), the folded edge: the review's own declaration, an
+    /// 816-byte `use crate::q::...::q::{m0, ..., m77}` whose prefix names no
+    /// file, gave 29 member edges and one standing for the other 49 that
+    /// looked like any other unresolved edge (its only tell a `{` in its
+    /// text), with nothing on the module saying so. That edge is now
+    /// `Folded`, the one kind of edge that stands for more than one import;
+    /// every other edge the grouped form gives is one its ungrouped form
+    /// gives too.
+    #[test]
+    fn ori_t_0036_a_folded_group_is_marked_not_passed_off_as_an_ordinary_edge() {
+        let dir = temp_dir("grouped-folded");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "src/lib.rs", "pub fn f() {}\n");
+        let prefix = format!("crate{}", "::q".repeat(200));
+        let members: Vec<String> = (0..78).map(|i| format!("m{i}")).collect();
+        let argument = format!("{prefix}::{{{}}}", members.join(","));
+        write(&dir, "src/grouped.rs", &format!("use {argument};\n"));
+        let ungrouped: String = members
+            .iter()
+            .map(|member| format!("use {prefix}::{member};\n"))
+            .collect();
+        write(&dir, "src/ungrouped.rs", &ungrouped);
+        let map = build_code_map(&dir).expect("maps");
+        let ungrouped = edge_pairs(&map, "src/ungrouped.rs");
+        assert_eq!(ungrouped.len(), members.len());
+        let grouped = edge_pairs(&map, "src/grouped.rs");
+        let (folded, spelled): (Vec<_>, Vec<_>) = grouped
+            .iter()
+            .partition(|(_, how)| *how == EdgeResolution::Folded);
+        assert_eq!(
+            folded,
+            vec![&(argument.clone(), EdgeResolution::Folded)],
+            "the members past the text budget are one edge, marked as standing for several"
+        );
+        assert!(
+            !spelled.is_empty() && spelled.len() < members.len(),
+            "the budget must bind on this declaration: {} spelled out",
+            spelled.len()
+        );
+        assert!(
+            spelled.iter().all(|edge| ungrouped.contains(edge)),
+            "every other edge is one the ungrouped form gives: {spelled:?}"
+        );
+        drop(guard);
+    }
+
+    /// Item 3 (MEDIUM), a related gap the review found: `from . import *`
+    /// and `from .. import *` gave no edge at all. A wildcard import of a
+    /// package imports its `__init__.py`; with none there, the edge says
+    /// it was looked for and not found, written as its dots.
+    #[test]
+    fn ori_t_0036_a_python_relative_wildcard_import_is_an_edge() {
+        let dir = temp_dir("py-relative-wildcard");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "pkg/__init__.py", "x = 1\n");
+        write(&dir, "pkg/sub/__init__.py", "y = 1\n");
+        write(&dir, "pkg/sub.py", "z = 1\n");
+        write(
+            &dir,
+            "pkg/sub/m.py",
+            "from . import *\nfrom .. import *\nfrom .sibling import *\n",
+        );
+        write(&dir, "pkg/sub/sibling.py", "w = 1\n");
+        write(&dir, "top.py", "from . import *\nfrom .. import *\n");
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(
+            edge_pairs(&map, "pkg/sub/m.py"),
+            vec![
+                ("pkg/__init__.py".to_owned(), EdgeResolution::Resolved),
+                ("pkg/sub/__init__.py".to_owned(), EdgeResolution::Resolved),
+                ("pkg/sub/sibling.py".to_owned(), EdgeResolution::Resolved),
+            ]
+        );
+        assert_eq!(
+            edge_pairs(&map, "top.py"),
+            vec![
+                (".".to_owned(), EdgeResolution::NotFound),
+                ("..".to_owned(), EdgeResolution::NotFound),
+            ],
+            "the root has no __init__.py, and a top-level `..` climbs out of the map"
+        );
+        drop(guard);
+    }
+
+    /// Item 3 (MEDIUM), the other related gap: only a file's top level was
+    /// read, so `mod inner { use crate::foo::Foo; }`, `fn f() { use
+    /// crate::{bar::Bar}; }` and every `mod tests { use super::*; }` gave
+    /// no edge, in a module still counted as parsed clean. A `use` is now
+    /// an edge at any depth, resolved from the module it is written in: in
+    /// an inline module, `self` is that module and `super` the file's own;
+    /// in a function body, the file's own module. A `mod name;` inside an
+    /// inline module names its file under that module's directory.
+    #[test]
+    fn ori_t_0036_use_and_mod_declarations_at_any_depth_are_edges() {
+        let dir = temp_dir("rust-nested-declarations");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "src/lib.rs",
+            "pub mod foo;\npub mod bar;\n\
+             mod inner {\n    use crate::foo::Foo;\n    use self::deep::D;\n    mod deep;\n}\n\
+             fn f() {\n    use crate::{bar::Bar};\n    use std::io::Write;\n}\n\
+             #[cfg(test)]\nmod tests {\n    use super::*;\n    use super::foo::Foo;\n}\n",
+        );
+        write(
+            &dir,
+            "src/foo.rs",
+            "pub struct Foo;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
+        );
+        write(&dir, "src/bar.rs", "pub struct Bar;\n");
+        write(&dir, "src/inner/deep.rs", "pub struct D;\n");
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(map.coverage.files_parsed_clean, 4, "{:?}", map.coverage);
+        assert_eq!(
+            edge_pairs(&map, "src/lib.rs"),
+            vec![
+                ("src/bar.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/bar.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/foo.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/foo.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/foo.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/inner/deep.rs".to_owned(), EdgeResolution::Resolved),
+                ("src/inner/deep.rs".to_owned(), EdgeResolution::Resolved),
+                ("std::io::Write".to_owned(), EdgeResolution::NotAttempted),
+                ("super::*".to_owned(), EdgeResolution::NotFound),
+            ],
+            "`use super::*` in lib.rs's tests module names the crate root, which is no file \
+             of its own to point at"
+        );
+        assert_eq!(
+            edge_pairs(&map, "src/foo.rs"),
+            vec![("src/foo.rs".to_owned(), EdgeResolution::Resolved)],
+            "`use super::*` in foo.rs's tests module is foo.rs itself"
+        );
+        drop(guard);
+    }
+
+    /// Item 7 (MEDIUM): only `crate::` and `mod` in Rust and `./`, `../` in
+    /// TypeScript were ever looked up, and everything else was marked
+    /// `external`, documented as "outside the mapped repository", with the
+    /// per-language notes its doc pointed to missing. The review's own
+    /// repository: every edge now says whether it was looked up, and
+    /// `self::` and `super::` paths are looked up like `crate::` ones.
+    #[test]
+    fn ori_t_0036_an_edge_says_whether_it_was_looked_up_and_self_and_super_are() {
+        let dir = temp_dir("edge-resolution");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "crates/alpha/src/lib.rs",
+            "pub mod net;\npub mod util;\nmod gone;\n",
+        );
+        write(&dir, "crates/alpha/src/util.rs", "pub struct Helper;\n");
+        write(
+            &dir,
+            "crates/alpha/src/net/mod.rs",
+            "pub mod http;\nuse super::util::Helper;\nuse self::http::Client;\n\
+             use crate::util::Helper as H;\nuse crate::nothing::X;\nuse super::super::Past;\n",
+        );
+        write(
+            &dir,
+            "crates/alpha/src/net/http.rs",
+            "use super::super::util::Helper;\npub struct Client;\n",
+        );
+        write(&dir, "crates/beta/src/lib.rs", "use alpha::util::Helper;\n");
+        write(
+            &dir,
+            "backend/app/core/cache.py",
+            "import app.core.redis_client\nfrom app.core import redis_client\n\
+             from . import redis_client\nfrom . import missing\n",
+        );
+        write(&dir, "backend/app/core/redis_client.py", "x = 1\n");
+        write(
+            &dir,
+            "frontend/app/layout.tsx",
+            "import a from \"@/lib/i18n\";\nimport b from \"../lib/i18n\";\n\
+             import c from \"./gone\";\nimport d from \"react\";\n",
+        );
+        write(&dir, "frontend/lib/i18n.ts", "export const t = 1;\n");
+        write(
+            &dir,
+            "gosvc/cmd/api/main.go",
+            "package main\n\nimport \"example.com/gosvc/internal/store\"\n\nfunc main() {}\n",
+        );
+        write(&dir, "gosvc/internal/store/store.go", "package store\n");
+        let map = build_code_map(&dir).expect("maps");
+        let resolved = |to: &str| (to.to_owned(), EdgeResolution::Resolved);
+        let not_found = |to: &str| (to.to_owned(), EdgeResolution::NotFound);
+        let not_attempted = |to: &str| (to.to_owned(), EdgeResolution::NotAttempted);
+        assert_eq!(
+            edge_pairs(&map, "crates/alpha/src/lib.rs"),
+            vec![
+                resolved("crates/alpha/src/net/mod.rs"),
+                resolved("crates/alpha/src/util.rs"),
+                not_found("mod gone"),
+            ]
+        );
+        assert_eq!(
+            edge_pairs(&map, "crates/alpha/src/net/mod.rs"),
+            vec![
+                not_found("crate::nothing::X"),
+                resolved("crates/alpha/src/net/http.rs"),
+                resolved("crates/alpha/src/net/http.rs"),
+                resolved("crates/alpha/src/util.rs"),
+                resolved("crates/alpha/src/util.rs"),
+                not_found("super::super::Past"),
+            ],
+            "`super::super` from net climbs past the crate root, where nothing can resolve"
+        );
+        assert_eq!(
+            edge_pairs(&map, "crates/alpha/src/net/http.rs"),
+            vec![resolved("crates/alpha/src/util.rs")]
+        );
+        assert_eq!(
+            edge_pairs(&map, "crates/beta/src/lib.rs"),
+            vec![not_attempted("alpha::util::Helper")],
+            "another crate's path is not looked up, even one in the same workspace"
+        );
+        assert_eq!(
+            edge_pairs(&map, "backend/app/core/cache.py"),
+            vec![
+                not_found(".missing"),
+                not_attempted("app.core"),
+                not_attempted("app.core.redis_client"),
+                resolved("backend/app/core/redis_client.py"),
+            ]
+        );
+        assert_eq!(
+            edge_pairs(&map, "frontend/app/layout.tsx"),
+            vec![
+                not_found("./gone"),
+                not_attempted("@/lib/i18n"),
+                resolved("frontend/lib/i18n.ts"),
+                not_attempted("react"),
+            ]
+        );
+        assert_eq!(
+            edge_pairs(&map, "gosvc/cmd/api/main.go"),
+            vec![not_attempted("example.com/gosvc/internal/store")]
+        );
+        drop(guard);
+    }
+
+    /// Item 3 (MEDIUM), the deadline of the new walk: `use` and `mod`
+    /// declarations are now found at any depth, by a walk over the whole
+    /// tree, which checks the deadline before every node and every child
+    /// it gathers. With an expired deadline it records nothing and says it
+    /// did not finish; with 20 ms left it stops within 250 ms. Timed on
+    /// the walk alone, after the parse.
+    #[test]
+    fn ori_t_0036_the_rust_declaration_walk_checks_its_deadline() {
+        let source = format!("fn f() {{\n{}}}\n", "    use a::b;\n".repeat(200_000));
+        let tree = parse_bounded(
+            Language::Rust,
+            false,
+            &source,
+            Instant::now() + Duration::from_secs(600),
+        )
+        .expect("parses");
+        let run = |deadline: Instant| -> (bool, usize) {
+            let mut scopes = vec![RustScope {
+                parent: None,
+                crate_cursor: None,
+                mod_node: None,
+            }];
+            let mut sink = EdgeSink::with_limit(usize::MAX);
+            let completed = rust_declaration_edges(
+                tree.root_node(),
+                source.as_bytes(),
+                &mut scopes,
+                0,
+                None,
+                &mut sink,
+                deadline,
+            );
+            (completed, sink.edges.len())
+        };
+        let start = Instant::now();
+        assert_eq!(run(Instant::now() - Duration::from_secs(1)), (false, 0));
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            start.elapsed()
+        );
+        let start = Instant::now();
+        let (completed, _) = run(start + Duration::from_millis(20));
+        let elapsed = start.elapsed();
+        assert!(
+            !completed && elapsed < Duration::from_millis(250),
+            "a deadline 20 ms away must stop the walk, but it ran {elapsed:?} (completed: \
+             {completed})"
+        );
+        assert_eq!(
+            run(Instant::now() + Duration::from_secs(600)),
+            (true, 200_000),
+            "with time left, every declaration is an edge"
+        );
     }
 }
