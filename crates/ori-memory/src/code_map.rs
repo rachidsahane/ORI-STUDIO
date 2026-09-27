@@ -258,14 +258,15 @@
 //!   so it is proven on Linux instead (see the report for how).
 //! - **Memory.** What the `spec/` citation scan holds while it runs, how
 //!   much of `spec/` it reads, and what the returned map keeps from it, each
-//!   bounded since round 5; what each module keeps from its own file, since
-//!   round 6 (the last two items below). Until round 5 none was: the review
-//!   of round 3 measured 2.3 GB held for eight newline-only documents of
-//!   8 MiB (every line of every document copied into its own `String`, all
-//!   documents at once, about 35 times the corpus), and 4.2 GB of heading
-//!   text in the returned map for 2000 modules each cited under 500 long
-//!   headings (the heading copied into every citation), both from
-//!   repositories that hold still.
+//!   bounded since round 5; what each module keeps from its own file,
+//!   bounded since round 6; and what one file's parse holds while it runs,
+//!   stated since round 6 (the last three items below). Until round 5 none
+//!   of the first three was bounded: the review of round 3 measured 2.3 GB
+//!   held for eight newline-only documents of 8 MiB (every line of every
+//!   document copied into its own `String`, all documents at once, about 35
+//!   times the corpus), and 4.2 GB of heading text in the returned map for
+//!   2000 modules each cited under 500 long headings (the heading copied
+//!   into every citation), both from repositories that hold still.
 //!   - *While scanning:* one document at a time, read into one buffer of at
 //!     most `max_file_bytes + 1` bytes (8 MiB by default) and dropped before
 //!     the next is read, every line searched in place as a slice of that
@@ -345,13 +346,25 @@
 //!     Their count is not capped: they grow with the bytes read from that
 //!     one file, which [`CodeMapOptions::max_file_bytes`] caps, and with
 //!     nothing else. The densest shape is one interface per two bytes of
-//!     source (each is a distinct name, and two names need a byte between
-//!     them: `var A,A,...,A int` in Go), 41 bytes kept per two read, so at
-//!     most about 20.5 times the file's size, about 172 MB for a file of
-//!     8 MiB that is nothing but such a list, not counting the allocator's
-//!     rounding
+//!     source (each is its own name in the source, and two names need a
+//!     byte between them: `var A,A,...,A int` in Go), 41 bytes kept per two
+//!     read, so at most about 20.5 times the file's size, about 172 MB for a
+//!     file of 8 MiB that is nothing but such a list, not counting the
+//!     allocator's rounding
 //!     (`tests::ori_t_0036_retained_interface_bytes_stay_within_the_stated_factor_of_the_file`
 //!     checks the factor on that shape).
+//!   - *While one file is parsed and extracted:* its bytes (at most
+//!     `max_file_bytes + 1`), tree-sitter's tree for it, and what
+//!     extraction builds, all dropped, but for what its [`Module`] keeps,
+//!     before the next file is read: files are processed one at a time. The
+//!     tree is tree-sitter's own, and it grows with the file's node count,
+//!     which only [`CodeMapOptions::max_file_bytes`] bounds. The densest
+//!     shapes measured (a node for every byte or two, as in
+//!     `import a,a,...`) peaked at 230 to 240 bytes per byte of source:
+//!     241 MB for a 1 MiB file, 953 MB for a 4 MiB one, 1.8 to 2.0 GB for
+//!     one at the 8 MiB default (release builds on macOS, round 6's
+//!     measurement, the whole process's peak footprint). A host that cannot
+//!     spare that sets a smaller `max_file_bytes`.
 //! - **What is not bounded.** There is no cap on the total number of files or
 //!   total bytes walked, and no `.gitignore` is honored: a `target/` or
 //!   `node_modules/` directory is walked like any other, its files seen,
