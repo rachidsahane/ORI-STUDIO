@@ -8428,7 +8428,7 @@ mod tests {
         assert_eq!(
             paths,
             [deep.as_str(), concat!("spec/top", ".md", "#top")],
-            "name order, depth first: spec/d sorts before spec/top.md"
+            "name order, depth first: the directory d sorts before the file top"
         );
     }
 
