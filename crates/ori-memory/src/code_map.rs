@@ -148,12 +148,13 @@
 //!   error recovery, which checks nothing; the size cap bounds it instead,
 //!   and the per-file bound below includes it. Concretely, the stages,
 //!   each under its own deadline:
-//!   - **Per file** (reading, parsing, extraction, and test detection,
-//!     together): [`CodeMapOptions::file_timeout`] plus a size-proportional
-//!     allowance (`per_file_budget`; see its doc for why a fixed bound alone
-//!     is wrong for roughly half the builds that check it), which every
-//!     part of the step that can be interrupted checks, plus, past that,
-//!     the one part that cannot. Parsing is bounded through
+//!   - **Per file** (a symlink's re-validation, opening, reading, parsing,
+//!     extraction, and test detection, together; the re-validation since
+//!     round 9, see "Symlinks"): [`CodeMapOptions::file_timeout`] plus a
+//!     size-proportional allowance (`per_file_budget`; see its doc for why
+//!     a fixed bound alone is wrong for roughly half the builds that check
+//!     it), which every part of the step that can be interrupted checks,
+//!     plus, past that, the one part that cannot. Parsing is bounded through
 //!     [`tree_sitter::Parser::parse_with_options`]'s progress callback,
 //!     which tree-sitter polls periodically while it parses, and not while
 //!     it recovers from an error at the end of its input: an input that
@@ -234,8 +235,12 @@
 //!     [`Coverage::spec_citation_scan`] is where its own incompleteness is
 //!     recorded, with the reason, not a demotion of an already-successful
 //!     `Module`; see that field's doc for why.
-//!   - **Outside any deadline**, and reading no file's content: the walk
-//!     (see "What is not bounded"), the `use crate::` index
+//!   - **Following the walk's symlinks**, once per [`build_code_map`] call:
+//!     a budget of the same `file_timeout`, spent by every symlink entry's
+//!     `stat` and resolution together and checked before each, so once it
+//!     is spent every later link is a recorded `TimedOut`; see "Symlinks".
+//!   - **Outside any deadline**, and reading no file's content: the rest of
+//!     the walk (see "What is not bounded"), the `use crate::` index
 //!     (`RustModuleIndex::build`), built once per map in time linear in the
 //!     walk's paths plus sorting them, and the final sort of each module's
 //!     lists, `n log n` in entries that the file's size bounds (at most one
@@ -284,6 +289,32 @@
 //!   about 1 MiB, at 1.4 GB resident, 27.6 MB more per link, and nothing
 //!   capped the number of links
 //!   (`tests::ori_t_0036_links_to_one_file_are_read_once_not_once_per_link`).
+//!   Following a link costs time before anything is read, and that is
+//!   bounded too, since round 9. The walk classifies a link's target by a
+//!   `stat` and places a link to a file by resolving it
+//!   ([`std::fs::canonicalize`]), and `process_file` resolves it again just
+//!   before its open. Each resolution runs only once a walk of the same
+//!   path, done as `realpath` does it and checked against its deadline at
+//!   every component, has found that it looks up at most 65,536 path
+//!   components (a `stat` of a path of `n` components looks up `n`) and
+//!   expands at most 40 links; a link that would cost more is
+//!   [`SkipReason::SymlinkResolutionOverBound`], never resolved or opened.
+//!   One refusal at that bound took about 1.4 ms in a release build on
+//!   macOS. The walk's links together spend at most one budget of
+//!   [`CodeMapOptions::file_timeout`], plus one link's bounded work, checked
+//!   before each link's `stat` and each resolution, after which every later
+//!   link is [`SkipReason::TimedOut`] under its own path. `process_file`'s
+//!   re-validation runs under the file's own deadline, and in a repository
+//!   that holds still repeats, for the links the walk admitted, the work
+//!   the walk already did inside its budget, so all of it together is at
+//!   most about twice that budget. Until round 9 neither resolution had a
+//!   deadline or a bound: the review of round 8 gave each link a target
+//!   that walks a 195-deep directory chain down and back up, through 31
+//!   chained links, which cost 13 ms of `realpath` per resolution, twice
+//!   per link, and mapped 2031 such links to one 14-byte file in 52
+//!   seconds with nothing recorded as `TimedOut`
+//!   (`tests::ori_t_0036_crafted_symlink_targets_time_out_under_a_short_deadline`,
+//!   `tests::ori_t_0036_a_link_whose_resolution_costs_too_much_is_refused_unresolved`).
 //!   A symlink to a directory is never descended into either, and is
 //!   recorded as [`SkipReason::SymlinkedDirectory`], not silently absent:
 //!   the walk saw it and made a decision about it, unlike an ordinary
@@ -472,6 +503,8 @@
 //!   hard link to content already read costs one [`SkippedFile`], and the
 //!   map follows the checkout's entries and its distinct content, nothing
 //!   else (until round 8 a link cost a whole parse and a whole [`Module`];
+//!   see "Symlinks"). Following a symlink entry is bounded per link and,
+//!   in the walk, for all links together (until round 9 it was neither;
 //!   see "Symlinks"). Races with a live writer are out of scope; see
 //!   "Threat model".
 //!
@@ -1132,7 +1165,10 @@ pub enum SkipReason {
     /// budget, or, in [`Coverage::spec_docs_skipped`], the `spec/` citation
     /// scan did not reach it (a document, or a directory it had not
     /// finished listing) before its deadline; see the module doc's "Time"
-    /// bound.
+    /// bound. For a symlink, also: the walk had spent its budget for
+    /// following links before it reached this one, or its resolution did
+    /// not finish before its deadline (since round 9; see the module doc's
+    /// "Symlinks").
     TimedOut,
     /// It is a symlink whose target is a directory. Never descended (see the
     /// module doc's cycle-safety note), and, unlike a plain directory,
@@ -1177,6 +1213,19 @@ pub enum SkipReason {
         /// was not mapped.
         path: String,
     },
+    /// It is a symlink whose resolution would cost more than one link's
+    /// resolution may: more than `lookups` path-component lookups (the
+    /// target's components, and those of every link met inside it,
+    /// expanded, each looked up along the whole path built so far, as
+    /// `realpath` does), or more than 40 links expanded. So where it points
+    /// was never decided, and it was never opened. See the module doc's
+    /// "Symlinks" for why one link's resolution is bounded: until round 9 a
+    /// static repository could make each link cost 26 ms, with no bound on
+    /// how many links it held.
+    SymlinkResolutionOverBound {
+        /// The most lookups one link's resolution may cost.
+        lookups: usize,
+    },
 }
 
 impl fmt::Display for SkipReason {
@@ -1202,6 +1251,11 @@ impl fmt::Display for SkipReason {
             Self::SameFileAs { path } => {
                 write!(f, "the same file as {path}, read under that path")
             }
+            Self::SymlinkResolutionOverBound { lookups } => write!(
+                f,
+                "symlink whose resolution would cost more than {lookups} path lookups, never \
+                 resolved"
+            ),
         }
     }
 }
@@ -1414,7 +1468,10 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
         source,
     })?;
 
-    let walk = walk_repository(&root_canon);
+    // The walk's symlink entries get one budget between them, sized by the
+    // same `file_timeout` configuration value as the `spec/` scan's
+    // deadline: see `LinkBudget`.
+    let walk = walk_repository(&root_canon, options.file_timeout);
     let files_seen = walk.files.len() + walk.pre_skipped.len();
     // Each path allocated once, here: a resolved edge's target is a clone
     // of one of these, never a fresh copy (see `EdgeTarget`).
@@ -1545,11 +1602,15 @@ struct Walk {
 
 /// Walks `root_canon` (already canonicalized) for every file, following no
 /// symlinked directory anywhere, descending no directory named `.git`. See
-/// the module doc's "Untrusted input" bounds.
-fn walk_repository(root_canon: &Path) -> Walk {
+/// the module doc's "Untrusted input" bounds. Following its symlink entries
+/// spends at most `link_budget`, all of them together, plus one link's
+/// bounded work (see [`LinkBudget`]); every link met after that is
+/// [`SkipReason::TimedOut`].
+fn walk_repository(root_canon: &Path, link_budget: Duration) -> Walk {
     let mut files: Vec<CandidateFile> = Vec::new();
     let mut pre_skipped: Vec<SkippedFile> = Vec::new();
     let mut pending: Vec<PathBuf> = vec![root_canon.to_path_buf()];
+    let mut links = LinkBudget::new(link_budget);
 
     while let Some(dir) = pending.pop() {
         let read_dir = match fs::read_dir(&dir) {
@@ -1611,8 +1672,15 @@ fn walk_repository(root_canon: &Path) -> Walk {
                 // `stat`, never `open`: deciding what a symlink's target is
                 // must never itself open it (a FIFO's `open` can block with
                 // no writer present). `fs::metadata` follows the link but is
-                // a `stat`-family call.
-                match fs::metadata(&abs) {
+                // a `stat`-family call. Metered, like the resolution below:
+                // once the walk's link budget is spent, a link is recorded
+                // as `TimedOut` without anything following it (see
+                // `LinkBudget`).
+                let Some(stat) = links.run(|_| fs::metadata(&abs)) else {
+                    admit_skip(root_canon, &abs, SkipReason::TimedOut, &mut pre_skipped);
+                    continue;
+                };
+                match stat {
                     Ok(target_meta) if target_meta.is_dir() => {
                         // Never descended: see the module doc's cycle-safety
                         // note. Recorded, not silently absent: this entry is
@@ -1626,7 +1694,13 @@ fn walk_repository(root_canon: &Path) -> Walk {
                             &mut pre_skipped,
                         );
                     }
-                    Ok(target_meta) if target_meta.is_file() => match fs::canonicalize(&abs) {
+                    Ok(target_meta) if target_meta.is_file() => match links
+                        .run(|deadline| resolve_link_bounded(&abs, deadline))
+                        .unwrap_or(Err(LinkRefusal::TimedOut))
+                    {
+                        Err(refusal @ (LinkRefusal::TimedOut | LinkRefusal::OverBound)) => {
+                            admit_skip(root_canon, &abs, refusal.skip_reason(), &mut pre_skipped);
+                        }
                         Ok(resolved) if resolved.starts_with(root_canon) => {
                             if resolved_path_enters_git(root_canon, &resolved) {
                                 admit_skip(
@@ -1753,6 +1827,220 @@ fn resolved_path_enters_git(root_canon: &Path, resolved: &Path) -> bool {
                 .any(|c| is_git_directory_name(c.as_os_str()))
         })
         .unwrap_or(false)
+}
+
+/// The most path-component lookups resolving one symlink entry may cost,
+/// counted by [`link_resolution_within_bound`] before
+/// [`fs::canonicalize`] is asked to do the same work. Resolving a link the
+/// way `realpath` does takes one `stat` per component of every target met
+/// along the way, each of the whole path built so far, and a `stat` of a
+/// path of `n` components looks up `n`: that sum is what is counted (plus
+/// one per `..` or leading `/`, which need no lookup, so no step is free).
+/// An ordinary link costs tens to a few hundred (a 20-component absolute
+/// target costs about 210); the shape the review of round 8 built, a
+/// target that walks 195 directories down and back up, through 31 chained
+/// links, costs about 640,000, which took `realpath` 13.5 ms per call on
+/// macOS, twice per link, with no bound on the number of links. At this
+/// bound one link's resolution costs about a millisecond or two: the
+/// walk's check and `canonicalize`'s own work, each at most this many
+/// lookups.
+const MAX_LINK_RESOLUTION_LOOKUPS: usize = 65_536;
+
+/// The most symlinks resolving one entry may expand, the entry itself
+/// included: Linux's own limit (`MAXSYMLINKS`, 40). macOS stops at 32, and
+/// its `stat` of the link then fails before this is reached. What it
+/// bounds is memory: each expansion queues its target's components, at
+/// most `PATH_MAX` bytes of them.
+const MAX_LINK_RESOLUTION_EXPANSIONS: usize = 40;
+
+/// Why a symlink entry was not resolved.
+#[derive(Debug)]
+enum LinkRefusal {
+    /// Its deadline passed, before its resolution began or during it.
+    TimedOut,
+    /// Resolving it would cost more than [`MAX_LINK_RESOLUTION_LOOKUPS`],
+    /// or expand more than [`MAX_LINK_RESOLUTION_EXPANSIONS`] links.
+    OverBound,
+    /// A step of its resolution failed (a component missing, or too long).
+    Io(io::Error),
+}
+
+impl LinkRefusal {
+    /// What an entry refused this way is recorded as.
+    fn skip_reason(self) -> SkipReason {
+        match self {
+            Self::TimedOut => SkipReason::TimedOut,
+            Self::OverBound => SkipReason::SymlinkResolutionOverBound {
+                lookups: MAX_LINK_RESOLUTION_LOOKUPS,
+            },
+            Self::Io(err) => SkipReason::Unreadable(err.to_string()),
+        }
+    }
+}
+
+/// What the walk may spend following its symlink entries, all of them
+/// together: the `stat` that classifies each link's target, and the
+/// resolution ([`resolve_link_bounded`]) that places a link to a file
+/// inside or outside the root. Time spent, not a deadline fixed when the
+/// walk starts: the walk interleaves this with listing directories, which
+/// is not metered (see the module doc's "What is not bounded"), and a
+/// deadline fixed up front would let a large tree of plain files use up
+/// the links' share. Each step is checked before it starts, none starts
+/// once the budget is spent, and each runs under the deadline what is left
+/// sets, which [`link_resolution_within_bound`] checks at every component:
+/// the walk spends at most the budget plus one step's bounded work on its
+/// links, however many there are. Until round 9 nothing metered this, and
+/// the review of round 8 made each link cost 26 ms of `realpath` (see
+/// [`MAX_LINK_RESOLUTION_LOOKUPS`]): 2031 links to one 14-byte file took 52
+/// seconds, none of it recorded as `TimedOut`.
+struct LinkBudget {
+    /// What is left to spend.
+    remaining: Duration,
+}
+
+impl LinkBudget {
+    fn new(budget: Duration) -> Self {
+        Self { remaining: budget }
+    }
+
+    /// Runs `step` under the deadline what is left of the budget sets, and
+    /// charges the budget the time it took; `None`, without running it,
+    /// when nothing is left.
+    fn run<T>(&mut self, step: impl FnOnce(Instant) -> T) -> Option<T> {
+        if self.remaining.is_zero() {
+            return None;
+        }
+        let started = Instant::now();
+        let outcome = step(started + self.remaining);
+        self.remaining = self.remaining.saturating_sub(started.elapsed());
+        Some(outcome)
+    }
+}
+
+/// Where the symlink `link` points, resolved by [`fs::canonicalize`], the
+/// platform's own `realpath`, which is what decides inside or outside the
+/// root, and inside or outside `.git`, in whatever spelling the filesystem
+/// keeps (see [`is_git_directory_name`]); but only once
+/// [`link_resolution_within_bound`] has found that the resolution costs no
+/// more than one link may, before `deadline`.
+fn resolve_link_bounded(
+    link: &Path,
+    deadline: Instant,
+) -> std::result::Result<PathBuf, LinkRefusal> {
+    link_resolution_within_bound(link, deadline)?;
+    fs::canonicalize(link).map_err(LinkRefusal::Io)
+}
+
+/// Whether resolving the symlink `link` costs at most
+/// [`MAX_LINK_RESOLUTION_LOOKUPS`] and expands at most
+/// [`MAX_LINK_RESOLUTION_EXPANSIONS`] links, found by doing that
+/// resolution's walk, as `realpath` does it, and stopping at the first
+/// step past either bound, or past `deadline`, which is checked before
+/// every step: one component, one `lstat` (and one `readlink` for a link),
+/// whatever the target holds. It starts in `link`'s own directory, which
+/// the walk reached without following any symlink. Its answer is a cost,
+/// never where the link points: that is [`fs::canonicalize`]'s, called only
+/// after this returns `Ok`, so a way this walk reads a path differently
+/// from the platform's own can refuse a link, never place one.
+#[cfg(unix)]
+fn link_resolution_within_bound(
+    link: &Path,
+    deadline: Instant,
+) -> std::result::Result<(), LinkRefusal> {
+    use std::path::Component;
+
+    /// One step of what is left to resolve.
+    enum Step {
+        /// A leading `/`: start again at the filesystem root.
+        Root,
+        /// `..`: up one directory.
+        Up,
+        /// A name to look up in the directory reached so far.
+        Name(std::ffi::OsString),
+    }
+
+    let (Some(parent), Some(name)) = (link.parent(), link.file_name()) else {
+        return Err(LinkRefusal::Io(io::Error::other(
+            "a symlink entry with no directory or no name",
+        )));
+    };
+    let mut current = parent.to_path_buf();
+    let mut depth = current
+        .components()
+        .filter(|component| matches!(component, Component::Normal(_)))
+        .count();
+    // Last in, first out: a target's steps are queued in reverse.
+    let mut pending = vec![Step::Name(name.to_owned())];
+    let mut lookups = 0usize;
+    let mut expansions = 0usize;
+    let mut charge = |cost: usize| -> std::result::Result<(), LinkRefusal> {
+        lookups = lookups.saturating_add(cost);
+        if lookups > MAX_LINK_RESOLUTION_LOOKUPS {
+            Err(LinkRefusal::OverBound)
+        } else {
+            Ok(())
+        }
+    };
+    while let Some(step) = pending.pop() {
+        if Instant::now() >= deadline {
+            return Err(LinkRefusal::TimedOut);
+        }
+        match step {
+            Step::Root => {
+                charge(1)?;
+                current = PathBuf::from("/");
+                depth = 0;
+            }
+            Step::Up => {
+                charge(1)?;
+                if current.pop() {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+            Step::Name(name) => {
+                charge(depth + 1)?;
+                let candidate = current.join(&name);
+                let meta = fs::symlink_metadata(&candidate).map_err(LinkRefusal::Io)?;
+                if meta.file_type().is_symlink() {
+                    expansions += 1;
+                    if expansions > MAX_LINK_RESOLUTION_EXPANSIONS {
+                        return Err(LinkRefusal::OverBound);
+                    }
+                    charge(depth + 1)?;
+                    let target = fs::read_link(&candidate).map_err(LinkRefusal::Io)?;
+                    let queued = pending.len();
+                    pending.extend(target.components().filter_map(|component| match component {
+                        Component::RootDir => Some(Step::Root),
+                        Component::ParentDir => Some(Step::Up),
+                        Component::Normal(part) => Some(Step::Name(part.to_owned())),
+                        Component::CurDir | Component::Prefix(_) => None,
+                    }));
+                    pending[queued..].reverse();
+                } else {
+                    current = candidate;
+                    depth += 1;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`link_resolution_within_bound`], off unix: [`fs::canonicalize`] there
+/// is one open, whose path the platform resolves in the kernel within its
+/// own limits on reparse points and path length, with no walk in this
+/// process to count, so only `deadline` is checked. Compiled for Windows by
+/// this ticket, never run there.
+#[cfg(not(unix))]
+fn link_resolution_within_bound(
+    _link: &Path,
+    deadline: Instant,
+) -> std::result::Result<(), LinkRefusal> {
+    if Instant::now() >= deadline {
+        Err(LinkRefusal::TimedOut)
+    } else {
+        Ok(())
+    }
 }
 
 /// Admits `abs` as a candidate file under its own path, or, when its path is
@@ -2223,6 +2511,10 @@ fn process_file(
     read_under: &mut ReadUnder,
 ) -> std::result::Result<Module, SkipReason> {
     let language = language_of(&file.rel).ok_or(SkipReason::UnsupportedLanguage)?;
+    // The file's whole step runs from here, a symlink's re-validation
+    // included: until round 9 its `canonicalize` ran before any deadline
+    // existed, and a crafted target made each one cost 13 ms.
+    let started = Instant::now();
 
     // Open first, decide by the opened handle, not by a path-based `stat`
     // followed by a separate, later `open`: this ticket's third review round
@@ -2242,9 +2534,11 @@ fn process_file(
         // file" down to "between this canonicalize and this open"; it does
         // not close it (a swap timed into that narrower gap is not
         // detected, and is outside this module's threat model: see the
-        // module doc).
-        let resolved =
-            fs::canonicalize(&file.abs).map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+        // module doc). Bounded as the walk's resolution is, and under the
+        // file's own budget, not the walk's (see `LinkBudget`): the walk's
+        // budget is what bounds how many links reach this point.
+        let resolved = resolve_link_bounded(&file.abs, started + options.file_timeout)
+            .map_err(LinkRefusal::skip_reason)?;
         if !resolved.starts_with(root_canon) {
             return Err(SkipReason::SymlinkOutsideRoot);
         }
@@ -2278,7 +2572,7 @@ fn process_file(
         .map_or_else(|| Arc::from(file.rel.as_str()), Arc::clone);
     read_under.insert(identity, own_path);
 
-    let deadline = Instant::now() + per_file_budget(options, meta.len());
+    let deadline = started + per_file_budget(options, meta.len());
 
     // The cap is enforced on bytes actually read (`read_capped`), not on
     // `meta.len()` taken on trust: a file that grows after this `fstat`, or
@@ -11449,6 +11743,208 @@ mod tests {
         for (module, edges) in expected {
             assert_eq!(edge_pairs(&map, module), edges, "{module}");
         }
+        drop(guard);
+    }
+
+    /// The shape the review of round 8 built to make each symlink's
+    /// resolution slow, in `dir`: one 14-byte source file, `f.rs`; one
+    /// directory chain `d/d/.../d`, 195 deep; 30 links `c00.rs` to `c29.rs`,
+    /// each pointing at the next (`c29.rs` at `f.rs`); and `links` links
+    /// `l0000.rs`, ... pointing at `c00.rs`. Every target walks the whole
+    /// chain down and back up first (`d/` 195 times, then `../` 195 times),
+    /// about 980 bytes, so resolving an `l` link looks up 31 such walks.
+    #[cfg(unix)]
+    fn crafted_link_repo(dir: &Path, links: usize) {
+        use std::os::unix::fs::symlink;
+        write(dir, "f.rs", "pub fn f() {}\n");
+        fs::create_dir_all(dir.join("d/".repeat(195))).expect("the directory chain");
+        let pad = format!("{}{}", "d/".repeat(195), "../".repeat(195));
+        for index in 0..30 {
+            let next = if index == 29 {
+                "f.rs".to_owned()
+            } else {
+                format!("c{:02}.rs", index + 1)
+            };
+            symlink(format!("{pad}{next}"), dir.join(format!("c{index:02}.rs"))).expect("chain");
+        }
+        for index in 0..links {
+            symlink(format!("{pad}c00.rs"), dir.join(format!("l{index:04}.rs"))).expect("link");
+        }
+    }
+
+    /// Round 9, item 1 (MEDIUM, safety): every symlink to a file was
+    /// resolved by `fs::canonicalize` twice, in the walk and again before
+    /// its open, neither under any deadline, and a static repository
+    /// chooses what each costs: with the review's shape
+    /// (`tests::crafted_link_repo`) each link cost about 26 ms, and 2031
+    /// entries took 52 seconds, nothing recorded as `TimedOut`, for a
+    /// checkout whose only source file is 14 bytes. With a short deadline,
+    /// the walk now stops following links once its link budget is spent,
+    /// and records every later one as `TimedOut`, so the map comes back in
+    /// about that budget, whatever the number of links. At the round-8
+    /// cost this test's 1000 links took about 26 seconds.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_crafted_symlink_targets_time_out_under_a_short_deadline() {
+        let dir = temp_dir("crafted-link-deadline");
+        let guard = DropGuard(dir.clone());
+        let links = 1000;
+        crafted_link_repo(&dir, links);
+        let options = CodeMapOptions {
+            file_timeout: Duration::from_millis(100),
+            ..CodeMapOptions::default()
+        };
+        let started = Instant::now();
+        let map = build_code_map_with_options(&dir, &options).expect("maps");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "{links} crafted links must cost about the link budget (100 ms), not a fixed cost \
+             per link: took {elapsed:?}"
+        );
+        let modules: Vec<&str> = map.modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(modules, vec!["f.rs"]);
+        let over_bound = SkipReason::SymlinkResolutionOverBound {
+            lookups: MAX_LINK_RESOLUTION_LOOKUPS,
+        };
+        let same_as_f = SkipReason::SameFileAs {
+            path: "f.rs".to_owned(),
+        };
+        let mut timed_out = 0usize;
+        for skipped in &map.coverage.files_skipped {
+            if skipped.reason == SkipReason::TimedOut {
+                timed_out += 1;
+            }
+            assert!(
+                skipped.reason == SkipReason::TimedOut
+                    || skipped.reason == over_bound
+                    || (skipped.path.starts_with('c') && skipped.reason == same_as_f),
+                "every link is timed out, over the bound, or (a short chain) placed: {skipped:?}"
+            );
+        }
+        assert_eq!(map.coverage.files_skipped.len(), links + 30);
+        assert!(
+            timed_out > 0,
+            "a static repository full of crafted links must yield TimedOut, not unbounded time"
+        );
+        assert_eq!(
+            map.coverage.files_seen,
+            map.coverage.files_parsed_clean
+                + map.coverage.files_parsed_with_errors
+                + map.coverage.files_skipped.len()
+        );
+        drop(guard);
+    }
+
+    /// Round 9, item 1, the bound on one link: however much time is left,
+    /// a link whose resolution would cost more than
+    /// `MAX_LINK_RESOLUTION_LOOKUPS` is refused as
+    /// `SkipReason::SymlinkResolutionOverBound` and never opened, in the
+    /// walk and in `process_file`'s own re-validation alike, while a
+    /// crafted chain short enough to fit and ordinary links (relative,
+    /// absolute, to another link) are still placed. Until round 9 the
+    /// 31-hop link was resolved (26 ms, twice) and recorded as the same
+    /// file as `f.rs`, and `process_file` read `f.rs` through it.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_link_whose_resolution_costs_too_much_is_refused_unresolved() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir("crafted-link-bound");
+        let guard = DropGuard(dir.clone());
+        crafted_link_repo(&dir, 1);
+        symlink("f.rs", dir.join("o1.rs")).expect("relative link");
+        symlink("o1.rs", dir.join("o2.rs")).expect("link to a link");
+        symlink(dir.join("f.rs"), dir.join("o3.rs")).expect("absolute link");
+
+        let map = build_code_map(&dir).expect("maps");
+        let modules: Vec<&str> = map.modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(modules, vec!["f.rs"]);
+        let reason = |path: &str| {
+            map.coverage
+                .files_skipped
+                .iter()
+                .find(|skipped| skipped.path == path)
+                .map(|skipped| skipped.reason.clone())
+                .unwrap_or_else(|| panic!("{path} recorded"))
+        };
+        let over_bound = SkipReason::SymlinkResolutionOverBound {
+            lookups: MAX_LINK_RESOLUTION_LOOKUPS,
+        };
+        let same_as_f = SkipReason::SameFileAs {
+            path: "f.rs".to_owned(),
+        };
+        assert_eq!(reason("l0000.rs"), over_bound, "31 crafted hops");
+        assert_eq!(reason("c00.rs"), over_bound, "30 crafted hops");
+        assert_eq!(reason("c29.rs"), same_as_f, "one crafted hop fits");
+        for path in ["o1.rs", "o2.rs", "o3.rs"] {
+            assert_eq!(reason(path), same_as_f, "an ordinary link: {path}");
+        }
+        for index in 1..29 {
+            let path = format!("c{index:02}.rs");
+            let got = reason(&path);
+            assert!(got == over_bound || got == same_as_f, "{path}: {got:?}");
+        }
+        assert_eq!(map.coverage.files_skipped.len(), 34);
+
+        // The second resolution, `process_file`'s re-validation, directly.
+        let root = fs::canonicalize(&dir).expect("canonicalize root");
+        let candidate = CandidateFile {
+            abs: root.join("l0000.rs"),
+            rel: "l0000.rs".to_owned(),
+            was_symlink: true,
+        };
+        let known = KnownPaths::new();
+        let index = RustModuleIndex::build(&known);
+        let result = process_file(
+            &candidate,
+            &known,
+            &index,
+            &CodeMapOptions::default(),
+            &root,
+            &mut ReadUnder::new(),
+        );
+        assert_eq!(result, Err(over_bound));
+        drop(guard);
+    }
+
+    /// Round 9, item 1, the budget checked per link: once the walk's link
+    /// budget is spent, no symlink entry is followed at all, not even by
+    /// the `stat` that classifies its target, and each is recorded as
+    /// `SkipReason::TimedOut` under its own path; plain entries are still
+    /// admitted, since listing them follows nothing.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_spent_link_budget_follows_no_further_link() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir("spent-link-budget");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "f.rs", "pub fn f() {}\n");
+        fs::create_dir_all(dir.join("sub")).expect("a directory");
+        symlink("f.rs", dir.join("a.rs")).expect("link to a file");
+        symlink("sub", dir.join("b")).expect("link to a directory");
+        symlink("gone.rs", dir.join("c.rs")).expect("dangling link");
+        let root = fs::canonicalize(&dir).expect("canonicalize root");
+
+        let walk = walk_repository(&root, Duration::ZERO);
+        let files: Vec<&str> = walk.files.iter().map(|file| file.rel.as_str()).collect();
+        assert_eq!(files, vec!["f.rs"]);
+        let timed_out = |path: &str| SkippedFile {
+            path: path.to_owned(),
+            reason: SkipReason::TimedOut,
+        };
+        assert_eq!(
+            walk.pre_skipped,
+            vec![timed_out("a.rs"), timed_out("b"), timed_out("c.rs")]
+        );
+
+        let walk = walk_repository(&root, Duration::from_secs(5));
+        let files: Vec<&str> = walk.files.iter().map(|file| file.rel.as_str()).collect();
+        assert_eq!(
+            files,
+            vec!["a.rs", "f.rs"],
+            "the same links, with time to follow them"
+        );
         drop(guard);
     }
 }
