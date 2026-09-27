@@ -197,11 +197,11 @@
 //! [`RepoWalk::skipped`], with a [`SkipReason`], each of these instead of
 //! reading it:
 //!
-//! - a symbolic link, to a file or to a directory, anywhere under `spec/`,
-//!   `spec/` itself included ([`SkipReason::Symlink`]): followed, `spec/mockups
-//!   -> design` or a file link into `spec/design/` indexed exactly the mock
-//!   data the exclusion above keeps out, and a link out of the repository
-//!   would have read whatever it pointed at;
+//! - a symbolic link, to a file or to a directory, anywhere under `spec/`
+//!   ([`SkipReason::Symlink`]): followed, `spec/mockups -> design` or a file
+//!   link into `spec/design/` indexed exactly the mock data the exclusion
+//!   above keeps out, and a link out of the repository would have read
+//!   whatever it pointed at;
 //! - a `.md` entry that is not a regular file, such as a named pipe, which
 //!   would block the walk forever on read ([`SkipReason::NotARegularFile`]);
 //! - a `.md` file whose path under the repository is not UTF-8
@@ -227,6 +227,17 @@
 //!
 //! A static repository is the scope: an entry swapped for a link between the
 //! walk's type check and its read is a race this does not claim to close.
+//!
+//! `spec/` itself is not an entry the walk can leave out: a walk with no
+//! `spec/` directory to walk (the repository root or `spec/` missing, or
+//! `spec/` a symbolic link, never followed, or a regular file) is refused
+//! with [`IndexerError::NoSpecDirectory`]. A review found round 6 returning
+//! an empty walk, `Ok`, with nothing skipped, for a repository root that
+//! did not exist and for a `spec/` that was a file; handed to
+//! [`Indexer::incremental_sync`], the documented pairing, that walk removed
+//! every document and returned `Ok`, and [`Indexer::collect_from_repo`]
+//! drops the skip list, so even the round 6 record of a linked `spec/` gave
+//! its caller nothing to notice.
 //!
 //! # Text before the first heading is a document too
 //!
@@ -1071,6 +1082,18 @@ pub enum IndexerError {
         /// Its `title` and `body` length together, in bytes.
         byte_len: usize,
     },
+    /// [`Indexer::walk_repo`] found no `spec/` directory to walk under the
+    /// repository root it was given: the root or `spec/` does not exist,
+    /// or `spec/` is a symbolic link or not a directory. Refused rather
+    /// than reported as a repository with no documents, which a sync would
+    /// read as every document removed (the module doc's "The vacuity
+    /// trap").
+    NoSpecDirectory {
+        /// The entry that is missing or not a directory.
+        path: PathBuf,
+        /// Why.
+        reason: &'static str,
+    },
     /// [`Indexer::recover`] could not move every index file into
     /// quarantine, and moved back every file it had already moved that it
     /// could. Nothing was rebuilt. When `stranded` is empty the index files
@@ -1173,6 +1196,12 @@ impl fmt::Display for IndexerError {
                 "{path} is too large to index: {byte_len} bytes of title and body (max \
                  {MAX_DOCUMENT_BYTES})"
             ),
+            Self::NoSpecDirectory { path, reason } => write!(
+                f,
+                "no spec/ directory to walk at {}: {reason}; refusing to report an empty \
+                 repository, which a sync would read as every document removed",
+                path.display()
+            ),
             Self::QuarantineIncomplete {
                 path,
                 source,
@@ -1219,7 +1248,8 @@ impl std::error::Error for IndexerError {
             | Self::DuplicatePath { .. }
             | Self::RecoveryRefused { .. }
             | Self::OpenRefused { .. }
-            | Self::DocumentTooLarge { .. } => None,
+            | Self::DocumentTooLarge { .. }
+            | Self::NoSpecDirectory { .. } => None,
         }
     }
 }
@@ -2427,18 +2457,36 @@ impl Indexer<'_> {
     /// repository walk never reads". Entries are visited in name order, so
     /// the result does not depend on the filesystem's own directory order.
     ///
+    /// A walk that returns `Ok` walked a real `spec/` directory: when there
+    /// is none to walk it is refused, never reported as an empty
+    /// repository, because an empty walk handed to
+    /// [`Indexer::incremental_sync`] removes every document and returns
+    /// `Ok` (the module doc's "The vacuity trap").
+    ///
     /// # Errors
     ///
-    /// [`IndexerError::Io`] only if `repo_root/spec` itself exists and
-    /// cannot be read, or if a file this walk reaches is somehow not under
-    /// `repo_root` (the module never synthesizes an absolute-path identity
-    /// as a fallback, see `walk_markdown`'s doc). One unreadable file or
-    /// subdirectory never fails the walk.
+    /// [`IndexerError::NoSpecDirectory`] if `repo_root` does not exist, or
+    /// `repo_root/spec` does not exist, is a symbolic link (never
+    /// followed), or is not a directory; [`IndexerError::Io`] if
+    /// `repo_root/spec` cannot be inspected or listed. One unreadable file
+    /// or subdirectory below it never fails the walk.
     pub fn walk_repo(repo_root: &Path) -> Result<RepoWalk, IndexerError> {
         let spec_dir = repo_root.join("spec");
         let mut walk = RepoWalk::default();
         match std::fs::symlink_metadata(&spec_dir) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(walk),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(if std::fs::symlink_metadata(repo_root).is_err() {
+                    IndexerError::NoSpecDirectory {
+                        path: repo_root.to_owned(),
+                        reason: "the repository root does not exist",
+                    }
+                } else {
+                    IndexerError::NoSpecDirectory {
+                        path: spec_dir,
+                        reason: "it does not exist",
+                    }
+                });
+            }
             Err(source) => {
                 return Err(IndexerError::Io {
                     path: spec_dir,
@@ -2446,13 +2494,17 @@ impl Indexer<'_> {
                 });
             }
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                walk.skipped.push(SkippedEntry {
+                return Err(IndexerError::NoSpecDirectory {
                     path: spec_dir,
-                    reason: SkipReason::Symlink,
+                    reason: "it is a symbolic link, which the walk never follows",
                 });
-                return Ok(walk);
             }
-            Ok(metadata) if !metadata.is_dir() => return Ok(walk),
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(IndexerError::NoSpecDirectory {
+                    path: spec_dir,
+                    reason: "it is not a directory",
+                });
+            }
             Ok(_) => {}
         }
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -6391,15 +6443,20 @@ mod tests {
         fs::create_dir_all(&repo).expect("create the repository root");
         std::os::unix::fs::symlink(&real, repo.join("spec")).expect("link spec/ elsewhere");
 
-        let walk = Indexer::walk_repo(&repo).expect("walk");
-        assert!(walk.documents.is_empty(), "{walk:?}");
-        assert_eq!(
-            walk.skipped,
-            vec![SkippedEntry {
-                path: repo.join("spec"),
-                reason: SkipReason::Symlink,
-            }]
-        );
+        // Round 6 returned an empty walk recording the link; round 7
+        // refuses it, since an empty walk handed to a sync removes every
+        // document (and collect_from_repo drops the record).
+        match Indexer::walk_repo(&repo) {
+            Err(IndexerError::NoSpecDirectory { path, reason }) => {
+                assert_eq!(path, repo.join("spec"));
+                assert!(reason.contains("symbolic link"), "{reason}");
+            }
+            other => panic!("a linked spec/ is never walked, and never an empty walk: {other:?}"),
+        }
+        assert!(matches!(
+            Indexer::collect_from_repo(&repo),
+            Err(IndexerError::NoSpecDirectory { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -8110,6 +8167,74 @@ mod tests {
             let b = Indexer::open(&beta).expect("B opens");
             assert_eq!(b.search("bravo", 10).expect("search").hits.len(), 1);
             assert_eq!(b.search("alpha", 10).expect("search").hits.len(), 0);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 5 (MEDIUM): no spec/ to walk looked like an empty repository.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_a_walk_with_no_spec_directory_is_refused_and_never_empties_the_index() {
+        // The review: a repository root that does not exist, and a spec/
+        // that is a regular file, each walked as Ok with no document and
+        // nothing skipped; incremental_sync with that walk then removed all
+        // 213 documents of a real index and returned Ok.
+        let scratch = Scratch::new("no-spec");
+        let real = scratch.path.join("real");
+        fs::create_dir_all(real.join("spec")).expect("create spec/");
+        fs::write(real.join("spec").join("PRD.md"), "# PRD\n\nreal content\n")
+            .expect("write a real document");
+        let documents = Indexer::collect_from_repo(&real).expect("walk the real repository");
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        indexer.full_rebuild(&documents).expect("seed");
+
+        let missing_root = scratch.path.join("no-such-repo");
+        let without_spec = scratch.path.join("without-spec");
+        fs::create_dir_all(&without_spec).expect("create a root with no spec/");
+        let spec_is_a_file = scratch.path.join("spec-is-a-file");
+        fs::create_dir_all(&spec_is_a_file).expect("create a root");
+        fs::write(spec_is_a_file.join("spec"), "not a directory").expect("write spec as a file");
+        let cases = [
+            ("missing root", missing_root.clone(), missing_root),
+            ("no spec/", without_spec.clone(), without_spec.join("spec")),
+            (
+                "spec/ a regular file",
+                spec_is_a_file.clone(),
+                spec_is_a_file.join("spec"),
+            ),
+        ];
+        for (label, root, named) in cases {
+            match Indexer::walk_repo(&root) {
+                Err(error @ IndexerError::NoSpecDirectory { .. }) => {
+                    assert_eq!(error.methodology_ref().section, 25);
+                    let IndexerError::NoSpecDirectory { path, .. } = &error else {
+                        unreachable!()
+                    };
+                    assert_eq!(path, &named, "{label}: {error}");
+                }
+                other => panic!("{label}: refused, never an empty walk: {other:?}"),
+            }
+            assert!(
+                matches!(
+                    Indexer::collect_from_repo(&root),
+                    Err(IndexerError::NoSpecDirectory { .. })
+                ),
+                "{label}"
+            );
+            // The caller's documented pairing never reaches the sync.
+            if let Ok(walk) = Indexer::walk_repo(&root) {
+                indexer
+                    .incremental_sync(&walk.documents)
+                    .expect("the sync the review ran");
+            }
+            let found = indexer.search("real", 10).expect("search");
+            assert_eq!(
+                (found.hits.len(), found.documents_covered),
+                (1, 1),
+                "{label}: the index still holds the real document"
+            );
         }
     }
 
