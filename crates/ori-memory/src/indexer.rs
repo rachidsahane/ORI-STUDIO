@@ -460,8 +460,9 @@
 //! heap in use, came back `Corrupt` from `search` and `all_documents`.
 //! `report_names_an_unread_page` has the detail;
 //! `tests::ori_t_0035_a_genuine_out_of_memory_condition_inside_the_check_itself_is_never_called_corrupt`
-//! steps the heap limit down 256 bytes at a time through that window, with
-//! and without another connection committing between calls.
+//! steps the heap limit down through that window 256 bytes at a time, with
+//! and without another connection committing between calls; against round
+//! 6's reading it finds 68 and 67 `Corrupt` results.
 //!
 //! Round 4 asked FTS5's `integrity-check` command instead. That command is
 //! an `INSERT`, so it needed the write lock with a zero busy timeout, it
@@ -8019,7 +8020,8 @@ mod tests {
      {
         // The review's reproduction, on a smaller index: a healthy index,
         // SQLite's hard heap limit set to the heap in use plus a margin that
-        // steps down 256 bytes at a time. Where the margin leaves the check
+        // steps down from 512 KiB, 4 KiB at a time, then 256 bytes at a
+        // time below 64 KiB. Where the margin leaves the check
         // enough memory for its own bookkeeping but not for a page it must
         // read, PRAGMA quick_check does not fail: it returns a report
         // ("unable to get the page. error code=7", "failed to get page 59",
@@ -8027,10 +8029,10 @@ mod tests {
         // and all_documents on a healthy index returned Corrupt, and a
         // caller told to recover would have quarantined it. Measured against
         // round 6's reading of the report: 68 Corrupt and 15 damaged
-        // verdicts in the first run. The second run has another connection
-        // committing between calls, as the review's did. The margins span
-        // the window found here with room on either side; the sweep must
-        // also reach both an ample and a starved heap.
+        // verdicts in the first run, 67 and 13 in the second, which has
+        // another connection committing between calls, as the review's did.
+        // The fine steps span the window found here with room on either
+        // side; the sweep must also reach both an ample and a starved heap.
         const CHILD: &str = "ORI_T_0035_CHECK_OOM_CHILD";
         const ROOT: &str = "ORI_T_0035_CHECK_OOM_ROOT";
         const WRITER: &str = "ORI_T_0035_CHECK_OOM_WRITER";
