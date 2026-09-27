@@ -44,8 +44,8 @@
 //! has been verified, the verification's text still matches, and no
 //! divergence is on record.
 //!
-//! [`FreshnessTracker::list_stale`] has a fourth, for a document it has no
-//! text for because the repository walk left it out:
+//! [`FreshnessTracker::list_stale`] has a fourth, for a record it has no
+//! text for because the repository walk left that text out:
 //! [`StaleReason::NotIndexed`], freshness unknown. The file is still in the
 //! repository, so nothing on record for it is dropped: every record on
 //! something the walk left out is listed with the reason the walk gave, and
@@ -53,26 +53,59 @@
 //! doc; the indexer's module doc, "A file left out is not a file removed",
 //! has what the index holds for such a file: none of its documents).
 //!
+//! # Readiness is about content, not records
+//!
+//! Criterion ORI-P1-026's readiness must never read "ready" over
+//! specification text nobody could check, and whether some text could be
+//! checked is a fact about the text, not about what happens to be on record
+//! for it. So every [`StaleReport`] carries, beside its stale records,
+//! [`StaleReport::freshness_unknown`]: every file, symbolic link or
+//! directory any content of which the repository walk left out, whatever
+//! the walk's reason and whatever the entry's [`SkipReason::scope`] (a
+//! repeated document path, whose later text is in no index, included),
+//! each with every reason the walk gave for it, whether or not any record
+//! exists on it. [`StaleReport::is_ready`] is the report's one readiness
+//! answer: false while that list is not empty or any record is stale,
+//! true otherwise. A file genuinely deleted is in no walk, so it is neither
+//! freshness unknown nor listed.
+//!
+//! Rounds 8 to 11 of this ticket listed records on what the walk left out,
+//! one shape of record at a time, and each review found content no listed
+//! record reached. Round 11's found three, each read as ready: a file whose
+//! own path is also a document of the corpus (a role file with no heading,
+//! or a file with a short preamble) gaining a section past the document
+//! cap, since a record at that path was checked against the indexed text
+//! alone; an edited row repeating a criterion identifier, since the walk's
+//! list dropped the repeat and the record at its path was checked against
+//! the first row; and content left out that nothing had ever been recorded
+//! on. The rule now covers the content itself, so no shape of record, and
+//! no absence of one, can hide it
+//! (`tests::ori_p1_026_every_file_left_out_is_freshness_unknown_whether_or_not_a_record_names_it`;
+//! the indexer's own tests run each shape, and every skip reason, through a
+//! real walk).
+//!
 //! # Freshness unknown is never fresh
 //!
-//! This tracker decides freshness by comparing text. For a record whose
-//! text the walk left out, it has nothing to compare: it cannot tell
-//! whether the document changed after the verification on record, so it
-//! cannot say the document is fresh, and saying nothing would let a caller
-//! read "no stale documents" over a document nobody could check. Every
-//! such record is therefore listed as [`StaleReason::NotIndexed`], this
-//! module's "freshness unknown" reason, carrying the walk's own reason for
-//! leaving the text out, whatever the record holds: a verification alone,
-//! a divergence, or a divergence a later verification cleared. Its line
-//! ([`StaleReason::divergence`]) says "freshness unknown" in so many
-//! words. A review found round 10 dropping a verification alone, and a
-//! divergence cleared by a re-verification, on a file the walk read but
-//! none of whose documents it indexed, every one past the document cap (a
-//! risk map of one heading and 70 KB, a runbook of two such sections, a
-//! criteria file of one such row): the stale list was empty, and a
-//! product read as ready over a file whose text nothing had checked
+//! This tracker decides a record's freshness by comparing text. For a
+//! record whose text the walk left out, it has nothing to compare: it
+//! cannot tell whether the document changed after the verification on
+//! record, so it cannot say the document is fresh, and saying nothing
+//! would drop a record the drift audit still holds. Every such record is
+//! therefore listed as [`StaleReason::NotIndexed`], this module's "freshness
+//! unknown" reason, carrying the walk's own reason for leaving the text
+//! out, whatever the record holds: a verification alone, a divergence, or
+//! a divergence a later verification cleared. Its line
+//! ([`StaleReason::divergence`]) says "freshness unknown" in so many words.
+//! A review found round 10 dropping a verification alone, and a divergence
+//! cleared by a re-verification, on a file the walk read but none of whose
+//! documents it indexed, every one past the document cap (a risk map of
+//! one heading and 70 KB, a runbook of two such sections, a criteria file
+//! of one such row): the stale list was empty
 //! (`tests::ori_p1_026_a_verification_alone_on_a_file_whose_documents_are_past_the_cap_is_listed_as_freshness_unknown`;
 //! the indexer's own tests run the same three shapes through a real walk).
+//! Each such file is in [`StaleReport::freshness_unknown`] as well, so the
+//! report is not ready even where no record reaches it ("Readiness is about
+//! content, not records", above).
 //!
 //! What is not listed is a record on something genuinely gone: a file no
 //! longer in the repository, or a document no longer in a file the walk
@@ -83,7 +116,9 @@
 //!
 //! Every entry the walk left out says what it covers, through
 //! [`SkipReason::scope`], and a record is matched to it by that scope and
-//! nothing else, never by the shape of the entry's key:
+//! nothing else, never by the shape of the entry's key. The file it makes
+//! freshness unknown is decided by the same scope: a file-scoped entry's
+//! own path, or the file a document-scoped entry's document belongs to.
 //!
 //! - A file-scoped entry ([`SkipScope::File`]) is a file, a symbolic link
 //!   or a directory the walk did not read. It covers a record at its path,
@@ -91,15 +126,23 @@
 //!   under that directory: nothing there was read, so nothing there can be
 //!   checked.
 //! - A document-scoped entry ([`SkipScope::Document`]) is one document of a
-//!   file the walk did read and split, left out for its size. It covers a
-//!   record at exactly that document path and no other, even when that
-//!   path is the file's bare path (the text above the file's first
-//!   heading). The file was read, so every other document path of it is
-//!   judged by the corpus: in it and checked, or not in it and removed. A
-//!   section genuinely removed from a file whose preamble is past the cap
-//!   is removed, never pinned as left out.
+//!   file the walk did read and split, left out for its size or as a
+//!   repeat of a path an earlier document of the walk took. It covers a
+//!   record at exactly that document path, when the corpus does not hold
+//!   it (a repeat's path it always does, with the earlier document), and no
+//!   other, even when that path is the file's bare path (the text above
+//!   the file's first heading). The file was read, so every other document
+//!   path of it is judged by the corpus: in it and checked, or not in it
+//!   and removed. A section genuinely removed from a file whose preamble is
+//!   past the cap is removed, never pinned as left out.
 //!
-//! A record on a file's own path that is not a document path (the drift
+//! A record at a file's own path that the corpus holds (the text above the
+//! file's first heading, or a whole file with no heading) is that
+//! document's record, checked against that document's text like any
+//! other; the rest of the file, when the walk left some of it out, is in
+//! [`StaleReport::freshness_unknown`], whatever that record holds.
+//!
+//! A record on a file's own path that the corpus does not hold (the drift
 //! audit's verification or divergence on the file, the `Document` of
 //! `spec/DATA_MODEL.md` section 2) names the whole file. The file was read,
 //! and is still in the repository, when the corpus holds a document of it
@@ -126,17 +169,20 @@
 //! longer in a file the walk read, and every one on a file no longer in the
 //! repository.
 //!
-//! Every listing here can be cleared. A record under a document-scoped
-//! entry is checked like any other once its document is back under the cap
-//! (fresh when its text is the verified text, or once re-verified), and is
-//! removed once the document is removed from its file. A record on a
-//! file's own path listed as not indexed stops being listed once no
-//! document of the file is left out (each back under the cap, or removed
-//! from the file), its file's documents then checked by their own records;
-//! a re-verification of the file while a document of it is still left out
-//! ends its divergence, but not the listing, since the text still cannot be
-//! checked. A file-level divergence beside indexed documents ends with the
-//! file's next verification, as it does anywhere.
+//! Every listing here can be cleared, and so can every file in
+//! [`StaleReport::freshness_unknown`]: a file leaves that list once the
+//! walk leaves nothing of it out (each document back under the cap, the
+//! repeat resolved, the file readable, or the file removed). A record
+//! under a document-scoped entry is checked like any other once its
+//! document is back under the cap (fresh when its text is the verified
+//! text, or once re-verified), and is removed once the document is removed
+//! from its file. A record on a file's own path listed as not indexed
+//! stops being listed once no document of the file is left out, its file's
+//! documents then checked by their own records; a re-verification of the
+//! file while a document of it is still left out ends its divergence, but
+//! not the listing, since the text still cannot be checked. A file-level
+//! divergence beside indexed documents ends with the file's next
+//! verification, as it does anywhere.
 //!
 //! # What does not make a document stale
 //!
@@ -160,7 +206,12 @@
 //! therefore reports [`StaleReport::documents_covered`], the size of the
 //! corpus it was actually asked to check, on every call, so a caller (and
 //! every test in this module) can assert that count is what it expects
-//! before it trusts an empty `stale` list.
+//! before it trusts an empty `stale` list. A tracker holding nothing is
+//! never ready over a corpus holding anything: every document of it is
+//! [`StaleReason::NeverVerified`]. And an empty corpus is ready only when
+//! the walk left nothing out either, [`StaleReport::is_ready`] reading
+//! [`StaleReport::freshness_unknown`] as well: a repository whose every
+//! file was left out has no document to check and is still not ready.
 //!
 //! Must not: return unsanitized production content in a package (`spec/LLD.md`
 //! section 2); nothing here reads a file, a clock or an environment variable,
@@ -315,6 +366,37 @@ pub struct StaleDocument {
     pub reason: StaleReason,
 }
 
+/// One file, symbolic link or directory some or all of whose content the
+/// repository walk left out, as [`FreshnessTracker::list_stale`] reports
+/// it whether or not any record names it: its freshness is unknown (the
+/// module doc's "Readiness is about content, not records"): AICD §25.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FreshnessUnknown {
+    /// The file, link or directory, under the repository root and
+    /// `/`-joined as a document path is: a file-scoped entry's own key, or
+    /// the file a document-scoped entry's document belongs to
+    /// ([`SkipReason::scope`]).
+    pub path: String,
+    /// Why the walk left its content out: the reason of every entry the
+    /// walk's list holds for it, in the order of their keys, never empty.
+    pub skipped: Vec<SkipReason>,
+}
+
+impl FreshnessUnknown {
+    /// A human-readable line for a query result, saying "freshness
+    /// unknown" in so many words and giving every reason the walk left the
+    /// content out for, in [`FreshnessUnknown::skipped`]'s order.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let reasons: Vec<String> = self.skipped.iter().map(ToString::to_string).collect();
+        format!(
+            "freshness unknown: the repository walk left content of it out, so that text could \
+             not be checked against the code: {}",
+            reasons.join("; ")
+        )
+    }
+}
+
 /// The result of one [`FreshnessTracker::list_stale`] call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaleReport {
@@ -325,6 +407,24 @@ pub struct StaleReport {
     /// Every stale document found, each carrying its reason and, through
     /// [`StaleReason::divergence`], a line describing what diverged.
     pub stale: Vec<StaleDocument>,
+    /// Every file, link or directory any content of which the walk left
+    /// out, in path order, whether or not any record names it: what makes
+    /// [`StaleReport::is_ready`] false even where `stale` is empty (the
+    /// module doc's "Readiness is about content, not records").
+    pub freshness_unknown: Vec<FreshnessUnknown>,
+}
+
+impl StaleReport {
+    /// The report's one readiness answer, the freshness half of `ori
+    /// readiness` (criterion ORI-P1-026): false while any record is stale
+    /// or any content the walk left out is freshness unknown, true only
+    /// when both lists are empty. Never read off `stale` alone: a file the
+    /// walk left out may have no record on it at all (the module doc's
+    /// "Readiness is about content, not records"). AICD §25.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.stale.is_empty() && self.freshness_unknown.is_empty()
+    }
 }
 
 /// Tracks, per document path, when it was last verified against the code,
@@ -418,8 +518,11 @@ impl FreshnessTracker {
 
     /// Checks every document in `current`, keyed by path with its text right
     /// now, and reports the stale ones with their divergence, in path order;
-    /// and reports every record on something the repository walk left out,
-    /// named in `not_indexed`, rather than dropping it.
+    /// reports every record on something the repository walk left out,
+    /// named in `not_indexed`, rather than dropping it; and reports every
+    /// file any content of which the walk left out as freshness unknown,
+    /// whether or not any record names it, so that
+    /// [`StaleReport::is_ready`] is false while one is.
     ///
     /// `current` is the live corpus a caller (the indexer's
     /// [`crate::indexer::Indexer::all_documents`], most naturally) hands in
@@ -427,76 +530,86 @@ impl FreshnessTracker {
     /// is what the walk the index was synced from left out,
     /// [`crate::indexer::RepoWalk::not_indexed`] of
     /// [`crate::indexer::Indexer::collect_from_repo`]'s walk: every entry
-    /// still in the repository that the walk did not read, keyed by the
-    /// document path, file path or directory path it names, with the
-    /// reason. A caller with no walk, and so nothing left out, passes an
-    /// empty map.
+    /// the walk did not read or did not index, a repeated document path
+    /// included, keyed by the document path, file path or directory path it
+    /// names, with the reason. The pairing is one walk's documents to the
+    /// sync that produced `current` and the same walk's list here. A caller
+    /// with no walk, and so nothing left out, passes an empty map.
     ///
-    /// The index's corpus is keyed by section, `<file>#<anchor>` (and a
-    /// file's bare path for the text above its first heading), while the
-    /// `Document` of `spec/DATA_MODEL.md` section 2, which the drift audit
-    /// files a divergence against, is the file. So a divergence on record
-    /// for a file whose sections `current` holds is listed, under the
-    /// file's path, whether or not `current` has a key at exactly that
-    /// path: the file is still in the repository. A review found round 7
-    /// dropping it as if the file had been removed, so a product whose
-    /// product requirements diverged read as ready, with every one of its
-    /// indexed sections verified. A verification recorded at a file's path
-    /// says nothing about any one section's text and makes none of them
-    /// fresh; each section is judged by its own record.
+    /// Content first (the module doc's "Readiness is about content, not
+    /// records"): every entry of `not_indexed` names a file, a file-scoped
+    /// entry by its own key and a document-scoped entry by the file its
+    /// document belongs to ([`SkipReason::scope`]), and each such file is in
+    /// [`StaleReport::freshness_unknown`] with every reason the walk gave
+    /// for it, whatever is or is not on record. A review found round 11
+    /// reading readiness off records alone, and three shapes of left-out
+    /// content that no record reached (the module doc has them).
     ///
-    /// Something the walk left out is still in the repository too, though
-    /// none of its text is in `current`. Every record whose path is not in
-    /// `current` and that an entry of `not_indexed` covers, by that entry's
-    /// [`SkipReason::scope`] (the module doc's "What a skip covers"), is
-    /// listed as [`StaleReason::NotIndexed`], with the walk's reason and
-    /// any divergence on record, whether that record is a verification, a
-    /// divergence or both: its text could not be checked, so it is not
-    /// fresh, and nothing the drift audit filed disappears while the file
-    /// exists. A file-scoped entry covers a record at its path, at a
-    /// document of that file, or under that directory; a document-scoped
-    /// entry covers a record at exactly its document path, and never a
-    /// sibling document of the same file, even when its key is the file's
-    /// bare path. A review found round 8 dropping the divergence on a file
-    /// one non-UTF-8 byte, or an ADR grown past the document cap, had taken
-    /// out of the index, so the product read as ready. An entry left out
-    /// with no record on it is not listed: nothing about it was ever
-    /// verified or filed, and the walk's own list names it.
+    /// Then records, each listed in `stale` where it is correct to list it:
     ///
-    /// A document-scoped entry also says its file was read and is still in
-    /// the repository, and that part of its text was left out. So every
-    /// record on that file's own path, a verification alone, a divergence,
-    /// or a divergence a later verification cleared, is listed while any
-    /// document of the file is left out for its size, even when every one
-    /// was and nothing of the file is in `current`: as
-    /// [`StaleReason::NotIndexed`], freshness unknown, carrying the first
-    /// such entry's reason (in path order) and the divergence on record, if
-    /// any. The one exception is a divergence on a file `current` also
-    /// holds a document of, listed as [`StaleReason::Divergence`], above. A
-    /// review found round 9 dropping the divergence: a single-section file
-    /// grown past the document cap left an entry keyed `<file>#<anchor>`,
-    /// which the record at the file's path never matched. A review found
-    /// round 10 still dropping a verification alone there, and a divergence
-    /// a re-verification had cleared, so the stale list was empty over a
-    /// file whose text nothing had checked (the module doc's "Freshness
-    /// unknown is never fresh").
+    /// - Every document of `current` that [`FreshnessTracker::check`] finds
+    ///   stale, including one whose path is a file's bare path, checked
+    ///   against that document's text.
+    /// - A divergence on record for a file whose documents `current` holds,
+    ///   under the file's path, whether or not `current` has a key at
+    ///   exactly that path (the index is keyed by section, the drift audit
+    ///   files against the file, the `Document` of `spec/DATA_MODEL.md`
+    ///   section 2). A review found round 7 dropping it as if the file had
+    ///   been removed. A verification recorded at a file's path says nothing
+    ///   about any one section's text and makes none of them fresh.
+    /// - Every record `current` does not hold that an entry of
+    ///   `not_indexed` covers by its scope (the module doc's "What a skip
+    ///   covers"), as [`StaleReason::NotIndexed`] with the walk's reason and
+    ///   any divergence on record, whatever the record holds: a file-scoped
+    ///   entry covers a record at its path, at a document of that file, or
+    ///   under that directory; a document-scoped entry covers a record at
+    ///   exactly its document path, never a sibling. A review found round 8
+    ///   dropping the divergence on a file one non-UTF-8 byte, or an ADR
+    ///   grown past the document cap, had taken out of the index.
+    /// - Every other record on the path of a file a document-scoped entry
+    ///   names a document of, that `current` does not hold, a verification
+    ///   alone included, as [`StaleReason::NotIndexed`] with the first such
+    ///   entry's reason (in path order) and any divergence on record; the
+    ///   one exception is the divergence beside indexed documents, above.
+    ///   Reviews found round 9 dropping the divergence on a single-section
+    ///   file grown past the cap, and round 10 a verification alone there.
     ///
     /// A verification alone on the path of a file every document of which
     /// is in `current` is not listed: those documents are each checked
-    /// against their own records. Only a record that no entry covers, whose
-    /// file has nothing in `current` and no document-scoped entry, is gone,
-    /// and not reported at all; so is a record for a document removed from
-    /// a file the walk read. That matches the indexer's own rule that a
-    /// removed document disappears rather than lingers. A review found
-    /// round 9 pinning such a record for good when the file's preamble was
-    /// past the document cap, by reading the preamble's entry, keyed at the
-    /// file's bare path, as the whole file.
+    /// against their own records. A record no entry covers, whose file has
+    /// nothing in `current` and no document-scoped entry, is gone and not
+    /// reported at all; so is a record for a document removed from a file
+    /// the walk read, and a file genuinely deleted is in neither list. That
+    /// matches the indexer's own rule that a removed document disappears
+    /// rather than lingers. A review found round 9 pinning such a record for
+    /// good when the file's preamble was past the document cap, by reading
+    /// the preamble's entry, keyed at the file's bare path, as the whole
+    /// file.
     #[must_use]
     pub fn list_stale(
         &self,
         current: &BTreeMap<String, String>,
         not_indexed: &BTreeMap<String, SkipReason>,
     ) -> StaleReport {
+        // Content: every file any of whose content the walk left out, with
+        // every reason it gave, whatever is on record.
+        let mut unknown: BTreeMap<&str, Vec<SkipReason>> = BTreeMap::new();
+        for (key, reason) in not_indexed {
+            let file = match reason.scope() {
+                SkipScope::File => key.as_str(),
+                SkipScope::Document => document_file(key),
+            };
+            unknown.entry(file).or_default().push(reason.clone());
+        }
+        let freshness_unknown = unknown
+            .into_iter()
+            .map(|(path, skipped)| FreshnessUnknown {
+                path: path.to_owned(),
+                skipped,
+            })
+            .collect();
+
+        // Records: each where it is correct to list it.
         let mut stale = Vec::new();
         for (path, content) in current {
             if let Freshness::Stale(reason) = self.check(path, content) {
@@ -516,6 +629,7 @@ impl FreshnessTracker {
             }
         }
         for (path, entry) in &self.documents {
+            // Checked above, against the text the corpus holds at its path.
             if current.contains_key(path) {
                 continue;
             }
@@ -536,9 +650,9 @@ impl FreshnessTracker {
                     detected_at: *detected_at,
                 },
                 // Any record on a file part or all of whose text was left
-                // out for its size, a verification alone included:
-                // freshness unknown, never dropped (the module doc's
-                // "Freshness unknown is never fresh").
+                // out, a verification alone included: freshness unknown,
+                // never dropped (the module doc's "Freshness unknown is
+                // never fresh").
                 (divergence, _) => match split_files.get(path.as_str()) {
                     Some(skipped) => StaleReason::NotIndexed {
                         skipped: (*skipped).clone(),
@@ -558,6 +672,7 @@ impl FreshnessTracker {
         StaleReport {
             documents_covered: current.len(),
             stale,
+            freshness_unknown,
         }
     }
 
@@ -975,7 +1090,10 @@ mod tests {
                     error: "permission denied".to_owned(),
                 },
             ),
-            (untracked, SkipReason::FileTooLarge { byte_len: 2 << 20 }),
+            (
+                untracked.clone(),
+                SkipReason::FileTooLarge { byte_len: 2 << 20 },
+            ),
         ]
         .into_iter()
         .collect();
@@ -1033,8 +1151,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             "every record on something left out is listed, in path order, with the \
              walk's reason and its divergence; the removed file's and the fresh \
-             document's are not, and an untracked left-out file is not invented"
+             document's are not, and no record is invented for an untracked left-out file"
         );
+        // The content rule: every entry left out is freshness unknown, the
+        // untracked file with no record on it included, so the report is
+        // not ready; the removed file is in no walk, and is not.
+        let unknown: Vec<(&str, &[SkipReason])> = report
+            .freshness_unknown
+            .iter()
+            .map(|file| (file.path.as_str(), file.skipped.as_slice()))
+            .collect();
+        let mut expected_unknown: Vec<(&str, &[SkipReason])> = not_indexed
+            .iter()
+            .map(|(key, reason)| (key.as_str(), std::slice::from_ref(reason)))
+            .collect();
+        expected_unknown.sort_by(|left, right| left.0.cmp(right.0));
+        assert_eq!(unknown, expected_unknown);
+        assert!(
+            unknown.iter().any(|(path, _)| *path == untracked)
+                && unknown.iter().all(|(path, _)| *path != removed),
+            "{unknown:?}"
+        );
+        assert!(!report.is_ready(), "{report:?}");
         let line = report.stale[0].reason.divergence();
         assert!(
             line.contains("EVENTS-DIVERGENCE") && line.contains("valid UTF-8"),
@@ -1050,13 +1188,11 @@ mod tests {
         );
 
         // The same records with nothing left out: the round 8 reading, in
-        // which each of these files is gone, for comparison.
-        assert!(
-            tracker
-                .list_stale(&current, &nothing_left_out())
-                .stale
-                .is_empty()
-        );
+        // which each of these files is gone, for comparison. Only there is
+        // the report ready.
+        let gone = tracker.list_stale(&current, &nothing_left_out());
+        assert!(gone.stale.is_empty() && gone.freshness_unknown.is_empty());
+        assert!(gone.is_ready(), "{gone:?}");
 
         // A re-review that verifies the file again ends its divergence; the
         // record is still listed while the walk leaves the file out.
@@ -1328,5 +1464,227 @@ mod tests {
                 divergence: Some(("RISK-DIVERGENCE".to_owned(), found)),
             })
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Round 12: readiness is about content, not records. Every file any
+    // content of which the walk left out is freshness unknown, whether or
+    // not a record names it, and the report is not ready while one is.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_026_every_file_left_out_is_freshness_unknown_whether_or_not_a_record_names_it() {
+        let file = |name: &str| ["spec", name].join("/");
+        // Round 11's shapes: a role file with no heading, indexed whole at
+        // its bare path, grown a section past the cap; a file with a short
+        // preamble grown a section past the cap between two indexed ones;
+        // and a criteria file whose repeated row is left out, its path held
+        // in the corpus by the first row. Beside them: a file of two
+        // sections both past the cap, a file left out whole, and a
+        // directory left out whole.
+        let role = ["spec", "agents", "qa.md"].join("/");
+        let role_section = format!("{role}#checklist");
+        let preamble = file("TESTING.md");
+        let (a, b, z) = (
+            format!("{preamble}#a"),
+            format!("{preamble}#b"),
+            format!("{preamble}#z"),
+        );
+        let criteria = ["spec", "criteria", "phase-9.md"].join("/");
+        let (row_1, row_2) = (
+            format!("{criteria}#ORI-P9-001"),
+            format!("{criteria}#ORI-P9-002"),
+        );
+        let risk = file("RISK_MAP.md");
+        let (one, two) = (format!("{risk}#one"), format!("{risk}#two"));
+        let unreadable = file("EVENTS.md");
+        let locked = ["spec", "runbooks"].join("/");
+        let in_locked = format!("{locked}/deploy.md");
+        let kept = format!("{}#prd", file("PRD.md"));
+
+        let current = corpus(&[
+            (role.as_str(), "the role text"),
+            (preamble.as_str(), "intro"),
+            (a.as_str(), "a text"),
+            (z.as_str(), "z text"),
+            (row_1.as_str(), "| ORI-P9-001 | first |"),
+            (row_2.as_str(), "| ORI-P9-002 | other |"),
+            (kept.as_str(), "prd text"),
+        ]);
+        let too_large = |path: &str| SkipReason::DocumentTooLarge {
+            path: path.to_owned(),
+            byte_len: 70_000,
+        };
+        let repeat = SkipReason::DuplicateDocumentPath {
+            path: row_1.clone(),
+        };
+        let bad_bytes = SkipReason::Unreadable {
+            error: "stream did not contain valid UTF-8".to_owned(),
+        };
+        let denied = SkipReason::Unreadable {
+            error: "permission denied".to_owned(),
+        };
+        let not_indexed: BTreeMap<String, SkipReason> = [
+            (role_section.clone(), too_large(&role_section)),
+            (b.clone(), too_large(&b)),
+            (row_1.clone(), repeat.clone()),
+            (one.clone(), too_large(&one)),
+            (two.clone(), too_large(&two)),
+            (unreadable.clone(), bad_bytes.clone()),
+            (locked.clone(), denied.clone()),
+        ]
+        .into_iter()
+        .collect();
+        let mut expected = vec![
+            FreshnessUnknown {
+                path: role.clone(),
+                skipped: vec![too_large(&role_section)],
+            },
+            FreshnessUnknown {
+                path: preamble.clone(),
+                skipped: vec![too_large(&b)],
+            },
+            FreshnessUnknown {
+                path: criteria.clone(),
+                skipped: vec![repeat],
+            },
+            FreshnessUnknown {
+                path: risk.clone(),
+                skipped: vec![too_large(&one), too_large(&two)],
+            },
+            FreshnessUnknown {
+                path: unreadable.clone(),
+                skipped: vec![bad_bytes],
+            },
+            FreshnessUnknown {
+                path: locked.clone(),
+                skipped: vec![denied],
+            },
+        ];
+        expected.sort_by(|left, right| left.path.cmp(&right.path));
+
+        // No record at all; every indexed document verified at its text and
+        // nothing else; and that, with a divergence a re-verification
+        // cleared on every file left out (on the role file and the
+        // preamble's file, whose bare paths are documents of the corpus,
+        // re-verified at the corpus's text).
+        let verified = Timestamp::from_millis(1_000);
+        let found = Timestamp::from_millis(2_000);
+        let reviewed = Timestamp::from_millis(3_000);
+        let no_record = FreshnessTracker::new();
+        let mut corpus_verified = FreshnessTracker::new();
+        for (path, text) in &current {
+            corpus_verified.record_verification(path.clone(), verified, text.clone());
+        }
+        let mut files_reviewed = corpus_verified.clone();
+        for path in [&role, &preamble, &criteria, &risk, &unreadable, &in_locked] {
+            files_reviewed.record_divergence(path.clone(), "found drifting", found);
+            let text = current.get(path).cloned().unwrap_or_default();
+            files_reviewed.record_verification(path.clone(), reviewed, text);
+        }
+
+        for (label, tracker) in [
+            ("no record at all", &no_record),
+            ("every indexed document verified", &corpus_verified),
+            ("every file left out re-reviewed too", &files_reviewed),
+        ] {
+            let report = tracker.list_stale(&current, &not_indexed);
+            assert_eq!(report.documents_covered, current.len(), "{label}");
+            assert_eq!(
+                report.freshness_unknown, expected,
+                "{label}: every file any content of which was left out, with every reason, \
+                 whatever is on record"
+            );
+            assert!(!report.is_ready(), "{label}: {report:?}");
+            for unknown in &report.freshness_unknown {
+                let line = unknown.line();
+                assert!(
+                    line.starts_with("freshness unknown: ")
+                        && unknown
+                            .skipped
+                            .iter()
+                            .all(|reason| line.contains(&reason.to_string())),
+                    "{label}: {line}"
+                );
+            }
+        }
+
+        // The records alone: with every indexed document verified, no
+        // record is stale, so only the content rule refuses readiness.
+        let report = corpus_verified.list_stale(&current, &not_indexed);
+        assert!(report.stale.is_empty(), "{report:?}");
+        // With the files re-reviewed, the records on the role file and the
+        // preamble's file are those documents' own, checked against the
+        // indexed text and fresh, the shape round 11 read as ready; the
+        // others are listed as not indexed.
+        let report = files_reviewed.list_stale(&current, &not_indexed);
+        let listed: Vec<&str> = report.stale.iter().map(|d| d.path.as_str()).collect();
+        let mut expected_listed = vec![
+            criteria.as_str(),
+            risk.as_str(),
+            unreadable.as_str(),
+            in_locked.as_str(),
+        ];
+        expected_listed.sort_unstable();
+        assert_eq!(listed, expected_listed, "{report:?}");
+
+        // Nothing left out: ready over the verified corpus, whatever is on
+        // record for files no longer there.
+        for tracker in [&corpus_verified, &files_reviewed] {
+            let report = tracker.list_stale(&current, &nothing_left_out());
+            assert!(report.freshness_unknown.is_empty(), "{report:?}");
+            assert!(report.is_ready(), "{report:?}");
+        }
+    }
+
+    #[test]
+    fn ori_p1_026_is_ready_is_false_while_a_record_is_stale_or_any_content_is_freshness_unknown() {
+        let prd = "spec/PRD.md";
+        let left_out = ["spec", "EVENTS.md"].join("/");
+        let something_left_out: BTreeMap<String, SkipReason> =
+            [(left_out.clone(), SkipReason::NotMarkdown)]
+                .into_iter()
+                .collect();
+        let current = corpus(&[(prd, "text")]);
+        let mut fresh = FreshnessTracker::new();
+        fresh.record_verification(prd, Timestamp::from_millis(1_000), "text");
+        let mut stale = FreshnessTracker::new();
+        stale.record_verification(prd, Timestamp::from_millis(1_000), "older text");
+
+        for (tracker, walk, ready) in [
+            (&fresh, &nothing_left_out(), true),
+            (&stale, &nothing_left_out(), false),
+            (&fresh, &something_left_out, false),
+            (&stale, &something_left_out, false),
+        ] {
+            let report = tracker.list_stale(&current, walk);
+            assert_eq!(report.documents_covered, 1);
+            assert_eq!(
+                report.is_ready(),
+                ready,
+                "ready exactly when nothing is stale and nothing is left out: {report:?}"
+            );
+            assert_eq!(
+                report.is_ready(),
+                report.stale.is_empty() && report.freshness_unknown.is_empty()
+            );
+        }
+
+        // An empty corpus is ready only when nothing was left out either:
+        // a repository whose every file was left out has nothing to check,
+        // and is not ready.
+        let empty = BTreeMap::new();
+        let report = fresh.list_stale(&empty, &nothing_left_out());
+        assert_eq!(report.documents_covered, 0);
+        assert!(report.is_ready(), "{report:?}");
+        let report = fresh.list_stale(&empty, &something_left_out);
+        assert_eq!(
+            report.freshness_unknown,
+            [FreshnessUnknown {
+                path: left_out,
+                skipped: vec![SkipReason::NotMarkdown],
+            }]
+        );
+        assert!(!report.is_ready(), "{report:?}");
     }
 }
