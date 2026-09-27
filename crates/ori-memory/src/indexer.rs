@@ -7750,6 +7750,157 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn ori_t_0035_identities_and_skip_keys_are_slash_joined_from_a_path_built_with_the_platform_separator()
+     {
+        use crate::freshness::StaleReason;
+
+        // Windows CI found a test spelling a skipped entry's native path
+        // with `to_string_lossy`, which there is `\`-separated, and so
+        // looking up the huge file's `/`-joined key in a map keyed with
+        // `\`. The product's
+        // own spellings, a document's path and a left-out entry's key and
+        // file, are each the path's components joined with `/`, so a Windows
+        // and a Unix checkout of one repository name every document and
+        // every entry alike. Every path below is assembled from components
+        // or joined with the platform's own separator, so on Windows each
+        // is `\`-separated natively, and on Unix `/`-separated.
+        let native = |parts: &[&str]| parts.join(std::path::MAIN_SEPARATOR_STR);
+
+        // The conversion a left-out entry's key and file are made by.
+        let root = std::env::temp_dir().join("ori-t-0035-identity-root");
+        let by_components = ["spec", "runbooks", "deploy.md"]
+            .iter()
+            .fold(root.clone(), |path, part| path.join(part));
+        let by_separator = root.join(native(&["spec", "runbooks", "deploy.md"]));
+        for path in [&by_components, &by_separator] {
+            assert_eq!(
+                path.strip_prefix(&root)
+                    .expect("under the root")
+                    .to_string_lossy(),
+                native(&["spec", "runbooks", "deploy.md"]),
+                "the precondition: the native spelling uses the platform's separator"
+            );
+            assert_eq!(
+                repository_key(&root, path),
+                concat!("spec/runbooks/deploy", ".md"),
+                "{path:?}"
+            );
+        }
+
+        // Through the walk: a document's path, and a left-out entry's key
+        // and file, of a file split, a file past the document cap and a
+        // file not named `.md`, each nested under the repository.
+        let repo = Scratch::new("slash-joined");
+        let spec = repo.path.join("spec");
+        let runbooks = spec.join("runbooks");
+        fs::create_dir_all(spec.join("adr")).expect("create spec/adr");
+        fs::create_dir_all(runbooks.join("deep")).expect("create spec/runbooks/deep");
+        fs::write(
+            spec.join("adr").join("ADR-0001-x.md"),
+            "# ADR-0001\n\nchosen\n",
+        )
+        .expect("write an ADR");
+        fs::write(
+            runbooks.join("deep").join("deploy.md"),
+            "# Deploy\n\nthe steps\n",
+        )
+        .expect("write a nested runbook");
+        fs::write(
+            runbooks.join("mixed.md"),
+            format!(
+                "# Short\n\nkept words\n\n# Long\n\n{}\n",
+                past_the_document_cap("long")
+            ),
+        )
+        .expect("write a runbook with one section past the cap");
+        fs::write(runbooks.join("openapi.yaml"), "openapi: 3.1.0\n").expect("write a YAML file");
+
+        let walk = Indexer::walk_repo(&repo.path).expect("walk");
+        assert_eq!(
+            walk.skipped
+                .iter()
+                .map(|entry| entry
+                    .path
+                    .strip_prefix(&repo.path)
+                    .expect("under the repository")
+                    .to_string_lossy()
+                    .into_owned())
+                .collect::<Vec<_>>(),
+            [
+                native(&["spec", "runbooks", "mixed.md"]),
+                native(&["spec", "runbooks", "openapi.yaml"]),
+            ],
+            "the precondition: each entry's own path is the native one"
+        );
+        assert_eq!(
+            walk.documents
+                .iter()
+                .map(|document| document.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                concat!("spec/adr/ADR-0001-x", ".md"),
+                concat!("spec/runbooks/deep/deploy", ".md", "#deploy"),
+                concat!("spec/runbooks/mixed", ".md", "#short"),
+            ]
+        );
+        assert_eq!(
+            walk.documents[0].kind,
+            DocumentKind::Adr,
+            "the ADR is recognised by its components on every platform"
+        );
+        let not_indexed = walk.not_indexed();
+        assert_eq!(
+            not_indexed
+                .entries()
+                .iter()
+                .map(|entry| (entry.key.as_str(), entry.file.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    concat!("spec/runbooks/mixed", ".md", "#long"),
+                    concat!("spec/runbooks/mixed", ".md"),
+                ),
+                (
+                    concat!("spec/runbooks/openapi", ".yaml"),
+                    concat!("spec/runbooks/openapi", ".yaml"),
+                ),
+            ]
+        );
+
+        // And the tracker reads them at those spellings: the file is
+        // freshness unknown, and a divergence on the section left out is
+        // listed with the walk's reason.
+        let corpus = walk_corpus(&walk);
+        let mut tracker = every_document_verified(&corpus);
+        let long = concat!("spec/runbooks/mixed", ".md", "#long");
+        tracker.record_divergence(long, "drifted", Timestamp::from_millis(2_000));
+        let report = tracker.list_stale(&corpus, &not_indexed);
+        assert_eq!(
+            report
+                .freshness_unknown
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            [concat!("spec/runbooks/mixed", ".md")]
+        );
+        assert!(
+            matches!(
+                report.stale.as_slice(),
+                [crate::freshness::StaleDocument {
+                    path,
+                    reason: StaleReason::NotIndexed {
+                        skipped: SkipReason::DocumentTooLarge { path: skipped, .. },
+                        divergence: Some(_),
+                    },
+                }] if path == long && skipped == long
+            ),
+            "{:?}",
+            report.stale
+        );
+        assert!(!report.is_ready());
+    }
+
     #[cfg(unix)]
     #[test]
     fn ori_t_0035_a_backslash_in_a_unix_file_name_is_part_of_the_name_never_a_separator() {
@@ -8055,6 +8206,8 @@ mod tests {
     // =====================================================================
 
     /// Opens a second product beside `scratch`'s own, under the same root.
+    /// Only the link tests use it, and links are made only on Unix.
+    #[cfg(unix)]
     fn other_product(scratch: &Scratch, id: &str) -> ProductDb {
         ProductDb::open(&scratch.path, id, Timestamp::from_millis(1_000))
             .expect("a second scratch product opens")
@@ -8328,6 +8481,11 @@ mod tests {
         let walk = Indexer::walk_repo(&repo.path).expect("walk");
         let adr_path = concat!("spec/adr/", "ADR-9999-long", ".md");
         let long_path = concat!("spec/runbooks/", "mixed", ".md", "#long");
+        // Each entry keyed by its path under the repository, its components
+        // joined with `/` as an identity is: a `SkippedEntry`'s path is the
+        // native one, which on Windows is `\`-separated, so spelling it
+        // with `to_string_lossy` keyed the huge file with a `\` there, and
+        // no entry was found at its `/`-joined key.
         let reasons: BTreeMap<String, SkipReason> = walk
             .skipped
             .iter()
@@ -8337,8 +8495,10 @@ mod tests {
                         .path
                         .strip_prefix(&repo.path)
                         .expect("under the repository")
-                        .to_string_lossy()
-                        .into_owned(),
+                        .components()
+                        .map(|component| component.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/"),
                     entry.reason.clone(),
                 )
             })
@@ -8682,29 +8842,26 @@ mod tests {
     }
 
     /// Every entry under `db`'s `index/quarantine/`, recursively, as paths
-    /// relative to it; empty when the directory is absent.
+    /// relative to it, their components joined with `/` on every platform
+    /// (so a caller's `"{directory}/"` prefix finds a file on Windows too);
+    /// empty when the directory is absent.
     fn quarantine_contents(db: &ProductDb) -> Vec<String> {
         let root = index_dir(db).join(QUARANTINE_DIR);
+        let relative = |path: &Path| {
+            path.strip_prefix(&root)
+                .expect("under the root")
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        };
         let mut out = Vec::new();
         if let Ok(entries) = fs::read_dir(&root) {
             for entry in entries {
                 let directory = entry.expect("an entry").path();
-                out.push(
-                    directory
-                        .strip_prefix(&root)
-                        .expect("under the root")
-                        .to_string_lossy()
-                        .into_owned(),
-                );
+                out.push(relative(&directory));
                 for file in fs::read_dir(&directory).expect("list a quarantine directory") {
-                    out.push(
-                        file.expect("an entry")
-                            .path()
-                            .strip_prefix(&root)
-                            .expect("under the root")
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
+                    out.push(relative(&file.expect("an entry").path()));
                 }
             }
         }
@@ -9691,28 +9848,33 @@ mod tests {
     /// Makes `file` unreadable to this process until the returned guard is
     /// dropped, where the platform can (Unix, by its mode), so a test can
     /// tell a file the walk left out unread from one it read.
+    #[cfg(unix)]
     fn make_unreadable(file: &Path) -> impl Drop + use<> {
+        use std::os::unix::fs::PermissionsExt;
         struct Restore(PathBuf);
         impl Drop for Restore {
             fn drop(&mut self) {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
-                }
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
             }
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(file, fs::Permissions::from_mode(0o000))
-                .expect("make a file unreadable");
-            assert!(
-                fs::read(file).is_err(),
-                "this test needs a process the file mode applies to"
-            );
-        }
+        fs::set_permissions(file, fs::Permissions::from_mode(0o000))
+            .expect("make a file unreadable");
+        assert!(
+            fs::read(file).is_err(),
+            "this test needs a process the file mode applies to"
+        );
         Restore(file.to_owned())
+    }
+
+    /// Where the platform has no mode to take away (Windows), `file` stays
+    /// readable, and the guard has nothing to restore.
+    #[cfg(not(unix))]
+    fn make_unreadable(_file: &Path) -> impl Drop + use<> {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {}
+        }
+        Restore
     }
 
     #[test]
@@ -12712,7 +12874,7 @@ mod tests {
         let spec = scratch.path.join("spec");
         fs::create_dir_all(spec.join("criteria")).expect("create a directory");
         let past = past_the_document_cap("grown");
-        let mut left_out = vec![
+        let left_out = vec![
             (
                 ["spec", "RISK_MAP.md"].join("/"),
                 format!("# Risk map\n\n{past}\n").into_bytes(),
@@ -12741,12 +12903,15 @@ mod tests {
         for (relative, bytes) in &left_out {
             fs::write(scratch.path.join(relative), bytes).expect("write a file");
         }
+        // A link as well, where the platform lets a test make one.
         #[cfg(unix)]
-        {
+        let left_out = {
+            let mut left_out = left_out;
             let linked = ["spec", "LINKED.md"].join("/");
             std::os::unix::fs::symlink("PRD.md", scratch.path.join(&linked)).expect("a link");
             left_out.push((linked, Vec::new()));
-        }
+            left_out
+        };
 
         let db = product(&scratch);
         let mut indexer = Indexer::open(&db).expect("open on-disk index");
@@ -13389,8 +13554,6 @@ mod tests {
     #[test]
     fn ori_p1_026_entries_that_share_a_key_list_every_file_and_every_reason() {
         use crate::freshness::FreshnessUnknown;
-        use crate::freshness::StaleDocument;
-        use crate::freshness::StaleReason;
 
         // The review's shapes. First, a file with a section past the cap,
         // keyed a.md#big, beside a sibling entry named a.md#big: round 12
@@ -13464,6 +13627,9 @@ mod tests {
         // directory, though the section's entry holds the same key first.
         #[cfg(unix)]
         {
+            use crate::freshness::StaleDocument;
+            use crate::freshness::StaleReason;
+
             let directory = scratch.path.join(&big);
             fs::create_dir_all(&directory).expect("create a directory");
             fs::write(directory.join("deploy.md"), "# Deploy\n\nthe steps\n")
