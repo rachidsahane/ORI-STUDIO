@@ -1873,7 +1873,10 @@ const MAX_LINK_RESOLUTION_LOOKUPS: usize = 65_536;
 /// included: Linux's own limit (`MAXSYMLINKS`, 40). macOS stops at 32, and
 /// its `stat` of the link then fails before this is reached. What it
 /// bounds is memory: each expansion queues its target's components, at
-/// most `PATH_MAX` bytes of them.
+/// most `PATH_MAX` bytes of them. Only the unix walk counts expansions (see
+/// [`link_resolution_within_bound`]'s other variant for why), so off unix
+/// nothing reads this.
+#[cfg_attr(not(unix), allow(dead_code))]
 const MAX_LINK_RESOLUTION_EXPANSIONS: usize = 40;
 
 /// Why a symlink entry was not resolved.
@@ -1882,7 +1885,9 @@ enum LinkRefusal {
     /// Its deadline passed, before its resolution began or during it.
     TimedOut,
     /// Resolving it would cost more than [`MAX_LINK_RESOLUTION_LOOKUPS`],
-    /// or expand more than [`MAX_LINK_RESOLUTION_EXPANSIONS`] links.
+    /// or expand more than [`MAX_LINK_RESOLUTION_EXPANSIONS`] links. Only
+    /// the unix walk counts either, so off unix nothing constructs this.
+    #[cfg_attr(not(unix), allow(dead_code))]
     OverBound,
     /// A step of its resolution failed (a component missing, or too long).
     Io(io::Error),
