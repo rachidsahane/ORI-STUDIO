@@ -172,8 +172,9 @@
 //!     seconds past); and, with no overrun measured but the same unchecked
 //!     shape, a TypeScript `export let` list (`ts_declaration_interfaces`)
 //!     and the siblings of one parent in Rust test detection
-//!     (`rust_test_names`, and `gather_children` under both traversal
-//!     helpers, which gathered a parent's children with no check). Each now
+//!     (`rust_test_names`), and every gathering of one parent's children
+//!     (now `gather_children`, under both traversal helpers and a grouped
+//!     `use`'s member list), which gathered them all with no check. Each now
 //!     checks per item, and names are walked in place rather than collected
 //!     first.
 //!   - **The `spec/` citation scan**, once per [`build_code_map`] call, not
@@ -2672,16 +2673,18 @@ fn rust_use_edges(
         }
         match node.kind() {
             "use_list" => {
-                let mut cursor = node.walk();
-                let members: Vec<Node> = node
-                    .named_children(&mut cursor)
-                    .filter(|member| !member.is_extra())
-                    .collect();
+                // Gathered with a check per child (`gather_children`): one
+                // group can hold millions of members.
+                let Some(children) = gather_children(node, deadline) else {
+                    return false;
+                };
                 // Reversed onto the stack, so members come off it in source
-                // order (the order is only cosmetic: edges are sorted later).
+                // order, the order `EdgeSink` keeps the first 4096 in (edges
+                // are sorted afterwards).
                 stack.extend(
-                    members
+                    children
                         .into_iter()
+                        .filter(|member| member.is_named() && !member.is_extra())
                         .rev()
                         .map(|member| (member, root, prefix)),
                 );
