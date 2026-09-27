@@ -1693,6 +1693,50 @@ impl DeclaredScope {
 /// No public constructor and no public field: the only way to hold one is for
 /// [`ScopeEnforcer::authorize`] to have returned it. See the module doc
 /// comment, "The seam the retrieval stands on".
+///
+/// Built outside this module, it does not compile:
+///
+/// ```compile_fail,E0451
+/// # use std::collections::BTreeMap;
+/// # use ori_core::types::Id;
+/// # use ori_memory::scope::Authorization;
+/// # use ori_memory::scope::Query;
+/// # use ori_memory::scope::Reader;
+/// fn forge(reader: Reader, product_id: Id, query: Query) -> Authorization {
+///     Authorization {
+///         reader,
+///         product_id,
+///         query,
+///         ticket_id: None,
+///         declared: None,
+///         sources: BTreeMap::new(),
+///         evidence: Vec::new(),
+///         evidence_access_seq: None,
+///     }
+/// }
+/// ```
+///
+/// while the same types reached through the enforcer do, which shows the
+/// example above fails for the private fields and for nothing else:
+///
+/// ```
+/// # use ori_core::types::Timestamp;
+/// # use ori_memory::scope::Authorization;
+/// # use ori_memory::scope::MemoryRequest;
+/// # use ori_memory::scope::Principal;
+/// # use ori_memory::scope::ProductStage;
+/// # use ori_memory::scope::ScopeEnforcer;
+/// # use ori_store::db::ProductDb;
+/// fn obtain(
+///     db: &mut ProductDb,
+///     principal: &Principal,
+///     request: &MemoryRequest,
+/// ) -> Option<Authorization> {
+///     ScopeEnforcer::new(ProductStage::Standard)
+///         .authorize(db, Timestamp::from_millis(0), principal, request)
+///         .ok()
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Authorization {
     reader: Reader,
@@ -1842,6 +1886,29 @@ impl Authorization {
 /// admitted for, so the package can check both against its own
 /// [`Authorization`]. See the module doc comment, "The seam the retrieval
 /// stands on".
+///
+/// Built outside this module, it does not compile:
+///
+/// ```compile_fail,E0451
+/// # use ori_core::types::Id;
+/// # use ori_memory::scope::Admitted;
+/// # use ori_memory::scope::Reader;
+/// fn forge(product_id: Id, reader: Reader) -> Admitted {
+///     Admitted { product_id, reader, candidates: Vec::new() }
+/// }
+/// ```
+///
+/// while the same types reached through the filter do, which shows the
+/// example above fails for the private fields and for nothing else:
+///
+/// ```
+/// # use ori_memory::scope::Admitted;
+/// # use ori_memory::scope::Authorization;
+/// # use ori_memory::scope::Candidate;
+/// fn keep(authorization: &Authorization, gathered: Vec<Candidate>) -> Admitted {
+///     authorization.filter(gathered)
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Admitted {
     product_id: Id,
