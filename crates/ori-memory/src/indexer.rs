@@ -585,7 +585,16 @@
 //! SQLite itself refuses a link anywhere in the path should one appear
 //! between that check and the open. `recover` does not refuse a linked
 //! index file: it is the repair for one, moving the link itself into
-//! quarantine and never touching what it points at.
+//! quarantine and never touching what it points at. It does refuse, with
+//! nothing moved, an entry at an index file's name that is neither a file
+//! nor a link: a review found round 7 renaming whatever was there, and with
+//! another product's own directory at `index/fts.sqlite-wal` (a product id
+//! or products root naming that path, which `ProductDb::open` does not
+//! check), it moved that product's live lock, event log and index into this
+//! product's quarantine while the other product had them open. Neither half
+//! of the proof above speaks for that product, whose `Indexer` borrows its
+//! own `ProductDb`, not this one's; `recover` now moves only what is this
+//! product's to move.
 //!
 //! The second name is round 7's: a review hard-linked one product's
 //! `fts.sqlite`, and then its `-wal`, to another product's, and round 6's
@@ -644,7 +653,7 @@
 //! flowchart TB
 //!   ERR[IndexerError::Corrupt from any call] --> DROP[caller drops every Indexer on the product]
 //!   DROP --> MUT[&mut ProductDb: the compiler proves no Indexer is alive; the OS lock proves no other engine process]
-//!   MUT --> OWN{product directory absolute, index/ and quarantine/ not links?}
+//!   MUT --> OWN{product directory absolute, index/ and quarantine/ not links, every entry at an index file's name a file or a link?}
 //!   OWN -->|no| REFUSED[RecoveryRefused: nothing moved]
 //!   OWN -->|yes| MOVE[move -wal, -journal, -shm, then fts.sqlite into index/quarantine/recovered_at-n/]
 //!   MOVE -->|a move fails| BACK[move back every file already moved; QuarantineIncomplete names any that stayed]
@@ -1129,10 +1138,12 @@ pub enum IndexerError {
     },
     /// [`Indexer::recover`] refused to move anything, because the directory
     /// it would move files out of or into is not one the product owns
-    /// outright, or the product directory is a relative path (the module
+    /// outright, the product directory is a relative path, or an entry at
+    /// an index file's name is neither a regular file nor a symbolic link,
+    /// such as a directory, which may be another product's (the module
     /// doc's "Recovery").
     RecoveryRefused {
-        /// The directory refused.
+        /// The directory or entry refused.
         path: PathBuf,
         /// Why.
         reason: &'static str,
@@ -2470,8 +2481,10 @@ impl Indexer<'_> {
     /// file) that is a symbolic link or a file with a second name, which
     /// [`Indexer::open`] refuses, is moved like any other file: the link, or
     /// this product's name for the file, goes into quarantine, and whatever
-    /// it pointed at, or the file's other name, is never touched. The files
-    /// move as one unit:
+    /// it pointed at, or the file's other name, is never touched. An entry
+    /// at one of those names that is neither a file nor a link, such as a
+    /// directory, is refused before anything moves: it may be another
+    /// product's. The files move as one unit:
     /// if one cannot be moved, every one already moved is moved back and
     /// nothing is rebuilt. If the rebuild itself fails after the move, the
     /// old files are already safe in quarantine and the product has a
@@ -2484,7 +2497,9 @@ impl Indexer<'_> {
     /// if `documents` holds one path twice or a document over the module
     /// doc's per-document cap, checked before anything is moved;
     /// [`IndexerError::RecoveryRefused`] if `db`'s directory is a relative
-    /// path, or `index/` or `index/quarantine/` is a symbolic link;
+    /// path, `index/` or `index/quarantine/` is a symbolic link, or an entry
+    /// at an index file's name is neither a regular file nor a symbolic
+    /// link;
     /// [`IndexerError::QuarantineIncomplete`] if a file cannot be moved,
     /// naming every file that could not be put back;
     /// [`IndexerError::Directory`] or [`IndexerError::Io`] if a directory
@@ -2764,6 +2779,13 @@ fn link_count(_metadata: &std::fs::Metadata) -> Option<u64> {
     None
 }
 
+/// Why [`Indexer::recover`] refuses an entry at an index file's name that
+/// is neither a regular file nor a symbolic link: `quarantine_index_files`
+/// has the review that found a directory there moved whole.
+const NOT_A_FILE_REFUSAL: &str = "it is neither a regular file nor a symbolic link, so it may \
+                                  be another product's directory, which recover never moves; \
+                                  move it aside by hand";
+
 /// Refuses `dir` if it is a symbolic link: [`Indexer::recover`] moves files
 /// only inside a directory the product owns outright (the module doc's
 /// "Recovery").
@@ -2795,6 +2817,20 @@ fn refuse_symlink(dir: &Path) -> Result<(), IndexerError> {
 /// (`remove_dir`, which refuses a directory that is not empty, so it can
 /// never remove a file); [`IndexerError::QuarantineIncomplete`] names any
 /// file that could not be put back.
+///
+/// It moves files and links, and nothing else. A review found round 7
+/// deciding only that an entry existed and then renaming it whatever it
+/// was: with another product's directory at `index/fts.sqlite-wal` (a
+/// product id or products root that names that path, which
+/// `ProductDb::open` does not check, or a link above the product directory
+/// that resolves there), `recover` moved that product's whole live
+/// directory, its lock, its event log and its index, into this product's
+/// quarantine, while its `ProductDb` and `Indexer` were open. Their later
+/// writes returned `Ok` into the moved copy, its lock stopped excluding a
+/// second writer, and its next open found an empty event log. Every entry
+/// is now checked before anything is moved, and an entry that is neither
+/// a regular file nor a symbolic link is refused
+/// ([`IndexerError::RecoveryRefused`]), with nothing moved.
 fn quarantine_index_files(
     index_dir: &Path,
     recovered_at: Timestamp,
@@ -2803,7 +2839,10 @@ fn quarantine_index_files(
     for name in INDEX_FILE_SET {
         let live = index_dir.join(name);
         match std::fs::symlink_metadata(&live) {
-            Ok(_) => present.push(name),
+            Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+                present.push(name);
+            }
+            Ok(_) => return Err(recovery_refused(live, NOT_A_FILE_REFUSAL)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(IndexerError::Io { path: live, source }),
         }
@@ -8971,5 +9010,159 @@ mod tests {
     #[cfg(not(unix))]
     fn file_inode(_path: &Path) -> u64 {
         0
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 8, item 2 (MEDIUM): recover moved a directory at an index
+    // file's name, another product's whole live directory included.
+    // ---------------------------------------------------------------------
+
+    /// How many rows `probe_log` holds in the product database at
+    /// `product_dir`, read through a connection of its own.
+    fn probe_rows(product_dir: &Path) -> i64 {
+        Connection::open_with_flags(
+            product_dir.join("product.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open the product database read-only")
+        .query_row("SELECT count(*) FROM probe_log", [], |row| row.get(0))
+        .expect("count probe_log")
+    }
+
+    #[test]
+    fn ori_t_0035_recover_refuses_a_directory_at_an_index_file_name_and_moves_nothing() {
+        // The review's layouts: another product whose own product directory
+        // is this product's index/fts.sqlite-wal (its product id names that
+        // path), another whose products root is index/fts.sqlite-journal,
+        // and a plain directory at index/fts.sqlite-shm. Round 7 renamed
+        // each whole into quarantine: the other product's live lock, event
+        // log and index went with it, its later writes returned Ok into the
+        // moved copy, and a second ProductDb for it then opened beside the
+        // first.
+        let alpha = [doc("a.md", DocumentKind::Section, "A", "alpha")];
+        for name in ["fts.sqlite-wal", "fts.sqlite-journal", "fts.sqlite-shm"] {
+            let scratch = Scratch::new("recover-directory");
+            let mut db = product(&scratch);
+            {
+                let mut indexer = Indexer::open(&db).expect("open on-disk index");
+                indexer.full_rebuild(&alpha).expect("seed");
+            }
+            let planted = fs::read(index_file(&db)).expect("the live index");
+            let at = index_dir(&db).join(name);
+            let opened = Timestamp::from_millis(2_000);
+            let other = match name {
+                "fts.sqlite-wal" => Some((scratch.path.clone(), format!("{PRODUCT}/index/{name}"))),
+                "fts.sqlite-journal" => Some((at.clone(), "PRODUCT-OTHER".to_owned())),
+                _ => {
+                    fs::create_dir_all(&at).expect("create a directory at the name");
+                    fs::write(at.join("keep"), b"kept").expect("write a file inside it");
+                    None
+                }
+            };
+            let mut other_db = other.as_ref().map(|(root, id)| {
+                let mut other_db =
+                    ProductDb::open(root, id, opened).expect("the other product opens");
+                other_db
+                    .connection()
+                    .execute_batch(
+                        "CREATE TABLE probe_log (n INTEGER); INSERT INTO probe_log VALUES (1);",
+                    )
+                    .expect("write the other product's event log");
+                other_db
+            });
+            let other_dir = other_db.as_ref().map(|other_db| other_db.dir().to_owned());
+            let mut other_indexer = other_db.as_ref().map(|other_db| {
+                let mut indexer = Indexer::open(other_db).expect("the other product's index opens");
+                indexer
+                    .full_rebuild(&[doc("p.md", DocumentKind::Section, "P", "pword")])
+                    .expect("seed the other product's index");
+                indexer
+            });
+            if let Some(other_dir) = &other_dir {
+                assert!(other_dir.join("lock").is_file(), "{name}: the precondition");
+                assert!(
+                    other_dir
+                        .canonicalize()
+                        .expect("resolve")
+                        .starts_with(at.canonicalize().expect("resolve")),
+                    "{name}: the other product lives at or under this product's index file name"
+                );
+            }
+            assert!(
+                matches!(Indexer::open(&db), Err(IndexerError::OpenRefused { .. })),
+                "{name}: open refuses a directory at an index file's name"
+            );
+
+            let result = Indexer::recover(&mut db, &alpha, Timestamp::from_millis(9));
+            match &result {
+                Err(error @ IndexerError::RecoveryRefused { path, .. }) => {
+                    assert_eq!(error.methodology_ref().section, 25);
+                    assert_eq!(
+                        path.canonicalize()
+                            .expect("the refused entry is still there"),
+                        at.canonicalize().expect("resolve"),
+                        "{name}: {error}"
+                    );
+                }
+                other => {
+                    panic!("{name}: a directory at an index file's name is refused: {other:?}")
+                }
+            }
+            assert!(at.is_dir(), "{name}: the directory was not moved");
+            assert!(
+                !index_dir(&db).join(QUARANTINE_DIR).exists(),
+                "{name}: nothing was moved into quarantine: {:?}",
+                quarantine_contents(&db)
+            );
+            assert_eq!(
+                fs::read(index_file(&db)).expect("the database is at its live path"),
+                planted,
+                "{name}: and nothing was rebuilt over it"
+            );
+
+            let (Some((other_root, other_id)), Some(other_dir)) = (other, other_dir) else {
+                assert_eq!(fs::read(at.join("keep")).expect("the file inside"), b"kept");
+                continue;
+            };
+            // The other product's live files are where it has them open.
+            for file in ["lock", "product.sqlite"] {
+                assert!(other_dir.join(file).is_file(), "{name}: {file} stayed put");
+            }
+            other_indexer
+                .as_mut()
+                .expect("opened above")
+                .add_or_replace(&doc(
+                    "later.md",
+                    DocumentKind::Section,
+                    "Later",
+                    "laterword",
+                ))
+                .expect("the other product's write");
+            {
+                let second = Indexer::open(other_db.as_ref().expect("opened above"))
+                    .expect("a second Indexer on the other product");
+                let found = second.search("laterword", 10).expect("search");
+                assert_eq!(
+                    (found.hits.len(), found.documents_covered),
+                    (1, 2),
+                    "{name}: the write went into the live index, not a moved copy"
+                );
+            }
+            match ProductDb::open(&other_root, &other_id, opened) {
+                Err(ori_store::db::DbError::Locked { .. }) => {}
+                other => panic!(
+                    "{name}: the other product's lock still excludes a second writer: {:?}",
+                    other.map(|_| "opened")
+                ),
+            }
+            drop(other_indexer);
+            other_db
+                .as_mut()
+                .expect("opened above")
+                .connection()
+                .execute("INSERT INTO probe_log VALUES (2)", [])
+                .expect("the other product's second event");
+            assert_eq!(probe_rows(&other_dir), 2, "{name}: its event log is live");
+        }
     }
 }
