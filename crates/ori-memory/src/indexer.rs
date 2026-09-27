@@ -8305,9 +8305,16 @@ mod tests {
                 .expect("A opens its own index")
                 .full_rebuild(&alpha_words)
                 .expect("A builds its index");
-            // B's writer stays open, so B's write-ahead log exists to link.
-            let mut writer = Indexer::open(&beta).expect("B opens its own index");
-            writer.full_rebuild(&bravo).expect("B builds its index");
+            // For the log, B's writer stays open, so B's write-ahead log
+            // exists to link. For the database file, B has closed, as in
+            // the review's first probe: its log is checkpointed and gone.
+            let mut writer = Some(Indexer::open(&beta).expect("B opens its own index"));
+            if let Some(writer) = writer.as_mut() {
+                writer.full_rebuild(&bravo).expect("B builds its index");
+            }
+            if variant == "index file" {
+                writer = None;
+            }
             let (theirs, ours) = match variant {
                 "index file" => (index_file(&beta), index_file(&alpha)),
                 _ => (
