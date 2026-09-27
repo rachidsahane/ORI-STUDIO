@@ -510,6 +510,14 @@
 //! declaration's edges are not its ungrouped equivalent's, and the edge
 //! says so (until round 7 it looked like any other unresolved edge).
 //!
+//! The same shape, in Python: `from <K dots> import <M names>` rebuilt its
+//! K-dot prefix once per name, K times M work inside one statement with no
+//! deadline check inside it (over two minutes for one 8 MiB statement, in
+//! the review of round 3), and kept all K dots in every unresolved edge's
+//! text (678 MB from a 169 KB file). The dots are now counted once, spelled
+//! as a count past 32, and the names loop checks the deadline
+//! (`python_import_from_edges`).
+//!
 //! # Dependency edges, per language
 //!
 //! Every edge says how its target was placed ([`EdgeResolution`]): a file
@@ -528,10 +536,11 @@
 //!   in, or one module up per `super`, and resolves to the deepest file
 //!   along it; the module a file is, is its path below its crate root. Any
 //!   other path (`std::`, another crate's name, a member of the same
-//!   workspace included, a name in scope) is not looked up. Declarations are found at any depth,
-//!   inside inline modules and function bodies as well as at the top level.
-//!   Not followed: `#[path]` attributes, `include!`, and a binary under
-//!   `src/bin/`, which is read as a module of the library beside it.
+//!   workspace included, a name in scope) is not looked up. Declarations
+//!   are found at any depth, inside inline modules and function bodies as
+//!   well as at the top level. Not followed: `#[path]` attributes,
+//!   `include!`, and a binary under `src/bin/`, which is read as a module
+//!   of the library beside it.
 //! - **TypeScript.** A relative specifier (`./`, `../`) is looked up as
 //!   `.ts`, `.tsx`, `index.ts` or `index.tsx`; any other (a package, a
 //!   `tsconfig` path alias, an absolute path) is not, since the
@@ -552,14 +561,6 @@
 //! So an edge that is [`EdgeResolution::NotAttempted`] may well name a file
 //! of this repository, and a consumer that needs the in-repository graph
 //! to be complete has to resolve those itself or treat it as incomplete.
-//!
-//! The same shape, in Python: `from <K dots> import <M names>` rebuilt its
-//! K-dot prefix once per name, K times M work inside one statement with no
-//! deadline check inside it (over two minutes for one 8 MiB statement, in
-//! the review of round 3), and kept all K dots in every unresolved edge's
-//! text (678 MB from a 169 KB file). The dots are now counted once, spelled
-//! as a count past 32, and the names loop checks the deadline
-//! (`python_import_from_edges`).
 //!
 //! # What "covering tests" means here, and what it misses
 //!
