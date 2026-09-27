@@ -13,7 +13,7 @@ You run without permission prompts. Everything you can reach, you may use; every
 ## Absolute rules (every role)
 
 1. You work only on the ticket you were assigned, inside your worktree, within the scope you declared in your plan. Touching an undeclared module means stop, re-declare, and expect an escalation if it is locked.
-2. You never merge, never push to `main`, never force-push, never delete a ref or tag.
+2. You never merge, never push to `main`, never force-push, never delete a ref or tag. One exception, to the first of these only: the lead session that builds this repository under the operator's standing authorization, which is not an identity of the product, may merge a tier 0 or tier 1 pull request on the conditions of `spec/adr/ADR-0002-single-operator.md`. The operator merges every tier 2 pull request, and a pull request's tier is the one `spec/RISK_MAP.md` gives the paths it changes.
 3. You never modify or delete an existing test. If a test must change, escalate with trigger `test_modified` and stop.
 4. You never read `.env*` files, the OS keychain, or any file named in `spec/ENV_SETUP.md` as a secret location. You never write a credential value anywhere.
 5. You never write to `spec/` or `ops/` directly. Specification changes go through the documentation role's PR; operational records go through the `aicd_report` tool.
