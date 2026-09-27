@@ -162,7 +162,20 @@
 //!     the review of round 3 or while fixing it: a grouped `use` is walked
 //!     node by node with a check per node (`rust_use_edges`), and a Python
 //!     `from ... import` checks before each imported name
-//!     (`python_import_from_edges`).
+//!     (`python_import_from_edges`). Round 6 found, while measuring the edge
+//!     cap, more loops over one statement's items that checked nothing, in
+//!     8 MiB files that hold still (release builds, a 13-second budget):
+//!     the names of a Go `var` or `const` list (a `var A,A,...,A int` ran
+//!     4.7 to 12 seconds past it) and its `type` specs
+//!     (`go_declaration_interfaces`); Python's imported names, which both
+//!     Python paths collected in full before the first check (2.8 and 4.4
+//!     seconds past); and, with no overrun measured but the same unchecked
+//!     shape, a TypeScript `export let` list (`ts_declaration_interfaces`)
+//!     and the siblings of one parent in Rust test detection
+//!     (`rust_test_names`, and `gather_children` under both traversal
+//!     helpers, which gathered a parent's children with no check). Each now
+//!     checks per item, and names are walked in place rather than collected
+//!     first.
 //!   - **The `spec/` citation scan**, once per [`build_code_map`] call, not
 //!     once per file (it runs after every file's [`Module`] already
 //!     exists): its own deadline, sized by the same `file_timeout`
@@ -2011,7 +2024,9 @@ fn normalize_join(base: &[String], relative: &str) -> Option<String> {
 /// a caller can tell an aborted scan apart from a complete one; see the
 /// module doc's "Time" bound. This is now the *second* line of defense
 /// against a slow extraction, not the only one: the cost is O(1) amortized
-/// per node regardless.
+/// per node regardless. The deadline is checked before each node is
+/// visited and before each child is gathered, since one node can have
+/// millions of children (see [`gather_children`]).
 fn for_each_node<'a>(root: Node<'a>, deadline: Instant, mut visit: impl FnMut(Node<'a>)) -> bool {
     let mut stack: Vec<Node<'a>> = vec![root];
     while let Some(node) = stack.pop() {
@@ -2019,12 +2034,30 @@ fn for_each_node<'a>(root: Node<'a>, deadline: Instant, mut visit: impl FnMut(No
             return false;
         }
         visit(node);
-        let mut cursor = node.walk();
-        let mut children: Vec<Node<'a>> = node.children(&mut cursor).collect();
+        let Some(mut children) = gather_children(node, deadline) else {
+            return false;
+        };
         children.reverse();
         stack.extend(children);
     }
     true
+}
+
+/// `node`'s children in sibling order, or `None` when `deadline` passed
+/// while gathering them, checked before each one. Gathering is one linear
+/// pass, but one parent can have millions of children (a file of nothing
+/// but `#[a]` lines has one per line), and until round 6 each traversal
+/// gathered them all with no check, as one step between two checks.
+fn gather_children<'a>(node: Node<'a>, deadline: Instant) -> Option<Vec<Node<'a>>> {
+    let mut cursor = node.walk();
+    let mut children = Vec::new();
+    for child in node.children(&mut cursor) {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        children.push(child);
+    }
+    Some(children)
 }
 
 /// Like [`for_each_node`], but the callback receives one parent's children in
@@ -2034,7 +2067,10 @@ fn for_each_node<'a>(root: Node<'a>, deadline: Instant, mut visit: impl FnMut(No
 /// exactly once (as a member of its parent's children), and every parent is
 /// still descended into, nested ones included, because every child is pushed
 /// onto the same traversal stack. Returns `false` when `deadline` passed
-/// before every parent's children were visited.
+/// before every parent's children were visited, checked once per parent
+/// and once per child gathered ([`gather_children`]); a caller whose
+/// per-child work is not constant checks it again inside `visit` (as
+/// [`rust_test_names`] does).
 fn for_each_sibling_group<'a>(
     root: Node<'a>,
     deadline: Instant,
@@ -2045,8 +2081,9 @@ fn for_each_sibling_group<'a>(
         if Instant::now() >= deadline {
             return false;
         }
-        let mut cursor = node.walk();
-        let children: Vec<Node<'a>> = node.children(&mut cursor).collect();
+        let Some(children) = gather_children(node, deadline) else {
+            return false;
+        };
         visit(&children);
         let mut reversed = children;
         reversed.reverse();
@@ -2837,29 +2874,55 @@ fn rust_attribute_last_segment(attribute_item: Node, source: &[u8]) -> Option<St
 /// attributes immediately before this item mark it as a test" locally, which
 /// is the same rule `rust_marked_test` used to compute by walking backward,
 /// computed forward instead.
+///
+/// [`for_each_sibling_group`] checks `deadline` once per parent and once per
+/// child it gathers; [`rust_tests_in_siblings`] checks it once per sibling
+/// too, since one parent can have millions of children (a file of nothing
+/// but `#[a]` lines has one child per line) and reading an attribute is not
+/// constant work.
 fn rust_test_names(root: Node, source: &[u8], deadline: Instant) -> (Vec<String>, bool) {
     let mut names = Vec::new();
+    let mut timed_out = false;
     let completed = for_each_sibling_group(root, deadline, |siblings| {
-        let mut pending_test = false;
-        for &node in siblings {
-            if node.kind() == "attribute_item" {
-                if rust_attribute_last_segment(node, source).as_deref() == Some("test") {
-                    pending_test = true;
-                }
-                continue;
-            }
-            if node.kind() == "function_item"
-                && pending_test
-                && let Some(name_node) = node.child_by_field_name("name")
-            {
-                names.push(text(name_node, source).to_owned());
-            }
-            pending_test = false;
+        if !timed_out && !rust_tests_in_siblings(siblings, source, &mut names, deadline) {
+            timed_out = true;
         }
     });
     names.sort();
     names.dedup();
-    (names, completed)
+    (names, completed && !timed_out)
+}
+
+/// Pushes onto `names` every function among one parent's `siblings` (in
+/// sibling order) that a run of attributes immediately before it marks as a
+/// test, and returns whether it finished before `deadline`, checked before
+/// every sibling.
+fn rust_tests_in_siblings(
+    siblings: &[Node],
+    source: &[u8],
+    names: &mut Vec<String>,
+    deadline: Instant,
+) -> bool {
+    let mut pending_test = false;
+    for &node in siblings {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if node.kind() == "attribute_item" {
+            if rust_attribute_last_segment(node, source).as_deref() == Some("test") {
+                pending_test = true;
+            }
+            continue;
+        }
+        if node.kind() == "function_item"
+            && pending_test
+            && let Some(name_node) = node.child_by_field_name("name")
+        {
+            names.push(text(name_node, source).to_owned());
+        }
+        pending_test = false;
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -2906,8 +2969,18 @@ fn ts_import_edge(rel: &str, specifier: &str, known: &KnownPaths, sink: &mut Edg
     sink.push(resolved, specifier);
 }
 
-fn ts_declaration_interfaces(declaration: Node, source: &[u8]) -> Vec<Interface> {
-    let mut items = Vec::new();
+/// Pushes onto `items` the interfaces one exported TypeScript declaration
+/// declares, and returns whether it finished before `deadline`, which it
+/// checks before every declarator: one `export let a, a, ..., a;` can hold
+/// millions of them, two bytes each, and until round 6 this loop had no
+/// check (see [`go_declaration_interfaces`] for what the Go equivalent of
+/// that cost).
+fn ts_declaration_interfaces(
+    declaration: Node,
+    source: &[u8],
+    items: &mut Vec<Interface>,
+    deadline: Instant,
+) -> bool {
     match declaration.kind() {
         "function_declaration" => {
             if let Some(name) = declaration.child_by_field_name("name") {
@@ -2936,6 +3009,9 @@ fn ts_declaration_interfaces(declaration: Node, source: &[u8]) -> Vec<Interface>
                 .children(&mut cursor)
                 .filter(|child| child.kind() == "variable_declarator")
             {
+                if Instant::now() >= deadline {
+                    return false;
+                }
                 if let Some(name) = declarator.child_by_field_name("name") {
                     items.push(Interface {
                         name: text(name, source).to_owned(),
@@ -2947,7 +3023,7 @@ fn ts_declaration_interfaces(declaration: Node, source: &[u8]) -> Vec<Interface>
         }
         _ => {}
     }
-    items
+    true
 }
 
 fn extract_typescript(
@@ -2976,8 +3052,14 @@ fn extract_typescript(
                     ts_import_edge(rel, specifier, known, &mut out.edges);
                 }
                 if let Some(declaration) = child.child_by_field_name("declaration") {
-                    out.interfaces
-                        .extend(ts_declaration_interfaces(declaration, source));
+                    if !ts_declaration_interfaces(
+                        declaration,
+                        source,
+                        &mut out.interfaces,
+                        deadline,
+                    ) {
+                        return (out, false);
+                    }
                     if declaration.kind() == "function_declaration"
                         && let Some(name) = declaration.child_by_field_name("name")
                         && text(name, source) == "main"
@@ -3073,7 +3155,10 @@ const MAX_SPELLED_RELATIVE_IMPORT_DOTS: usize = 32;
 ///   [`MAX_EDGE_TARGET_BYTES`], the cap every unresolved target has; the
 ///   importing file's path is not in the edge at all since round 6).
 /// - The loop over names checks `deadline` before every name, returning
-///   `false` when it passes, and stops when `sink` is full.
+///   `false` when it passes, and stops when `sink` is full. The names are
+///   walked in place, not collected before the loop: the collection alone
+///   ran eleven to fifteen seconds, unchecked, for one 8 MiB statement
+///   (release builds, round 6's measurement), past a 13-second file budget.
 fn python_import_from_edges(
     node: Node,
     source: &[u8],
@@ -3140,10 +3225,12 @@ fn python_import_from_edges(
         return true;
     }
 
-    let names: Vec<Node> = node
-        .children_by_field_name("name", &mut node.walk())
-        .collect();
-    for name_node in names {
+    // Walked in place, never collected first: collecting every name before
+    // the loop's first deadline check was itself unbounded work (eleven to
+    // fifteen seconds for one 8 MiB statement, tree-sitter finding each named
+    // child by its field), which round 4's per-name check never reached.
+    let mut names = node.walk();
+    for name_node in node.children_by_field_name("name", &mut names) {
         if Instant::now() >= deadline {
             return false;
         }
@@ -3166,6 +3253,39 @@ fn python_import_from_edges(
     true
 }
 
+/// Records into `sink` the edges of one Python `import a, b.c as d`
+/// statement (each external: an absolute import is never resolved here),
+/// and returns whether it finished before `deadline`, checked before every
+/// name. The names are walked in place, never collected first; see
+/// [`python_import_from_edges`] for why. A full `sink` ends the statement
+/// early and is not a deadline miss.
+fn python_import_edges(
+    statement: Node,
+    source: &[u8],
+    sink: &mut EdgeSink,
+    deadline: Instant,
+) -> bool {
+    let mut names = statement.walk();
+    for name_node in statement.children_by_field_name("name", &mut names) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let name_text = if name_node.kind() == "aliased_import" {
+            name_node
+                .child_by_field_name("name")
+                .map(|n| text(n, source))
+        } else {
+            Some(text(name_node, source))
+        };
+        if let Some(name_text) = name_text
+            && !sink.push_external(name_text)
+        {
+            return true;
+        }
+    }
+    true
+}
+
 fn extract_python(
     root: Node,
     source: &[u8],
@@ -3181,22 +3301,8 @@ fn extract_python(
         }
         match child.kind() {
             "import_statement" => {
-                let names: Vec<Node> = child
-                    .children_by_field_name("name", &mut child.walk())
-                    .collect();
-                for name_node in names {
-                    let name_text = if name_node.kind() == "aliased_import" {
-                        name_node
-                            .child_by_field_name("name")
-                            .map(|n| text(n, source))
-                    } else {
-                        Some(text(name_node, source))
-                    };
-                    if let Some(name_text) = name_text
-                        && !out.edges.push_external(name_text)
-                    {
-                        break;
-                    }
+                if !python_import_edges(child, source, &mut out.edges, deadline) {
+                    return (out, false);
                 }
             }
             "import_from_statement" => {
@@ -3298,6 +3404,48 @@ fn go_exported(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
+/// Pushes onto `interfaces` the exported names one Go `type`, `const` or
+/// `var` declaration declares, and returns whether it finished before
+/// `deadline`, which it checks before every spec and every name. One
+/// declaration can hold millions of names (`var A, A, ..., A int`, two
+/// bytes each), and until round 6 they were collected and walked with no
+/// check at all: the file's other stages each checked the deadline, and
+/// this loop alone ran on past it, 4.7 to 12 seconds past a 13-second
+/// budget for one 8 MiB declaration (release builds, this ticket's machine).
+fn go_declaration_interfaces(
+    declaration: Node,
+    source: &[u8],
+    interfaces: &mut Vec<Interface>,
+    deadline: Instant,
+) -> bool {
+    let mut cursor = declaration.walk();
+    for spec in declaration.children(&mut cursor) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let kind = match spec.kind() {
+            "type_spec" => InterfaceKind::Type,
+            "const_spec" | "var_spec" => InterfaceKind::Constant,
+            _ => continue,
+        };
+        let mut names = spec.walk();
+        for name_node in spec.children_by_field_name("name", &mut names) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            let name = text(name_node, source);
+            if go_exported(name) {
+                interfaces.push(Interface {
+                    name: name.to_owned(),
+                    kind,
+                    line: line_of(spec),
+                });
+            }
+        }
+    }
+    true
+}
+
 fn extract_go(root: Node, source: &[u8], deadline: Instant) -> (Extracted, bool) {
     let mut out = Extracted::new();
     let mut package_name = String::new();
@@ -3338,43 +3486,11 @@ fn extract_go(root: Node, source: &[u8], deadline: Instant) -> (Extracted, bool)
                     });
                 }
             }
-            "type_declaration" => {
-                let mut inner_cursor = child.walk();
-                for spec in child
-                    .children(&mut inner_cursor)
-                    .filter(|n| n.kind() == "type_spec")
-                {
-                    if let Some(name_node) = spec.child_by_field_name("name") {
-                        let name = text(name_node, source);
-                        if go_exported(name) {
-                            out.interfaces.push(Interface {
-                                name: name.to_owned(),
-                                kind: InterfaceKind::Type,
-                                line: line_of(spec),
-                            });
-                        }
-                    }
-                }
-            }
-            "const_declaration" | "var_declaration" => {
-                let mut inner_cursor = child.walk();
-                for spec in child
-                    .children(&mut inner_cursor)
-                    .filter(|n| n.kind() == "const_spec" || n.kind() == "var_spec")
-                {
-                    let names: Vec<Node> = spec
-                        .children_by_field_name("name", &mut spec.walk())
-                        .collect();
-                    for name_node in names {
-                        let name = text(name_node, source);
-                        if go_exported(name) {
-                            out.interfaces.push(Interface {
-                                name: name.to_owned(),
-                                kind: InterfaceKind::Constant,
-                                line: line_of(spec),
-                            });
-                        }
-                    }
+            "type_declaration" | "const_declaration" | "var_declaration" => {
+                let completed =
+                    go_declaration_interfaces(child, source, &mut out.interfaces, deadline);
+                if !completed {
+                    return (out, false);
                 }
             }
             _ => {}
@@ -8135,6 +8251,175 @@ mod tests {
             );
         }
         drop(guard);
+    }
+
+    /// The first node of `kind` in `tree`, at any depth.
+    fn first_of_kind<'t>(tree: &'t tree_sitter::Tree, kind: &str) -> Node<'t> {
+        let mut found = None;
+        for_each_node(
+            tree.root_node(),
+            Instant::now() + Duration::from_secs(600),
+            |node| {
+                if found.is_none() && node.kind() == kind {
+                    found = Some(node);
+                }
+            },
+        );
+        found.unwrap_or_else(|| panic!("a {kind} node"))
+    }
+
+    /// Found while measuring item 1 (HIGH): loops over one statement's
+    /// items (or one parent's children, for Rust test detection) that
+    /// checked no deadline, or collected every item before their first
+    /// check, so one 8 MiB statement ran seconds past its file's budget in
+    /// a release build. Each such loop, given one statement of 600,000
+    /// items of two to five bytes: with an expired deadline, must extract
+    /// nothing and stop at once (within 100 ms, far less than collecting
+    /// every item first takes); with a deadline 20 ms away, must stop
+    /// within 250 ms and say it did not finish. Timed on the loop alone,
+    /// after the parse.
+    #[test]
+    fn ori_t_0036_one_statement_of_many_items_is_extracted_under_the_deadline() {
+        let items = 600_000;
+        let go_var = format!("package m\nvar A{} int\n", ",A".repeat(items - 1));
+        let go_type = format!("package m\ntype (A int{})\n", ";A int".repeat(items / 3));
+        let ts_let = format!("export let a{};\n", ",a".repeat(items - 1));
+        let py_import = format!("import a{}\n", ",a".repeat(items - 1));
+        let py_from = format!("from . import a{}\n", ",a".repeat(items - 1));
+        let rs_attributes = "#[a]\n".repeat(items);
+        let cases: [(&str, Language, &str, &str); 6] = [
+            ("Go var", Language::Go, &go_var, "var_declaration"),
+            ("Go type", Language::Go, &go_type, "type_declaration"),
+            (
+                "TypeScript let",
+                Language::TypeScript,
+                &ts_let,
+                "lexical_declaration",
+            ),
+            (
+                "Python import",
+                Language::Python,
+                &py_import,
+                "import_statement",
+            ),
+            (
+                "Python from",
+                Language::Python,
+                &py_from,
+                "import_from_statement",
+            ),
+            ("Rust tests", Language::Rust, &rs_attributes, "source_file"),
+        ];
+        for (label, language, source, kind) in cases {
+            let tree = parse_bounded(
+                language,
+                false,
+                source,
+                Instant::now() + Duration::from_secs(600),
+            )
+            .expect("parses");
+            let node = first_of_kind(&tree, kind);
+            let run = |deadline: Instant| -> (bool, usize) {
+                let mut interfaces = Vec::new();
+                let mut sink = EdgeSink::with_limit(usize::MAX);
+                let completed = match label {
+                    "Go var" | "Go type" => go_declaration_interfaces(
+                        node,
+                        source.as_bytes(),
+                        &mut interfaces,
+                        deadline,
+                    ),
+                    "TypeScript let" => ts_declaration_interfaces(
+                        node,
+                        source.as_bytes(),
+                        &mut interfaces,
+                        deadline,
+                    ),
+                    "Python import" => {
+                        python_import_edges(node, source.as_bytes(), &mut sink, deadline)
+                    }
+                    "Rust tests" => {
+                        let (names, completed) = rust_test_names(node, source.as_bytes(), deadline);
+                        interfaces.extend(names.into_iter().map(|name| Interface {
+                            name,
+                            kind: InterfaceKind::Function,
+                            line: 0,
+                        }));
+                        completed
+                    }
+                    _ => python_import_from_edges(
+                        node,
+                        source.as_bytes(),
+                        "m.py",
+                        &KnownPaths::new(),
+                        &mut sink,
+                        deadline,
+                    ),
+                };
+                (completed, interfaces.len() + sink.edges.len())
+            };
+            let already_past = Instant::now() - Duration::from_secs(1);
+            let start = Instant::now();
+            assert_eq!(
+                run(already_past),
+                (false, 0),
+                "{label}: an expired deadline extracts nothing"
+            );
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(100),
+                "{label}: with the deadline already past, the loop must stop at its first \
+                 item, not after collecting all {items}: it took {elapsed:?}"
+            );
+            let start = Instant::now();
+            let (completed, _) = run(start + Duration::from_millis(20));
+            let elapsed = start.elapsed();
+            assert!(
+                !completed && elapsed < Duration::from_millis(250),
+                "{label}: a deadline 20 ms away must stop the loop, but it ran {elapsed:?} \
+                 (completed: {completed})"
+            );
+        }
+    }
+
+    /// Found with the test above: the two per-child checks it cannot tell
+    /// apart by timing, checked directly with an expired deadline, which
+    /// must stop each before its first child. `gather_children` is what
+    /// both traversal helpers gather a parent's children with, and
+    /// `rust_tests_in_siblings` is Rust test detection's work on one
+    /// parent's children once gathered.
+    #[test]
+    fn ori_t_0036_gathering_and_scanning_children_check_the_deadline_per_child() {
+        let source = "#[test]\nfn a() {}\n#[test]\nfn b() {}\n";
+        let tree = parse_bounded(
+            Language::Rust,
+            false,
+            source,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .expect("parses");
+        let root = tree.root_node();
+        let already_past = Instant::now() - Duration::from_secs(1);
+        let later = Instant::now() + Duration::from_secs(60);
+        assert!(gather_children(root, already_past).is_none());
+        let children = gather_children(root, later).expect("time left");
+        assert_eq!(children.len(), 4);
+
+        let mut names = Vec::new();
+        assert!(!rust_tests_in_siblings(
+            &children,
+            source.as_bytes(),
+            &mut names,
+            already_past
+        ));
+        assert!(names.is_empty(), "{names:?}");
+        assert!(rust_tests_in_siblings(
+            &children,
+            source.as_bytes(),
+            &mut names,
+            later
+        ));
+        assert_eq!(names, vec!["a".to_owned(), "b".to_owned()]);
     }
 
     /// Item 2 (MEDIUM): the `spec/` scan descended directories named `.git`,
