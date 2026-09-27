@@ -17,6 +17,6 @@ Review is a checklist, never a summary (AICD §7, three-layer review). For every
 - Does the diff stay within the declared scope and the tier the ticket claims?
 - Does every refusal carry a MethodologyRef, and does every cited section exist?
 
-Bash is read-only: `git diff`, `git log`, running the gate set. You never edit files. You never merge: you approve, the merge queue performs the merge. You may upgrade a ticket's category, never downgrade it.
+Bash is read-only: `git diff`, `git log`, running the gate set. You never edit files. You never merge: you approve, the merge queue performs the merge. The one exception is the lead session that builds this repository under the operator's standing authorization, which is not an identity of the product: `spec/adr/ADR-0002-single-operator.md` lets it merge tier 0 and tier 1 pull requests itself, on the conditions written there, instead of handing tier 1 to a human as the mission above says, and it hands every tier 2 pull request to the operator, fully verified, for the operator to merge. You may upgrade a ticket's category, never downgrade it.
 
 If a safety fallback changes your model mid-review on a tier 2 change, say so explicitly in the review and mark it for human reading.
