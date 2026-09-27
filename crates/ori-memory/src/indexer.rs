@@ -76,33 +76,25 @@
 //! module's own type for canonical documents walked out of `spec/`, which
 //! `ori_memory::barrier::Indexable` has no reason to cover.
 //!
-//! # `spec/design/` is excluded, and the exclusion is recorded
+//! # `spec/design/` is walked like the rest of `spec/`
 //!
 //! Escalation E-0006 (`ops/escalations/E-0006-the-design-artifact-is-mock-data.md`)
-//! found `spec/design/Ori Studio.html` to be 342 KB of mock UI data for a
-//! fictional product ("Ledgerline"), with its own fabricated
-//! `spec/`-shaped citations. [`Indexer::collect_from_repo`] never descends
-//! into `spec/design/`: indexing a different, invented product's sample
-//! tickets and sample criteria as this product's canonical documents would
-//! put them into a full-text index and a freshness tracker that both exist
-//! to be trusted, exactly the "look like this product's truth" failure
-//! E-0006 raised about the machinery built around that file before it. A
-//! symbolic link pointing into `spec/design/` from anywhere else under
-//! `spec/` is never followed either ("What the repository walk never
-//! reads", below), so the exclusion cannot be walked around.
+//! found `spec/design/Ori Studio.html` to be mock UI data for a fictional
+//! product ("Ledgerline"), with its own fabricated `spec/`-shaped
+//! citations. That file is all E-0006 is about, and the walk never reads
+//! it: it reads only `.md` files, and records the HTML file in
+//! [`RepoWalk::skipped`] with [`SkipReason::NotMarkdown`], like any other
+//! file that is not Markdown.
 //!
-//! The exclusion is never silent: [`Indexer::walk_repo`] records the
-//! directory in [`RepoWalk::skipped`] with [`SkipReason::Excluded`] and the
-//! reason. A review found it recorded nowhere, and found what it actually
-//! removes from the index on this repository's tree: not the HTML file
-//! E-0006 is about, which the walk would never read anyway since it reads
-//! only `.md` files, but `spec/design/DESIGN.md`, which `spec/README.md`
-//! lists as a Draft document (the gate G2 design document) and which ruling
-//! R23 says governs the phase 3 screen set, and any file added under
-//! `spec/design/` later. Whether that document belongs in this corpus is a
-//! question for the operator, raised with this module's report; this module
-//! does not decide it, and keeps the exclusion as it was until it is
-//! answered.
+//! Earlier rounds went further and never entered `spec/design/` at all, on
+//! a reading of E-0006 that the lead has since corrected as a mistake: what
+//! that removed from the index was `spec/design/DESIGN.md`, which
+//! `spec/README.md` lists as a Draft specification document (a gate G2
+//! artifact) and which ruling R23 says governs the phase 3 screen set, and
+//! any `.md` file added under `spec/design/` later. The exclusion is gone:
+//! every `.md` file under `spec/design/` is split, indexed and tracked
+//! exactly as the same file is anywhere else under `spec/`
+//! (`tests::ori_t_0035_every_markdown_file_under_spec_design_is_indexed_like_any_spec_file`).
 //!
 //! # The index is derived: rebuild and incremental must agree
 //!
@@ -207,10 +199,9 @@
 //! reading it:
 //!
 //! - a symbolic link, to a file or to a directory, anywhere under `spec/`
-//!   ([`SkipReason::Symlink`]): followed, `spec/mockups -> design` or a file
-//!   link into `spec/design/` indexed exactly the mock data the exclusion
-//!   above keeps out, and a link out of the repository would have read
-//!   whatever it pointed at;
+//!   ([`SkipReason::Symlink`]): followed, a link inside `spec/` indexed one
+//!   file's text a second time under another identity, and a link out of
+//!   the repository would have read whatever it pointed at;
 //! - an entry that is not a regular file, such as a named pipe, which
 //!   would block the walk forever on read ([`SkipReason::NotARegularFile`]);
 //! - a regular file whose name does not carry the `.md` extension exactly,
@@ -234,10 +225,9 @@
 //!   ([`SkipReason::FileDocumentLimit`]), and one that would take the walk
 //!   past its budget of documents or of bytes
 //!   ([`SkipReason::WalkDocumentLimit`], [`SkipReason::WalkByteLimit`]):
-//!   "What one walk costs", below;
-//! - `spec/design/`, as a whole ([`SkipReason::Excluded`]; above).
+//!   "What one walk costs", below.
 //!
-//! Nothing else is left out. Every other line of every file the walk reads
+//! Nothing else is left out; no directory under `spec/` is skipped by name. Every other line of every file the walk reads
 //! is in some document: a criteria file's rows that start with an
 //! identifier become one [`DocumentKind::Criterion`] each, and every other
 //! line of it (its title, its prose, its table header, a proposed criterion
@@ -283,8 +273,8 @@
 //! what is left, or any file once no document is left, is left out without
 //! being read at all; and a later, smaller file that still fits is read.
 //! Files are reached in name order, so which ones are left out does not
-//! depend on the filesystem. This repository's own `spec/` is 213
-//! documents and about 187 KB today.
+//! depend on the filesystem. This repository's own `spec/` is 221
+//! documents and about 198 KB today.
 //!
 //! No one file can spend the walk's budget. One file is read up to
 //! `MAX_FILE_BYTES`, a sixteenth of the bytes, and split into at most
@@ -1084,12 +1074,6 @@ pub enum SkipReason {
         /// How many bytes the walk had left when it reached the file.
         remaining: u64,
     },
-    /// A directory the walk never enters, by a decision recorded elsewhere;
-    /// `reason` names it (the module doc's "`spec/design/` is excluded").
-    Excluded {
-        /// Why, and where the decision is recorded.
-        reason: &'static str,
-    },
 }
 
 /// What one [`Indexer::walk_repo`] found: AICD §25.
@@ -1763,7 +1747,7 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// the walk a few hundred bytes beyond its own text (its path twice, three
 /// strings, a set entry), so a file of empty headings, two bytes each,
 /// turned a 1 MiB file into 524,288 documents and about 200 MB of memory in
-/// a review. 16,384 is about 77 times the 213 documents this repository's
+/// a review. 16,384 is about 74 times the 221 documents this repository's
 /// own `spec/` produces today. Every document a file splits into is
 /// counted, the ones the walk then leaves out (a repeated path, one over
 /// [`MAX_DOCUMENT_BYTES`]) included, because each of those costs the walk
@@ -1793,7 +1777,7 @@ const MAX_FILE_DOCUMENTS: usize = MAX_WALK_DOCUMENTS / 16;
 /// documents, in all: 16 MiB, the module doc's "What one walk costs". The
 /// documents a walk returns hold their text, so this bounds that half of
 /// its memory as [`MAX_WALK_DOCUMENTS`] bounds the other. This repository's
-/// `spec/` is about 187 KB of Markdown today.
+/// `spec/` is about 198 KB of Markdown today.
 const MAX_WALK_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Commits `tx`. In test builds only, it then runs the after-commit hook a
@@ -2690,14 +2674,13 @@ impl Indexer<'_> {
     /// module's own splitter, not `ori-gates::spec_refs::heading_slug`'s,
     /// since `ori-memory` does not and must not depend on `ori-gates`, a
     /// sideways crate under `spec/LLD.md` section 2's dependency direction)
-    /// are read. `spec/design/` is never entered, and is listed in
-    /// [`RepoWalk::skipped`] with the reason; see the module doc. Symbolic
+    /// are read, `spec/design/*.md` included (see the module doc). Symbolic
     /// links, non-regular files, files not named `.md`, non-UTF-8 paths,
     /// unreadable entries, repeated document paths, files over 1 MiB,
     /// documents over 64 KiB, files of more than 1,024 documents and files
     /// past the walk's own budget (16,384 documents and 16 MiB of text in
-    /// all) are left out and listed there
-    /// too; see the module doc's "What the repository walk never reads"
+    /// all) are left out and listed in [`RepoWalk::skipped`], with the
+    /// reason; see the module doc's "What the repository walk never reads"
     /// and "What one walk costs". The walk's stack use does not depend on
     /// the tree's depth. Entries are visited in name order, so
     /// the result does not depend on the filesystem's own directory order.
@@ -3115,8 +3098,9 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Walks `spec_dir` for `.md` files, depth first, entries in name order,
-/// skipping (and recording) the whole `spec/design` subtree by its exact
-/// repository-relative path, appending every document found to
+/// entering every directory under it, `spec/design/` included (the module
+/// doc's "`spec/design/` is walked like the rest of `spec/`"), appending
+/// every document found to
 /// `walk.documents` (and every entry left out to `walk.skipped`), with
 /// `path` computed relative to `repo_root`, never to the directory being
 /// listed. Returns an error only when `spec_dir` itself cannot be listed,
@@ -3160,18 +3144,9 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// checks the exact shape, `["spec", "adr", filename]` or `["spec",
 /// "criteria", filename]`, three components with `adr`/`criteria` in the
 /// second one, not a components-contains check. Second, the `spec/design`
-/// skip matched any directory named `design` at any depth (excluding, for
-/// example, a hypothetical `spec/runbooks/design/`, which the module doc
-/// never asked it to touch, and which is not what "`spec/design/` is
-/// skipped entirely" means), and it was checked directory by directory
-/// during the recursion rather than against the exact relative path,
-/// which is a narrower rule than "the whole `spec/design` subtree, and
-/// nothing else". It now compares the directory's own repository-relative
-/// path to `spec/design` exactly, still skipping the whole subtree (this
-/// function never descends past a match), and now the test
-/// `tests::ori_t_0035_collect_from_repo_excludes_a_nested_markdown_file_under_spec_design`
-/// plants a file two levels deep to prove that directly, not only at the
-/// top level.
+/// skip of that time matched any directory named `design` at any depth;
+/// the skip has since been removed altogether, so no directory is skipped
+/// by name at all.
 ///
 /// A third review found the walk following symbolic links (`is_dir` and
 /// `read_to_string` both follow them), rewriting `\` to `/` on every
@@ -3208,20 +3183,6 @@ fn walk_markdown(repo_root: &Path, spec_dir: &Path, walk: &mut RepoWalk) -> std:
             continue;
         }
         if file_type.is_dir() {
-            let relative_dir = path.strip_prefix(repo_root).unwrap_or(&path);
-            if relative_dir == Path::new("spec").join("design") {
-                // See the module doc, "spec/design/ is excluded". The exact
-                // repository-relative path, not merely the directory's own
-                // name, so a same-named directory elsewhere in the tree is
-                // untouched; recorded, never silent.
-                walk.skipped.push(SkippedEntry {
-                    path,
-                    reason: SkipReason::Excluded {
-                        reason: DESIGN_EXCLUSION,
-                    },
-                });
-                continue;
-            }
             match entries_in_reverse_name_order(&path) {
                 Ok(entries) => listings.push(entries),
                 Err(error) => walk.skipped.push(SkippedEntry {
@@ -3474,12 +3435,6 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, budget: &m
         }
     }
 }
-
-/// The recorded reason `spec/design/` is never walked: the module doc's
-/// "`spec/design/` is excluded".
-const DESIGN_EXCLUSION: &str = "spec/design/ is excluded as a whole: escalation E-0006 records \
-                                the design artifact under it as mock data for a fictional \
-                                product";
 
 /// Reads `path` as UTF-8 text, never more than [`MAX_FILE_BYTES`] of it:
 /// `Ok(Err(byte_len))` for a file longer than that (its length as the
@@ -4189,21 +4144,22 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // The repository walk: spec/design/ exclusion, ADR, criteria and
-    // section handling.
+    // The repository walk: the design artifact, ADR, criteria and section
+    // handling.
     // -------------------------------------------------------------------
 
     #[test]
-    fn ori_t_0035_collect_from_repo_excludes_spec_design() {
+    fn ori_t_0035_collect_from_repo_never_indexes_the_html_design_artifact() {
+        // Escalation E-0006 is about this file alone: mock data for a
+        // fictional product. The walk reads only .md files, so it is
+        // recorded as not Markdown and none of it is indexed.
         let scratch = Scratch::new("collect-design");
         let spec = scratch.path.join("spec");
         let design = spec.join("design");
         fs::create_dir_all(&design).expect("create spec/design");
-        fs::write(
-            design.join("Ori Studio.html"),
-            "<html>Ledgerline mock data, ORI-DVG-04</html>",
-        )
-        .expect("write the mock design artifact");
+        let artifact = design.join("Ori Studio.html");
+        fs::write(&artifact, "<html>Ledgerline mock data, ORI-DVG-04</html>")
+            .expect("write the mock design artifact");
         fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
 
         let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
@@ -4215,7 +4171,17 @@ mod tests {
             documents
                 .iter()
                 .all(|document| !document.body.contains("Ledgerline")),
-            "spec/design/ must never contribute a document (escalation E-0006): {documents:?}"
+            "the HTML design artifact must never contribute a document (escalation E-0006): \
+             {documents:?}"
+        );
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        assert_eq!(
+            walk.skipped,
+            vec![SkippedEntry {
+                path: artifact,
+                reason: SkipReason::NotMarkdown,
+            }],
+            "it is recorded as a file that is not Markdown, like any other"
         );
     }
 
@@ -5236,61 +5202,83 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Finding 7 (MEDIUM): the spec/design/ exclusion test passed vacuously.
-    // A new test, added beside the existing one rather than editing it
-    // (CLAUDE.md: an existing test is never modified).
+    // Round 9, item 3: the spec/design/ exclusion was a mistake, corrected
+    // by the lead. DESIGN.md is a Draft specification document (a gate G2
+    // artifact) and is indexed like any spec file; E-0006 concerns only the
+    // HTML file, which the walk never reads.
     // ---------------------------------------------------------------------
 
     #[test]
-    fn ori_t_0035_collect_from_repo_excludes_a_real_markdown_file_under_spec_design() {
-        let scratch = Scratch::new("collect-design-md");
+    fn ori_t_0035_every_markdown_file_under_spec_design_is_indexed_like_any_spec_file() {
+        let scratch = Scratch::new("design-indexed");
         let spec = scratch.path.join("spec");
         let design = spec.join("design");
-        fs::create_dir_all(&design).expect("create spec/design");
-        fs::write(
-            design.join("DESIGN.md"),
-            "# Design Ori Studio\n\nLedgerline mock content that must never be indexed\n",
-        )
-        .expect("write a real markdown file under spec/design/");
-        fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
+        fs::create_dir_all(design.join("screens")).expect("create spec/design/screens");
+        fs::create_dir_all(spec.join("runbooks").join("design"))
+            .expect("create spec/runbooks/design");
+        let design_md = ["spec", "design", "DESIGN.md"].join("/");
+        let files = [
+            (
+                design_md.clone(),
+                "Draft preamble designword\n\n# Design\n\n## Tokens\n\ntokenword\n",
+            ),
+            (
+                ["spec", "design", "screens", "fleet.md"].join("/"),
+                "# Fleet\n\nscreenword\n",
+            ),
+            (
+                ["spec", "runbooks", "design", "R.md"].join("/"),
+                "# Runbook design notes\n\nrunbookword\n",
+            ),
+        ];
+        for (relative, text) in &files {
+            fs::write(scratch.path.join(relative), text).expect("write a spec file");
+        }
 
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
         assert!(
-            !documents.is_empty(),
-            "the real document outside spec/design/ must still be collected"
+            walk.skipped.is_empty(),
+            "no directory under spec/ is skipped by name: {:?}",
+            walk.skipped
         );
-        assert!(
-            documents
-                .iter()
-                .all(|d| !d.path.starts_with("spec/design/")),
-            "a real .md file under spec/design/ must never be collected, unlike the .html file \
-             the existing test plants (which the extension filter alone already drops, so it \
-             cannot tell the directory skip apart from its absence): {documents:?}"
+        let paths: Vec<&str> = walk.documents.iter().map(|d| d.path.as_str()).collect();
+        for expected in [
+            design_md.clone(),
+            format!("{design_md}#design"),
+            format!("{design_md}#tokens"),
+            format!("{}#fleet", files[1].0),
+            format!("{}#runbook-design-notes", files[2].0),
+        ] {
+            assert!(
+                paths.contains(&expected.as_str()),
+                "{expected} is indexed: {paths:?}"
+            );
+        }
+        let design_documents: Vec<&IndexableDocument> = walk
+            .documents
+            .iter()
+            .filter(|d| document_file(&d.path) == design_md)
+            .collect();
+        let reference =
+            section_documents(&design_md, files[0].1, MAX_FILE_DOCUMENTS).expect("split");
+        assert_eq!(
+            design_documents,
+            reference.iter().collect::<Vec<_>>(),
+            "DESIGN.md is split exactly as any section file under spec/ is"
         );
-    }
+        assert_eq!(
+            assert_every_entry_is_indexed_or_skipped(&scratch.path, &walk),
+            files.len()
+        );
 
-    #[test]
-    fn ori_t_0035_collect_from_repo_treats_a_differently_cased_design_directory_as_a_different_name()
-     {
-        // The exclusion matches the literal directory name "design"
-        // (lower case), the name escalation E-0006 and this repository's
-        // real spec/design/ both use; it does not fold case. A directory a
-        // caller actually named "Design" is therefore a different name as
-        // far as this module is concerned, not an evasion of the exclusion:
-        // documenting that choice here, rather than leaving it implicit.
-        let scratch = Scratch::new("collect-design-case");
-        let spec = scratch.path.join("spec");
-        let differently_cased = spec.join("Design");
-        fs::create_dir_all(&differently_cased).expect("create spec/Design");
-        fs::write(differently_cased.join("NOTES.md"), "# Notes\n\ncontent\n")
-            .expect("write a markdown file under the differently-cased directory");
-
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
-        assert!(
-            documents.iter().any(|d| d.path.starts_with("spec/Design/")),
-            "a directory literally named Design is not the same name as design, and this \
-             module's exclusion is a literal name match, not a case-folded one: {documents:?}"
-        );
+        let mut indexer = Indexer::open_in_memory().expect("an in-memory index");
+        indexer
+            .full_rebuild(&Indexer::collect_from_repo(&scratch.path).expect("collect"))
+            .expect("index the walk");
+        for word in ["designword", "tokenword", "screenword", "runbookword"] {
+            let found = indexer.search(word, 10).expect("search");
+            assert_eq!(found.hits.len(), 1, "{word} is searchable: {found:?}");
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -5672,62 +5660,6 @@ mod tests {
              Adr document: {adr_docs:?}"
         );
         assert!(adr_docs.iter().all(|d| d.kind == DocumentKind::Section));
-    }
-
-    // ---------------------------------------------------------------------
-    // Item 4(b) (LOW): spec/design/ is excluded by its exact
-    // repository-relative path; a nested file is excluded too, and a
-    // same-named directory elsewhere is not.
-    // ---------------------------------------------------------------------
-
-    #[test]
-    fn ori_t_0035_collect_from_repo_excludes_a_nested_markdown_file_under_spec_design() {
-        let scratch = Scratch::new("design-nested");
-        let nested = scratch.path.join("spec").join("design").join("screens");
-        fs::create_dir_all(&nested).expect("create spec/design/screens");
-        fs::write(
-            nested.join("S.md"),
-            "# Nested\n\nLedgerline nested mock content\n",
-        )
-        .expect("write a nested file under spec/design/");
-        fs::write(
-            scratch.path.join("spec").join("PRD.md"),
-            "# PRD\n\nreal content\n",
-        )
-        .expect("write a real document");
-
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
-        assert!(
-            !documents.is_empty(),
-            "the real document must still be collected"
-        );
-        assert!(
-            documents
-                .iter()
-                .all(|d| !d.path.starts_with("spec/design/")),
-            "a file nested two levels under spec/design/ must never be collected: {documents:?}"
-        );
-    }
-
-    #[test]
-    fn ori_t_0035_collect_from_repo_does_not_exclude_a_differently_placed_design_directory() {
-        let scratch = Scratch::new("design-elsewhere");
-        let elsewhere = scratch.path.join("spec").join("runbooks").join("design");
-        fs::create_dir_all(&elsewhere).expect("create spec/runbooks/design");
-        fs::write(
-            elsewhere.join("R.md"),
-            "# Runbook design notes\n\nreal content\n",
-        )
-        .expect("write a file under a design-named directory that is not spec/design");
-
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
-        assert!(
-            documents
-                .iter()
-                .any(|d| d.path.starts_with(concat!("spec/runbooks/design/", "R.md"))),
-            "the exclusion must match only the exact path spec/design, not any directory named \
-             design anywhere under spec/: {documents:?}"
-        );
     }
 
     // ---------------------------------------------------------------------
@@ -6804,9 +6736,9 @@ mod tests {
     }
 
     /// Every regular `.md` file under `repo_root/spec`, as a repository
-    /// relative, `/`-joined path, outside `spec/design/` and never through a
-    /// link: the files [`Indexer::walk_repo`] reads, found independently of
-    /// it, so a file the walk produced nothing for is still checked.
+    /// relative, `/`-joined path, never through a link: the files
+    /// [`Indexer::walk_repo`] reads, found independently of it, so a file
+    /// the walk produced nothing for is still checked.
     fn markdown_files_to_index(repo_root: &Path) -> Vec<String> {
         fn visit(repo_root: &Path, dir: &Path, out: &mut Vec<String>) {
             for entry in fs::read_dir(dir).expect("list a directory") {
@@ -6819,7 +6751,7 @@ mod tests {
                     .components()
                     .map(|component| component.as_os_str().to_string_lossy().into_owned())
                     .collect();
-                if file_type.is_dir() && relative != ["spec", "design"] {
+                if file_type.is_dir() {
                     visit(repo_root, &path, out);
                 } else if file_type.is_file()
                     && path.extension().and_then(|extension| extension.to_str()) == Some("md")
@@ -6996,8 +6928,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ori_t_0035_the_walk_never_follows_a_symbolic_link_into_spec_design_or_out_of_the_repository()
-    {
+    fn ori_t_0035_the_walk_never_follows_a_symbolic_link_inside_spec_or_out_of_the_repository() {
         let scratch = Scratch::new("walk-symlinks");
         let spec = scratch.path.join("spec");
         let design = spec.join("design");
@@ -7043,10 +6974,28 @@ mod tests {
             "the real document is still collected: {walk:?}"
         );
         assert!(
-            walk.documents.iter().all(|document| {
-                !document.body.contains("Ledgerline") && !document.body.contains("private words")
-            }),
-            "no link may bring spec/design/ or anything outside spec/ into the index: {:?}",
+            walk.documents
+                .iter()
+                .all(|document| !document.body.contains("private words")),
+            "no link may bring anything outside spec/ into the index: {:?}",
+            walk.documents
+        );
+        // spec/design/ is walked like the rest of spec/, so its files are
+        // indexed once each, at their own paths, and never a second time
+        // through a link to them.
+        let design_text: Vec<&str> = walk
+            .documents
+            .iter()
+            .filter(|document| document.body.contains("Ledgerline"))
+            .map(|document| document_file(&document.path))
+            .collect();
+        assert_eq!(
+            design_text,
+            [
+                ["spec", "design", "DESIGN.md"].join("/"),
+                ["spec", "design", "screens", "S.md"].join("/"),
+            ],
+            "each linked-to file is indexed at its real path only: {:?}",
             walk.documents
         );
         let skipped_links: BTreeSet<PathBuf> = walk
@@ -7949,43 +7898,6 @@ mod tests {
             .incremental_sync(&walk.documents)
             .expect("an immediate resync");
         assert_eq!((resync.upserted, resync.removed), (0, 0));
-    }
-
-    #[test]
-    fn ori_t_0035_the_spec_design_exclusion_is_recorded_in_the_skip_list_with_its_reason() {
-        // Round 5 skipped spec/design/ with no record: the review found
-        // DESIGN.md and any new file under it left out while the walk
-        // reported nothing skipped. The exclusion stands (whether it should
-        // cover DESIGN.md is the operator's question); it is now recorded.
-        let scratch = Scratch::new("design-recorded");
-        let spec = scratch.path.join("spec");
-        let design = spec.join("design");
-        fs::create_dir_all(design.join("screens")).expect("create spec/design/screens");
-        fs::write(
-            design.join("DESIGN.md"),
-            "# Design\n\n## Tokens\n\ntoken words\n",
-        )
-        .expect("write a design document");
-        fs::write(
-            design.join("screens").join("fleet.md"),
-            "# Fleet\n\nscreen words\n",
-        )
-        .expect("write a nested design file");
-        fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
-
-        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
-        assert_eq!(
-            walk.skipped,
-            vec![SkippedEntry {
-                path: design,
-                reason: SkipReason::Excluded {
-                    reason: DESIGN_EXCLUSION,
-                },
-            }],
-            "the whole excluded subtree is one recorded entry, with its reason"
-        );
-        assert!(DESIGN_EXCLUSION.contains("E-0006"));
-        assert_eq!(walk.documents.len(), 1);
     }
 
     // ---------------------------------------------------------------------
