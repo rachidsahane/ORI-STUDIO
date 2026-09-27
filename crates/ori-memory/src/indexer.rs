@@ -8212,6 +8212,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ori_t_0035_a_check_report_naming_a_page_it_could_not_read_is_never_read_as_damage() {
+        // The row the review traced under a genuine out-of-memory condition,
+        // and the shapes around it: a page the check could not get is "could
+        // not check", whatever else the report says; a page whose read
+        // failed with SQLITE_CORRUPT, and every message about a page that
+        // was read, is damage.
+        let traced = "*** in database main ***\nFreelist: failed to get page 59\n\
+                      Tree 2 page 2: unable to get the page. error code=7\n\
+                      Page 7: never used";
+        let cases = [
+            (traced, ReportRow::UnreadPage),
+            (
+                "*** in database main ***\nTree 4 page 9: unable to get the page. error code=3082",
+                ReportRow::UnreadPage,
+            ),
+            (
+                "*** in database main ***\nTree 4 page 9: unable to get the page. error code=10",
+                ReportRow::UnreadPage,
+            ),
+            (
+                "*** in database main ***\nFailed to read ptrmap key=5",
+                ReportRow::UnreadPage,
+            ),
+            (
+                "*** in database main ***\nTree 4 page 9: unable to get the page. error code=11",
+                ReportRow::Damage,
+            ),
+            (
+                "*** in database main ***\nTree 4 page 9: unable to get the page. error code=267",
+                ReportRow::Damage,
+            ),
+            (
+                "*** in database main ***\nPage 7: never used",
+                ReportRow::Damage,
+            ),
+            (
+                "*** in database main ***\nTree 2 page 2: btreeInitPage() returns error code 11",
+                ReportRow::Damage,
+            ),
+            (
+                "malformed inverted index for FTS5 table main.documents",
+                ReportRow::Damage,
+            ),
+            (
+                "unable to validate the inverted index for FTS5 table main.documents: out of memory",
+                ReportRow::NotValidated,
+            ),
+        ];
+        for (row, expected) in cases {
+            assert_eq!(report_row(row), expected, "{row:?}");
+        }
+    }
+
     /// `bytes` with bit 0 of the byte at `offset` flipped.
     fn flip_low_bit(bytes: &[u8], offset: usize) -> Vec<u8> {
         let mut flipped = bytes.to_vec();
