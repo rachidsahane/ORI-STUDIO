@@ -244,13 +244,14 @@
 //!   so it is proven on Linux instead (see the report for how).
 //! - **Memory.** What the `spec/` citation scan holds while it runs, how
 //!   much of `spec/` it reads, and what the returned map keeps from it, each
-//!   bounded since round 5. Until then none was: the review of round 3
-//!   measured 2.3 GB held for eight newline-only documents of 8 MiB (every
-//!   line of every document copied into its own `String`, all documents at
-//!   once, about 35 times the corpus), and 4.2 GB of heading text in the
-//!   returned map for 2000 modules each cited under 500 long headings (the
-//!   heading copied into every citation), both from repositories that hold
-//!   still.
+//!   bounded since round 5; what each module keeps from its own file, since
+//!   round 6 (the last two items below). Until round 5 none was: the review
+//!   of round 3 measured 2.3 GB held for eight newline-only documents of
+//!   8 MiB (every line of every document copied into its own `String`, all
+//!   documents at once, about 35 times the corpus), and 4.2 GB of heading
+//!   text in the returned map for 2000 modules each cited under 500 long
+//!   headings (the heading copied into every citation), both from
+//!   repositories that hold still.
 //!   - *While scanning:* one document at a time, read into one buffer of at
 //!     most `max_file_bytes + 1` bytes (8 MiB by default) and dropped before
 //!     the next is read, every line searched in place as a slice of that
@@ -297,6 +298,46 @@
 //!     (`tests::ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings`
 //!     sums what a returned map keeps, for the review's shape, against this
 //!     bound).
+//!   - *Kept per module, its dependency edges:* at most 4096, the first
+//!     found in source order ([`Module::dependency_edges_truncated`] marks a
+//!     module that had more). An edge is a 24-byte record on a 64-bit
+//!     target and holds no copy of the importing module's path: the
+//!     [`Module`] holding it is the importing module. A resolved target
+//!     ([`EdgeTarget`]) is the walk's own allocation of that file's path,
+//!     shared by every edge in the map that names it, so it is stored once
+//!     for the whole map however many edges name it, and all of them
+//!     together are at most the paths the walk found. An unresolved target
+//!     is its own allocation: a 16-byte reference-count header and at most
+//!     1024 bytes of text ([`DependencyEdge::to_truncated`] marks one cut to
+//!     fit). So the edges one module keeps take at most 4096 x (24 + 16 +
+//!     1024) = 4,358,144 bytes, about 4.2 MiB, not counting the allocator's
+//!     own rounding, whatever its file holds and however long its own path
+//!     or its targets' paths are
+//!     (`tests::ori_t_0036_retained_edge_bytes_are_bounded_for_many_imports_at_a_long_path`
+//!     sums what a returned map keeps, for the review's shape in all four
+//!     languages, against this bound). Until round 6, an edge copied its
+//!     importing module's path, a resolved edge its target's path as well,
+//!     and an entry point its module's path, with no cap on how many there
+//!     were: one import name costs about two bytes of source, and the
+//!     review of round 5 measured 1.78 GB of such copies kept for one 4 MiB
+//!     Python file (`import a,a,...`) at an 850-byte path, each symlink to
+//!     the file adding as much again.
+//!   - *Kept per module, the rest:* its path, at most 500 citations (above),
+//!     and its interfaces, entry points and covering tests, none of which
+//!     holds a copy of the module's path. Each of those is a fixed-size
+//!     record (40, 32 and 24 bytes on a 64-bit target) plus text that is a
+//!     distinct piece of the file's own source (a name, or a shebang entry
+//!     point's first line) or one of the fixed names `main` and `__main__`.
+//!     Their count is not capped: they grow with the bytes read from that
+//!     one file, which [`CodeMapOptions::max_file_bytes`] caps, and with
+//!     nothing else. The densest shape is one interface per two bytes of
+//!     source (each is a distinct name, and two names need a byte between
+//!     them: `var A,A,...,A int` in Go), 41 bytes kept per two read, so at
+//!     most about 20.5 times the file's size, about 172 MB for a file of
+//!     8 MiB that is nothing but such a list, not counting the allocator's
+//!     rounding
+//!     (`tests::ori_t_0036_retained_interface_bytes_stay_within_the_stated_factor_of_the_file`
+//!     checks the factor on that shape).
 //! - **What is not bounded.** There is no cap on the total number of files or
 //!   total bytes walked, and no `.gitignore` is honored: a `target/` or
 //!   `node_modules/` directory is walked like any other, its files seen,
@@ -305,7 +346,9 @@
 //!   [`Coverage`] rather than hidden by a heuristic this module does not
 //!   implement. Both are named as gaps in this ticket's closing report, not
 //!   silently assumed away. The same holds for the number of entries under
-//!   `spec/`, which are listed (paths only) before any is read. Races with a
+//!   `spec/`, which are listed (paths only) before any is read, and for the
+//!   number of interfaces, entry points and covering tests one module keeps,
+//!   which only its file's size bounds (see "Memory"). Races with a
 //!   live writer are out of scope; see "Threat model".
 //!
 //! # Quadratic extraction, and what stays fast
@@ -445,7 +488,9 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::io::Read as _;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tree_sitter::{Node, ParseOptions, ParseState, Parser};
@@ -564,32 +609,112 @@ pub struct Interface {
 
 /// One dependency edge from a module to another module, or to something
 /// outside the mapped repository.
+///
+/// The importing module is the [`Module`] whose [`Module::dependency_edges`]
+/// holds this edge; the edge itself holds no copy of that module's path.
+/// Until round 6 of this ticket it did (a `from` field, one copy of the path
+/// per edge), which let one file hold gigabytes of copies of its own path;
+/// see the module doc's "Memory" bound.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct DependencyEdge {
-    /// The importing module's path.
-    pub from: String,
-    /// When [`DependencyEdge::external`] is `false`, another module's
-    /// [`Module::path`] in this same [`CodeMap`]. Otherwise, the import
-    /// target as written in the source (a crate name, a bare specifier, a
-    /// dotted absolute import, a Go import path), because it could not be
-    /// resolved to a file in the mapped repository. Two bounded departures
-    /// from "as written": a member of a grouped Rust `use` is written as its
-    /// own full path (its group's prefix, `::`, the member), which is what
-    /// its ungrouped form records; and a Python relative import with more
-    /// than 32 leading dots writes them as a count (`[N leading dots]name`).
-    /// See the module doc's "Quadratic extraction" for why.
-    pub to: String,
+    /// When [`DependencyEdge::external`] is `false`, the path of another
+    /// file the walk found in this same repository (a [`Module::path`] when
+    /// that file was parsed), shared with every other edge that resolves to
+    /// the same file rather than copied per edge; see [`EdgeTarget`].
+    /// Otherwise, the import target as written in the source (a crate name,
+    /// a bare specifier, a dotted absolute import, a Go import path), because
+    /// it could not be resolved to a file in the mapped repository. Three
+    /// bounded departures from "as written": a member of a grouped Rust `use`
+    /// is written as its own full path (its group's prefix, `::`, the
+    /// member), which is what its ungrouped form records; a Python relative
+    /// import with more than 32 leading dots writes them as a count (`[N
+    /// leading dots]name`); and text longer than 1024 bytes is cut to 1024
+    /// (back to a UTF-8 character boundary) and marked
+    /// [`DependencyEdge::to_truncated`]. See the module doc's "Quadratic
+    /// extraction" and "Memory" for why.
+    pub to: EdgeTarget,
     /// Whether `to` names something outside the mapped repository (or
     /// something this module's resolver did not attempt, see the module
     /// doc's per-language notes; Go edges are always external).
     pub external: bool,
+    /// Whether `to` is the first 1024 bytes of a longer unresolved target
+    /// rather than all of it. Never `true` for a resolved edge, whose `to`
+    /// is always a whole path.
+    pub to_truncated: bool,
 }
 
-/// One entry point: a place a program starts running.
+/// Where a [`DependencyEdge`] points, as text: read it as a `&str` (it
+/// dereferences to one and compares equal to one).
+///
+/// Shared, not copied: every edge in one [`CodeMap`] that resolves to the
+/// same file holds the same single allocation of that file's path, made
+/// once per [`build_code_map`] call, so a module importing one file a
+/// thousand times keeps one copy of the path, not a thousand. An unresolved
+/// target is its own allocation of at most 1024 bytes. See the module doc's
+/// "Memory" bound.
+#[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct EdgeTarget(Arc<str>);
+
+impl EdgeTarget {
+    /// The target's text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for EdgeTarget {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for EdgeTarget {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Rendered as the text itself, exactly as a `String` field renders, so a
+/// map's `Debug` output reads the same as it did before targets were shared.
+impl fmt::Debug for EdgeTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.0, f)
+    }
+}
+
+impl fmt::Display for EdgeTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for EdgeTarget {
+    fn eq(&self, other: &str) -> bool {
+        *self.0 == *other
+    }
+}
+
+impl PartialEq<&str> for EdgeTarget {
+    fn eq(&self, other: &&str) -> bool {
+        *self.0 == **other
+    }
+}
+
+impl PartialEq<String> for EdgeTarget {
+    fn eq(&self, other: &String) -> bool {
+        *self.0 == **other
+    }
+}
+
+/// One entry point: a place a program starts running. The module it is in
+/// is the [`Module`] whose [`Module::entry_points`] holds it; like a
+/// [`DependencyEdge`], it holds no copy of that module's path (until round
+/// 6 it did, one per entry point, the same defect).
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct EntryPoint {
-    /// The module it is in.
-    pub module: String,
     /// `main` (Rust, Go, or a top-level TypeScript function so named),
     /// `__main__` (a Python `if __name__ == "__main__":` guard), or the
     /// literal first line of a shebang (`#!...`), which is checked for every
@@ -644,8 +769,14 @@ pub struct Module {
     pub parsed_with_errors: bool,
     /// The module's public interfaces, sorted by (line, name).
     pub interfaces: Vec<Interface>,
-    /// The module's outgoing dependency edges, sorted by (external, to).
+    /// The module's outgoing dependency edges, sorted by (external, to), at
+    /// most 4096 of them.
     pub dependency_edges: Vec<DependencyEdge>,
+    /// Whether the file had more than 4096 dependency edges, so that
+    /// `dependency_edges` holds the first 4096 found in source order (then
+    /// sorted) and extraction stopped recording more. See the module doc's
+    /// "Memory" bound.
+    pub dependency_edges_truncated: bool,
     /// The module's entry points, sorted by (line, name).
     pub entry_points: Vec<EntryPoint>,
     /// The tests found to cover this module, by the rule the module doc
@@ -956,7 +1087,13 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
 
     let walk = walk_repository(&root_canon);
     let files_seen = walk.files.len() + walk.pre_skipped.len();
-    let known: HashSet<String> = walk.files.iter().map(|file| file.rel.clone()).collect();
+    // Each path allocated once, here: a resolved edge's target is a clone
+    // of one of these, never a fresh copy (see `EdgeTarget`).
+    let known: KnownPaths = walk
+        .files
+        .iter()
+        .map(|file| Arc::from(file.rel.as_str()))
+        .collect();
     // Built once, shared by every file: see `RustModuleIndex`'s doc for why
     // building it per `use crate::...` resolution (the shape this ticket's
     // third review round found) is the defect, not a detail.
@@ -1645,11 +1782,17 @@ fn per_file_budget(options: &CodeMapOptions, file_bytes: u64) -> Duration {
         .saturating_add(Duration::from_micros(allowance_micros))
 }
 
+/// Every root-relative path the walk admitted as a candidate file, each
+/// allocated once per [`build_code_map`] call. Import resolution looks a
+/// path up here and, on a match, clones the one shared allocation into the
+/// edge's [`EdgeTarget`], so a resolved edge never copies a path.
+type KnownPaths = HashSet<Arc<str>>;
+
 /// Turns one candidate file into a [`Module`], or the [`SkipReason`] it was
 /// skipped for.
 fn process_file(
     file: &CandidateFile,
-    known: &HashSet<String>,
+    known: &KnownPaths,
     rust_index: &RustModuleIndex,
     options: &CodeMapOptions,
     root_canon: &Path,
@@ -1733,10 +1876,10 @@ fn process_file(
             extract_typescript(root, source.as_bytes(), &file.rel, known, deadline)
         }
         Language::Python => extract_python(root, source.as_bytes(), &file.rel, known, deadline),
-        Language::Go => extract_go(root, source.as_bytes(), &file.rel, deadline),
+        Language::Go => extract_go(root, source.as_bytes(), deadline),
     };
 
-    if let Some(shebang) = shebang_entry_point(&file.rel, source) {
+    if let Some(shebang) = shebang_entry_point(source) {
         extracted.entry_points.push(shebang);
     }
 
@@ -1761,7 +1904,8 @@ fn process_file(
         language,
         parsed_with_errors,
         interfaces: extracted.interfaces,
-        dependency_edges: extracted.edges,
+        dependency_edges: extracted.edges.edges,
+        dependency_edges_truncated: extracted.edges.truncated,
         entry_points: extracted.entry_points,
         covering_tests,
         spec_sections: Vec::new(),
@@ -1802,13 +1946,12 @@ fn parse_bounded(
 
 /// A shebang line is checked the same way for every language: the file's
 /// first two bytes are `#!`.
-fn shebang_entry_point(rel: &str, source: &str) -> Option<EntryPoint> {
+fn shebang_entry_point(source: &str) -> Option<EntryPoint> {
     if !source.starts_with("#!") {
         return None;
     }
     let line = source.lines().next().unwrap_or("#!").to_owned();
     Some(EntryPoint {
-        module: rel.to_owned(),
         name: line,
         line: 1,
     })
@@ -1915,7 +2058,7 @@ fn for_each_sibling_group<'a>(
 /// What one language's top-level scan produced.
 struct Extracted {
     interfaces: Vec<Interface>,
-    edges: Vec<DependencyEdge>,
+    edges: EdgeSink,
     entry_points: Vec<EntryPoint>,
 }
 
@@ -1923,8 +2066,104 @@ impl Extracted {
     fn new() -> Self {
         Self {
             interfaces: Vec::new(),
-            edges: Vec::new(),
+            edges: EdgeSink::new(),
             entry_points: Vec::new(),
+        }
+    }
+}
+
+/// The most dependency edges one module keeps. Past it, extraction stops
+/// recording edges for that module and sets
+/// [`Module::dependency_edges_truncated`]: one import name costs about two
+/// bytes of source (`import a,a,...` in Python, `use {a,a,...};` in Rust),
+/// so a file under the size cap could otherwise hold millions of edges. Far
+/// above what hand-written code imports; a generated file past it is
+/// reported truncated, not silently cut. See the module doc's "Memory".
+const MAX_DEPENDENCY_EDGES_PER_MODULE: usize = 4096;
+
+/// The longest unresolved edge target text one edge keeps. Longer text is
+/// cut to this many bytes, back to a UTF-8 character boundary, and marked
+/// [`DependencyEdge::to_truncated`]. A resolved target is never cut: it is
+/// a whole path, shared rather than copied (see [`EdgeTarget`]).
+const MAX_EDGE_TARGET_BYTES: usize = 1024;
+
+/// Where one module's dependency edges are collected while its file is
+/// extracted: every edge-producing site in every language goes through
+/// [`EdgeSink::push_resolved`] or [`EdgeSink::push_external`], which are
+/// what hold the edge cap and the target text cap, so no site can keep more
+/// than they allow, and none holds a copy of the importing file's path.
+struct EdgeSink {
+    edges: Vec<DependencyEdge>,
+    /// Set the first time an edge that exists is refused because `limit`
+    /// edges are already held, never merely because `limit` were reached.
+    truncated: bool,
+    /// [`MAX_DEPENDENCY_EDGES_PER_MODULE`] for every module this crate
+    /// maps. A field, not the constant read in place, only so that a test
+    /// can drive one statement's extraction past the cap and time it.
+    limit: usize,
+}
+
+impl EdgeSink {
+    fn new() -> Self {
+        Self::with_limit(MAX_DEPENDENCY_EDGES_PER_MODULE)
+    }
+
+    fn with_limit(limit: usize) -> Self {
+        Self {
+            edges: Vec::new(),
+            truncated: false,
+            limit,
+        }
+    }
+
+    /// Whether one more edge fits. `false` marks the module truncated: the
+    /// caller had an edge to record and could not.
+    fn has_room(&mut self) -> bool {
+        if self.edges.len() < self.limit {
+            true
+        } else {
+            self.truncated = true;
+            false
+        }
+    }
+
+    /// Records an edge to `target`, one of the walk's own paths, by cloning
+    /// its shared allocation, never copying its text. `false` when the sink
+    /// is full, and the caller should stop producing edges.
+    fn push_resolved(&mut self, target: &Arc<str>) -> bool {
+        if !self.has_room() {
+            return false;
+        }
+        self.edges.push(DependencyEdge {
+            to: EdgeTarget(Arc::clone(target)),
+            external: false,
+            to_truncated: false,
+        });
+        true
+    }
+
+    /// Records an unresolved edge whose target is `text`, keeping at most
+    /// [`MAX_EDGE_TARGET_BYTES`] of it. `false` when the sink is full, and
+    /// the caller should stop producing edges.
+    fn push_external(&mut self, text: &str) -> bool {
+        if !self.has_room() {
+            return false;
+        }
+        let kept = truncate_at_char_boundary(text, MAX_EDGE_TARGET_BYTES);
+        self.edges.push(DependencyEdge {
+            to: EdgeTarget(Arc::from(kept)),
+            external: true,
+            to_truncated: kept.len() < text.len(),
+        });
+        true
+    }
+
+    /// [`EdgeSink::push_resolved`] when `resolved` names a file, otherwise
+    /// [`EdgeSink::push_external`] of `text`.
+    fn push(&mut self, resolved: Option<&Arc<str>>, text: &str) -> bool {
+        match resolved {
+            Some(target) => self.push_resolved(target),
+            None => self.push_external(text),
         }
     }
 }
@@ -1939,7 +2178,7 @@ fn rust_has_pub(node: Node) -> bool {
         .any(|child| child.kind() == "visibility_modifier")
 }
 
-fn resolve_rust_mod(rel: &str, name: &str, known: &HashSet<String>) -> Option<String> {
+fn resolve_rust_mod<'k>(rel: &str, name: &str, known: &'k KnownPaths) -> Option<&'k Arc<str>> {
     let mut dir = dir_components(rel);
     let stem = rel
         .rsplit('/')
@@ -1951,15 +2190,9 @@ fn resolve_rust_mod(rel: &str, name: &str, known: &HashSet<String>) -> Option<St
     }
     dir.push(name.to_owned());
     let base = dir.join("/");
-    let as_file = format!("{base}.rs");
-    if known.contains(&as_file) {
-        return Some(as_file);
-    }
-    let as_mod = format!("{base}/mod.rs");
-    if known.contains(&as_mod) {
-        return Some(as_mod);
-    }
-    None
+    known
+        .get(format!("{base}.rs").as_str())
+        .or_else(|| known.get(format!("{base}/mod.rs").as_str()))
 }
 
 /// The directory `use crate::...` paths in `rel` resolve against: the
@@ -1978,7 +2211,7 @@ fn resolve_rust_mod(rel: &str, name: &str, known: &HashSet<String>) -> Option<St
 /// file's `crate::` paths resolve against its own nearest crate root, not a
 /// single global guess, which also gives each crate in a mapped workspace
 /// its own correct answer.
-fn rust_crate_root(rel: &str, known: &HashSet<String>) -> Option<String> {
+fn rust_crate_root(rel: &str, known: &KnownPaths) -> Option<String> {
     let mut dir = dir_components(rel);
     loop {
         let prefix = dir.join("/");
@@ -1992,7 +2225,7 @@ fn rust_crate_root(rel: &str, known: &HashSet<String>) -> Option<String> {
         } else {
             format!("{prefix}/main.rs")
         };
-        if known.contains(&lib) || known.contains(&main) {
+        if known.contains(lib.as_str()) || known.contains(main.as_str()) {
             return Some(prefix);
         }
         if dir.is_empty() {
@@ -2023,11 +2256,12 @@ struct RustModuleIndex {
     /// The resolved path when this node's own segment sequence names a real
     /// `<segments>.rs` file. Preferred over `as_mod_dir` when both exist
     /// (matching the original search order, which checked the file form
-    /// before the `mod.rs` form at each length).
-    as_file: Option<String>,
+    /// before the `mod.rs` form at each length). The walk's own allocation
+    /// of the path ([`KnownPaths`]), shared, never a copy.
+    as_file: Option<Arc<str>>,
     /// The resolved path when this node's own segment sequence names a real
-    /// `<segments>/mod.rs` file.
-    as_mod_dir: Option<String>,
+    /// `<segments>/mod.rs` file, shared the same way.
+    as_mod_dir: Option<Arc<str>>,
 }
 
 /// Iterative, not the derived recursive drop glue: a deep, mostly
@@ -2052,7 +2286,7 @@ impl Drop for RustModuleIndex {
 }
 
 impl RustModuleIndex {
-    fn build(known: &HashSet<String>) -> Self {
+    fn build(known: &KnownPaths) -> Self {
         let mut root = Self::default();
         for path in known {
             if let Some(stem) = path.strip_suffix("/mod.rs") {
@@ -2082,7 +2316,7 @@ impl RustModuleIndex {
     fn insert<'a>(
         &mut self,
         segments: impl Iterator<Item = &'a str>,
-        resolved: &str,
+        resolved: &Arc<str>,
         is_file: bool,
     ) {
         let mut node = self;
@@ -2090,14 +2324,14 @@ impl RustModuleIndex {
             node = node.children.entry(seg.to_owned()).or_default();
         }
         if is_file {
-            node.as_file = Some(resolved.to_owned());
+            node.as_file = Some(Arc::clone(resolved));
         } else {
-            node.as_mod_dir = Some(resolved.to_owned());
+            node.as_mod_dir = Some(Arc::clone(resolved));
         }
     }
 
-    fn resolved(&self) -> Option<&str> {
-        self.as_file.as_deref().or(self.as_mod_dir.as_deref())
+    fn resolved(&self) -> Option<&Arc<str>> {
+        self.as_file.as_ref().or(self.as_mod_dir.as_ref())
     }
 
     /// The trie node standing for `crate_root` (from [`rust_crate_root`]),
@@ -2183,7 +2417,7 @@ impl RustModuleIndex {
             segments,
             deadline,
         );
-        cursor.best.map(str::to_owned)
+        cursor.best.map(|best| best.to_string())
     }
 }
 
@@ -2195,7 +2429,7 @@ struct TrieCursor<'i> {
     /// when the importing file has no crate root to start from.
     node: Option<&'i RustModuleIndex>,
     /// The deepest file found along the walk so far.
-    best: Option<&'i str>,
+    best: Option<&'i Arc<str>>,
 }
 
 /// What a `use` path's leading segments have decided so far.
@@ -2330,8 +2564,10 @@ fn render_use_member(
     parts.join("::")
 }
 
-/// The dependency edges of one Rust `use` declaration, given its `argument`
-/// node, and whether it finished before `deadline`.
+/// Records into `sink` the dependency edges of one Rust `use` declaration,
+/// given its `argument` node, and returns whether it finished before
+/// `deadline`. A full `sink` ends the declaration early and is not a
+/// deadline miss: the sink itself records the truncation.
 ///
 /// A declaration without a group is one path: an edge to the file its
 /// longest `crate::` prefix names, or, when it does not start with `crate`
@@ -2357,17 +2593,18 @@ fn render_use_member(
 /// unresolved members is capped at [`USE_GROUP_TEXT_FACTOR`] times the
 /// declaration's own length plus [`USE_GROUP_TEXT_SLACK`]. Past that cap, the
 /// members not yet spelled out are recorded once, together, as one external
-/// edge carrying the whole argument exactly as written: honest about what
-/// was not resolved, and never a partial edge that looks complete.
+/// edge carrying the whole argument as written (itself cut to
+/// [`MAX_EDGE_TARGET_BYTES`] by the sink, like every unresolved target):
+/// honest about what was not resolved, and never a partial edge that looks
+/// complete.
 fn rust_use_edges(
     argument: Node,
     source: &[u8],
-    rel: &str,
     crate_start: Option<&RustModuleIndex>,
+    sink: &mut EdgeSink,
     deadline: Instant,
-) -> (Vec<DependencyEdge>, bool) {
+) -> bool {
     let raw = text(argument, source);
-    let mut edges = Vec::new();
 
     if !matches!(argument.kind(), "use_list" | "scoped_use_list") {
         let (root, completed) = extend_use_root(
@@ -2380,12 +2617,8 @@ fn rust_use_edges(
             UseRoot::Crate(cursor) => cursor.best,
             _ => None,
         };
-        edges.push(DependencyEdge {
-            from: rel.to_owned(),
-            to: resolved.unwrap_or(raw).to_owned(),
-            external: resolved.is_none(),
-        });
-        return (edges, completed);
+        sink.push(resolved, raw);
+        return completed;
     }
 
     let mut prefixes: Vec<UsePrefix<'_>> = Vec::new();
@@ -2398,7 +2631,7 @@ fn rust_use_edges(
         vec![(argument, UseRoot::Undecided, None)];
     while let Some((node, root, prefix)) = stack.pop() {
         if Instant::now() >= deadline {
-            return (edges, false);
+            return false;
         }
         match node.kind() {
             "use_list" => {
@@ -2432,7 +2665,7 @@ fn rust_use_edges(
                     deadline,
                 );
                 if !completed {
-                    return (edges, false);
+                    return false;
                 }
                 let own = text(path, source);
                 let rendered_len =
@@ -2452,18 +2685,16 @@ fn rust_use_edges(
                     deadline,
                 );
                 if !completed {
-                    return (edges, false);
+                    return false;
                 }
                 if let UseRoot::Crate(TrieCursor {
                     best: Some(resolved),
                     ..
                 }) = root
                 {
-                    edges.push(DependencyEdge {
-                        from: rel.to_owned(),
-                        to: resolved.to_owned(),
-                        external: false,
-                    });
+                    if !sink.push_resolved(resolved) {
+                        return true;
+                    }
                     continue;
                 }
                 if over_budget {
@@ -2482,29 +2713,23 @@ fn rust_use_edges(
                     continue;
                 }
                 text_budget -= rendered_len;
-                edges.push(DependencyEdge {
-                    from: rel.to_owned(),
-                    to: render_use_member(&prefixes, prefix, member, is_self),
-                    external: true,
-                });
+                if !sink.push_external(&render_use_member(&prefixes, prefix, member, is_self)) {
+                    return true;
+                }
             }
         }
     }
     if over_budget {
-        edges.push(DependencyEdge {
-            from: rel.to_owned(),
-            to: raw.to_owned(),
-            external: true,
-        });
+        sink.push_external(raw);
     }
-    (edges, true)
+    true
 }
 
 fn extract_rust(
     root: Node,
     source: &[u8],
     rel: &str,
-    known: &HashSet<String>,
+    known: &KnownPaths,
     rust_index: &RustModuleIndex,
     deadline: Instant,
 ) -> (Extracted, bool) {
@@ -2525,12 +2750,10 @@ fn extract_rust(
                 let name = text(name_node, source);
                 let is_declaration = child.child_by_field_name("body").is_none();
                 if is_declaration {
-                    let resolved = resolve_rust_mod(rel, name, known);
-                    out.edges.push(DependencyEdge {
-                        from: rel.to_owned(),
-                        to: resolved.clone().unwrap_or_else(|| format!("mod {name}")),
-                        external: resolved.is_none(),
-                    });
+                    match resolve_rust_mod(rel, name, known) {
+                        Some(resolved) => out.edges.push_resolved(resolved),
+                        None => out.edges.push_external(&format!("mod {name}")),
+                    };
                 }
                 if rust_has_pub(child) {
                     out.interfaces.push(Interface {
@@ -2544,10 +2767,7 @@ fn extract_rust(
                 let Some(argument) = child.child_by_field_name("argument") else {
                     continue;
                 };
-                let (edges, completed) =
-                    rust_use_edges(argument, source, rel, crate_start, deadline);
-                out.edges.extend(edges);
-                if !completed {
+                if !rust_use_edges(argument, source, crate_start, &mut out.edges, deadline) {
                     return (out, false);
                 }
             }
@@ -2558,7 +2778,6 @@ fn extract_rust(
                 let name = text(name_node, source);
                 if name == "main" {
                     out.entry_points.push(EntryPoint {
-                        module: rel.to_owned(),
                         name: "main".to_owned(),
                         line: line_of(child),
                     });
@@ -2658,7 +2877,11 @@ fn string_literal_text<'a>(node: Node<'a>, source: &'a [u8]) -> &'a str {
     text(node, source).trim_matches(|c| c == '"' || c == '\'' || c == '`')
 }
 
-fn resolve_ts_relative(rel: &str, specifier: &str, known: &HashSet<String>) -> Option<String> {
+fn resolve_ts_relative<'k>(
+    rel: &str,
+    specifier: &str,
+    known: &'k KnownPaths,
+) -> Option<&'k Arc<str>> {
     let base = dir_components(rel);
     let joined = normalize_join(&base, specifier)?;
     [
@@ -2668,24 +2891,19 @@ fn resolve_ts_relative(rel: &str, specifier: &str, known: &HashSet<String>) -> O
         format!("{joined}/index.tsx"),
     ]
     .into_iter()
-    .find(|candidate| known.contains(candidate))
+    .find_map(|candidate| known.get(candidate.as_str()))
 }
 
-fn ts_import_edge(rel: &str, specifier: &str, known: &HashSet<String>) -> DependencyEdge {
-    if specifier.starts_with("./") || specifier.starts_with("../") {
-        let resolved = resolve_ts_relative(rel, specifier, known);
-        DependencyEdge {
-            from: rel.to_owned(),
-            to: resolved.clone().unwrap_or_else(|| specifier.to_owned()),
-            external: resolved.is_none(),
-        }
+/// Records one TypeScript import or re-export's edge into `sink`: resolved
+/// when it is a relative specifier naming a file in the map, otherwise the
+/// specifier as written.
+fn ts_import_edge(rel: &str, specifier: &str, known: &KnownPaths, sink: &mut EdgeSink) {
+    let resolved = if specifier.starts_with("./") || specifier.starts_with("../") {
+        resolve_ts_relative(rel, specifier, known)
     } else {
-        DependencyEdge {
-            from: rel.to_owned(),
-            to: specifier.to_owned(),
-            external: true,
-        }
-    }
+        None
+    };
+    sink.push(resolved, specifier);
 }
 
 fn ts_declaration_interfaces(declaration: Node, source: &[u8]) -> Vec<Interface> {
@@ -2736,7 +2954,7 @@ fn extract_typescript(
     root: Node,
     source: &[u8],
     rel: &str,
-    known: &HashSet<String>,
+    known: &KnownPaths,
     deadline: Instant,
 ) -> (Extracted, bool) {
     let mut out = Extracted::new();
@@ -2749,13 +2967,13 @@ fn extract_typescript(
             "import_statement" => {
                 if let Some(source_node) = child.child_by_field_name("source") {
                     let specifier = string_literal_text(source_node, source);
-                    out.edges.push(ts_import_edge(rel, specifier, known));
+                    ts_import_edge(rel, specifier, known, &mut out.edges);
                 }
             }
             "export_statement" => {
                 if let Some(source_node) = child.child_by_field_name("source") {
                     let specifier = string_literal_text(source_node, source);
-                    out.edges.push(ts_import_edge(rel, specifier, known));
+                    ts_import_edge(rel, specifier, known, &mut out.edges);
                 }
                 if let Some(declaration) = child.child_by_field_name("declaration") {
                     out.interfaces
@@ -2765,7 +2983,6 @@ fn extract_typescript(
                         && text(name, source) == "main"
                     {
                         out.entry_points.push(EntryPoint {
-                            module: rel.to_owned(),
                             name: "main".to_owned(),
                             line: line_of(declaration),
                         });
@@ -2777,7 +2994,6 @@ fn extract_typescript(
                     && text(name, source) == "main"
                 {
                     out.entry_points.push(EntryPoint {
-                        module: rel.to_owned(),
                         name: "main".to_owned(),
                         line: line_of(child),
                     });
@@ -2832,8 +3048,10 @@ fn typescript_test_names(root: Node, source: &[u8], deadline: Instant) -> (Vec<S
 /// does) is never resolved here anyway.
 const MAX_SPELLED_RELATIVE_IMPORT_DOTS: usize = 32;
 
-/// The dependency edges of one Python `from ... import ...` statement, and
-/// whether it finished before `deadline`.
+/// Records into `sink` the dependency edges of one Python `from ... import
+/// ...` statement, and returns whether it finished before `deadline`. A full
+/// `sink` ends the statement early and is not a deadline miss: the sink
+/// itself records the truncation.
 ///
 /// A relative import (`from . import a`, `from ..pkg import b`) resolves
 /// against the importing file's own directory, climbing one level per dot
@@ -2851,28 +3069,26 @@ const MAX_SPELLED_RELATIVE_IMPORT_DOTS: usize = 32;
 ///   file to the root's own `b.py`, which Python itself refuses.)
 /// - The unresolved text's prefix is built once per statement, and spelled
 ///   as a count past [`MAX_SPELLED_RELATIVE_IMPORT_DOTS`], so each edge costs
-///   the length of its own name, not `K` more.
+///   the length of its own name, not `K` more (and never more than
+///   [`MAX_EDGE_TARGET_BYTES`], the cap every unresolved target has; the
+///   importing file's path is not in the edge at all since round 6).
 /// - The loop over names checks `deadline` before every name, returning
-///   what it has and `false` when it passes.
+///   `false` when it passes, and stops when `sink` is full.
 fn python_import_from_edges(
     node: Node,
     source: &[u8],
     rel: &str,
-    known: &HashSet<String>,
+    known: &KnownPaths,
+    sink: &mut EdgeSink,
     deadline: Instant,
-) -> (Vec<DependencyEdge>, bool) {
-    let mut edges = Vec::new();
+) -> bool {
     let Some(module_name) = node.child_by_field_name("module_name") else {
-        return (edges, true);
+        return true;
     };
 
     if module_name.kind() != "relative_import" {
-        edges.push(DependencyEdge {
-            from: rel.to_owned(),
-            to: text(module_name, source).to_owned(),
-            external: true,
-        });
-        return (edges, true);
+        sink.push_external(text(module_name, source));
+        return true;
     }
 
     let (dots, dotted) = {
@@ -2906,26 +3122,22 @@ fn python_import_from_edges(
     } else {
         format!("[{dots} leading dots]")
     };
-    let resolve = |segments: &[&str]| -> Option<String> {
+    let resolve = |segments: &[&str]| -> Option<&Arc<str>> {
         let mut target_dir = base.clone()?;
         target_dir.extend(segments.iter().map(|segment| (*segment).to_owned()));
         let joined = target_dir.join("/");
         [format!("{joined}.py"), format!("{joined}/__init__.py")]
             .into_iter()
-            .find(|candidate| known.contains(candidate))
+            .find_map(|candidate| known.get(candidate.as_str()))
     };
 
     if let Some(dotted) = dotted {
         let segments: Vec<&str> = dotted.split('.').collect();
-        let resolved = resolve(&segments);
-        edges.push(DependencyEdge {
-            from: rel.to_owned(),
-            to: resolved
-                .clone()
-                .unwrap_or_else(|| format!("{prefix}{dotted}")),
-            external: resolved.is_none(),
-        });
-        return (edges, true);
+        match resolve(&segments) {
+            Some(resolved) => sink.push_resolved(resolved),
+            None => sink.push_external(&format!("{prefix}{dotted}")),
+        };
+        return true;
     }
 
     let names: Vec<Node> = node
@@ -2933,7 +3145,7 @@ fn python_import_from_edges(
         .collect();
     for name_node in names {
         if Instant::now() >= deadline {
-            return (edges, false);
+            return false;
         }
         let name_text = if name_node.kind() == "aliased_import" {
             name_node
@@ -2943,23 +3155,22 @@ fn python_import_from_edges(
             Some(text(name_node, source))
         };
         let Some(name_text) = name_text else { continue };
-        let resolved = resolve(&[name_text]);
-        edges.push(DependencyEdge {
-            from: rel.to_owned(),
-            to: resolved
-                .clone()
-                .unwrap_or_else(|| format!("{prefix}{name_text}")),
-            external: resolved.is_none(),
-        });
+        let recorded = match resolve(&[name_text]) {
+            Some(resolved) => sink.push_resolved(resolved),
+            None => sink.push_external(&format!("{prefix}{name_text}")),
+        };
+        if !recorded {
+            return true;
+        }
     }
-    (edges, true)
+    true
 }
 
 fn extract_python(
     root: Node,
     source: &[u8],
     rel: &str,
-    known: &HashSet<String>,
+    known: &KnownPaths,
     deadline: Instant,
 ) -> (Extracted, bool) {
     let mut out = Extracted::new();
@@ -2977,24 +3188,19 @@ fn extract_python(
                     let name_text = if name_node.kind() == "aliased_import" {
                         name_node
                             .child_by_field_name("name")
-                            .map(|n| text(n, source).to_owned())
+                            .map(|n| text(n, source))
                     } else {
-                        Some(text(name_node, source).to_owned())
+                        Some(text(name_node, source))
                     };
-                    if let Some(name_text) = name_text {
-                        out.edges.push(DependencyEdge {
-                            from: rel.to_owned(),
-                            to: name_text,
-                            external: true,
-                        });
+                    if let Some(name_text) = name_text
+                        && !out.edges.push_external(name_text)
+                    {
+                        break;
                     }
                 }
             }
             "import_from_statement" => {
-                let (edges, completed) =
-                    python_import_from_edges(child, source, rel, known, deadline);
-                out.edges.extend(edges);
-                if !completed {
+                if !python_import_from_edges(child, source, rel, known, &mut out.edges, deadline) {
                     return (out, false);
                 }
             }
@@ -3027,7 +3233,6 @@ fn extract_python(
                     let condition_text = text(condition, source);
                     if condition_text.contains("__name__") && condition_text.contains("__main__") {
                         out.entry_points.push(EntryPoint {
-                            module: rel.to_owned(),
                             name: "__main__".to_owned(),
                             line: line_of(child),
                         });
@@ -3061,13 +3266,15 @@ fn python_test_names(root: Node, source: &[u8], deadline: Instant) -> (Vec<Strin
 // Go
 // ---------------------------------------------------------------------------
 
+/// Records into `sink` one edge per `import_spec` under `import_declaration`,
+/// each external (see the module doc). Once `sink` is full, the rest of the
+/// declaration is still visited (under `deadline`) but records nothing.
 fn go_import_spec_edges(
     import_declaration: Node,
     source: &[u8],
-    rel: &str,
+    sink: &mut EdgeSink,
     deadline: Instant,
-) -> Vec<DependencyEdge> {
-    let mut edges = Vec::new();
+) {
     for_each_node(import_declaration, deadline, |node| {
         if node.kind() != "import_spec" {
             return;
@@ -3080,23 +3287,18 @@ fn go_import_spec_edges(
             .children(&mut cursor)
             .find(|child| child.kind() == "interpreted_string_literal_content")
             .map_or_else(
-                || text(path_node, source).trim_matches('"').to_owned(),
-                |content| text(content, source).to_owned(),
+                || text(path_node, source).trim_matches('"'),
+                |content| text(content, source),
             );
-        edges.push(DependencyEdge {
-            from: rel.to_owned(),
-            to: content,
-            external: true,
-        });
+        sink.push_external(content);
     });
-    edges
 }
 
 fn go_exported(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
-fn extract_go(root: Node, source: &[u8], rel: &str, deadline: Instant) -> (Extracted, bool) {
+fn extract_go(root: Node, source: &[u8], deadline: Instant) -> (Extracted, bool) {
     let mut out = Extracted::new();
     let mut package_name = String::new();
     let mut cursor = root.walk();
@@ -3115,8 +3317,7 @@ fn extract_go(root: Node, source: &[u8], rel: &str, deadline: Instant) -> (Extra
                 }
             }
             "import_declaration" => {
-                out.edges
-                    .extend(go_import_spec_edges(child, source, rel, deadline));
+                go_import_spec_edges(child, source, &mut out.edges, deadline);
             }
             "function_declaration" => {
                 let Some(name_node) = child.child_by_field_name("name") else {
@@ -3125,7 +3326,6 @@ fn extract_go(root: Node, source: &[u8], rel: &str, deadline: Instant) -> (Extra
                 let name = text(name_node, source);
                 if name == "main" && package_name == "main" {
                     out.entry_points.push(EntryPoint {
-                        module: rel.to_owned(),
                         name: "main".to_owned(),
                         line: line_of(child),
                     });
@@ -3925,6 +4125,11 @@ mod tests {
         fs::write(path, content).expect("write fixture file");
     }
 
+    /// A [`KnownPaths`] holding exactly `paths`, as the walk would build it.
+    fn known_paths(paths: &[&str]) -> KnownPaths {
+        paths.iter().map(|path| Arc::from(*path)).collect()
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
         let unique = format!(
@@ -4537,10 +4742,11 @@ mod tests {
     /// module's edges.
     #[test]
     fn ori_t_0036_rust_crate_root_is_found_by_walking_up_from_the_importing_file() {
-        let mut known: HashSet<String> = HashSet::new();
-        known.insert("crates/x/src/lib.rs".to_owned());
-        known.insert("crates/x/src/foo.rs".to_owned());
-        known.insert("crates/x/src/nested/bar.rs".to_owned());
+        let known = known_paths(&[
+            "crates/x/src/lib.rs",
+            "crates/x/src/foo.rs",
+            "crates/x/src/nested/bar.rs",
+        ]);
         assert_eq!(
             rust_crate_root("crates/x/src/foo.rs", &known),
             Some("crates/x/src".to_owned())
@@ -4550,8 +4756,7 @@ mod tests {
             Some("crates/x/src".to_owned()),
             "a file nested under src/ must still find src/ itself, not its own directory"
         );
-        let mut no_root: HashSet<String> = HashSet::new();
-        no_root.insert("somewhere/deep/file.rs".to_owned());
+        let no_root = known_paths(&["somewhere/deep/file.rs"]);
         assert_eq!(
             rust_crate_root("somewhere/deep/file.rs", &no_root),
             None,
@@ -5354,7 +5559,7 @@ mod tests {
             rel: "victim.rs".to_owned(),
             was_symlink: false,
         };
-        let known: HashSet<String> = HashSet::new();
+        let known = KnownPaths::new();
         let index = RustModuleIndex::build(&known);
         let result = process_file(&candidate, &known, &index, &CodeMapOptions::default(), &dir);
         assert!(
@@ -5739,6 +5944,7 @@ mod tests {
             parsed_with_errors: false,
             interfaces: Vec::new(),
             dependency_edges: Vec::new(),
+            dependency_edges_truncated: false,
             entry_points: Vec::new(),
             covering_tests: Vec::new(),
             spec_sections: Vec::new(),
@@ -5800,14 +6006,12 @@ mod tests {
     #[test]
     fn ori_t_0036_rust_module_index_longest_prefix_is_linear_on_a_long_matching_chain() {
         let depth = 50_000;
-        let mut known: HashSet<String> = HashSet::new();
         let mut path = String::from("src");
         for _ in 0..depth {
             path.push_str("/a");
         }
         path.push_str(".rs");
-        known.insert(path.clone());
-        known.insert("src/lib.rs".to_owned());
+        let known = known_paths(&[path.as_str(), "src/lib.rs"]);
         let index = RustModuleIndex::build(&known);
 
         let segments: Vec<String> = (0..depth).map(|_| "a".to_owned()).collect();
@@ -5835,14 +6039,12 @@ mod tests {
     #[test]
     fn ori_t_0036_rust_module_index_longest_prefix_respects_an_expired_deadline() {
         let depth = 10_000;
-        let mut known: HashSet<String> = HashSet::new();
         let mut path = String::from("src");
         for _ in 0..depth {
             path.push_str("/a");
         }
         path.push_str(".rs");
-        known.insert(path.clone());
-        known.insert("src/lib.rs".to_owned());
+        let known = known_paths(&[path.as_str(), "src/lib.rs"]);
         let index = RustModuleIndex::build(&known);
 
         let segments: Vec<String> = (0..depth).map(|_| "a".to_owned()).collect();
@@ -6154,7 +6356,7 @@ mod tests {
         };
         let root = fs::canonicalize(&dir).expect("canonicalize root");
         let result = within(Duration::from_secs(10), move || {
-            let known: HashSet<String> = HashSet::new();
+            let known = KnownPaths::new();
             let index = RustModuleIndex::build(&known);
             process_file(
                 &candidate,
@@ -6190,7 +6392,7 @@ mod tests {
         };
         let root = fs::canonicalize(&dir).expect("canonicalize root");
         let result = within(Duration::from_secs(10), move || {
-            let known: HashSet<String> = HashSet::new();
+            let known = KnownPaths::new();
             let index = RustModuleIndex::build(&known);
             process_file(
                 &candidate,
@@ -6375,6 +6577,7 @@ mod tests {
             parsed_with_errors: false,
             interfaces: Vec::new(),
             dependency_edges: Vec::new(),
+            dependency_edges_truncated: false,
             entry_points: Vec::new(),
             covering_tests: Vec::new(),
             spec_sections: Vec::new(),
@@ -6516,29 +6719,37 @@ mod tests {
         .expect("parses");
         let statement = first_import_from(&tree);
         let already_past = Instant::now() - Duration::from_secs(1);
-        let (edges, completed) = python_import_from_edges(
+        let mut sink = EdgeSink::new();
+        let completed = python_import_from_edges(
             statement,
             source.as_bytes(),
             "pkg/m.py",
-            &HashSet::new(),
+            &KnownPaths::new(),
+            &mut sink,
             already_past,
         );
         assert!(!completed, "an expired deadline must stop the names loop");
         assert!(
-            edges.is_empty(),
+            sink.edges.is_empty(),
             "nothing is produced after the deadline: {} edges",
-            edges.len()
+            sink.edges.len()
         );
 
-        let (edges, completed) = python_import_from_edges(
+        let mut sink = EdgeSink::new();
+        let completed = python_import_from_edges(
             statement,
             source.as_bytes(),
             "pkg/m.py",
-            &HashSet::new(),
+            &KnownPaths::new(),
+            &mut sink,
             Instant::now() + Duration::from_secs(60),
         );
         assert!(completed);
-        assert_eq!(edges.len(), 1000, "with time left, every name is an edge");
+        assert_eq!(
+            sink.edges.len(),
+            1000,
+            "with time left, every name is an edge"
+        );
     }
 
     /// Item 3 (HIGH), the memory form, end to end: `K` dots and `M` names
@@ -6606,17 +6817,22 @@ mod tests {
         )
         .expect("parses");
         let statement = first_import_from(&tree);
+        // No edge cap here: this measures the names loop itself, over every
+        // one of its names, not the cap that stops a real module's loop at
+        // `MAX_DEPENDENCY_EDGES_PER_MODULE`.
+        let mut sink = EdgeSink::with_limit(usize::MAX);
         let start = Instant::now();
-        let (edges, completed) = python_import_from_edges(
+        let completed = python_import_from_edges(
             statement,
             source.as_bytes(),
             "m.py",
-            &HashSet::new(),
+            &KnownPaths::new(),
+            &mut sink,
             Instant::now() + Duration::from_secs(120),
         );
         let elapsed = start.elapsed();
         assert!(completed);
-        assert_eq!(edges.len(), names);
+        assert_eq!(sink.edges.len(), names);
         assert!(
             elapsed < Duration::from_secs(3),
             "{dots} dots and {names} names took {elapsed:?}; the prefix must be built once, not \
@@ -6649,7 +6865,7 @@ mod tests {
                 .expect("present")
                 .dependency_edges
                 .iter()
-                .map(|e| (e.to.clone(), e.external))
+                .map(|e| (e.to.to_string(), e.external))
                 .collect()
         };
         assert_eq!(
@@ -6689,7 +6905,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{module} present"))
             .dependency_edges
             .iter()
-            .map(|e| (e.to.clone(), e.external))
+            .map(|e| (e.to.to_string(), e.external))
             .collect();
         pairs.sort();
         pairs
@@ -6807,21 +7023,31 @@ mod tests {
 
     /// Item 5 (LOW), the text bound: a long prefix that resolves nowhere,
     /// over many members, would cost prefix length times member count to
-    /// spell out member by member (here 2000 members under a 6 KB prefix,
-    /// about 12 MB). Past the budget, the members not yet spelled out are
-    /// recorded once, as the declaration exactly as written, and the total
+    /// spell out member by member (here 2000 members under a 905-byte
+    /// prefix, about 1.8 MB). Past the budget, the members not yet spelled
+    /// out are recorded once, as the declaration as written, and the total
     /// text stays near the declaration's own size.
+    ///
+    /// Rewritten in round 6, when every unresolved target became capped at
+    /// `MAX_EDGE_TARGET_BYTES`: round 4's version used a 6 KB prefix, so
+    /// every member it spelled out is now cut to the same first 1024 bytes
+    /// as the declaration itself, and "recorded once, as the declaration"
+    /// could no longer be told apart from a member. The prefix is now under
+    /// the cap, so each member spelled out is whole and exact, and the one
+    /// edge standing for the rest is the declaration cut to the cap and
+    /// marked. The budget still binds (asserted, not assumed).
     #[test]
     fn ori_t_0036_a_grouped_use_with_a_long_unresolved_prefix_stays_bounded() {
         let dir = temp_dir("grouped-budget");
         let guard = DropGuard(dir.clone());
         write(&dir, "src/lib.rs", "pub fn f() {}\n");
-        let mut argument = String::from("crate::");
-        argument.push_str(&"q::".repeat(2000));
-        argument.push('{');
+        let prefix = format!("crate{}", "::q".repeat(300));
+        let mut argument = format!("{prefix}::{{");
         let members: Vec<String> = (0..2000).map(|i| format!("x{i}")).collect();
         argument.push_str(&members.join(", "));
         argument.push('}');
+        assert!(prefix.len() + 2 + "x1999".len() < MAX_EDGE_TARGET_BYTES);
+        assert!(argument.len() > MAX_EDGE_TARGET_BYTES);
         write(&dir, "src/user.rs", &format!("use {argument};\n"));
         let map = build_code_map(&dir).expect("maps");
         let user = map
@@ -6832,23 +7058,43 @@ mod tests {
         let total: usize = user.dependency_edges.iter().map(|e| e.to.len()).sum();
         let budget = argument.len() * USE_GROUP_TEXT_FACTOR + USE_GROUP_TEXT_SLACK;
         assert!(
-            total <= budget + argument.len(),
+            total <= budget + MAX_EDGE_TARGET_BYTES,
             "{total} bytes of edge text for a {} byte declaration; the cap is {budget} plus \
-             the declaration itself",
+             one capped target",
             argument.len()
         );
-        assert!(
-            user.dependency_edges
-                .iter()
-                .any(|e| e.external && e.to == argument),
-            "the members past the budget must be recorded, once, as the declaration as written"
+        let (rest, spelled): (Vec<&DependencyEdge>, Vec<&DependencyEdge>) = user
+            .dependency_edges
+            .iter()
+            .partition(|e| e.to.contains('{'));
+        assert_eq!(
+            rest.len(),
+            1,
+            "the members past the budget must be recorded, once: {rest:?}"
         );
         assert!(
-            user.dependency_edges
+            rest[0].external
+                && rest[0].to_truncated
+                && rest[0].to.len() == MAX_EDGE_TARGET_BYTES
+                && argument.starts_with(rest[0].to.as_str()),
+            "that one edge is the declaration as written, cut to the cap and marked: {:?}",
+            rest[0]
+        );
+        assert!(
+            !spelled.is_empty() && spelled.len() < members.len(),
+            "the budget must bind: {} of {} members spelled out",
+            spelled.len(),
+            members.len()
+        );
+        let expected: HashSet<String> = members
+            .iter()
+            .map(|member| format!("{prefix}::{member}"))
+            .collect();
+        assert!(
+            spelled
                 .iter()
-                .filter(|e| e.to != argument)
-                .all(|e| e.external && e.to.starts_with("crate::q::q::")),
-            "every member spelled out before the budget ran out is its own full path"
+                .all(|e| e.external && !e.to_truncated && expected.contains(e.to.as_str())),
+            "every member spelled out before the budget ran out is its own full path, whole"
         );
         drop(guard);
     }
@@ -6874,19 +7120,20 @@ mod tests {
             .child_by_field_name("argument")
             .expect("an argument");
         let already_past = Instant::now() - Duration::from_secs(1);
-        let (edges, completed) =
-            rust_use_edges(argument, source.as_bytes(), "src/x.rs", None, already_past);
+        let mut sink = EdgeSink::new();
+        let completed = rust_use_edges(argument, source.as_bytes(), None, &mut sink, already_past);
         assert!(!completed, "an expired deadline must stop the walk");
-        assert!(edges.is_empty(), "{edges:?}");
-        let (edges, completed) = rust_use_edges(
+        assert!(sink.edges.is_empty(), "{:?}", sink.edges);
+        let mut sink = EdgeSink::new();
+        let completed = rust_use_edges(
             argument,
             source.as_bytes(),
-            "src/x.rs",
             None,
+            &mut sink,
             Instant::now() + Duration::from_secs(60),
         );
         assert!(completed);
-        assert_eq!(edges.len(), 3, "{edges:?}");
+        assert_eq!(sink.edges.len(), 3, "{:?}", sink.edges);
     }
     /// Item 4 (mutant survival), V3 of the review of round 3: `files_seen`
     /// counting only the pre-skips whose path has no `/` survived every
@@ -7581,6 +7828,314 @@ mod tests {
     // ORI-T-0036, round 6 (2026-09-27), from the review of round 5: what
     // one module keeps from its own file, and `.git` under `spec/`.
     // -----------------------------------------------------------------
+
+    /// A directory path of three 200-byte components, so that a module
+    /// under it has a path of over 600 bytes: long enough that a copy of it
+    /// per edge or per entry point is unmistakable, short enough (with the
+    /// temporary directory in front) for every platform's path limit.
+    fn long_directory() -> String {
+        ["d", "e", "f"]
+            .iter()
+            .map(|letter| letter.repeat(200))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Item 1 (HIGH), the defect itself: every `DependencyEdge` held a copy
+    /// of its importing module's path (`from`), and every `EntryPoint` one
+    /// too (`module`), so one file could hold its own path millions of
+    /// times. Neither may hold it at all now: the `Module` that holds an
+    /// edge or an entry point is where it comes from. Checked through each
+    /// record's `Debug` rendering, which shows every field it has, whatever
+    /// the fields are named, in all four languages and for resolved,
+    /// unresolved and shebang records alike. The round-5 code fails this.
+    #[test]
+    fn ori_t_0036_no_edge_or_entry_point_holds_a_copy_of_its_module_path() {
+        let dir = temp_dir("no-path-copies");
+        let guard = DropGuard(dir.clone());
+        let long = long_directory();
+        write(
+            &dir,
+            &format!("{long}/m.py"),
+            "import os\nfrom . import b\n\nif __name__ == \"__main__\":\n    pass\n",
+        );
+        write(&dir, &format!("{long}/b.py"), "x = 1\n");
+        write(
+            &dir,
+            &format!("{long}/s.py"),
+            "#!/usr/bin/env python3\nimport os\n",
+        );
+        write(
+            &dir,
+            &format!("{long}/m.rs"),
+            "mod gone;\nuse std::fmt;\n\nfn main() {}\n",
+        );
+        write(
+            &dir,
+            &format!("{long}/m.ts"),
+            "import \"./b\";\nimport \"y\";\n\nfunction main() {}\n",
+        );
+        write(&dir, &format!("{long}/b.ts"), "export const b = 1;\n");
+        write(
+            &dir,
+            &format!("{long}/m.go"),
+            "package main\n\nimport \"fmt\"\n\nfunc main() {}\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let checked: Vec<&Module> = map
+            .modules
+            .iter()
+            .filter(|m| m.path.ends_with("/m.py") || m.path.ends_with("/m.rs"))
+            .chain(
+                map.modules
+                    .iter()
+                    .filter(|m| m.path.ends_with("/m.ts") || m.path.ends_with("/m.go")),
+            )
+            .chain(map.modules.iter().filter(|m| m.path.ends_with("/s.py")))
+            .collect();
+        assert_eq!(checked.len(), 5, "{:?}", map.coverage);
+        for module in checked {
+            assert!(module.path.len() > 600, "{}", module.path);
+            assert!(
+                !module.dependency_edges.is_empty() && !module.entry_points.is_empty(),
+                "the fixture must give {} both edges and entry points",
+                module.path
+            );
+            for edge in &module.dependency_edges {
+                let rendered = format!("{edge:?}");
+                assert!(
+                    !rendered.contains(module.path.as_str())
+                        && rendered.len() <= edge.to.len() + 96,
+                    "an edge must hold its target and nothing sized by its own module's path: \
+                     {rendered}"
+                );
+            }
+            for entry in &module.entry_points {
+                let rendered = format!("{entry:?}");
+                assert!(
+                    !rendered.contains(module.path.as_str())
+                        && rendered.len() <= entry.name.len() + 64,
+                    "an entry point must hold its name and line and nothing sized by its \
+                     module's path: {rendered}"
+                );
+            }
+        }
+        drop(guard);
+    }
+
+    /// The bytes one module's edges keep, counted the way the module doc's
+    /// "Memory" bound states them: each edge's record, plus, for an
+    /// unresolved target (its own allocation), its reference-count header
+    /// and its text. A resolved target is shared across the whole map and
+    /// counted there, not per edge (see
+    /// `tests::ori_t_0036_retained_edge_bytes_are_bounded_for_many_imports_at_a_long_path`,
+    /// which checks that it is in fact shared).
+    fn retained_edge_bytes(module: &Module) -> usize {
+        let header = 2 * std::mem::size_of::<usize>();
+        module
+            .dependency_edges
+            .iter()
+            .map(|edge| {
+                std::mem::size_of::<DependencyEdge>()
+                    + if edge.external {
+                        header + edge.to.len()
+                    } else {
+                        0
+                    }
+            })
+            .sum()
+    }
+
+    /// Item 1 (HIGH), the bound: the review's shape, one import name per
+    /// two bytes or so of source, past the edge cap, at a path of over 600
+    /// bytes, in each of the four languages, with one unresolved target
+    /// longer than the target text cap and a thousand edges resolving to
+    /// one file. Each module keeps exactly `MAX_DEPENDENCY_EDGES_PER_MODULE`
+    /// edges and says it was cut; what those edges keep is summed and must
+    /// sit within the stated per-module bound (4,358,144 bytes on a 64-bit
+    /// target, the figure the module doc states); the long target is cut to
+    /// the cap and marked; and every edge to the one resolved file shares a
+    /// single allocation of its path rather than a copy each. The round-5
+    /// code kept every edge (4160 here) with a copy of the module's path in
+    /// each, plus the resolved target's path copied per edge.
+    #[test]
+    fn ori_t_0036_retained_edge_bytes_are_bounded_for_many_imports_at_a_long_path() {
+        let dir = temp_dir("edge-bytes");
+        let guard = DropGuard(dir.clone());
+        let long = long_directory();
+        let cap = MAX_DEPENDENCY_EDGES_PER_MODULE;
+        let flood = cap + 64 - 1001;
+        let long_name = "x".repeat(2 * MAX_EDGE_TARGET_BYTES);
+
+        let mut py = format!("from . import {}\n", vec!["b"; 1000].join(", "));
+        py.push_str(&format!("import {long_name}{}\n", ", a".repeat(flood)));
+        write(&dir, &format!("{long}/m.py"), &py);
+        write(&dir, &format!("{long}/b.py"), "x = 1\n");
+
+        let mut rs = format!("use crate::{{{}}};\n", vec!["b"; 1000].join(", "));
+        rs.push_str(&format!("use {{{long_name}{}}};\n", ", a".repeat(flood)));
+        write(&dir, &format!("{long}/m.rs"), &rs);
+        write(&dir, &format!("{long}/lib.rs"), "pub mod b;\n");
+        write(&dir, &format!("{long}/b.rs"), "pub struct B;\n");
+
+        let mut ts = "import \"./b\";\n".repeat(1000);
+        ts.push_str(&format!("import \"{long_name}\";\n"));
+        ts.push_str(&"import \"a\";\n".repeat(flood));
+        write(&dir, &format!("{long}/m.ts"), &ts);
+        write(&dir, &format!("{long}/b.ts"), "export const b = 1;\n");
+
+        let mut go = format!("package m\n\nimport (\n\"{long_name}\"\n");
+        go.push_str(&"\"a\"\n".repeat(cap + 63));
+        go.push_str(")\n");
+        write(&dir, &format!("{long}/m.go"), &go);
+
+        let map = build_code_map(&dir).expect("maps");
+        let record = std::mem::size_of::<DependencyEdge>();
+        let header = 2 * std::mem::size_of::<usize>();
+        let bound = cap * (record + header + MAX_EDGE_TARGET_BYTES);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            (record, bound),
+            (24, 4_358_144),
+            "the module doc states a 24-byte edge record and this bound, for a 64-bit target"
+        );
+
+        for (file, resolved_target) in [
+            ("m.py", Some("b.py")),
+            ("m.rs", Some("b.rs")),
+            ("m.ts", Some("b.ts")),
+            ("m.go", None),
+        ] {
+            let path = format!("{long}/{file}");
+            let module = map
+                .modules
+                .iter()
+                .find(|m| m.path == path)
+                .unwrap_or_else(|| panic!("{file} present: {:?}", map.coverage));
+            assert!(!module.parsed_with_errors, "{file} parses clean");
+            assert_eq!(module.dependency_edges.len(), cap, "{file} keeps the cap");
+            assert!(
+                module.dependency_edges_truncated,
+                "{file} had more edges than it keeps, and must say so"
+            );
+            let retained = retained_edge_bytes(module);
+            assert!(
+                retained <= bound,
+                "{file}: {retained} bytes of edges kept, over the {bound}-byte bound (the \
+                 round-5 shape also copied the {}-byte module path into every edge)",
+                path.len()
+            );
+            let cut: Vec<&DependencyEdge> = module
+                .dependency_edges
+                .iter()
+                .filter(|e| e.to_truncated)
+                .collect();
+            assert_eq!(cut.len(), 1, "{file}: {cut:?}");
+            assert!(
+                cut[0].external
+                    && cut[0].to.len() == MAX_EDGE_TARGET_BYTES
+                    && long_name.starts_with(cut[0].to.as_str()),
+                "{file}: the long target is its first {MAX_EDGE_TARGET_BYTES} bytes, marked"
+            );
+            let resolved: Vec<&DependencyEdge> = module
+                .dependency_edges
+                .iter()
+                .filter(|e| !e.external)
+                .collect();
+            match resolved_target {
+                Some(target) => {
+                    assert_eq!(resolved.len(), 1000, "{file}");
+                    let expected = format!("{long}/{target}");
+                    assert!(
+                        resolved
+                            .iter()
+                            .all(|e| e.to == expected && Arc::ptr_eq(&e.to.0, &resolved[0].to.0)),
+                        "{file}: every edge to {target} must share one allocation of its path"
+                    );
+                }
+                None => assert!(resolved.is_empty(), "Go edges are always external"),
+            }
+        }
+        drop(guard);
+    }
+
+    /// Item 1 (HIGH), the truncation flag's exact meaning: a module with
+    /// exactly `MAX_DEPENDENCY_EDGES_PER_MODULE` edges keeps them all and is
+    /// not marked; one more, and it keeps the cap and is marked. The flag
+    /// says an edge that exists was dropped, never merely that the cap was
+    /// reached.
+    #[test]
+    fn ori_t_0036_the_edge_cap_marks_a_module_only_when_an_edge_was_dropped() {
+        let dir = temp_dir("edge-cap-boundary");
+        let guard = DropGuard(dir.clone());
+        let cap = MAX_DEPENDENCY_EDGES_PER_MODULE;
+        let imports = |count: usize| format!("import {}\n", vec!["a"; count].join(", "));
+        write(&dir, "exact.py", &imports(cap));
+        write(&dir, "over.py", &imports(cap + 1));
+        let map = build_code_map(&dir).expect("maps");
+        let find = |path: &str| {
+            map.modules
+                .iter()
+                .find(|m| m.path == path)
+                .expect("present")
+        };
+        let exact = find("exact.py");
+        assert_eq!(exact.dependency_edges.len(), cap);
+        assert!(!exact.dependency_edges_truncated, "nothing was dropped");
+        let over = find("over.py");
+        assert_eq!(over.dependency_edges.len(), cap);
+        assert!(over.dependency_edges_truncated, "one edge was dropped");
+        drop(guard);
+    }
+
+    /// Item 1 (HIGH), the rest of what a module keeps: interfaces, entry
+    /// points and covering tests are not capped in count, and the module
+    /// doc's "Memory" bound states what they can reach instead: a fixed
+    /// record each (40, 32 and 24 bytes on a 64-bit target) plus text that
+    /// is a piece of the file's own source, at most about 20.5 bytes kept
+    /// per byte read, reached by one interface per two bytes. Checked here
+    /// on that densest shape in Go and in TypeScript, by summing what the
+    /// returned map keeps.
+    #[test]
+    fn ori_t_0036_retained_interface_bytes_stay_within_the_stated_factor_of_the_file() {
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            (
+                std::mem::size_of::<Interface>(),
+                std::mem::size_of::<EntryPoint>(),
+                std::mem::size_of::<String>(),
+            ),
+            (40, 32, 24),
+            "the record sizes the module doc states, for a 64-bit target"
+        );
+        let dir = temp_dir("interface-bytes");
+        let guard = DropGuard(dir.clone());
+        let names = 32 * 1024;
+        let go = format!("package m\nvar A{} int\n", ",A".repeat(names - 1));
+        let ts = format!("export let a{};\n", ",a".repeat(names - 1));
+        write(&dir, "m.go", &go);
+        write(&dir, "m.ts", &ts);
+        let map = build_code_map(&dir).expect("maps");
+        for (path, file_bytes) in [("m.go", go.len()), ("m.ts", ts.len())] {
+            let module = map
+                .modules
+                .iter()
+                .find(|m| m.path == path)
+                .expect("present");
+            assert_eq!(module.interfaces.len(), names, "{path}: one per name");
+            let kept: usize = module
+                .interfaces
+                .iter()
+                .map(|i| std::mem::size_of::<Interface>() + i.name.len())
+                .sum();
+            assert!(
+                kept * 2 <= file_bytes * 41 + 82,
+                "{path}: {kept} bytes of interfaces kept for a {file_bytes}-byte file, over \
+                 20.5 times its size"
+            );
+        }
+        drop(guard);
+    }
 
     /// Item 2 (MEDIUM): the `spec/` scan descended directories named `.git`,
     /// which the main walk never does, so a nested clone at `spec/` had
