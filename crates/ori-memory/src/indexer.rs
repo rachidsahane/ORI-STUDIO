@@ -229,8 +229,9 @@
 //!   ([`SkipReason::WalkDocumentLimit`], [`SkipReason::WalkByteLimit`]):
 //!   "What one walk costs", below.
 //!
-//! Nothing else is left out; no directory under `spec/` is skipped by name. Every other line of every file the walk reads
-//! is in some document: a criteria file's rows that start with an
+//! Nothing else is left out; no directory under `spec/` is skipped by
+//! name. Every other line of every file the walk reads is in some
+//! document: a criteria file's rows that start with an
 //! identifier become one [`DocumentKind::Criterion`] each, and every other
 //! line of it (its title, its prose, its table header, a proposed criterion
 //! in the acceptance-criterion template's two-column form, a whole
