@@ -5,7 +5,7 @@
 | Trigger | `spec_conflict` |
 | Raised by | The lead, at ORI-T-0097 review, from a finding its coder made while scanning every file in the repository |
 | Blocks | Nothing. It **unblocks** open escalation 4, which has been with the operator since batch 1 |
-| State | Open, with the operator |
+| State | Answered by the operator in session on 2026-09-27, option 2: the citation check covers everything under `spec/`, HTML included, and excludes the design mockup by name, with the reason recorded and its mock-data marker asserted present on every run so the exemption cannot outlive its subject. This also answers open escalation 4 of `ops/phase-1-backlog.md` (gate 9 reads everything under `spec/`). It binds ORI-T-0040's citation checker and ORI-T-0047's gate 9. The follow-through this record asks for, ruling R19 and `RECORDED_UNRESOLVED` stating that the twelve references are sample data rather than defects awaiting repair, is owed and not yet done |
 
 ## What the file actually contains
 
