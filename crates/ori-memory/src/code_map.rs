@@ -223,11 +223,14 @@
 //!   pending directories), never recursive, so a pathologically deep
 //!   directory tree cannot overflow the call stack the way a naive recursive
 //!   walker would. A directory literally named `.git` is not descended into
-//!   at any depth, because it is version-control metadata, never source; this
-//!   is one of two filesystem conventions this module hard-codes (the other
-//!   is `spec`, above), and both are documented here because they are real
-//!   exclusions, not oversights (a repo that keeps source inside a directory
-//!   named `.git` is not one this module claims to map, and none does).
+//!   at any depth, by the walk or by the `spec/` citation scan (which
+//!   records each one it passes over in [`Coverage::spec_docs_skipped`];
+//!   until round 6 it descended them), because it is version-control
+//!   metadata, never source; this is one of two filesystem conventions this
+//!   module hard-codes (the other is `spec`, above), and both are documented
+//!   here because they are real exclusions, not oversights (a repo that
+//!   keeps source inside a directory named `.git` is not one this module
+//!   claims to map, and none does).
 //! - **Every entry accounted for.** A directory this module cannot read
 //!   (permissions, a transient I/O error) is recorded as one
 //!   [`SkipReason::Unreadable`] entry for the directory itself, not silently
@@ -689,9 +692,12 @@ pub enum SkipReason {
     /// handle's own metadata, after an open that does not block and before
     /// anything is read; see the module doc's "File type" bound.
     NotARegularFile,
-    /// A symlink resolves inside a directory named `.git`. This module never
-    /// descends `.git` directly; this reason is what stops a symlink from
-    /// reaching the same content by a side door.
+    /// A symlink resolves inside a directory named `.git`, or, in
+    /// [`Coverage::spec_docs_skipped`], a directory named `.git` under
+    /// `spec/` that the citation scan did not descend. This module never
+    /// descends `.git` directly; in [`Coverage::files_skipped`] this reason
+    /// is what stops a symlink from reaching the same content by a side
+    /// door.
     GitMetadata,
     /// Its name, or an ancestor directory's name, is not valid UTF-8. The
     /// path recorded here is a lossy rendering (invalid bytes replaced), for
@@ -797,7 +803,9 @@ pub struct Coverage {
     /// opened as a regular file or read, was over
     /// [`CodeMapOptions::max_file_bytes`], was not UTF-8, or was not reached
     /// before the deadline or the corpus budget ran out; a directory that
-    /// could not be listed; a symlink the scan does not follow. Empty exactly
+    /// could not be listed; a directory named `.git`, which the scan never
+    /// descends ([`SkipReason::GitMetadata`]); a symlink the scan does not
+    /// follow. Empty exactly
     /// when [`Coverage::spec_citation_scan`] is [`SpecScan::Complete`], and
     /// never empty when it is [`SpecScan::Partial`].
     pub spec_docs_skipped: Vec<SkippedFile>,
@@ -1182,7 +1190,7 @@ fn walk_repository(root_canon: &Path) -> Walk {
                     }
                 }
             } else if file_type.is_dir() {
-                if name == ".git" {
+                if is_git_directory_name(&name) {
                     continue;
                 }
                 pending.push(abs);
@@ -1227,6 +1235,14 @@ fn lossy_rel_path_string(root: &Path, abs: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect();
     parts.join("/")
+}
+
+/// Whether a directory entry's name is literally `.git`: the one rule for
+/// version-control metadata, which neither the walk ([`walk_repository`])
+/// nor the `spec/` scan ([`list_markdown`]) ever descends. Exact and
+/// case-sensitive, like the `spec` match, on every platform.
+fn is_git_directory_name(name: &std::ffi::OsStr) -> bool {
+    name == ".git"
 }
 
 /// Whether `resolved` (already confirmed inside `root_canon`) has a path
@@ -3740,7 +3756,12 @@ struct SpecListing {
 /// document whose path is not UTF-8 as [`SkipReason::NonUtf8Name`]; a
 /// symlink that could stand for documents (named `*.md`, or whose target a
 /// `stat`, never an open, says is a directory) as
-/// [`SkipReason::SymlinkNotFollowed`]. Checks `deadline` once per entry: a
+/// [`SkipReason::SymlinkNotFollowed`]; a directory named `.git`, never
+/// descended, by the same rule the main walk applies
+/// ([`is_git_directory_name`]), as [`SkipReason::GitMetadata`]. Round 5's
+/// version descended it, so a nested clone at `spec/` had git's own files
+/// read and cited (a branch named `*.md` is enough to make one) while the
+/// scan reported itself complete. Checks `deadline` once per entry: a
 /// `spec/` tree could itself hold enough entries that listing them is not
 /// free.
 fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> SpecListing {
@@ -3803,7 +3824,11 @@ fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> SpecListing {
                 continue;
             }
             if file_type.is_dir() {
-                pending.push(path);
+                if is_git_directory_name(&entry.file_name()) {
+                    admit_skip(root, &path, SkipReason::GitMetadata, &mut skipped);
+                } else {
+                    pending.push(path);
+                }
                 continue;
             }
             if !is_markdown {
@@ -7550,5 +7575,73 @@ mod tests {
         let (_guard, map) = built_fixture();
         assert_eq!(map.coverage.spec_citation_scan, SpecScan::Complete);
         assert!(map.coverage.spec_docs_skipped.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // ORI-T-0036, round 6 (2026-09-27), from the review of round 5: what
+    // one module keeps from its own file, and `.git` under `spec/`.
+    // -----------------------------------------------------------------
+
+    /// Item 2 (MEDIUM): the `spec/` scan descended directories named `.git`,
+    /// which the main walk never does, so a nested clone at `spec/` had
+    /// git's own files read, their headings kept and their text cited, and
+    /// the scan still reported itself complete. The scan now applies the
+    /// walk's rule, records each such directory as `GitMetadata` (making the
+    /// scan `Partial`, since something under `spec/` was passed over), and
+    /// reads everything else as before. A submodule's `.git` *file*, which
+    /// holds no documents, is neither read nor recorded. The round-5 code
+    /// fails this.
+    #[test]
+    fn ori_t_0036_the_spec_scan_never_descends_a_git_directory() {
+        let dir = temp_dir("spec-git");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "a.rs", "pub fn a() {}\n");
+        // Assembled, not written whole: see the fixture-path comment earlier
+        // in this file.
+        let readme = format!("spec/{}.md", "readme");
+        let kept = format!("spec/deep/{}.md", "kept");
+        write(&dir, &readme, "# Readme\n\nsee a.rs\n");
+        write(&dir, &kept, "# Kept\na.rs\n");
+        write(
+            &dir,
+            &format!("spec/.git/info/{}.md", "notes"),
+            "# Inside nested .git metadata\nsee a.rs\n",
+        );
+        write(
+            &dir,
+            &format!("spec/deep/.git/{}.md", "x"),
+            "# Also inside a .git\na.rs\n",
+        );
+        write(&dir, "spec/sub/.git", "gitdir: ../../.git/modules/sub\n");
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(map.spec_docs, vec![kept.clone(), readme.clone()]);
+        let headings: Vec<&str> = map.spec_headings.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(headings, vec!["Kept", "Readme"]);
+        let a = map
+            .modules
+            .iter()
+            .find(|m| m.path == "a.rs")
+            .expect("present");
+        let cited: Vec<&str> = a
+            .spec_sections
+            .iter()
+            .filter_map(|citation| map.spec_doc(citation))
+            .collect();
+        assert_eq!(cited, vec![kept.as_str(), readme.as_str()]);
+        assert_eq!(
+            map.coverage.spec_docs_skipped,
+            vec![
+                SkippedFile {
+                    path: "spec/.git".to_owned(),
+                    reason: SkipReason::GitMetadata,
+                },
+                SkippedFile {
+                    path: "spec/deep/.git".to_owned(),
+                    reason: SkipReason::GitMetadata,
+                },
+            ]
+        );
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Partial);
+        drop(guard);
     }
 }
