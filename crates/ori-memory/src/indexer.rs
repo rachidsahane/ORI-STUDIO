@@ -260,10 +260,19 @@
 //! unbalanced quotes, `NOT`, a column filter, a bare `*`, an embedded `NUL`
 //! and an empty string each either return the (possibly empty) matching set
 //! or [`IndexerError::InvalidQuery`], never a widened search and never a
-//! `rusqlite`/SQLite message forwarded verbatim to the caller (the embedded
-//! `NUL` case does reach SQLite's own parser, which reports "unterminated
-//! string" because FTS5's parser stops scanning at a `NUL`; that raw report
-//! is discarded and mapped to [`IndexerError::InvalidQuery`], not returned).
+//! `rusqlite`/SQLite message forwarded verbatim to the caller.
+//!
+//! A quoted phrase has exactly one shape FTS5's parser refuses: one holding
+//! a `NUL`, because the parser stops scanning at it and reports
+//! "unterminated string". [`Indexer::search`] refuses that query itself,
+//! before SQLite sees it, and that is the only [`IndexerError::InvalidQuery`]
+//! it returns. Every failure SQLite reports while a search runs is therefore
+//! never the query's fault, and goes through the same classifier every other
+//! read does. A review found round 6 mapping any bare `SQLITE_ERROR` from the
+//! `MATCH` to `InvalidQuery` instead: one flipped bit in the tokenizer name
+//! the stored schema holds (`unicode61` read back as `tnicode61`) made every
+//! search fail with FTS5's "no such tokenizer", and the caller was told its
+//! query was at fault.
 //!
 //! # Query cost is bounded by bytes
 //!
@@ -369,14 +378,27 @@
 //! another connection had just written reported "checksum mismatch" 133
 //! times in 200, and 0 in 200 opened this way. The rule:
 //!
-//! - the check returns any row but `ok`, or itself fails with
+//! - the check reports damage in a page it read, or itself fails with
 //!   `SQLITE_CORRUPT` or `SQLITE_NOTADB`: `Corrupt`, carrying the original
 //!   error;
-//! - the check returns `ok`, or fails for any other reason (busy, locked,
-//!   out of memory, an FTS5 format this build does not read): the original
-//!   error, unchanged, as [`IndexerError::Sqlite`] (or
-//!   [`IndexerError::Locked`], or for a search [`IndexerError::InvalidQuery`],
-//!   exactly as it would have been without the check).
+//! - the check returns `ok`, reports that it could not read a page, or
+//!   fails for any other reason (busy, locked, out of memory, an FTS5
+//!   format this build does not read): the original error, unchanged, as
+//!   [`IndexerError::Sqlite`] (or [`IndexerError::Locked`]), exactly as it
+//!   would have been without the check.
+//!
+//! "Could not read a page" is its own case because a review found the
+//! bundled SQLite reporting a genuine out-of-memory condition inside the
+//! check as a *row*, not an error: a page the check could not get for want
+//! of memory is written into its report ("unable to get the page. error
+//! code=7"), followed by lines that are only consequences of the pages it
+//! skipped ("Page 7: never used"). Round 6 read every such row as damage,
+//! and a healthy index, with SQLite's heap limit set a little above the
+//! heap in use, came back `Corrupt` from `search` and `all_documents`.
+//! `report_names_an_unread_page` has the detail;
+//! `tests::ori_t_0035_a_genuine_out_of_memory_condition_inside_the_check_itself_is_never_called_corrupt`
+//! steps the heap limit down 256 bytes at a time through that window, with
+//! and without another connection committing between calls.
 //!
 //! Round 4 asked FTS5's `integrity-check` command instead. That command is
 //! an `INSERT`, so it needed the write lock with a zero busy timeout, it
@@ -386,21 +408,43 @@
 //! concurrent writer turning a healthy index `Corrupt` in 2989 of 3000, and
 //! one failed search holding every writer off for a scan of the whole index.
 //!
-//! What the rule gives up, stated rather than hidden: damage that makes the
-//! check itself fail with anything but `SQLITE_CORRUPT` is not called
-//! `Corrupt`. This module's tests pin one such shape
-//! (`tests::ori_t_0035_an_out_of_memory_error_the_check_cannot_settle_is_never_called_corrupt_and_recover_still_repairs_it`):
-//! FTS5's structure record rewritten through SQL so that a length in it
-//! decodes to an implausible size, after which every reader, the check
-//! included, fails with `SQLITE_NOMEM`, which nothing distinguishes from a
-//! real out-of-memory condition. Likewise an FTS5 format version this build
-//! does not read (a newer build's index, or a damaged config row) fails the
-//! check with a plain `SQLITE_ERROR`. Both are reported as the error they
-//! are, and [`Indexer::recover`] repairs both, because it never reads the
-//! old file at all. Page-level damage, the kind storage actually produces,
-//! is seen: in this module's page sweep the check reports every damaged
-//! copy as damaged, including the ones whose damage an ordinary search
-//! never touches.
+//! What the rule gives up, stated rather than hidden: damage the check
+//! cannot settle is never called `Corrupt`. It is reported as the error
+//! SQLite gives, which names the file, and [`Indexer::recover`] repairs
+//! every such case, because it never reads the old file at all; that is the
+//! route for any failure that persists. This module's tests pin these
+//! shapes:
+//!
+//! - FTS5's structure record rewritten through SQL so that a length in it
+//!   decodes to an implausible size, after which every reader, the check
+//!   included, fails with `SQLITE_NOMEM`, which nothing distinguishes from a
+//!   real out-of-memory condition
+//!   (`tests::ori_t_0035_an_out_of_memory_error_the_check_cannot_settle_is_never_called_corrupt_and_recover_still_repairs_it`);
+//! - an FTS5 format version this build does not read (a newer build's
+//!   index, or a damaged config row), which fails the check with a plain
+//!   `SQLITE_ERROR`;
+//! - one bit flipped in the tokenizer name the stored schema holds, after
+//!   which every search fails with FTS5's "no such tokenizer" (a plain
+//!   `SQLITE_ERROR`, never blamed on the query), and one bit flipped in the
+//!   header's write version (the file becomes read-only, so a rebuild fails
+//!   with `SQLITE_READONLY`) or schema format (open fails with "unsupported
+//!   file format")
+//!   (`tests::ori_t_0035_damage_the_check_cannot_settle_is_never_blamed_on_the_query_and_recover_repairs_it`).
+//!
+//! Page-level damage, the kind storage actually produces, is seen: in this
+//! module's page sweep the check reports every damaged copy as damaged,
+//! including the ones whose damage an ordinary search never touches.
+//!
+//! The check runs only after a call fails, so the rule classifies damage a
+//! call trips over; it never makes a call that succeeds look again. A read
+//! that reads through damaged bytes without an error returns what it read,
+//! and damage a read never touches is not reported by it at all: a review
+//! flipping one bit at a time found, among copies the check calls damaged,
+//! `all_documents` returning `Ok` with altered contents and `search`
+//! returning `Ok` with a `documents_covered` off by one to nine, and
+//! `incremental_sync` returning `Ok` on most of them. Such damage surfaces
+//! when a later call fails on it, and [`Indexer::recover`] replaces it
+//! whether or not any call has.
 //!
 //! The check reads the whole file, so it costs time in proportion to the
 //! index. It runs only on a failure that is neither a lock nor already
@@ -914,9 +958,10 @@ pub enum IndexerError {
     },
     /// `path` is damaged: SQLite reported `SQLITE_CORRUPT` or
     /// `SQLITE_NOTADB`, or `PRAGMA quick_check`, asked after some other
-    /// failure, reported damage (the module doc's "What is reported as
-    /// corrupt, and what is not"; a check that merely could not run never
-    /// produces this). Recovery is [`Indexer::recover`], which needs the
+    /// failure, reported damage in a page it read (the module doc's "What
+    /// is reported as corrupt, and what is not"; a check that could not run,
+    /// or could not read a page, never produces this). Recovery is
+    /// [`Indexer::recover`], which needs the
     /// product's `ProductDb` exclusively; `path` is never deleted, only
     /// moved aside into `index/quarantine/` by that call.
     Corrupt {
@@ -928,24 +973,24 @@ pub enum IndexerError {
     },
     /// A `rusqlite` call failed in a way none of the above names more
     /// specifically, and the integrity check found nothing wrong or could
-    /// not run.
+    /// not run. Damage the check cannot settle is reported this way too
+    /// (the module doc's "What is reported as corrupt, and what is not"):
+    /// for an on-disk index, a failure that persists is repaired by
+    /// [`Indexer::recover`], which never reads the old file.
     Sqlite {
         /// What was being attempted.
         context: String,
         /// The underlying error.
         source: rusqlite::Error,
     },
-    /// `query` could not be run safely as an FTS5 `MATCH` expression even
-    /// after being quoted as a literal phrase (the module doc's "FTS5 query
-    /// safety"; an embedded `NUL` is the one case this module's own tests
-    /// reach). Carries only the query text a caller already had, never the
-    /// underlying SQLite message, so nothing from inside the query engine
-    /// is echoed back to whoever sent the query. Distinct from
-    /// [`IndexerError::Corrupt`] and [`IndexerError::Locked`]: an
-    /// adversarial review found an earlier version of this module folding
-    /// every failure while a `MATCH` ran into this variant, which blamed a
-    /// perfectly valid query for a corrupt index; `search_error` now
-    /// checks the SQLite error code before choosing a variant.
+    /// `query` holds a `NUL`, the one text FTS5's parser refuses even after
+    /// it is quoted as a literal phrase (the module doc's "FTS5 query
+    /// safety"), refused before SQLite sees it. Carries only the query text
+    /// a caller already had, never an SQLite message. Never returned for a
+    /// failure SQLite reports while a search runs: reviews found earlier
+    /// versions of this module blaming a valid query for a corrupt index,
+    /// and then for a tokenizer the damaged schema named and this build
+    /// does not have.
     InvalidQuery {
         /// The text that could not be searched safely.
         query: String,
@@ -1184,33 +1229,77 @@ fn is_corrupt(error: &rusqlite::Error) -> bool {
     )
 }
 
-/// Whether a `rusqlite` failure is SQLite reporting a bare `SQLITE_ERROR`
-/// (`ErrorCode::Unknown`, primary result code 1: rusqlite's own `ErrorCode`
-/// maps every primary code it does not otherwise name to this one variant,
-/// and `SQLITE_ERROR` is one of those). [`Indexer::search`] runs exactly one
-/// fixed, already-tested SQL statement whose only caller-influenced part is
-/// the `MATCH` argument, so a bare `SQLITE_ERROR` surfacing from that one
-/// statement is FTS5's own query-syntax parser refusing the (quoted, but
-/// still occasionally invalid, the embedded-`NUL` case) phrase, not a schema
-/// or connection problem; those come back with a more specific `ErrorCode`
-/// and are handled before this check runs (see `search_error`).
-fn is_query_syntax_error(error: &rusqlite::Error) -> bool {
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(inner, _) if inner.code == ErrorCode::Unknown
-    )
-}
-
 /// What `PRAGMA quick_check` said about a file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Integrity {
     /// It returned exactly `ok`.
     Intact,
-    /// It reported damage, or failed with `SQLITE_CORRUPT`/`SQLITE_NOTADB`.
+    /// It reported damage it read, or failed with
+    /// `SQLITE_CORRUPT`/`SQLITE_NOTADB`.
     Damaged,
     /// It could not run to a verdict (busy, locked, out of memory, an FTS5
-    /// format this build does not read, or anything else).
+    /// format this build does not read, a page it could not read, or
+    /// anything else).
     Undetermined,
+}
+
+/// What one row of `PRAGMA quick_check`'s report says, other than `ok`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReportRow {
+    /// Damage the check read.
+    Damage,
+    /// The check could not read part of the file, so it read nothing there
+    /// and every other line of its report may be a consequence of that
+    /// (see [`report_names_an_unread_page`]).
+    UnreadPage,
+    /// FTS5 could not run its own check ("unable to validate"): says
+    /// nothing either way.
+    NotValidated,
+}
+
+/// Reads one row of `PRAGMA quick_check`'s report.
+fn report_row(text: &str) -> ReportRow {
+    if text.starts_with("unable to validate") {
+        ReportRow::NotValidated
+    } else if report_names_an_unread_page(text) {
+        ReportRow::UnreadPage
+    } else {
+        ReportRow::Damage
+    }
+}
+
+/// Whether a row of `PRAGMA quick_check`'s report says the check failed to
+/// read a page, rather than that a page it read was damaged: "unable to get
+/// the page. error code=N" for any `N` that is not `SQLITE_CORRUPT` or
+/// `SQLITE_NOTADB`, "failed to get page N" (a freelist or overflow page),
+/// or "Failed to read ptrmap key=N".
+///
+/// A review found the bundled SQLite (3.53.2) reporting a genuine
+/// out-of-memory condition this way rather than as an error: its b-tree
+/// check turns a failed page read into an out-of-memory error only when the
+/// read fails with `SQLITE_IOERR_NOMEM`, while the page cache fails with
+/// plain `SQLITE_NOMEM`, so the check writes "unable to get the page. error
+/// code=7" into its report and carries on. Every other line of that report
+/// is then a consequence of the pages it never read ("Page 7: never used",
+/// "Child page depth differs", "wrong # of entries in index"), so the whole
+/// report is read as "could not check", never as damage. Real damage in a
+/// page that was read is reported by the other messages, which is what
+/// [`Integrity::Damaged`] rests on; a page whose read fails with
+/// `SQLITE_CORRUPT` is still damage.
+fn report_names_an_unread_page(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.contains("failed to get page")
+            || line.contains("Failed to read ptrmap")
+            || line
+                .split_once("unable to get the page. error code=")
+                .is_some_and(|(_, code)| {
+                    code.trim().parse::<i32>().map_or(true, |code| {
+                        let primary = code & 0xff;
+                        primary != rusqlite::ffi::SQLITE_CORRUPT
+                            && primary != rusqlite::ffi::SQLITE_NOTADB
+                    })
+                })
+    })
 }
 
 /// Runs `PRAGMA quick_check` on `conn`: a read, never a write, so it needs
@@ -1233,9 +1322,12 @@ enum Integrity {
 ///
 /// A row that begins "unable to validate" is FTS5 saying it could not run
 /// its check, not that it found damage; the bundled version reports that as
-/// an error rather than a row, and it is read as [`Integrity::Undetermined`]
-/// all the same, so a different SQLite that did report it as a row could
-/// never turn "could not check" into "damaged".
+/// an error rather than a row, and it is read as saying nothing all the
+/// same, so a different SQLite that did report it as a row could never turn
+/// "could not check" into "damaged". A row that says the check failed to
+/// read a page makes the whole verdict [`Integrity::Undetermined`]
+/// ([`report_names_an_unread_page`] has the measurement), so every row is
+/// read before a verdict is given.
 fn quick_check(conn: &Connection) -> Integrity {
     if conn.execute_batch("SAVEPOINT ori_quick_check").is_err() {
         return Integrity::Undetermined;
@@ -1268,23 +1360,29 @@ fn quick_check_in_one_snapshot(conn: &Connection) -> Integrity {
         Err(error) if is_corrupt(&error) => return Integrity::Damaged,
         Err(_) => return Integrity::Undetermined,
     };
-    let mut saw_ok = false;
+    let (mut saw_ok, mut damage, mut failed) = (false, false, false);
     loop {
         match rows.next() {
             Ok(Some(row)) => match row.get_ref(0) {
                 Ok(ValueRef::Text(b"ok")) => saw_ok = true,
-                Ok(ValueRef::Text(text)) if text.starts_with(b"unable to validate") => {
-                    return Integrity::Undetermined;
-                }
-                Ok(_) => return Integrity::Damaged,
-                Err(_) => return Integrity::Undetermined,
+                Ok(ValueRef::Text(text)) => match report_row(&String::from_utf8_lossy(text)) {
+                    ReportRow::UnreadPage => return Integrity::Undetermined,
+                    ReportRow::NotValidated => {}
+                    ReportRow::Damage => damage = true,
+                },
+                Ok(_) | Err(_) => return Integrity::Undetermined,
             },
             Ok(None) => break,
             Err(error) if is_corrupt(&error) => return Integrity::Damaged,
-            Err(_) => return Integrity::Undetermined,
+            Err(_) => {
+                failed = true;
+                break;
+            }
         }
     }
-    if saw_ok {
+    if damage {
+        Integrity::Damaged
+    } else if saw_ok && !failed {
         Integrity::Intact
     } else {
         Integrity::Undetermined
@@ -1343,30 +1441,6 @@ fn classify(
         },
         Integrity::Intact | Integrity::Undetermined => IndexerError::sqlite(context, source),
     }
-}
-
-/// [`Indexer::search`]'s own classifier: the same cases [`classify`]
-/// names, plus [`IndexerError::InvalidQuery`] for a bare `SQLITE_ERROR`
-/// ([`is_query_syntax_error`]), which `classify` alone would report as
-/// [`IndexerError::Sqlite`]. A lock and `SQLITE_CORRUPT` are checked first,
-/// so a real lock or real corruption is never misreported as the caller's
-/// query being unsafe; everything else falls back to [`classify`], check
-/// included.
-fn search_error(
-    conn: &Connection,
-    path: &Path,
-    query: &str,
-    source: rusqlite::Error,
-) -> IndexerError {
-    if is_locked(&source) || is_corrupt(&source) {
-        return classify_without_check(path, "search", source);
-    }
-    if is_query_syntax_error(&source) {
-        return IndexerError::InvalidQuery {
-            query: query.to_owned(),
-        };
-    }
-    classify(conn, path, "search", source)
 }
 
 /// Refuses `documents` if any two elements share a `path` (the identity
@@ -2100,8 +2174,9 @@ impl<'db> Indexer<'db> {
     /// [`IndexerError::QueryTooLarge`] if `query` is longer than
     /// `MAX_QUERY_BYTES` (the module doc's "Query cost is bounded by
     /// bytes"), checked before FTS5 ever sees it;
-    /// [`IndexerError::InvalidQuery`] if `query`, even quoted, cannot be
-    /// searched safely (the module doc's embedded-`NUL` case);
+    /// [`IndexerError::InvalidQuery`] if `query` holds a `NUL`, which FTS5
+    /// cannot parse even quoted (the module doc's "FTS5 query safety"),
+    /// checked before FTS5 ever sees it;
     /// [`IndexerError::Locked`] if a concurrent write holds the lock;
     /// [`IndexerError::Corrupt`] if the index is damaged;
     /// [`IndexerError::Sqlite`] if the search fails for another reason.
@@ -2109,6 +2184,11 @@ impl<'db> Indexer<'db> {
         if query.len() > MAX_QUERY_BYTES {
             return Err(IndexerError::QueryTooLarge {
                 byte_len: query.len(),
+            });
+        }
+        if query.contains('\0') {
+            return Err(IndexerError::InvalidQuery {
+                query: query.to_owned(),
             });
         }
 
@@ -2133,12 +2213,13 @@ impl<'db> Indexer<'db> {
                  ORDER BY rank ASC, path ASC LIMIT ?2",
             )
             .map_err(|source| classify(&tx, &path, "prepare a search", source))?;
-        // `query_map` itself only prepares the row-mapping closure; FTS5's
-        // own query-syntax errors (the embedded-NUL case this module's
-        // tests reach), a locked write and a corrupt page all surface
-        // lazily, while the returned iterator is stepped below, not here.
-        // Either failure point goes through `search_error`, which tells
-        // them apart rather than blaming every one of them on the query.
+        // `query_map` itself only prepares the row-mapping closure; a
+        // locked write, a corrupt page and a tokenizer that cannot be
+        // loaded all surface lazily, while the returned iterator is stepped
+        // below, not here. Neither failure point is ever the query's fault:
+        // the one query text FTS5's parser refuses once quoted, an embedded
+        // NUL, was refused above, so every failure goes through
+        // `classify` (the module doc's "FTS5 query safety").
         let rows = statement
             .query_map(params![quoted, limit], |row| {
                 let path: String = row.get(0)?;
@@ -2147,12 +2228,12 @@ impl<'db> Indexer<'db> {
                 let score: f64 = row.get(3)?;
                 Ok((path, kind_text, title, score))
             })
-            .map_err(|source| search_error(&tx, &path, query, source))?;
+            .map_err(|source| classify(&tx, &path, "search", source))?;
 
         let mut hits = Vec::new();
         for row in rows {
             let (path_hit, kind_text, title, score) =
-                row.map_err(|source| search_error(&tx, &path, query, source))?;
+                row.map_err(|source| classify(&tx, &path, "search", source))?;
             if let Some(kind) = DocumentKind::parse(&kind_text) {
                 hits.push(SearchHit {
                     path: path_hit,
@@ -3702,9 +3783,10 @@ mod tests {
             );
         }
 
-        // An embedded NUL reaches SQLite's own parser (FTS5 stops scanning
-        // at a NUL even inside a quoted literal) and must come back as a
-        // typed refusal, never a panic and never the raw SQLite message.
+        // An embedded NUL is the one text FTS5's parser refuses even quoted
+        // (it stops scanning at a NUL inside a literal), so search refuses it
+        // before SQLite sees it: a typed refusal, never a panic and never
+        // the raw SQLite message.
         let nul_query = "foo\u{0}bar";
         match indexer.search(nul_query, 10) {
             Err(IndexerError::InvalidQuery { query }) => assert_eq!(query, nul_query),
@@ -7533,6 +7615,321 @@ mod tests {
                 }
             };
             assert_eq!(report, expected, "{method}");
+        }
+    }
+
+    // =====================================================================
+    // Round 7: six items an adversarial review confirmed by independent
+    // reproduction. Each test below fails against the code before its fix.
+    // =====================================================================
+
+    // ---------------------------------------------------------------------
+    // Item 1: a genuine out-of-memory condition inside the check itself.
+    // ---------------------------------------------------------------------
+
+    /// SQLite's current process-wide hard heap limit, in bytes.
+    fn hard_heap_limit(conn: &Connection) -> u64 {
+        let limit: i64 = conn
+            .query_row("PRAGMA hard_heap_limit", [], |row| row.get(0))
+            .expect("read the hard heap limit");
+        u64::try_from(limit).expect("a limit is never negative")
+    }
+
+    /// How many bytes SQLite can still allocate in one piece on `conn`
+    /// under a hard heap limit of `limit`, found with `randomblob`, which
+    /// allocates exactly the blob it returns: the distance between the heap
+    /// in use and the limit, measured without an `unsafe` call (the heap in
+    /// use has no safe accessor). Doubling from a small size, then
+    /// bisecting, so a small headroom costs only small blobs.
+    fn heap_headroom(conn: &Connection, limit: u64) -> u64 {
+        let fits = |bytes: u64| {
+            conn.query_row(
+                "SELECT length(randomblob(?1))",
+                params![i64::try_from(bytes).expect("fits")],
+                |row| row.get::<_, i64>(0),
+            )
+            .is_ok()
+        };
+        let (mut fits_below, mut fails_at) = (0u64, 256u64);
+        while fails_at < limit && fits(fails_at) {
+            fits_below = fails_at;
+            fails_at *= 2;
+        }
+        let mut fails_at = fails_at.min(limit);
+        while fails_at - fits_below > 16 {
+            let middle = fits_below + (fails_at - fits_below) / 2;
+            if fits(middle) {
+                fits_below = middle;
+            } else {
+                fails_at = middle;
+            }
+        }
+        fits_below
+    }
+
+    #[test]
+    fn ori_t_0035_a_genuine_out_of_memory_condition_inside_the_check_itself_is_never_called_corrupt()
+     {
+        // The review's reproduction, on a smaller index: a healthy index,
+        // SQLite's hard heap limit set to the heap in use plus a margin that
+        // steps down 256 bytes at a time. Where the margin leaves the check
+        // enough memory for its own bookkeeping but not for a page it must
+        // read, PRAGMA quick_check does not fail: it returns a report
+        // ("unable to get the page. error code=7", "failed to get page 59",
+        // "Page 7: never used"), which round 6 read as damage, so a search
+        // and all_documents on a healthy index returned Corrupt, and a
+        // caller told to recover would have quarantined it. Measured against
+        // round 6's reading of the report: 68 Corrupt and 15 damaged
+        // verdicts in the first run. The second run has another connection
+        // committing between calls, as the review's did. The margins span
+        // the window found here with room on either side; the sweep must
+        // also reach both an ample and a starved heap.
+        const CHILD: &str = "ORI_T_0035_CHECK_OOM_CHILD";
+        const ROOT: &str = "ORI_T_0035_CHECK_OOM_ROOT";
+        const WRITER: &str = "ORI_T_0035_CHECK_OOM_WRITER";
+        const MARGINS: std::ops::RangeInclusive<u64> = 12 * 1024..=64 * 1024;
+        const STEP: usize = 256;
+        let corpus: Vec<IndexableDocument> = (0..500)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "D",
+                    &format!("needle alpha{n} shared body text for a real doclist"),
+                )
+            })
+            .collect();
+        let Some(root) = std::env::var_os(ROOT).filter(|_| std::env::var_os(CHILD).is_some())
+        else {
+            for writer in ["0", "1"] {
+                let scratch = Scratch::new("check-oom");
+                {
+                    let db = product(&scratch);
+                    let mut indexer = Indexer::open(&db).expect("open on-disk index");
+                    indexer.full_rebuild(&corpus).expect("seed");
+                }
+                let root = scratch.path.to_str().expect("a UTF-8 scratch path");
+                run_in_child_process(
+                    "indexer::tests::ori_t_0035_a_genuine_out_of_memory_condition_inside_the_check_itself_is_never_called_corrupt",
+                    CHILD,
+                    &[(ROOT, root), (WRITER, writer)],
+                );
+                let db = product(&scratch);
+                let indexer = Indexer::open(&db).expect("the index still opens");
+                let integrity: String = indexer
+                    .conn
+                    .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                    .expect("run PRAGMA integrity_check");
+                assert_eq!(integrity, "ok", "the index was healthy all along");
+                let stored = indexer.all_documents().expect("read back");
+                assert_eq!(
+                    stored
+                        .iter()
+                        .filter(|(document, _)| document.path != "churn.md")
+                        .count(),
+                    corpus.len(),
+                    "every seeded document is still there"
+                );
+            }
+            return;
+        };
+
+        let with_writer = std::env::var(WRITER).is_ok_and(|value| value == "1");
+        let db = ProductDb::open(Path::new(&root), PRODUCT, Timestamp::from_millis(2_000))
+            .expect("the child opens the parent's product");
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        let mut writer = Indexer::open(&db).expect("a second connection, for the writer run");
+        let _ = indexer
+            .conn
+            .query_row("PRAGMA hard_heap_limit = 33554432", [], |row| {
+                row.get::<_, i64>(0)
+            });
+        assert!(indexer.search("needle", 50).is_ok());
+        assert_eq!(indexer.all_documents().expect("warm").len(), corpus.len());
+        assert_eq!(quick_check(&indexer.conn), Integrity::Intact);
+
+        let (mut ok, mut out_of_memory, mut corrupt, mut damaged, mut other) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
+        for margin in MARGINS.rev().step_by(STEP) {
+            if with_writer {
+                let _ = writer.add_or_replace(&doc(
+                    "churn.md",
+                    DocumentKind::Section,
+                    "C",
+                    &format!("churn {margin}"),
+                ));
+            }
+            let limit = hard_heap_limit(&indexer.conn);
+            let in_use = limit - heap_headroom(&indexer.conn, limit);
+            let target = in_use + margin;
+            if target < limit {
+                let _ = indexer.conn.query_row(
+                    &format!("PRAGMA hard_heap_limit = {target}"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                );
+            }
+            let results: [(&str, Result<(), IndexerError>); 4] = [
+                ("search", indexer.search("needle", 50).map(|_| ())),
+                ("search", indexer.search("alpha123", 50).map(|_| ())),
+                ("all_documents", indexer.all_documents().map(|_| ())),
+                (
+                    "incremental_sync",
+                    indexer.incremental_sync(&corpus).map(|_| ()),
+                ),
+            ];
+            for (call, result) in results {
+                match result {
+                    Ok(()) => ok += 1,
+                    Err(IndexerError::Corrupt { source, .. }) => {
+                        corrupt += 1;
+                        eprintln!("margin {margin}: {call} called Corrupt: {source:?}");
+                    }
+                    Err(IndexerError::Sqlite { source, .. })
+                        if source.sqlite_error_code() == Some(rusqlite::ErrorCode::OutOfMemory) =>
+                    {
+                        out_of_memory += 1;
+                    }
+                    Err(error) => {
+                        other += 1;
+                        eprintln!("margin {margin}: {call}: {error:?}");
+                    }
+                }
+            }
+            if quick_check(&indexer.conn) == Integrity::Damaged {
+                damaged += 1;
+                eprintln!("margin {margin}: the check itself said Damaged");
+            }
+        }
+        eprintln!(
+            "check out-of-memory sweep (writer {with_writer}): ok {ok}, out of memory \
+             {out_of_memory}, corrupt {corrupt}, check damaged {damaged}, other {other}"
+        );
+        assert!(
+            ok > 0 && out_of_memory > 0,
+            "the sweep must reach both an ample and a starved heap, or it proves nothing: ok \
+             {ok}, out of memory {out_of_memory}"
+        );
+        assert_eq!(
+            (corrupt, damaged),
+            (0, 0),
+            "a genuine out-of-memory condition on a healthy index is never Corrupt, and the check \
+             never calls it damaged"
+        );
+    }
+
+    /// `bytes` with bit 0 of the byte at `offset` flipped.
+    fn flip_low_bit(bytes: &[u8], offset: usize) -> Vec<u8> {
+        let mut flipped = bytes.to_vec();
+        flipped[offset] ^= 0x01;
+        flipped
+    }
+
+    #[test]
+    fn ori_t_0035_damage_the_check_cannot_settle_is_never_blamed_on_the_query_and_recover_repairs_it()
+     {
+        // The review's case: one bit flipped in the tokenizer name the
+        // stored schema holds, `unicode61` read back as `tnicode61`. Every
+        // search then fails with FTS5's "no such tokenizer", a plain
+        // SQLITE_ERROR, which round 6 mapped to InvalidQuery before any
+        // check ran, telling the caller its query was at fault. The check
+        // cannot settle this damage, so it is the error SQLite gives, never
+        // InvalidQuery; and recover, which never reads the old file,
+        // repairs it. Two header bytes the review flipped are pinned beside
+        // it the same way: the write version (offset 18), after which the
+        // file is read-only, and the schema format (offset 47), after which
+        // SQLite refuses the file format.
+        let corpus: Vec<IndexableDocument> = (0..40)
+            .map(|n| {
+                doc(
+                    &format!("d{n}.md"),
+                    DocumentKind::Section,
+                    "D",
+                    &format!("alpha words {n}"),
+                )
+            })
+            .collect();
+        for damage in ["tokenizer name", "write version", "schema format"] {
+            let scratch = Scratch::new("unsettled-damage");
+            let mut db = product(&scratch);
+            let file = index_file(&db);
+            Indexer::open(&db)
+                .expect("open on-disk index")
+                .full_rebuild(&corpus)
+                .expect("seed");
+            checkpoint(&file);
+            let healthy = fs::read(&file).expect("read the index");
+            let offset = match damage {
+                "tokenizer name" => {
+                    let name = b"unicode61";
+                    let found: Vec<usize> = healthy
+                        .windows(name.len())
+                        .enumerate()
+                        .filter(|(_, window)| window == name)
+                        .map(|(at, _)| at)
+                        .collect();
+                    assert_eq!(found.len(), 1, "the tokenizer is named once, in the schema");
+                    found[0]
+                }
+                "write version" => 18,
+                _ => 47,
+            };
+            fs::write(&file, flip_low_bit(&healthy, offset)).expect("flip one bit");
+
+            let outcomes: Vec<(&str, Result<(), IndexerError>)> = match Indexer::open(&db) {
+                Err(error) => vec![("open", Err(error))],
+                Ok(mut indexer) => {
+                    if damage == "tokenizer name" {
+                        assert_eq!(
+                            quick_check(&indexer.conn),
+                            Integrity::Undetermined,
+                            "the check cannot settle this damage; that is the case pinned"
+                        );
+                    }
+                    vec![
+                        ("search", indexer.search("alpha", 10).map(|_| ())),
+                        ("all_documents", indexer.all_documents().map(|_| ())),
+                        ("full_rebuild", indexer.full_rebuild(&corpus).map(|_| ())),
+                    ]
+                }
+            };
+            eprintln!("{damage}: {outcomes:?}");
+            assert!(
+                outcomes.iter().any(|(_, outcome)| outcome.is_err()),
+                "{damage}: some call must meet the damage, or this case proves nothing"
+            );
+            for (call, outcome) in &outcomes {
+                assert!(
+                    !matches!(
+                        outcome,
+                        Err(IndexerError::InvalidQuery { .. } | IndexerError::Corrupt { .. })
+                    ),
+                    "{damage}: {call} must report the error SQLite gives, never blame the query \
+                     and never call damage the check cannot see Corrupt: {outcome:?}"
+                );
+            }
+            if damage == "tokenizer name" {
+                assert!(
+                    matches!(
+                        &outcomes[0],
+                        ("search", Err(IndexerError::Sqlite { source, .. }))
+                            if source.sqlite_error_code() == Some(rusqlite::ErrorCode::Unknown)
+                    ),
+                    "the search fails with the plain SQLITE_ERROR FTS5 gives: {:?}",
+                    outcomes[0]
+                );
+            }
+
+            let report = Indexer::recover(&mut db, &corpus, Timestamp::from_millis(8_000))
+                .unwrap_or_else(|error| panic!("{damage}: recover repairs it: {error}"));
+            assert_eq!(report.rebuilt.total, corpus.len(), "{damage}");
+            let indexer = Indexer::open(&db).expect("the fresh index opens");
+            let found = indexer.search("alpha", 100).expect("search after recovery");
+            assert_eq!(
+                (found.hits.len(), found.documents_covered),
+                (corpus.len(), corpus.len()),
+                "{damage}"
+            );
         }
     }
 
