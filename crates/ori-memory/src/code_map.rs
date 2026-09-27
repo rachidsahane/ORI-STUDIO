@@ -8349,7 +8349,10 @@ mod tests {
     /// Runs `work` on its own thread and waits at most `limit` for it, so a
     /// regression that blocks in `open(2)` fails the test in bounded time
     /// instead of hanging the whole suite. A thread left blocked by such a
-    /// regression is torn down when the test binary exits.
+    /// regression is torn down when the test binary exits. Unix only, like
+    /// every test that calls it (each opens a FIFO): off unix it would be
+    /// dead code, which `-D warnings` refuses.
+    #[cfg(unix)]
     fn within<T: Send + 'static>(limit: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
