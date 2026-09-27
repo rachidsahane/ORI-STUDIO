@@ -76,24 +76,33 @@
 //! module's own type for canonical documents walked out of `spec/`, which
 //! `ori_memory::barrier::Indexable` has no reason to cover.
 //!
-//! # `spec/design/` is excluded, and this is a decision, not an oversight
+//! # `spec/design/` is excluded, and the exclusion is recorded
 //!
 //! Escalation E-0006 (`ops/escalations/E-0006-the-design-artifact-is-mock-data.md`)
 //! found `spec/design/Ori Studio.html` to be 342 KB of mock UI data for a
 //! fictional product ("Ledgerline"), with its own fabricated
 //! `spec/`-shaped citations. [`Indexer::collect_from_repo`] never descends
-//! into `spec/design/`: indexing that file's prose as this product's
-//! canonical documents would put a different, invented product's sample
-//! tickets and sample criteria into a full-text index and a freshness
-//! tracker that both exist to be trusted, exactly the "look like this
-//! product's truth" failure E-0006 raised about the machinery built around
-//! that file before it. `spec/design/` governs the phase 3 screen set
-//! (ruling R23) and is real specification content for a different purpose
-//! (the UI's own design system, not mocked); this indexer takes no side on
-//! that file's worth, only on whether it belongs in *this* corpus, and it
-//! does not. A symbolic link pointing into `spec/design/` from anywhere else
-//! under `spec/` is never followed either ("What the repository walk never
+//! into `spec/design/`: indexing a different, invented product's sample
+//! tickets and sample criteria as this product's canonical documents would
+//! put them into a full-text index and a freshness tracker that both exist
+//! to be trusted, exactly the "look like this product's truth" failure
+//! E-0006 raised about the machinery built around that file before it. A
+//! symbolic link pointing into `spec/design/` from anywhere else under
+//! `spec/` is never followed either ("What the repository walk never
 //! reads", below), so the exclusion cannot be walked around.
+//!
+//! The exclusion is never silent: [`Indexer::walk_repo`] records the
+//! directory in [`RepoWalk::skipped`] with [`SkipReason::Excluded`] and the
+//! reason. A review found it recorded nowhere, and found what it actually
+//! removes from the index on this repository's tree: not the HTML file
+//! E-0006 is about, which the walk would never read anyway since it reads
+//! only `.md` files, but `spec/design/DESIGN.md`, which `spec/README.md`
+//! lists as a Draft document (the gate G2 design document) and which ruling
+//! R23 says governs the phase 3 screen set, and any file added under
+//! `spec/design/` later. Whether that document belongs in this corpus is a
+//! question for the operator, raised with this module's report; this module
+//! does not decide it, and keeps the exclusion as it was until it is
+//! answered.
 //!
 //! # The index is derived: rebuild and incremental must agree
 //!
@@ -121,12 +130,12 @@
 //! ```mermaid
 //! flowchart TB
 //!   T[target: &[IndexableDocument]] --> C{full_rebuild or incremental_sync}
-//!   C -->|full_rebuild| CLEAR[DROP and CREATE documents] --> ADDALL[INSERT every target document] --> COMMIT[transaction commit]
-//!   C -->|incremental_sync| CURRENT[every stored row: rowid, path, kind, checksum]
+//!   C -->|full_rebuild| COUNT[count every stored row: at a target path, or not] --> CLEAR[DROP and CREATE documents] --> ADDALL[INSERT every target document] --> COMMIT[transaction commit]
+//!   C -->|incremental_sync| CURRENT[every stored row: rowid and every column]
 //!   CURRENT --> DIFF{diff against target, by path}
 //!   DIFF -->|path not text, or path not in target| DEL[DELETE the rows]
-//!   DIFF -->|path new, or anything stored differs, or two rows share it| UPSERT[DELETE WHERE path, then INSERT]
-//!   DIFF -->|exactly one row, same kind, same checksum| SKIP[leave alone]
+//!   DIFF -->|path new, or any column stored differs, or two rows share it| UPSERT[DELETE WHERE path, then INSERT]
+//!   DIFF -->|exactly one row, every column exactly as this build writes it| SKIP[leave alone]
 //!   DEL --> COMMIT
 //!   UPSERT --> COMMIT
 //! ```
@@ -201,7 +210,20 @@
 //! - a file or directory that cannot be read, including a `.md` file whose
 //!   bytes are not UTF-8 text ([`SkipReason::Unreadable`]), so one such file
 //!   no longer fails the whole walk;
-//! - a document whose path an earlier document already took (above).
+//! - a document whose path an earlier document already took (above);
+//! - a file longer than 1 MiB ([`SkipReason::FileTooLarge`]), never read
+//!   past that, and a document longer than 64 KiB of title and body
+//!   ([`SkipReason::DocumentTooLarge`]), which no writer stores: "Query
+//!   cost is bounded by bytes", below;
+//! - `spec/design/`, as a whole ([`SkipReason::Excluded`]; above).
+//!
+//! Nothing else is left out. Every other line of every file the walk reads
+//! is in some document: a criteria file's rows that start with an
+//! identifier become one [`DocumentKind::Criterion`] each, and every other
+//! line of it (its title, its prose, its table header, a proposed criterion
+//! in the acceptance-criterion template's two-column form, a whole
+//! criteria file of another shape) is split into sections like any other
+//! specification file. A review found all of that dropped with no record.
 //!
 //! A static repository is the scope: an entry swapped for a link between the
 //! walk's type check and its read is a race this does not claim to close.
@@ -243,7 +265,7 @@
 //! string" because FTS5's parser stops scanning at a `NUL`; that raw report
 //! is discarded and mapped to [`IndexerError::InvalidQuery`], not returned).
 //!
-//! # Query cost is bounded by bytes, and only by bytes
+//! # Query cost is bounded by bytes
 //!
 //! Quoting stops `query` from being read as FTS5 syntax; it does nothing
 //! about `query`'s *cost*. An adversarial review measured one search of a
@@ -252,10 +274,36 @@
 //! and does not deduplicate repeated tokens, so cost grows with (repeated
 //! terms) x (how many documents contain each). [`Indexer::search`] refuses
 //! `query` outright, before it is quoted or bound, when it is longer than
-//! `MAX_QUERY_BYTES`, and that byte length is the whole bound: under
-//! `unicode61` every term is at least one byte and two terms are separated
-//! by at least one more, so 1024 bytes can never hold more than 512 terms,
-//! whatever the script.
+//! `MAX_QUERY_BYTES`: under `unicode61` every term is at least one byte and
+//! two terms are separated by at least one more, so 1024 bytes can never
+//! hold more than 512 terms, whatever the script.
+//!
+//! That bounds the number of terms, not what each one costs. A later review
+//! found the other factor: each term's cost is its positions in the
+//! document being matched, and nothing bounded a document, so one 2 MB spec
+//! file of a single repeated term and one 1,023-byte query took about 3
+//! seconds and 1.09 GB of SQLite heap. So a document is bounded too:
+//! `MAX_DOCUMENT_BYTES`, 64 KiB of `title` and `body` together, which every
+//! writer refuses to exceed ([`IndexerError::DocumentTooLarge`], before
+//! anything is written) and the repository walk leaves out with a reason.
+//! At the cap, the worst search within the query cap is measured at 72.6
+//! MB of heap (the constant's doc has the whole measurement), and
+//! `tests::ori_t_0035_the_worst_query_within_the_byte_cap_against_a_document_at_the_size_cap_stays_bounded`
+//! holds it inside a 96 MiB heap cap in which the same search against a
+//! document four times the cap fails.
+//!
+//! What the two caps do not bound, measured rather than assumed: the
+//! number of documents a search matches. Its memory grows slowly with it
+//! (the same worst search against 1, 10 and 100 documents each at the cap:
+//! 72.7, 73.2 and 87.6 MB of heap), and its time in proportion (0.08, 0.8
+//! and 7.5 seconds, release), as any search's time grows with the corpus
+//! it searches. A repository that fills itself with documents built to
+//! match one query can still make that query slow, and its memory still
+//! grows by that slow step per matching document; what it can no longer
+//! do is make any one document cost memory without bound. The walk also
+//! reads no file past
+//! `MAX_FILE_BYTES`, 1 MiB, which bounds what one file costs the walk
+//! itself.
 //!
 //! Earlier rounds also capped a token count, computed by this module's own
 //! approximation of `unicode61`. Reviews found it wrong in both directions
@@ -402,16 +450,53 @@
 //!    module doc), so no other process holds a `ProductDb`, and so an
 //!    `Indexer`, for this product while `recover` runs.
 //!
+//! Both halves speak of *this product's* files, so both rest on one more
+//! fact: an `Indexer` opened from a product's `ProductDb` holds that
+//! product's file and no other. A review broke that twice. Round 5's
+//! [`Indexer::open`] canonicalized `index/`, and so followed a link: with
+//! one product's `index/` (or its `fts.sqlite`) a link into another's, the
+//! first product's `Indexer`, borrowing only its own `ProductDb`, held the
+//! second product's file open; `recover` on the second compiled, moved that
+//! file into quarantine, and the first `Indexer`'s later writes returned
+//! `Ok` into the quarantined copy, 40 times in 40. And both `open` and
+//! `recover` resolved `ProductDb::dir()`, which is whatever path the product
+//! was opened with, relative ones included, against the working directory
+//! of the moment: after a change of directory, `recover` moved and rebuilt
+//! a different, separately locked product's live index, 20 times in 20. So
+//! `open` and `recover` both refuse a product directory that is not
+//! absolute ([`IndexerError::OpenRefused`],
+//! [`IndexerError::RecoveryRefused`]); both canonicalize it once, which
+//! resolves a link at or above it exactly as `ProductDb::open` did when it
+//! reached its lock file through the same path; both refuse an `index/`
+//! that is a link; and `open` refuses an `index/fts.sqlite`, `-wal`,
+//! `-journal` or `-shm` that is a link or not a regular file, then opens
+//! the file with `SQLITE_OPEN_NOFOLLOW`, so SQLite itself refuses a link
+//! anywhere in the path should one appear between that check and the open.
+//! `recover` does not refuse a linked index file: it is the repair for one,
+//! moving the link itself into quarantine and never touching what it
+//! points at.
+//!
 //! Under that proof `recover` moves `fts.sqlite` and any `-wal`, `-journal`
 //! or `-shm` beside it into `index/quarantine/<recovered_at>-<n>/`, and
 //! never deletes them, because they are the evidence of what went wrong: the
 //! write-ahead log may hold the damaged index's last committed transactions,
-//! which the database file itself does not. Side files move first, because
-//! SQLite discards a write-ahead log or rollback journal it finds beside a
-//! new, empty database (measured on this build: a leftover log was gone once
-//! the new database's connection closed, a leftover journal once it was
-//! first read), so one left behind by a failure part way would be lost as
-//! soon as a fresh index was used. It then creates a fresh index and runs
+//! which the database file itself does not. They move as one unit: if one
+//! move fails, every file already moved is moved back, the directory made
+//! for them is removed if that leaves it empty, and
+//! [`IndexerError::QuarantineIncomplete`] names any file that could not be
+//! put back; nothing is rebuilt. A review found round 5 returning at the
+//! first failure, with the log already in quarantine and the database still
+//! live: the next open then served the index as it stood before the log's
+//! transactions, with no error, and a retry quarantined the database in a
+//! second directory, apart from its log. Side files still move first, for
+//! the one failure part way no rollback can answer, a process killed
+//! between two moves: SQLite discards a write-ahead log or rollback journal
+//! it finds beside a new, empty database (measured on this build: a leftover
+//! log was gone once the new database's connection closed, a leftover
+//! journal once it was first read), so the order leaves the old database
+//! without its log, which is the stale-index outcome above and loses
+//! nothing, never the log beside a fresh database, which would lose it.
+//! That case is not detected. It then creates a fresh index and runs
 //! [`Indexer::full_rebuild`] from the caller's target set. It never opens
 //! the damaged file, so no damage can make it fail, and damage found while
 //! opening (a destroyed header included) is recovered exactly like any
@@ -424,7 +509,10 @@
 //! flowchart TB
 //!   ERR[IndexerError::Corrupt from any call] --> DROP[caller drops every Indexer on the product]
 //!   DROP --> MUT[&mut ProductDb: the compiler proves no Indexer is alive; the OS lock proves no other engine process]
-//!   MUT --> MOVE[move -wal, -journal, -shm, then fts.sqlite into index/quarantine/recovered_at-n/]
+//!   MUT --> OWN{product directory absolute, index/ and quarantine/ not links?}
+//!   OWN -->|no| REFUSED[RecoveryRefused: nothing moved]
+//!   OWN -->|yes| MOVE[move -wal, -journal, -shm, then fts.sqlite into index/quarantine/recovered_at-n/]
+//!   MOVE -->|a move fails| BACK[move back every file already moved; QuarantineIncomplete names any that stayed]
 //!   MOVE --> FRESH[create a fresh fts.sqlite]
 //!   FRESH --> REBUILD[full_rebuild from the caller's target set]
 //! ```
@@ -435,7 +523,13 @@
 //! An `index/` or `index/quarantine/` that is a symbolic link is refused
 //! ([`IndexerError::RecoveryRefused`]): `recover` moves files only inside a
 //! directory the product owns outright, never into or out of one that may
-//! be another product's.
+//! be another product's. Nor does it cover a component of the product
+//! directory's own path that is replaced by a link, or retargeted, after
+//! `ProductDb::open` took its lock: canonicalizing then resolves to a
+//! directory other than the locked one, and nothing here can compare the
+//! two, since `ProductDb` keeps the path as it was given and no identity of
+//! the directory it locked. A static filesystem under the products root is
+//! the scope, the same scope the repository walk states for `spec/`.
 //!
 //! # Reads and writes share one transaction
 //!
@@ -493,6 +587,7 @@ use ori_core::types::Timestamp;
 use ori_store::db::ProductDb;
 use rusqlite::Connection;
 use rusqlite::ErrorCode;
+use rusqlite::OpenFlags;
 use rusqlite::params;
 use rusqlite::types::ValueRef;
 
@@ -515,11 +610,12 @@ const QUARANTINE_DIR: &str = "quarantine";
 
 /// The files SQLite may keep beside [`INDEX_FILE`], in the order
 /// [`Indexer::recover`] moves them: every side file before the database
-/// itself. A failure part way can then leave the old database without its
-/// side files, which `recover` can simply be run again against, but never
+/// itself. A move that fails part way is rolled back, every file already
+/// moved put back where it was (the module doc's "Recovery"); the order
+/// still matters for a process killed between two moves, which no rollback
+/// can answer: that leaves the old database without its side files, never
 /// the side files beside a fresh database, where SQLite would discard them,
-/// and the evidence with them (the module doc's "Recovery" records the
-/// measurement).
+/// and the evidence with them (the module doc records the measurement).
 const INDEX_FILE_SET: [&str; 4] = [
     "fts.sqlite-wal",
     "fts.sqlite-journal",
@@ -648,6 +744,12 @@ impl IndexableDocument {
         self.body.hash(&mut hasher);
         hasher.finish()
     }
+
+    /// The bytes FTS5 indexes for this document, `title` and `body`
+    /// together: what `MAX_DOCUMENT_BYTES` bounds.
+    fn indexed_byte_len(&self) -> usize {
+        self.title.len() + self.body.len()
+    }
 }
 
 /// One hit from [`Indexer::search`].
@@ -678,16 +780,24 @@ pub struct SearchReport {
 }
 
 /// The result of one [`Indexer::full_rebuild`] or [`Indexer::incremental_sync`]
-/// call.
+/// call: every row the call deleted and every document it wrote, counted
+/// inside its one write transaction, so that the rows stored before the
+/// call, less `removed` and `replaced`, plus `upserted`, is exactly `total`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IndexReport {
-    /// Documents written (added new, or replaced because anything stored
-    /// for them differed from the target).
+    /// Target documents written: every one of them for
+    /// [`Indexer::full_rebuild`]; for [`Indexer::incremental_sync`], each
+    /// one new at its path or whose stored row was not exactly what this
+    /// build writes for it.
     pub upserted: usize,
-    /// Stored rows deleted because they were no longer in the target set
-    /// (or, for a row this build did not write, because nothing in the
-    /// target set could be addressed by its path at all).
+    /// Stored rows deleted whose path is not in the target set (or is not
+    /// text at all, so no target document could name it).
     pub removed: usize,
+    /// Stored rows deleted at a path that is in the target set, to make
+    /// room for the target's document there: the old version of every
+    /// document rewritten, and any second row sharing its path. For
+    /// [`Indexer::full_rebuild`], every stored row at a target path.
+    pub replaced: usize,
     /// The index's total live document count after this call, read inside
     /// the same transaction as the writes, before it commits.
     pub total: usize,
@@ -739,6 +849,28 @@ pub enum SkipReason {
     DuplicateDocumentPath {
         /// The document path that was already taken.
         path: String,
+    },
+    /// A file longer than `MAX_FILE_BYTES` (1 MiB): never read past that
+    /// many bytes, and none of it indexed (the module doc's "Query cost is
+    /// bounded by bytes").
+    FileTooLarge {
+        /// The file's length in bytes, as far as the walk found it.
+        byte_len: u64,
+    },
+    /// A document the file produced whose `title` and `body` together are
+    /// longer than `MAX_DOCUMENT_BYTES` (64 KiB), which no writer in this
+    /// module stores; the file's other documents are kept.
+    DocumentTooLarge {
+        /// The document's path.
+        path: String,
+        /// Its `title` and `body` length together, in bytes.
+        byte_len: usize,
+    },
+    /// A directory the walk never enters, by a decision recorded elsewhere;
+    /// `reason` names it (the module doc's "`spec/design/` is excluded").
+    Excluded {
+        /// Why, and where the decision is recorded.
+        reason: &'static str,
     },
 }
 
@@ -838,12 +970,53 @@ pub enum IndexerError {
     },
     /// [`Indexer::recover`] refused to move anything, because the directory
     /// it would move files out of or into is not one the product owns
-    /// outright (the module doc's "Recovery").
+    /// outright, or the product directory is a relative path (the module
+    /// doc's "Recovery").
     RecoveryRefused {
         /// The directory refused.
         path: PathBuf,
         /// Why.
         reason: &'static str,
+    },
+    /// [`Indexer::open`] refused to open the index, because the file it
+    /// would open is not certainly the one under this product's own
+    /// directory: the product directory is a relative path, or `index/`,
+    /// `index/fts.sqlite` or one of the files SQLite keeps beside it is a
+    /// symbolic link or not the kind of entry it must be (the module doc's
+    /// "Recovery"). Nothing was opened or changed.
+    OpenRefused {
+        /// The entry refused.
+        path: PathBuf,
+        /// Why.
+        reason: &'static str,
+    },
+    /// A document in the target set has a `title` and `body` longer
+    /// together than `MAX_DOCUMENT_BYTES` (64 KiB): refused before anything
+    /// is written, as [`IndexerError::DuplicatePath`] is, because a
+    /// document that size would lift the bound on every later search's
+    /// cost (the module doc's "Query cost is bounded by bytes").
+    DocumentTooLarge {
+        /// The document's path.
+        path: String,
+        /// Its `title` and `body` length together, in bytes.
+        byte_len: usize,
+    },
+    /// [`Indexer::recover`] could not move every index file into
+    /// quarantine, and moved back every file it had already moved that it
+    /// could. Nothing was rebuilt. When `stranded` is empty the index files
+    /// are exactly where they were before the call (and the empty
+    /// quarantine directory made for them is gone again); otherwise each
+    /// path in it is a file that is in `quarantine` and could not be put
+    /// back, and every other file is at its live path.
+    QuarantineIncomplete {
+        /// The file whose move failed, at its live path.
+        path: PathBuf,
+        /// Why that move failed.
+        source: std::io::Error,
+        /// The quarantine directory the files were being moved into.
+        quarantine: PathBuf,
+        /// Files moved into `quarantine` that could not be moved back.
+        stranded: Vec<PathBuf>,
     },
 }
 
@@ -920,6 +1093,45 @@ impl fmt::Display for IndexerError {
                 "refusing to recover the index through {}: {reason}",
                 path.display()
             ),
+            Self::OpenRefused { path, reason } => write!(
+                f,
+                "refusing to open the index through {}: {reason}",
+                path.display()
+            ),
+            Self::DocumentTooLarge { path, byte_len } => write!(
+                f,
+                "{path} is too large to index: {byte_len} bytes of title and body (max \
+                 {MAX_DOCUMENT_BYTES})"
+            ),
+            Self::QuarantineIncomplete {
+                path,
+                source,
+                quarantine,
+                stranded,
+            } if stranded.is_empty() => write!(
+                f,
+                "{} could not be moved into quarantine: {source}; every file already moved \
+                 was put back, so the index files are where they were and nothing was rebuilt",
+                path.display()
+            ),
+            Self::QuarantineIncomplete {
+                path,
+                source,
+                quarantine,
+                stranded,
+            } => {
+                write!(
+                    f,
+                    "{} could not be moved into quarantine: {source}; nothing was rebuilt, and \
+                     these files are in {} and could not be moved back:",
+                    path.display(),
+                    quarantine.display()
+                )?;
+                for file in stranded {
+                    write!(f, " {}", file.display())?;
+                }
+                f.write_str("; every other index file is at its live path")
+            }
         }
     }
 }
@@ -927,13 +1139,17 @@ impl fmt::Display for IndexerError {
 impl std::error::Error for IndexerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Directory { source, .. } | Self::Io { source, .. } => Some(source),
+            Self::Directory { source, .. }
+            | Self::Io { source, .. }
+            | Self::QuarantineIncomplete { source, .. } => Some(source),
             Self::Corrupt { source, .. } | Self::Sqlite { source, .. } => Some(source),
             Self::Locked { .. }
             | Self::InvalidQuery { .. }
             | Self::QueryTooLarge { .. }
             | Self::DuplicatePath { .. }
-            | Self::RecoveryRefused { .. } => None,
+            | Self::RecoveryRefused { .. }
+            | Self::OpenRefused { .. }
+            | Self::DocumentTooLarge { .. } => None,
         }
     }
 }
@@ -1153,23 +1369,43 @@ fn search_error(
     classify(conn, path, "search", source)
 }
 
-/// Refuses `documents` if any two elements share a `path`: the identity
-/// [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] both key on.
-/// Checked before either does any write, so a caller sees the refusal
-/// before any partial effect.
+/// Refuses `documents` if any two elements share a `path` (the identity
+/// [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] both key on)
+/// or any one of them is larger than `MAX_DOCUMENT_BYTES`. Checked before
+/// either does any write, and before [`Indexer::recover`] moves anything,
+/// so a caller sees the refusal before any partial effect.
 ///
 /// # Errors
 ///
-/// [`IndexerError::DuplicatePath`] naming the first path seen twice, in
-/// `documents`' own order.
-fn refuse_duplicate_paths(documents: &[IndexableDocument]) -> Result<(), IndexerError> {
+/// [`IndexerError::DocumentTooLarge`] or [`IndexerError::DuplicatePath`]
+/// for the first offending document, in `documents`' own order.
+fn refuse_invalid_target(documents: &[IndexableDocument]) -> Result<(), IndexerError> {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for document in documents {
+        refuse_oversized(document)?;
         if !seen.insert(document.path.as_str()) {
             return Err(IndexerError::DuplicatePath {
                 path: document.path.clone(),
             });
         }
+    }
+    Ok(())
+}
+
+/// Refuses `document` if its `title` and `body` together are longer than
+/// `MAX_DOCUMENT_BYTES`: the per-document half of the module doc's "Query
+/// cost is bounded by bytes".
+///
+/// # Errors
+///
+/// [`IndexerError::DocumentTooLarge`].
+fn refuse_oversized(document: &IndexableDocument) -> Result<(), IndexerError> {
+    let byte_len = document.indexed_byte_len();
+    if byte_len > MAX_DOCUMENT_BYTES {
+        return Err(IndexerError::DocumentTooLarge {
+            path: document.path.clone(),
+            byte_len,
+        });
     }
     Ok(())
 }
@@ -1182,9 +1418,9 @@ fn quote_fts5_phrase(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
-/// The largest `query` [`Indexer::search`] accepts, in bytes, and the only
-/// bound on its cost: the module doc's "Query cost is bounded by bytes, and
-/// only by bytes". An adversarial review measured 1 MB of a common
+/// The largest `query` [`Indexer::search`] accepts, in bytes: half of the
+/// bound on its cost, the module doc's "Query cost is bounded by bytes"
+/// ([`MAX_DOCUMENT_BYTES`] is the other half). An adversarial review measured 1 MB of a common
 /// repeated term costing 4.5 seconds and 2.18 GB of resident memory,
 /// because FTS5 opens one index iterator per phrase term and repeated
 /// tokens are not deduplicated. 1 KiB is generous for a legitimate search
@@ -1193,6 +1429,34 @@ fn quote_fts5_phrase(text: &str) -> String {
 /// script, since every term is at least one byte and every two are
 /// separated by at least one more.
 const MAX_QUERY_BYTES: usize = 1024;
+
+/// The largest document this index stores, in bytes of `title` and `body`
+/// together (the two columns FTS5 indexes): the other half of the module
+/// doc's "Query cost is bounded by bytes". [`MAX_QUERY_BYTES`] bounds how
+/// many terms a phrase has; this bounds how many positions each term can
+/// have in one document, and a phrase's memory is about the product of the
+/// two. Measured on this build, release, as SQLite's own heap high-water
+/// mark around [`Indexer::search`]'s own statement, the query `a` repeated
+/// 512 times (1,023 bytes) against one document of `a` repeated to fill
+/// it: 24.6 MB at 16 KiB, 40.6 MB at 32 KiB, 72.6 MB and 0.15 to 0.18
+/// seconds at 64 KiB, 136.7 MB at 128 KiB, 264.8 MB at 256 KiB, 521.0 MB
+/// at 512 KiB, and 1.03 GB and 6.6 seconds at the review's 2 MB; the same
+/// document searched for `a` once costs 1.0 MB at 64 KiB. 64 KiB admits
+/// the largest document this repository has, the 20,797-byte second ADR,
+/// which is indexed whole as one document, three times over, and holds
+/// the worst search within the query cap under 75 MB of heap; a document
+/// past it is left out by the walk and refused by every writer, both with
+/// a reason.
+const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
+
+/// The largest file [`Indexer::walk_repo`] reads, in bytes: 1 MiB. Not a
+/// bound on search cost ([`MAX_DOCUMENT_BYTES`] is), but on what one file
+/// costs the walk itself, which holds a file's whole text and its split
+/// documents in memory at once. The largest file under this repository's
+/// `spec/` today is 32,646 bytes, so it is thirty-two times what is needed;
+/// a section file this long can still hold many documents under the
+/// per-document cap.
+const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Commits `tx`. In test builds only, it then runs the after-commit hook a
 /// test installed on this thread, which is how
@@ -1264,39 +1528,44 @@ impl<'db> Indexer<'db> {
     /// index is derived". Any number of `Indexer`s may be open on one
     /// product at once.
     ///
+    /// The file opened is always the one under this product's own
+    /// directory, never one reached through a link: the borrow of `db` is
+    /// what proves [`Indexer::recover`] safe, and it proves nothing about a
+    /// file that belongs to another product (the module doc's "Recovery").
+    /// So `db`'s directory must be absolute, and neither `index/` nor
+    /// `index/fts.sqlite` nor any file SQLite keeps beside it may be a
+    /// symbolic link; the path is resolved once, here, and SQLite is told
+    /// to refuse a link anywhere in it as well.
+    ///
     /// # Errors
     ///
-    /// [`IndexerError::Directory`] if `index/` cannot be created or resolved
-    /// to an absolute, canonical path;
+    /// [`IndexerError::OpenRefused`] if `db`'s directory is a relative path,
+    /// or `index/` or an index file is a symbolic link or the wrong kind of
+    /// entry; [`IndexerError::Directory`] if the product directory cannot be
+    /// resolved or `index/` cannot be created;
     /// [`IndexerError::Corrupt`] if the file exists and is damaged in a way
     /// opening it meets (a destroyed header, a damaged schema page, a
     /// truncated file); [`Indexer::recover`] repairs every such case;
     /// [`IndexerError::Sqlite`] if the file cannot be opened or the schema
     /// cannot be created for another reason.
     pub fn open(db: &'db ProductDb) -> Result<Self, IndexerError> {
-        let index_dir = db.dir().join(INDEX_DIR);
-        std::fs::create_dir_all(&index_dir).map_err(|source| IndexerError::Directory {
-            path: index_dir.clone(),
-            source,
-        })?;
-        // Canonical and absolute, resolved once, here: never a
-        // possibly-relative path re-resolved later against whatever the
-        // process's current working directory happens to be by then.
-        let canonical_dir = index_dir
-            .canonicalize()
-            .map_err(|source| IndexerError::Directory {
-                path: index_dir.clone(),
-                source,
-            })?;
-        Self::open_file(canonical_dir.join(INDEX_FILE))
+        let index_dir = owned_index_dir(db, open_refused)?;
+        refuse_unowned_index_files(&index_dir)?;
+        Self::open_file(index_dir.join(INDEX_FILE))
     }
 
-    /// Opens (creating if absent) the index file at exactly `path`. Private:
-    /// every caller outside this module reaches a file only through a
-    /// [`ProductDb`], which is what "Recovery" in the module doc rests on.
+    /// Opens (creating if absent) the index file at exactly `path`, with
+    /// `SQLITE_OPEN_NOFOLLOW`, so SQLite itself refuses a symbolic link
+    /// anywhere in `path` (it already opens every file with `O_NOFOLLOW`,
+    /// which covers only the last component). Private: every caller
+    /// outside this module reaches a file only through a [`ProductDb`],
+    /// which is what "Recovery" in the module doc rests on.
     fn open_file(path: PathBuf) -> Result<Self, IndexerError> {
-        let conn = Connection::open(&path)
-            .map_err(|source| classify_without_check(&path, "open", source))?;
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|source| classify_without_check(&path, "open", source))?;
         Self::configure(conn, Some(path))
     }
 
@@ -1436,10 +1705,13 @@ impl<'db> Indexer<'db> {
     ///
     /// # Errors
     ///
+    /// [`IndexerError::DocumentTooLarge`] if `document` is larger than the
+    /// module doc's per-document cap, checked before anything is written;
     /// [`IndexerError::Locked`] if another writer holds the lock;
     /// [`IndexerError::Corrupt`] if the index is damaged;
     /// [`IndexerError::Sqlite`] if the write fails for another reason.
     pub fn add_or_replace(&mut self, document: &IndexableDocument) -> Result<(), IndexerError> {
+        refuse_oversized(document)?;
         let path = self.display_path();
         let tx = self
             .conn
@@ -1463,9 +1735,20 @@ impl<'db> Indexer<'db> {
     /// [`IndexerError::Corrupt`], and the repair is [`Indexer::recover`],
     /// never a retry of this (the module doc's "Recovery").
     ///
+    /// The report counts what the drop discards, read first in the same
+    /// transaction: every stored row, as [`IndexReport::replaced`] when a
+    /// target document has its path and as [`IndexReport::removed`] when
+    /// none does. A review found `removed` always 0 here, even when the
+    /// rebuild dropped rows `incremental_sync` would have reported removed.
+    /// The rows are read from FTS5's own content table, `documents_content`,
+    /// never through the virtual table, so damage to the inverted index,
+    /// which the drop repairs, cannot fail the count first.
+    ///
     /// # Errors
     ///
     /// [`IndexerError::DuplicatePath`] if `documents` holds one path twice;
+    /// [`IndexerError::DocumentTooLarge`] if one of them is larger than the
+    /// module doc's per-document cap;
     /// [`IndexerError::Locked`] if another writer holds the lock;
     /// [`IndexerError::Corrupt`] if the file is damaged beyond what
     /// rebuilding the table can repair;
@@ -1474,12 +1757,13 @@ impl<'db> Indexer<'db> {
         &mut self,
         documents: &[IndexableDocument],
     ) -> Result<IndexReport, IndexerError> {
-        refuse_duplicate_paths(documents)?;
+        refuse_invalid_target(documents)?;
         let path = self.display_path();
         let tx = self
             .conn
             .transaction()
             .map_err(|source| classify_without_check(&path, "begin transaction", source))?;
+        let (removed, replaced) = Self::rows_a_rebuild_discards(&tx, documents, &path)?;
         tx.execute_batch("DROP TABLE documents;")
             .map_err(|source| {
                 classify(
@@ -1506,33 +1790,101 @@ impl<'db> Indexer<'db> {
         commit(tx).map_err(|source| classify(&self.conn, &path, "commit", source))?;
         Ok(IndexReport {
             upserted: documents.len(),
-            removed: 0,
+            removed,
+            replaced,
             total,
         })
+    }
+
+    /// Every row a [`Indexer::full_rebuild`] to `documents` is about to
+    /// drop, as `(removed, replaced)`: rows whose path no document in
+    /// `documents` has (or that have no text path), and rows at a path one
+    /// does. Read from `documents_content`, FTS5's own table of the stored
+    /// column values, one row per document, where the first declared
+    /// column, `path`, is `c0`; see `full_rebuild`'s doc for why not
+    /// through the virtual table. A file with no such table stores no rows
+    /// this could count, and neither half is counted.
+    fn rows_a_rebuild_discards(
+        conn: &Connection,
+        documents: &[IndexableDocument],
+        display_path: &Path,
+    ) -> Result<(usize, usize), IndexerError> {
+        let has_content_table: bool = conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_schema \
+                 WHERE type = 'table' AND name = 'documents_content'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| classify(conn, display_path, "look up the content table", source))?;
+        if !has_content_table {
+            return Ok((0, 0));
+        }
+        let target_paths: BTreeSet<&str> = documents
+            .iter()
+            .map(|document| document.path.as_str())
+            .collect();
+        let mut statement = conn
+            .prepare("SELECT c0 FROM documents_content")
+            .map_err(|source| {
+                classify(conn, display_path, "prepare a count of stored rows", source)
+            })?;
+        let mut rows = statement
+            .query([])
+            .map_err(|source| classify(conn, display_path, "count stored rows", source))?;
+        let (mut removed, mut replaced) = (0usize, 0usize);
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(source) => {
+                    return Err(classify(conn, display_path, "count one stored row", source));
+                }
+            };
+            let at_target_path = match row.get_ref(0) {
+                Ok(ValueRef::Text(bytes)) => std::str::from_utf8(bytes)
+                    .is_ok_and(|stored_path| target_paths.contains(stored_path)),
+                Ok(_) => false,
+                Err(source) => {
+                    return Err(classify(conn, display_path, "count one stored row", source));
+                }
+            };
+            if at_target_path {
+                replaced += 1;
+            } else {
+                removed += 1;
+            }
+        }
+        Ok((removed, replaced))
     }
 
     /// Re-indexes to match `documents` exactly ("re-index on merge", PRD
     /// K-02), leaving the stored rows exactly as [`Indexer::full_rebuild`]
     /// of the same target set would: every stored row whose path is not in
     /// `documents` is deleted; every document in `documents` is written
-    /// (delete-then-add) unless exactly one row is stored at its path, with
-    /// its exact `kind` text and its checksum, in which case it is left
-    /// alone.
+    /// (delete-then-add) unless exactly one row is stored at its path and
+    /// every column of it (`kind`, `title` and `body` as text, `checksum`
+    /// as an integer) is exactly what this build writes for that document,
+    /// in which case it is left alone.
     ///
-    /// The diff basis is every stored row's `rowid`, `path`, `kind` and
-    /// `checksum`, read without assuming their types, never
+    /// The diff basis is every stored row's `rowid` and every column, read
+    /// without assuming their types and compared against the target as each
+    /// row is read (so no stored body is held in memory), never
     /// [`Indexer::all_documents`] (which leaves out a row whose `kind` does
-    /// not parse). Reviews found three ways a row some other writer stored
+    /// not parse). Reviews found four ways a row some other writer stored
     /// (a manual edit, an older or newer build) outlived every sync while
     /// `full_rebuild` replaced it: a `kind` that does not parse, removed by
     /// round 3 but still skipped when its path *was* in the target and its
     /// checksum happened to match (the checksum hashes the kind this build
-    /// would store, not the text actually stored); two rows at one path; and
-    /// a `path` or `checksum` of the wrong type, which failed every sync
-    /// outright. Each is now a difference like any other: a row that is not
-    /// exactly what this build would have written is rewritten, and one
-    /// whose path is not text at all is deleted by its `rowid`, since no
-    /// target document can name it.
+    /// would store, not the text actually stored); two rows at one path; a
+    /// `path` or `checksum` of the wrong type, which failed every sync
+    /// outright; and, once those were fixed, a `title` or `body` changed
+    /// with `kind` and `checksum` left alone, which round 5 compared by
+    /// checksum only and so never repaired (a `NULL` body made
+    /// [`Indexer::all_documents`] fail on every call after). Each is now a
+    /// difference like any other: a row that is not exactly what this build
+    /// would have written is rewritten, and one whose path is not text at
+    /// all is deleted by its `rowid`, since no target document can name it.
     ///
     /// Reads the current index inside the same write transaction the deletes
     /// and upserts run in, not before it: an adversarial review found that
@@ -1544,15 +1896,21 @@ impl<'db> Indexer<'db> {
     /// [`Indexer::all_documents`]'s doc gives: nothing here is read from
     /// bookkeeping held in memory.
     ///
-    /// What it still trusts: that a row whose `kind` and checksum are what
-    /// this build would store also holds the `title` and `body` that
-    /// checksum was computed from. A writer that edits those two columns
-    /// and leaves the checksum alone is not detected here; `full_rebuild`
-    /// replaces it.
+    /// What it trusts, stated rather than left to be found: the rows the
+    /// `documents` table returns. It does not check that FTS5's inverted
+    /// index still agrees with those rows (a writer that edits the shadow
+    /// tables directly can leave a row that reads back exactly right and
+    /// searches wrongly, which [`IndexerError::Corrupt`] reports once a
+    /// search trips over it), nor the table's own definition (a writer that
+    /// recreates the table with another tokenizer and the same rows is not
+    /// noticed). [`Indexer::full_rebuild`] replaces both, and is the answer
+    /// to either.
     ///
     /// # Errors
     ///
     /// [`IndexerError::DuplicatePath`] if `documents` holds one path twice;
+    /// [`IndexerError::DocumentTooLarge`] if one of them is larger than the
+    /// module doc's per-document cap;
     /// [`IndexerError::Locked`] if another writer holds the lock, or holds
     /// it by the time this call's reads try to become writes;
     /// [`IndexerError::Corrupt`] if the index is damaged;
@@ -1562,7 +1920,7 @@ impl<'db> Indexer<'db> {
         &mut self,
         documents: &[IndexableDocument],
     ) -> Result<IndexReport, IndexerError> {
-        refuse_duplicate_paths(documents)?;
+        refuse_invalid_target(documents)?;
         let path = self.display_path();
         let tx = self
             .conn
@@ -1571,11 +1929,16 @@ impl<'db> Indexer<'db> {
 
         // Read inside the transaction just opened, not before it: see the
         // doc above.
-        let stored = Self::stored_rows_on(&tx, &path)?;
-        let target_paths: BTreeSet<&str> = documents
+        let target: BTreeMap<&str, (&IndexableDocument, i64)> = documents
             .iter()
-            .map(|document| document.path.as_str())
+            .map(|document| {
+                (
+                    document.path.as_str(),
+                    (document, document.checksum() as i64),
+                )
+            })
             .collect();
+        let stored = Self::stored_rows_on(&tx, &target, &path)?;
         let mut by_path: BTreeMap<&str, Vec<&StoredRow>> = BTreeMap::new();
         let mut unaddressable: Vec<i64> = Vec::new();
         for row in &stored {
@@ -1591,25 +1954,25 @@ impl<'db> Indexer<'db> {
             removed += 1;
         }
         for (stored_path, rows) in &by_path {
-            if !target_paths.contains(stored_path) {
+            if !target.contains_key(stored_path) {
                 Self::delete_path(&tx, stored_path, &path)?;
                 removed += rows.len();
             }
         }
 
         let mut upserted = 0usize;
+        let mut replaced = 0usize;
         for document in documents {
-            let unchanged = match by_path.get(document.path.as_str()).map(Vec::as_slice) {
-                Some([only]) => {
-                    only.kind.as_deref() == Some(document.kind.as_str())
-                        && only.checksum == Some(document.checksum() as i64)
-                }
-                _ => false,
-            };
-            if unchanged {
+            let at_path = by_path
+                .get(document.path.as_str())
+                .map_or(&[][..], Vec::as_slice);
+            if let [only] = at_path
+                && only.exact
+            {
                 continue;
             }
             Self::delete_path(&tx, &document.path, &path)?;
+            replaced += at_path.len();
             Self::insert(&tx, document, &path)?;
             upserted += 1;
         }
@@ -1621,29 +1984,41 @@ impl<'db> Indexer<'db> {
         Ok(IndexReport {
             upserted,
             removed,
+            replaced,
             total,
         })
     }
 
     /// Every stored row, as [`StoredRow`]s: the diff basis
     /// [`Indexer::incremental_sync`] uses, read without assuming any
-    /// column's type, since a row another writer stored may hold anything.
+    /// column's type, since a row another writer stored may hold anything,
+    /// and each compared against `target` as it is read.
     fn stored_rows_on(
         conn: &Connection,
+        target: &BTreeMap<&str, (&IndexableDocument, i64)>,
         display_path: &Path,
     ) -> Result<Vec<StoredRow>, IndexerError> {
         let mut statement = conn
-            .prepare("SELECT rowid, path, kind, checksum FROM documents")
+            .prepare("SELECT rowid, path, kind, title, body, checksum FROM documents")
             .map_err(|source| {
                 classify(conn, display_path, "prepare a read of stored rows", source)
             })?;
         let rows = statement
             .query_map([], |row| {
+                let path = text_of(row.get_ref(1)?);
+                let exact = match path.as_deref().and_then(|stored| target.get(stored)) {
+                    Some((document, checksum)) => {
+                        row.get_ref(2)? == ValueRef::Text(document.kind.as_str().as_bytes())
+                            && row.get_ref(3)? == ValueRef::Text(document.title.as_bytes())
+                            && row.get_ref(4)? == ValueRef::Text(document.body.as_bytes())
+                            && row.get_ref(5)? == ValueRef::Integer(*checksum)
+                    }
+                    None => false,
+                };
                 Ok(StoredRow {
                     rowid: row.get(0)?,
-                    path: text_of(row.get_ref(1)?),
-                    kind: text_of(row.get_ref(2)?),
-                    checksum: integer_of(row.get_ref(3)?),
+                    path,
+                    exact,
                 })
             })
             .map_err(|source| classify(conn, display_path, "read stored rows", source))?;
@@ -1859,34 +2234,37 @@ impl Indexer<'_> {
     /// reason `ProductDb::open`'s `opened_at` gives. `documents` is the
     /// target set the fresh index is rebuilt from, normally
     /// [`Indexer::collect_from_repo`]'s. The damaged file is never opened,
-    /// so no damage can make this fail. If the rebuild itself fails after
-    /// the move, the old files are already safe in quarantine and the
-    /// product has a fresh, possibly partial index; calling this again, or
+    /// so no damage can make this fail. An `index/fts.sqlite` (or side
+    /// file) that is a symbolic link, which [`Indexer::open`] refuses, is
+    /// moved like any other file: the link itself goes into quarantine and
+    /// whatever it pointed at is never touched. The files move as one unit:
+    /// if one cannot be moved, every one already moved is moved back and
+    /// nothing is rebuilt. If the rebuild itself fails after the move, the
+    /// old files are already safe in quarantine and the product has a
+    /// fresh, possibly partial index; calling this again, or
     /// [`Indexer::full_rebuild`], completes it.
     ///
     /// # Errors
     ///
-    /// [`IndexerError::DuplicatePath`] if `documents` holds one path twice,
-    /// checked before anything is moved;
-    /// [`IndexerError::RecoveryRefused`] if `index/` or `index/quarantine/`
-    /// is a symbolic link;
+    /// [`IndexerError::DuplicatePath`] or [`IndexerError::DocumentTooLarge`]
+    /// if `documents` holds one path twice or a document over the module
+    /// doc's per-document cap, checked before anything is moved;
+    /// [`IndexerError::RecoveryRefused`] if `db`'s directory is a relative
+    /// path, or `index/` or `index/quarantine/` is a symbolic link;
+    /// [`IndexerError::QuarantineIncomplete`] if a file cannot be moved,
+    /// naming every file that could not be put back;
     /// [`IndexerError::Directory`] or [`IndexerError::Io`] if a directory
-    /// cannot be created or a file cannot be moved;
-    /// any error [`Indexer::full_rebuild`] returns, from rebuilding the
-    /// fresh index.
+    /// cannot be created or read;
+    /// any error [`Indexer::open`] or [`Indexer::full_rebuild`] returns,
+    /// from creating and rebuilding the fresh index.
     pub fn recover(
         db: &mut ProductDb,
         documents: &[IndexableDocument],
         recovered_at: Timestamp,
     ) -> Result<RecoveryReport, IndexerError> {
-        refuse_duplicate_paths(documents)?;
+        refuse_invalid_target(documents)?;
         let db: &ProductDb = db;
-        let index_dir = db.dir().join(INDEX_DIR);
-        std::fs::create_dir_all(&index_dir).map_err(|source| IndexerError::Directory {
-            path: index_dir.clone(),
-            source,
-        })?;
-        refuse_symlink(&index_dir)?;
+        let index_dir = owned_index_dir(db, recovery_refused)?;
 
         let (quarantine, quarantined_files) = quarantine_index_files(&index_dir, recovered_at)?;
 
@@ -1925,18 +2303,20 @@ impl Indexer<'_> {
     /// file), `spec/criteria/*.md` (kind [`DocumentKind::Criterion`], one
     /// document per table row whose first cell matches
     /// `ORI-[A-Z0-9]+-[0-9]+`, per `spec/criteria/phase-1.md`'s own format
-    /// line, "Identifier `ORI-P1-nnn`"), and every other `spec/**/*.md` (kind
+    /// line, "Identifier `ORI-P1-nnn`", with every other line of the file
+    /// split into sections as below), and every other `spec/**/*.md` (kind
     /// [`DocumentKind::Section`], one document for any text above the first
     /// ATX heading and one per heading, flat rather than level-aware: this
     /// module's own splitter, not `ori-gates::spec_refs::heading_slug`'s,
     /// since `ori-memory` does not and must not depend on `ori-gates`, a
     /// sideways crate under `spec/LLD.md` section 2's dependency direction)
-    /// are read. `spec/design/` is skipped entirely; see the module doc.
-    /// Symbolic links, non-regular files, non-UTF-8 paths, unreadable
-    /// entries and repeated document paths are left out and listed in
-    /// [`RepoWalk::skipped`]; see the module doc's "What the repository
-    /// walk never reads". Entries are visited in name order, so the result
-    /// does not depend on the filesystem's own directory order.
+    /// are read. `spec/design/` is never entered, and is listed in
+    /// [`RepoWalk::skipped`] with the reason; see the module doc. Symbolic
+    /// links, non-regular files, non-UTF-8 paths, unreadable entries,
+    /// repeated document paths, files over 1 MiB and documents over 64 KiB
+    /// are left out and listed there too; see the module doc's "What the
+    /// repository walk never reads". Entries are visited in name order, so
+    /// the result does not depend on the filesystem's own directory order.
     ///
     /// # Errors
     ///
@@ -1977,14 +2357,14 @@ impl Indexer<'_> {
     }
 }
 
-/// One row as [`Indexer::incremental_sync`] reads it: every column it diffs
-/// on, typed as found rather than as this build would have stored it
-/// (`None` for a value of any other type).
+/// One row as [`Indexer::incremental_sync`] reads it: its `rowid`, its
+/// `path` if that is UTF-8 text (`None` for a value of any other type), and
+/// whether every column is exactly what this build writes for the target
+/// document at that path.
 struct StoredRow {
     rowid: i64,
     path: Option<String>,
-    kind: Option<String>,
-    checksum: Option<i64>,
+    exact: bool,
 }
 
 /// `value` as a `String` if it is UTF-8 text, else `None`.
@@ -1995,12 +2375,103 @@ fn text_of(value: ValueRef<'_>) -> Option<String> {
     }
 }
 
-/// `value` as an `i64` if it is an integer, else `None`.
-fn integer_of(value: ValueRef<'_>) -> Option<i64> {
-    match value {
-        ValueRef::Integer(integer) => Some(integer),
-        _ => None,
+/// Why a symbolic link is refused, wherever one is: the file behind it may
+/// be another product's, which no borrow of this product's `ProductDb`
+/// says anything about (the module doc's "Recovery").
+const LINK_REFUSAL: &str = "it is a symbolic link, so the file behind it may be another product's";
+
+/// [`IndexerError::OpenRefused`], as a constructor [`owned_index_dir`] can
+/// be handed.
+fn open_refused(path: PathBuf, reason: &'static str) -> IndexerError {
+    IndexerError::OpenRefused { path, reason }
+}
+
+/// [`IndexerError::RecoveryRefused`], as a constructor [`owned_index_dir`]
+/// can be handed.
+fn recovery_refused(path: PathBuf, reason: &'static str) -> IndexerError {
+    IndexerError::RecoveryRefused { path, reason }
+}
+
+/// `<db's directory>/index/`, resolved the one way that keeps every
+/// [`Indexer`] and [`Indexer::recover`] on this product's own files, and
+/// created if absent: `db`'s directory must be absolute (a relative one is
+/// resolved against the working directory at the time of the call, which
+/// after a change of directory is another directory than the one
+/// `ProductDb::open` locked); it is then canonicalized, which resolves any
+/// link at or above it, the same way `ProductDb::open` reached its lock
+/// file through it; and `index/` itself must be a real directory, never a
+/// link. Every refusal is built with `refuse`, so `open` and `recover` each
+/// name their own.
+fn owned_index_dir(
+    db: &ProductDb,
+    refuse: fn(PathBuf, &'static str) -> IndexerError,
+) -> Result<PathBuf, IndexerError> {
+    let product_dir = db.dir();
+    if !product_dir.is_absolute() {
+        return Err(refuse(
+            product_dir.to_owned(),
+            "the product directory is a relative path, which resolves against the working \
+             directory of the moment, not the one the product's lock was taken in",
+        ));
     }
+    let product_dir = product_dir
+        .canonicalize()
+        .map_err(|source| IndexerError::Directory {
+            path: product_dir.to_owned(),
+            source,
+        })?;
+    let index_dir = product_dir.join(INDEX_DIR);
+    let mut created = false;
+    loop {
+        match std::fs::symlink_metadata(&index_dir) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(refuse(index_dir, LINK_REFUSAL));
+            }
+            Ok(metadata) if metadata.is_dir() => return Ok(index_dir),
+            Ok(_) => return Err(refuse(index_dir, "it is not a directory")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !created => {
+                match std::fs::create_dir(&index_dir) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(source) => {
+                        return Err(IndexerError::Directory {
+                            path: index_dir,
+                            source,
+                        });
+                    }
+                }
+                created = true;
+            }
+            Err(source) => {
+                return Err(IndexerError::Directory {
+                    path: index_dir,
+                    source,
+                });
+            }
+        }
+    }
+}
+
+/// Refuses to open the index if any file of [`INDEX_FILE_SET`] in
+/// `index_dir` is a symbolic link or not a regular file: [`Indexer::open`]
+/// opens only files under its own product's directory. An absent file is
+/// fine; SQLite creates it.
+fn refuse_unowned_index_files(index_dir: &Path) -> Result<(), IndexerError> {
+    for name in INDEX_FILE_SET {
+        let live = index_dir.join(name);
+        match std::fs::symlink_metadata(&live) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(open_refused(live, LINK_REFUSAL));
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(open_refused(live, "it is not a regular file"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(IndexerError::Io { path: live, source }),
+        }
+    }
+    Ok(())
 }
 
 /// Refuses `dir` if it is a symbolic link: [`Indexer::recover`] moves files
@@ -2012,10 +2483,7 @@ fn refuse_symlink(dir: &Path) -> Result<(), IndexerError> {
         source,
     })?;
     if metadata.file_type().is_symlink() {
-        return Err(IndexerError::RecoveryRefused {
-            path: dir.to_owned(),
-            reason: "it is a symbolic link, so the files it holds may be another product's",
-        });
+        return Err(recovery_refused(dir.to_owned(), LINK_REFUSAL));
     }
     Ok(())
 }
@@ -2026,6 +2494,17 @@ fn refuse_symlink(dir: &Path) -> Result<(), IndexerError> {
 /// directory (`None`, and nothing created, when no file was present) and
 /// every moved file's new path. Only [`Indexer::recover`] calls this, under
 /// the proof its doc states.
+///
+/// The files move as one unit. A review found a failed move returning at
+/// once, leaving the side files already moved in quarantine: the next open
+/// then served the database without its write-ahead log, silently, as it
+/// stood before the log's transactions, and a retry quarantined the
+/// database in a second directory, apart from its log. Now a failed move
+/// moves every file already moved back to its live path, last moved first,
+/// and removes the directory made for them if that leaves it empty
+/// (`remove_dir`, which refuses a directory that is not empty, so it can
+/// never remove a file); [`IndexerError::QuarantineIncomplete`] names any
+/// file that could not be put back.
 fn quarantine_index_files(
     index_dir: &Path,
     recovered_at: Timestamp,
@@ -2051,16 +2530,30 @@ fn quarantine_index_files(
     refuse_symlink(&quarantine_root)?;
     let destination = unique_quarantine_dir(&quarantine_root, recovered_at)?;
 
-    let mut moved = Vec::new();
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     for name in present {
         let from = index_dir.join(name);
         let to = destination.join(name);
-        std::fs::rename(&from, &to).map_err(|source| IndexerError::Io {
-            path: from.clone(),
-            source,
-        })?;
-        moved.push(to);
+        if let Err(source) = move_file(&from, &to) {
+            let mut stranded = Vec::new();
+            for (live, quarantined) in moved.iter().rev() {
+                if move_file(quarantined, live).is_err() {
+                    stranded.push(quarantined.clone());
+                }
+            }
+            if stranded.is_empty() {
+                let _ = std::fs::remove_dir(&destination);
+            }
+            return Err(IndexerError::QuarantineIncomplete {
+                path: from,
+                source,
+                quarantine: destination,
+                stranded,
+            });
+        }
+        moved.push((from, to));
     }
+    let moved: Vec<PathBuf> = moved.into_iter().map(|(_, to)| to).collect();
     for name in INDEX_FILE_SET {
         let live = index_dir.join(name);
         if std::fs::symlink_metadata(&live).is_ok() {
@@ -2108,8 +2601,22 @@ fn unique_quarantine_dir(
     })
 }
 
-/// Recursively walks `dir` for `.md` files, skipping the whole `spec/design`
-/// subtree by its exact repository-relative path, appending every document
+/// `std::fs::rename(from, to)`, for every move [`quarantine_index_files`]
+/// makes, forward and back. In test builds only, it first asks the test
+/// running on this thread whether this move must fail, which is how that
+/// function's rollback is tested on every platform, including a move back
+/// that fails too; `chflags uchg`, the real refusal those tests also use,
+/// exists only on macOS and the BSDs. Compiled out of every other build.
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = tests::injected_move_failure(from) {
+        return Err(error);
+    }
+    std::fs::rename(from, to)
+}
+
+/// Recursively walks `dir` for `.md` files, skipping (and recording) the
+/// whole `spec/design` subtree by its exact repository-relative path, appending every document
 /// found to `walk.documents` (and every entry left out to `walk.skipped`),
 /// with `path` computed relative to `repo_root`, never to `dir` itself.
 /// Returns an error only when `dir` itself cannot be listed, which
@@ -2197,11 +2704,16 @@ fn walk_markdown(
         if file_type.is_dir() {
             let relative_dir = path.strip_prefix(repo_root).unwrap_or(&path);
             if relative_dir == Path::new("spec").join("design") {
-                // E-0006: spec/design/ is mock data for a fictional product.
                 // See the module doc, "spec/design/ is excluded". The exact
                 // repository-relative path, not merely the directory's own
                 // name, so a same-named directory elsewhere in the tree is
-                // untouched.
+                // untouched; recorded, never silent.
+                walk.skipped.push(SkippedEntry {
+                    path,
+                    reason: SkipReason::Excluded {
+                        reason: DESIGN_EXCLUSION,
+                    },
+                });
                 continue;
             }
             if let Err(error) = walk_markdown(repo_root, &path, walk, seen) {
@@ -2267,8 +2779,15 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, seen: &mut
     // in a file name stays part of that name. See the module doc's
     // "Document identity".
     let relative = components.join("/");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let text = match read_capped(&path) {
+        Ok(Ok(text)) => text,
+        Ok(Err(byte_len)) => {
+            walk.skipped.push(SkippedEntry {
+                path,
+                reason: SkipReason::FileTooLarge { byte_len },
+            });
+            return;
+        }
         Err(error) => {
             walk.skipped.push(SkippedEntry {
                 path,
@@ -2291,12 +2810,25 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, seen: &mut
             text,
         )]
     } else if is_criteria {
-        criteria_documents(&relative, &text)
+        let (mut rows, rest) = criteria_documents(&relative, &text);
+        if !rest.trim().is_empty() {
+            rows.extend(section_documents(&relative, &rest));
+        }
+        rows
     } else {
         section_documents(&relative, &text)
     };
     for document in documents {
-        if seen.insert(document.path.clone()) {
+        let byte_len = document.indexed_byte_len();
+        if byte_len > MAX_DOCUMENT_BYTES {
+            walk.skipped.push(SkippedEntry {
+                path: path.clone(),
+                reason: SkipReason::DocumentTooLarge {
+                    path: document.path,
+                    byte_len,
+                },
+            });
+        } else if seen.insert(document.path.clone()) {
             walk.documents.push(document);
         } else {
             walk.skipped.push(SkippedEntry {
@@ -2307,6 +2839,35 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, seen: &mut
             });
         }
     }
+}
+
+/// The recorded reason `spec/design/` is never walked: the module doc's
+/// "`spec/design/` is excluded".
+const DESIGN_EXCLUSION: &str = "spec/design/ is excluded as a whole: escalation E-0006 records \
+                                the design artifact under it as mock data for a fictional \
+                                product";
+
+/// Reads `path` as UTF-8 text, never more than [`MAX_FILE_BYTES`] of it:
+/// `Ok(Err(byte_len))` for a file longer than that (its length as the
+/// filesystem reports it, or as far as this read got, whichever is more),
+/// so a file that grows between the size check and the read is still
+/// bounded.
+fn read_capped(path: &Path) -> std::io::Result<Result<String, u64>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let reported = file.metadata()?.len();
+    if reported > MAX_FILE_BYTES {
+        return Ok(Err(reported));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if read > MAX_FILE_BYTES {
+        return Ok(Err(read.max(reported)));
+    }
+    String::from_utf8(bytes)
+        .map(Ok)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 /// The text of the first ATX heading in `text`, with leading `#`s and
@@ -2350,6 +2911,16 @@ fn first_heading(text: &str) -> Option<String> {
 /// `path`, which [`Indexer::walk_repo`] would then have to leave out; see
 /// `tests::ori_t_0035_collect_from_repo_and_full_rebuild_succeed_on_this_repositorys_own_spec_tree`
 /// for the check that this repository's own `spec/` never hits one.
+///
+/// A later review found that search quadratic: every repeat of a heading
+/// restarted it at `-1`, so the `n`th repeat tried `n` anchors, and 32,768
+/// identical headings (a 128 KB file) took 25.6 seconds. `next_suffix`
+/// below keeps, for each base anchor, the first suffix not yet tried, and
+/// the search resumes there. It skips nothing it should not: every suffix
+/// below it was found taken, and an anchor, once taken, stays taken. Each
+/// candidate anchor is tried at most once, so a file splits in time
+/// linear in its size
+/// (`tests::ori_t_0035_a_file_of_one_heading_repeated_to_the_file_cap_splits_within_a_stated_bound`).
 fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> {
     let mut preamble = String::new();
     let mut sections: Vec<(String, String)> = Vec::new();
@@ -2399,14 +2970,22 @@ fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> 
         ));
     }
     let mut used_anchors: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut next_suffix: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     out.extend(sections.into_iter().map(|(title, body)| {
         let base = heading_anchor(&title);
-        let mut anchor = base.clone();
-        let mut suffix = 1usize;
-        while used_anchors.contains(&anchor) {
-            anchor = format!("{base}-{suffix}");
-            suffix += 1;
-        }
+        let anchor = if used_anchors.contains(&base) {
+            let suffix = next_suffix.entry(base.clone()).or_insert(1);
+            loop {
+                let candidate = format!("{base}-{suffix}");
+                *suffix += 1;
+                if !used_anchors.contains(&candidate) {
+                    break candidate;
+                }
+            }
+        } else {
+            base
+        };
         used_anchors.insert(anchor.clone());
         IndexableDocument::new(
             format!("{relative_path}#{anchor}"),
@@ -2440,33 +3019,51 @@ fn heading_anchor(title: &str) -> String {
     out
 }
 
-/// Splits a criteria table's rows into one [`IndexableDocument`] per
-/// criterion, matching `spec/criteria/phase-1.md`'s own format: a markdown
-/// table whose first column is the identifier (`ORI-P1-nnn`).
-fn criteria_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> {
-    let mut out = Vec::new();
+/// Splits a criteria file into one [`IndexableDocument`] per criterion,
+/// matching `spec/criteria/phase-1.md`'s own format (a markdown table whose
+/// first column is the identifier, `ORI-P1-nnn`), and returns every other
+/// line, in order, as the second half of the pair, for [`collect_file`] to
+/// index as sections like any other specification file. A table row
+/// inside a fenced code block is text, not a criterion.
+///
+/// A review found everything but those rows dropped without a record: a
+/// criteria file's title and prose, a proposed criterion appended in the
+/// acceptance-criterion template's two-column form (whose first cell is a
+/// field name, not an identifier), and a whole criteria file of another
+/// shape, such as the personas file the specification schedules for that
+/// directory, which produced no document at all while every sync
+/// returned `Ok`. None of it is dropped now.
+fn criteria_documents(relative_path: &str, text: &str) -> (Vec<IndexableDocument>, String) {
+    let mut rows = Vec::new();
+    let mut rest = String::new();
+    let mut in_fence = false;
     for line in text.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with('|') {
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        } else if !in_fence && let Some(id) = criterion_row_id(trimmed) {
+            rows.push(IndexableDocument::new(
+                format!("{relative_path}#{id}"),
+                DocumentKind::Criterion,
+                id.to_owned(),
+                trimmed.to_owned(),
+            ));
             continue;
         }
-        let cells: Vec<&str> = trimmed
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        let Some(id) = cells.first() else { continue };
-        if !is_criterion_id(id) {
-            continue;
-        }
-        out.push(IndexableDocument::new(
-            format!("{relative_path}#{id}"),
-            DocumentKind::Criterion,
-            (*id).to_owned(),
-            trimmed.to_owned(),
-        ));
+        rest.push_str(line);
+        rest.push('\n');
     }
-    out
+    (rows, rest)
+}
+
+/// The identifier in `row`'s first cell, if `row` is a markdown table row
+/// whose first cell is one ([`is_criterion_id`]).
+fn criterion_row_id(row: &str) -> Option<&str> {
+    if !row.starts_with('|') {
+        return None;
+    }
+    let id = row.trim_matches('|').split('|').next()?.trim();
+    is_criterion_id(id).then_some(id)
 }
 
 /// Whether `text` matches `ORI-[A-Z0-9]+-[0-9]+`, the criterion identifier
@@ -2568,6 +3165,46 @@ mod tests {
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    // -------------------------------------------------------------------
+    // The move seam `move_file` calls in test builds (see its doc).
+    // -------------------------------------------------------------------
+
+    /// Which moves fail: the predicate is asked the source path of every
+    /// move `move_file` is about to make on this thread.
+    type MoveFailure = Box<dyn Fn(&Path) -> bool>;
+
+    thread_local! {
+        static FAIL_MOVE: RefCell<Option<MoveFailure>> = const { RefCell::new(None) };
+    }
+
+    /// Makes every move on this thread whose source `fails` accepts fail,
+    /// until the returned guard is dropped.
+    fn fail_moves(fails: impl Fn(&Path) -> bool + 'static) -> impl Drop {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                FAIL_MOVE.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        FAIL_MOVE.with(|slot| *slot.borrow_mut() = Some(Box::new(fails)));
+        Clear
+    }
+
+    /// The error a move from `from` must fail with, if the test on this
+    /// thread asked for one: called by `move_file` in test builds only.
+    pub(super) fn injected_move_failure(from: &Path) -> Option<std::io::Error> {
+        FAIL_MOVE.with(|slot| {
+            slot.borrow().as_ref().and_then(|fails| {
+                fails(from).then(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "this move was made to fail by the test",
+                    )
+                })
+            })
+        })
     }
 
     // -------------------------------------------------------------------
@@ -5343,45 +5980,109 @@ mod tests {
         );
     }
 
+    /// Every regular `.md` file under `repo_root/spec`, as a repository
+    /// relative, `/`-joined path, outside `spec/design/` and never through a
+    /// link: the files [`Indexer::walk_repo`] reads, found independently of
+    /// it, so a file the walk produced nothing for is still checked.
+    fn markdown_files_to_index(repo_root: &Path) -> Vec<String> {
+        fn visit(repo_root: &Path, dir: &Path, out: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).expect("list a directory") {
+                let entry = entry.expect("a directory entry");
+                let path = entry.path();
+                let file_type = entry.file_type().expect("an entry's type");
+                let relative: Vec<String> = path
+                    .strip_prefix(repo_root)
+                    .expect("under the root")
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                if file_type.is_dir() && relative != ["spec", "design"] {
+                    visit(repo_root, &path, out);
+                } else if file_type.is_file()
+                    && path.extension().and_then(|extension| extension.to_str()) == Some("md")
+                {
+                    out.push(relative.join("/"));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(repo_root, &repo_root.join("spec"), &mut out);
+        out.sort();
+        out
+    }
+
+    /// Asserts that every non-blank line of every file
+    /// [`markdown_files_to_index`] finds, unless `walk` recorded the file as
+    /// skipped, is a heading (some document's title) or sits in the body of
+    /// some document from that file (a criterion's body is its row,
+    /// trimmed). Returns how many files and lines were checked.
+    fn assert_every_non_blank_line_is_indexed(repo_root: &Path, walk: &RepoWalk) -> (usize, usize) {
+        let skipped: BTreeSet<&Path> = walk
+            .skipped
+            .iter()
+            .map(|entry| entry.path.as_path())
+            .collect();
+        let (mut files, mut lines) = (0usize, 0usize);
+        for file in markdown_files_to_index(repo_root) {
+            if skipped.contains(repo_root.join(&file).as_path()) {
+                continue;
+            }
+            let anchored = format!("{file}#");
+            let documents: Vec<&IndexableDocument> = walk
+                .documents
+                .iter()
+                .filter(|document| document.path == file || document.path.starts_with(&anchored))
+                .collect();
+            let text = fs::read_to_string(repo_root.join(&file)).expect("read a walked file");
+            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                let as_title = line.trim_start().trim_start_matches('#').trim();
+                let kept = documents.iter().any(|document| {
+                    document.body.contains(line)
+                        || document.title == as_title
+                        || (document.kind == DocumentKind::Criterion
+                            && document.body == line.trim())
+                });
+                assert!(
+                    kept,
+                    "{file}: this line is in no indexed document: {line:?} (documents from the \
+                     file: {})",
+                    documents.len()
+                );
+                lines += 1;
+            }
+            files += 1;
+        }
+        (files, lines)
+    }
+
     #[test]
-    fn ori_t_0035_no_non_blank_line_of_this_repositorys_own_section_files_is_left_out_of_the_index()
-    {
-        // The property item 3 states, checked on the real tree: every
-        // non-blank line of every file indexed as sections is a heading
-        // (some document's title) or sits in some document's body.
+    fn ori_t_0035_no_non_blank_line_of_any_file_this_repositorys_walk_reads_is_left_out_of_the_index()
+     {
+        // Round 5's version of this check looked at Section documents only,
+        // so it could not see that a criteria file kept nothing but its
+        // table rows. Every file the walk reads, of every kind, now; a
+        // file that produced no document at all fails on its first line.
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .expect("crates/ori-memory sits two levels under the repository root")
             .to_owned();
         let walk = Indexer::walk_repo(&repo_root).expect("walk this repository");
-        let mut by_file: BTreeMap<&str, Vec<&IndexableDocument>> = BTreeMap::new();
-        for document in &walk.documents {
-            if document.kind == DocumentKind::Section {
-                let file = document.path.split('#').next().expect("a path");
-                by_file.entry(file).or_default().push(document);
-            }
-        }
+        let (files, checked) = assert_every_non_blank_line_is_indexed(&repo_root, &walk);
         assert!(
-            by_file.len() > 20,
-            "a vacuous walk would pass the check below for the wrong reason: {} files",
-            by_file.len()
+            files > 20,
+            "a vacuous walk would pass the check above for the wrong reason: {files} files"
         );
-        let mut checked = 0usize;
-        for (file, documents) in &by_file {
-            let text = fs::read_to_string(repo_root.join(file)).expect("read a walked file");
-            for line in text.lines().filter(|line| !line.trim().is_empty()) {
-                let as_title = line.trim_start().trim_start_matches('#').trim();
-                let kept = documents
+        assert!(
+            walk.documents
+                .iter()
+                .any(|document| document.kind == DocumentKind::Criterion)
+                && walk
+                    .documents
                     .iter()
-                    .any(|document| document.body.contains(line) || document.title == as_title);
-                assert!(
-                    kept,
-                    "{file}: this line is in no indexed document: {line:?}"
-                );
-                checked += 1;
-            }
-        }
+                    .any(|document| document.kind == DocumentKind::Adr),
+            "the criteria and ADR files were among those checked"
+        );
         assert!(checked > 1000, "only {checked} lines checked");
     }
 
@@ -5636,11 +6337,30 @@ mod tests {
             .find(|document| document.path == repeated)
             .expect("the first row is kept");
         assert!(kept.body.contains("first wording"));
+        // Four documents: the two distinct rows, the PRD's section, and,
+        // since round 6, the table's header and separator rows, which are
+        // no criterion's and are indexed as the criteria file's own text
+        // rather than dropped (the module doc's "What the repository walk
+        // never reads").
+        let paths: BTreeSet<&str> = walk
+            .documents
+            .iter()
+            .map(|document| document.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            BTreeSet::from([
+                repeated,
+                concat!("spec/criteria/phase-1", ".md", "#ORI-P1-002"),
+                concat!("spec/criteria/phase-1", ".md"),
+                concat!("spec/PRD", ".md", "#prd"),
+            ])
+        );
         let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
         let report = indexer
             .full_rebuild(&walk.documents)
             .expect("the walk's set never fails the rebuild wholesale");
-        assert_eq!(report.total, 3);
+        assert_eq!(report.total, 4);
     }
 
     #[test]
@@ -5834,6 +6554,985 @@ mod tests {
                 target.len() + 1,
                 "{method}: the intruder's commit really did land right after this one"
             );
+        }
+    }
+
+    // =====================================================================
+    // Round 6: seven items an adversarial review confirmed by independent
+    // reproduction. Each test below fails against the code before its fix.
+    // =====================================================================
+
+    /// Opens a second product beside `scratch`'s own, under the same root.
+    fn other_product(scratch: &Scratch, id: &str) -> ProductDb {
+        ProductDb::open(&scratch.path, id, Timestamp::from_millis(1_000))
+            .expect("a second scratch product opens")
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 1 (HIGH): a link let one product's Indexer hold another's file.
+    // ---------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_open_refuses_an_index_linked_into_another_products_index() {
+        // The review's setup: product A's index/ (or its fts.sqlite) is a
+        // link to product B's. Round 5's open followed it, so A's Indexer,
+        // borrowing only A's ProductDb, held B's file open; recover(&mut B)
+        // compiled, moved that file into quarantine, and A's later writes
+        // returned Ok into the quarantined file. Now A's open is refused, so
+        // no Indexer can hold a file its own borrow says nothing about.
+        let bravo = vec![doc("b.md", DocumentKind::Section, "B", "bravo words")];
+        for variant in ["index directory", "index file", "write-ahead log"] {
+            let scratch = Scratch::new("open-link");
+            let alpha = other_product(&scratch, "PRODUCT-T35-A");
+            let mut beta = other_product(&scratch, "PRODUCT-T35-B");
+            Indexer::open(&beta)
+                .expect("B opens its own index")
+                .full_rebuild(&bravo)
+                .expect("B builds its index");
+            checkpoint(&index_file(&beta));
+            let beta_bytes = fs::read(index_file(&beta)).expect("read B's index");
+            let (link, target) = match variant {
+                "index directory" => {
+                    fs::remove_dir_all(index_dir(&alpha)).expect("remove A's index/");
+                    (index_dir(&alpha), index_dir(&beta))
+                }
+                "index file" => (index_file(&alpha), index_file(&beta)),
+                _ => (
+                    index_dir(&alpha).join("fts.sqlite-wal"),
+                    index_dir(&beta).join("fts.sqlite-wal"),
+                ),
+            };
+            std::os::unix::fs::symlink(&target, &link).expect("link A's entry into B's index");
+
+            match Indexer::open(&alpha) {
+                Err(error @ IndexerError::OpenRefused { .. }) => {
+                    assert_eq!(error.methodology_ref().section, 25);
+                    let IndexerError::OpenRefused { path, .. } = &error else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        path.file_name(),
+                        link.file_name(),
+                        "{variant}: the refusal names the link: {error}"
+                    );
+                }
+                Err(other) => panic!("{variant}: refused for the wrong reason: {other:?}"),
+                Ok(_) => panic!("{variant}: A's Indexer must never open through a link"),
+            }
+            assert_eq!(
+                fs::read(index_file(&beta)).expect("read B's index again"),
+                beta_bytes,
+                "{variant}: B's file is untouched"
+            );
+
+            // A link at A's own index file is A's to move: recover moves
+            // the link itself into A's quarantine, never what it points at,
+            // and A then has a real index of its own. A linked index/ is
+            // refused by recover too (its own test, above).
+            if variant == "index file" {
+                let mut alpha = alpha;
+                let report = Indexer::recover(
+                    &mut alpha,
+                    &[doc("a.md", DocumentKind::Section, "A", "alpha words")],
+                    Timestamp::from_millis(9),
+                )
+                .expect("recover moves A's link aside");
+                let moved = report
+                    .quarantine
+                    .expect("the link was moved")
+                    .join(INDEX_FILE);
+                assert!(
+                    fs::symlink_metadata(&moved)
+                        .expect("the moved entry")
+                        .file_type()
+                        .is_symlink(),
+                    "the link itself was moved, not the file behind it"
+                );
+                let a = Indexer::open(&alpha).expect("A now opens a real index of its own");
+                assert_eq!(a.search("alpha", 10).expect("search").hits.len(), 1);
+                assert_eq!(a.search("bravo", 10).expect("search").hits.len(), 0);
+            }
+            assert_eq!(
+                fs::read(index_file(&beta)).expect("read B's index again"),
+                beta_bytes,
+                "{variant}: B's file is still untouched"
+            );
+            assert!(!index_dir(&beta).join(QUARANTINE_DIR).exists());
+            let b = Indexer::open(&beta).expect("B still opens");
+            assert_eq!(
+                b.search("bravo", 10).expect("search").hits.len(),
+                1,
+                "{variant}: B's index is intact"
+            );
+            drop(b);
+            Indexer::recover(&mut beta, &bravo, Timestamp::from_millis(10))
+                .expect("and B, whose borrow nothing else holds, can still recover its own");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 2 (MEDIUM): a relative product directory re-resolved later.
+    // ---------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_open_and_recover_refuse_a_product_directory_given_as_a_relative_path() {
+        // The review changed the working directory between ProductDb::open
+        // and recover, and recover moved and rebuilt a different, separately
+        // locked product's live index. The working directory is process-wide,
+        // so this test never changes it: it reaches its scratch product
+        // through a relative path from wherever the test runs, which is the
+        // precondition the review's reproduction needed.
+        let scratch = Scratch::new("relative-dir");
+        let corpus = vec![doc("a.md", DocumentKind::Section, "A", "alpha words")];
+        let file = {
+            let db = product(&scratch);
+            Indexer::open(&db)
+                .expect("open through the absolute path")
+                .full_rebuild(&corpus)
+                .expect("seed");
+            checkpoint(&index_file(&db));
+            index_file(&db)
+        };
+        let before = fs::read(&file).expect("read the index");
+
+        let cwd = std::env::current_dir().expect("the working directory");
+        let mut relative = PathBuf::new();
+        for _ in cwd.components() {
+            relative.push("..");
+        }
+        relative.push(
+            scratch
+                .path
+                .strip_prefix("/")
+                .expect("an absolute scratch path"),
+        );
+        assert!(relative.is_relative());
+        let mut db = ProductDb::open(&relative, PRODUCT, Timestamp::from_millis(2_000))
+            .expect("ProductDb accepts a relative root");
+        assert!(db.dir().is_relative(), "the precondition: {:?}", db.dir());
+
+        assert!(
+            matches!(Indexer::open(&db), Err(IndexerError::OpenRefused { .. })),
+            "open refuses a relative product directory"
+        );
+        match Indexer::recover(&mut db, &corpus, Timestamp::from_millis(3)) {
+            Err(error @ IndexerError::RecoveryRefused { .. }) => {
+                assert!(error.to_string().contains("relative"), "{error}");
+            }
+            other => panic!("recover refuses a relative product directory: {other:?}"),
+        }
+        assert_eq!(
+            fs::read(&file).expect("the index is still at its live path"),
+            before,
+            "nothing was moved or rebuilt"
+        );
+        assert!(
+            !scratch
+                .path
+                .join(PRODUCT)
+                .join(INDEX_DIR)
+                .join(QUARANTINE_DIR)
+                .exists()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 3 (MEDIUM): no per-document cap, so no bound on a query's cost.
+    // ---------------------------------------------------------------------
+
+    /// A document whose `title` and `body` are exactly `byte_len` bytes
+    /// together, its body the one-letter term `a` as densely as it fits:
+    /// the most positions of one term a document of that size can hold.
+    fn dense_document(path: &str, byte_len: usize) -> IndexableDocument {
+        let mut body = "a ".repeat((byte_len - 1) / 2);
+        while body.len() < byte_len - 1 {
+            body.push('a');
+        }
+        let document = doc(path, DocumentKind::Section, "T", &body);
+        assert_eq!(document.indexed_byte_len(), byte_len);
+        document
+    }
+
+    #[test]
+    fn ori_t_0035_every_writer_refuses_a_document_over_the_size_cap_and_the_walk_skips_it_with_a_reason()
+     {
+        let at_cap = dense_document("at-cap.md", MAX_DOCUMENT_BYTES);
+        let over = dense_document("over.md", MAX_DOCUMENT_BYTES + 1);
+        let refused = |result: Result<(), IndexerError>, call: &str| match result {
+            Err(IndexerError::DocumentTooLarge { path, byte_len }) => {
+                assert_eq!(
+                    (path.as_str(), byte_len),
+                    ("over.md", MAX_DOCUMENT_BYTES + 1)
+                );
+            }
+            other => panic!("{call} must refuse a document over the cap: {other:?}"),
+        };
+
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer
+            .full_rebuild(std::slice::from_ref(&at_cap))
+            .expect("a document exactly at the cap is stored");
+        let both = [at_cap.clone(), over.clone()];
+        refused(indexer.full_rebuild(&both).map(|_| ()), "full_rebuild");
+        refused(
+            indexer.incremental_sync(&both).map(|_| ()),
+            "incremental_sync",
+        );
+        refused(indexer.add_or_replace(&over), "add_or_replace");
+        assert_eq!(
+            indexer.all_documents().expect("dump").len(),
+            1,
+            "a refusal writes nothing"
+        );
+        let scratch = Scratch::new("recover-over-cap");
+        let mut db = product(&scratch);
+        Indexer::open(&db)
+            .expect("open")
+            .full_rebuild(std::slice::from_ref(&at_cap))
+            .expect("seed");
+        refused(
+            Indexer::recover(&mut db, &both, Timestamp::from_millis(1)).map(|_| ()),
+            "recover",
+        );
+        assert!(
+            !index_dir(&db).join(QUARANTINE_DIR).exists(),
+            "recover refuses before moving anything"
+        );
+
+        // The walk: a file over the file cap is never read; a document over
+        // the document cap is left out and its file's other documents kept;
+        // a long file of short sections is indexed whole.
+        let repo = Scratch::new("walk-caps");
+        let spec = repo.path.join("spec");
+        fs::create_dir_all(spec.join("adr")).expect("create spec/adr");
+        fs::create_dir_all(spec.join("runbooks")).expect("create spec/runbooks");
+        let huge = spec.join("huge.md");
+        let file_cap = usize::try_from(MAX_FILE_BYTES).expect("fits");
+        fs::write(&huge, "a".repeat(file_cap + 1))
+            .expect("write a file one byte over the file cap");
+        let adr = spec.join("adr").join("ADR-9999-long.md");
+        fs::write(
+            &adr,
+            format!("# ADR-9999\n\n{}\n", "b ".repeat(MAX_DOCUMENT_BYTES / 2)),
+        )
+        .expect("write an ADR over the document cap");
+        let big_section = spec.join("runbooks").join("mixed.md");
+        let long_section: String = "c ".repeat(MAX_DOCUMENT_BYTES / 2);
+        fs::write(
+            &big_section,
+            format!("# Short\n\nkept words\n\n# Long\n\n{long_section}\n"),
+        )
+        .expect("write a file with one section over the document cap");
+        let many = spec.join("runbooks").join("many.md");
+        let mut many_text = String::new();
+        for n in 0..40 {
+            many_text.push_str(&format!("# Part {n}\n\n{}\n\n", "d ".repeat(1000)));
+        }
+        assert!(many_text.len() > MAX_DOCUMENT_BYTES);
+        fs::write(&many, &many_text).expect("write a long file of short sections");
+
+        let walk = Indexer::walk_repo(&repo.path).expect("walk");
+        let adr_path = concat!("spec/adr/", "ADR-9999-long", ".md");
+        let long_path = concat!("spec/runbooks/", "mixed", ".md", "#long");
+        let reasons: BTreeMap<String, SkipReason> = walk
+            .skipped
+            .iter()
+            .map(|entry| {
+                (
+                    entry
+                        .path
+                        .strip_prefix(&repo.path)
+                        .expect("under the repository")
+                        .to_string_lossy()
+                        .into_owned(),
+                    entry.reason.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(reasons.len(), 3, "{:?}", walk.skipped);
+        assert!(matches!(
+            reasons[concat!("spec/huge", ".md")],
+            SkipReason::FileTooLarge { byte_len } if byte_len == MAX_FILE_BYTES + 1
+        ));
+        assert!(matches!(
+            &reasons[adr_path],
+            SkipReason::DocumentTooLarge { path, byte_len }
+                if path == adr_path && *byte_len > MAX_DOCUMENT_BYTES
+        ));
+        assert!(matches!(
+            &reasons[concat!("spec/runbooks/", "mixed", ".md")],
+            SkipReason::DocumentTooLarge { path, .. } if path == long_path
+        ));
+        let paths: BTreeSet<&str> = walk.documents.iter().map(|d| d.path.as_str()).collect();
+        assert!(paths.contains(concat!("spec/runbooks/", "mixed", ".md", "#short")));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.starts_with(concat!("spec/runbooks/", "many", ".md#")))
+                .count(),
+            40,
+            "the cap is per document: a long file of short sections is indexed whole"
+        );
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer
+            .full_rebuild(&walk.documents)
+            .expect("the walk never hands a writer a document it refuses");
+    }
+
+    #[test]
+    fn ori_t_0035_the_worst_query_within_the_byte_cap_against_a_document_at_the_size_cap_stays_bounded()
+     {
+        // The review's case: 512 repetitions of a one-letter term (1,023
+        // bytes) against one 2 MB document of that term, about 3 seconds
+        // and 1.09 GB of SQLite heap. The document cap is what bounds it:
+        // at the cap, the same query is measured (release) at 72.6 MB of
+        // heap; here it must finish inside a 96 MiB heap cap and the stated
+        // time, while the same query against a document four times the cap
+        // (measured at 264.8 MB), which only a raw insert can store,
+        // exhausts that same heap cap.
+        const CHILD: &str = "ORI_T_0035_DOCUMENT_CAP_QUERY_CHILD";
+        const HEAP_LIMIT: u64 = 96 * 1024 * 1024;
+        const TIME_LIMIT: Duration = Duration::from_secs(20);
+        if std::env::var_os(CHILD).is_none() {
+            run_in_child_process(
+                "indexer::tests::ori_t_0035_the_worst_query_within_the_byte_cap_against_a_document_at_the_size_cap_stays_bounded",
+                CHILD,
+                &[],
+            );
+            return;
+        }
+
+        let scratch = Scratch::new("document-cap-query");
+        let db = product(&scratch);
+        let at_cap = dense_document("at-cap.md", MAX_DOCUMENT_BYTES);
+        Indexer::open(&db)
+            .expect("open")
+            .full_rebuild(std::slice::from_ref(&at_cap))
+            .expect("a document at the cap is stored");
+        let four_times = dense_document("four-times.md", 4 * MAX_DOCUMENT_BYTES);
+        let mut indexer = Indexer::open(&db).expect("reopen");
+        assert!(matches!(
+            indexer.add_or_replace(&four_times),
+            Err(IndexerError::DocumentTooLarge { .. })
+        ));
+        let worst = "a ".repeat(MAX_QUERY_BYTES / 2);
+        let limit: i64 = indexer
+            .conn
+            .query_row(
+                &format!("PRAGMA hard_heap_limit = {HEAP_LIMIT}"),
+                [],
+                |row| row.get(0),
+            )
+            .expect("cap SQLite's heap");
+        assert_eq!(u64::try_from(limit).expect("positive"), HEAP_LIMIT);
+
+        let started = std::time::Instant::now();
+        let report = indexer
+            .search(&worst, 10)
+            .expect("the worst query within the byte cap runs inside the heap cap");
+        let elapsed = started.elapsed();
+        eprintln!("worst query against a document at the size cap: {elapsed:?}");
+        assert_eq!((report.hits.len(), report.documents_covered), (1, 1));
+        assert!(elapsed < TIME_LIMIT, "took {elapsed:?}");
+
+        // Control: past the cap, stored the only way it still can be.
+        Connection::open(index_file(&db))
+            .expect("a raw connection")
+            .execute(
+                "INSERT INTO documents (path, kind, title, body, checksum) VALUES (?1, ?2, ?3, ?4, 1)",
+                params![
+                    four_times.path,
+                    four_times.kind.as_str(),
+                    four_times.title,
+                    four_times.body
+                ],
+            )
+            .expect("store a document four times the cap behind the writers' backs");
+        let uncapped: rusqlite::Result<Vec<String>> = indexer
+            .conn
+            .prepare(
+                "SELECT path FROM documents WHERE documents MATCH ?1 AND path = 'four-times.md'",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(params![quote_fts5_phrase(&worst)], |row| row.get(0))?
+                    .collect()
+            });
+        match uncapped {
+            Err(error) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OutOfMemory) => {}
+            other => panic!(
+                "the control must exhaust the same heap cap, or the cap proves nothing: {other:?}"
+            ),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 4 (MEDIUM): the heading-anchor search was quadratic.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_a_file_of_one_heading_repeated_to_the_file_cap_splits_within_a_stated_bound() {
+        // The review: 32,768 identical headings (128 KB) took 25.6 s, and
+        // 1 MB about 27 minutes by extrapolation. This is the worst file the
+        // walk reads: exactly the file cap, one four-byte heading repeated
+        // 262,144 times. The bound, 20 s in an unoptimized build on a loaded
+        // machine, is far above what the linear search needs and far below
+        // what the quadratic one did; the walk runs on a thread, so a
+        // regression fails at the bound instead of running for minutes.
+        const BOUND: Duration = Duration::from_secs(20);
+        let scratch = Scratch::new("repeated-headings");
+        let runbooks = scratch.path.join("spec").join("runbooks");
+        fs::create_dir_all(&runbooks).expect("create spec/runbooks");
+        let file_cap = usize::try_from(MAX_FILE_BYTES).expect("fits");
+        let headings = file_cap / 4;
+        fs::write(runbooks.join("repeat.md"), "# a\n".repeat(headings))
+            .expect("write a file of one repeated heading");
+
+        let root = scratch.path.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let _ = sender.send(Indexer::walk_repo(&root));
+        });
+        let walk = receiver
+            .recv_timeout(BOUND)
+            .unwrap_or_else(|_| {
+                panic!("{headings} repeated headings did not split within {BOUND:?}")
+            })
+            .expect("walk");
+        eprintln!(
+            "{headings} repeated headings split in {:?}",
+            started.elapsed()
+        );
+        assert!(walk.skipped.is_empty(), "{:?}", walk.skipped);
+        assert_eq!(walk.documents.len(), headings);
+        let prefix = concat!("spec/runbooks/", "repeat", ".md#");
+        assert_eq!(walk.documents[0].path, format!("{prefix}a"));
+        assert_eq!(walk.documents[1].path, format!("{prefix}a-1"));
+        assert_eq!(
+            walk.documents[headings - 1].path,
+            format!("{prefix}a-{}", headings - 1)
+        );
+        let distinct: std::collections::HashSet<&str> =
+            walk.documents.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(distinct.len(), headings, "every anchor is distinct");
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 5 (MEDIUM): content left out with no record.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_every_line_of_a_criteria_file_is_indexed_including_prose_a_template_form_criterion_and_a_file_of_another_shape()
+     {
+        // The review's three cases: a criteria file's title, format line and
+        // "proposed criteria" prose; a proposed criterion appended in the
+        // acceptance-criterion template's two-column form; and a whole
+        // criteria file of another shape (a personas file), which produced
+        // no document at all. Round 5 kept only rows starting with an ID.
+        let scratch = Scratch::new("criteria-prose");
+        let criteria = scratch.path.join("spec").join("criteria");
+        fs::create_dir_all(&criteria).expect("create spec/criteria");
+        fs::write(
+            criteria.join("phase-1.md"),
+            "# Acceptance criteria: Phase 1\n\n\
+             Format per the template. Identifier `ORI-P1-nnn`, formatmarker.\n\n\
+             | ID | Type | Expected result |\n|---|---|---|\n\
+             | ORI-P1-001 | F | first result |\n| ORI-P1-002 | F | second result |\n\n\
+             Proposed criteria are appended below this line, proposalmarker.\n\n\
+             | Field | Value |\n|---|---|\n| ID | ORI-P1-050 |\n| Type | F |\n\
+             | Precondition | templatemarker |\n\n\
+             ```text\n| ORI-P1-099 | fenced | not a criterion |\n```\n",
+        )
+        .expect("write a criteria file with prose");
+        let personas = format!("{}.md", ["per", "sonas"].concat());
+        fs::write(
+            criteria.join(&personas),
+            "# Personas\n\nWho the product is for, personamarker.\n\n## Solo operator\n\n\
+             Runs one product alone, solomarker.\n\n| Persona | Goal |\n|---|---|\n\
+             | Operator | tablemarker |\n",
+        )
+        .expect("write a criteria file of another shape");
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        assert!(walk.skipped.is_empty(), "{:?}", walk.skipped);
+        let (files, lines) = assert_every_non_blank_line_is_indexed(&scratch.path, &walk);
+        assert_eq!(files, 2);
+        assert!(lines > 20, "only {lines} lines checked");
+        let criteria_ids: BTreeSet<&str> = walk
+            .documents
+            .iter()
+            .filter(|d| d.kind == DocumentKind::Criterion)
+            .map(|d| d.title.as_str())
+            .collect();
+        assert_eq!(
+            criteria_ids,
+            BTreeSet::from(["ORI-P1-001", "ORI-P1-002"]),
+            "rows starting with an ID are criteria; the fenced row is text"
+        );
+
+        let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
+        indexer.full_rebuild(&walk.documents).expect("rebuild");
+        let personas_prefix = format!("spec/criteria/{personas}");
+        for (marker, file) in [
+            ("formatmarker", concat!("spec/criteria/phase-1", ".md")),
+            ("proposalmarker", concat!("spec/criteria/phase-1", ".md")),
+            ("templatemarker", concat!("spec/criteria/phase-1", ".md")),
+            ("ORI-P1-050", concat!("spec/criteria/phase-1", ".md")),
+            ("fenced", concat!("spec/criteria/phase-1", ".md")),
+            ("personamarker", personas_prefix.as_str()),
+            ("solomarker", personas_prefix.as_str()),
+            ("tablemarker", personas_prefix.as_str()),
+        ] {
+            let hits = indexer.search(marker, 10).expect("search").hits;
+            assert_eq!(hits.len(), 1, "{marker}: {hits:?}");
+            assert!(hits[0].path.starts_with(file), "{marker}: {hits:?}");
+            assert_eq!(hits[0].kind, DocumentKind::Section, "{marker}");
+        }
+        let resync = indexer
+            .incremental_sync(&walk.documents)
+            .expect("an immediate resync");
+        assert_eq!((resync.upserted, resync.removed), (0, 0));
+    }
+
+    #[test]
+    fn ori_t_0035_the_spec_design_exclusion_is_recorded_in_the_skip_list_with_its_reason() {
+        // Round 5 skipped spec/design/ with no record: the review found
+        // DESIGN.md and any new file under it left out while the walk
+        // reported nothing skipped. The exclusion stands (whether it should
+        // cover DESIGN.md is the operator's question); it is now recorded.
+        let scratch = Scratch::new("design-recorded");
+        let spec = scratch.path.join("spec");
+        let design = spec.join("design");
+        fs::create_dir_all(design.join("screens")).expect("create spec/design/screens");
+        fs::write(
+            design.join("DESIGN.md"),
+            "# Design\n\n## Tokens\n\ntoken words\n",
+        )
+        .expect("write a design document");
+        fs::write(
+            design.join("screens").join("fleet.md"),
+            "# Fleet\n\nscreen words\n",
+        )
+        .expect("write a nested design file");
+        fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        assert_eq!(
+            walk.skipped,
+            vec![SkippedEntry {
+                path: design,
+                reason: SkipReason::Excluded {
+                    reason: DESIGN_EXCLUSION,
+                },
+            }],
+            "the whole excluded subtree is one recorded entry, with its reason"
+        );
+        assert!(DESIGN_EXCLUSION.contains("E-0006"));
+        assert_eq!(walk.documents.len(), 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 6 (LOW): a move failing part way split the database from its log.
+    // ---------------------------------------------------------------------
+
+    /// Plants, as `db`'s live index, a database file and a write-ahead log
+    /// whose committed frames hold one document (`walword`) the database
+    /// file alone does not, and returns the planted bytes of each. Checks
+    /// both halves of that on copies, never on the planted files, since
+    /// closing a connection on them would checkpoint the log away.
+    fn plant_an_index_whose_log_holds_a_commit(
+        db: &ProductDb,
+        scratch: &Scratch,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let held = scratch.path.join("held");
+        fs::create_dir_all(&held).expect("create a holding directory");
+        {
+            let mut writer = Indexer::open(db).expect("open on-disk index");
+            let five: Vec<IndexableDocument> = (0..5)
+                .map(|n| doc(&format!("d{n}.md"), DocumentKind::Section, "D", "alpha"))
+                .collect();
+            writer.full_rebuild(&five).expect("seed");
+            writer
+                .conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint = 0")
+                .expect("checkpoint, then keep every later commit in the log");
+            writer
+                .add_or_replace(&doc("w.md", DocumentKind::Section, "W", "walword"))
+                .expect("a commit only the log holds");
+            for name in [INDEX_FILE, "fts.sqlite-wal"] {
+                fs::copy(index_dir(db).join(name), held.join(name)).expect("copy a live file");
+            }
+        }
+        for name in INDEX_FILE_SET {
+            let _ = fs::remove_file(index_dir(db).join(name));
+        }
+        for name in [INDEX_FILE, "fts.sqlite-wal"] {
+            fs::copy(held.join(name), index_dir(db).join(name)).expect("plant a live file");
+        }
+        let walword_rows = |files: &[&str]| -> i64 {
+            let probe = scratch.path.join(format!("probe-{}", files.len()));
+            fs::create_dir_all(&probe).expect("create a probe directory");
+            for name in files {
+                fs::copy(held.join(name), probe.join(name)).expect("copy for the probe");
+            }
+            Connection::open(probe.join(INDEX_FILE))
+                .expect("open the probe")
+                .query_row(
+                    "SELECT count(*) FROM documents_content WHERE c3 = 'walword'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count the rows holding walword")
+        };
+        assert_eq!(
+            walword_rows(&[INDEX_FILE]),
+            0,
+            "the database alone lacks it"
+        );
+        assert_eq!(
+            walword_rows(&[INDEX_FILE, "fts.sqlite-wal"]),
+            1,
+            "the database with its log has it"
+        );
+        (
+            fs::read(held.join(INDEX_FILE)).expect("read the planted database"),
+            fs::read(held.join("fts.sqlite-wal")).expect("read the planted log"),
+        )
+    }
+
+    /// Every entry under `db`'s `index/quarantine/`, recursively, as paths
+    /// relative to it; empty when the directory is absent.
+    fn quarantine_contents(db: &ProductDb) -> Vec<String> {
+        let root = index_dir(db).join(QUARANTINE_DIR);
+        let mut out = Vec::new();
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries {
+                let directory = entry.expect("an entry").path();
+                out.push(
+                    directory
+                        .strip_prefix(&root)
+                        .expect("under the root")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                for file in fs::read_dir(&directory).expect("list a quarantine directory") {
+                    out.push(
+                        file.expect("an entry")
+                            .path()
+                            .strip_prefix(&root)
+                            .expect("under the root")
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Asserts a failed recover left the planted pair exactly where it was,
+    /// then recovers again and asserts both went into one directory.
+    fn assert_rolled_back_then_recovered_together(
+        db: &mut ProductDb,
+        planted: &(Vec<u8>, Vec<u8>),
+        result: Result<RecoveryReport, IndexerError>,
+    ) {
+        match &result {
+            Err(IndexerError::QuarantineIncomplete { path, stranded, .. }) => {
+                assert_eq!(path.file_name(), Some(std::ffi::OsStr::new(INDEX_FILE)));
+                assert!(
+                    stranded.is_empty(),
+                    "every moved file was put back: {stranded:?}"
+                );
+            }
+            other => panic!("a failed move is reported as such: {other:?}"),
+        }
+        let message = result.expect_err("checked above").to_string();
+        assert!(message.contains("put back"), "{message}");
+        assert_eq!(
+            fs::read(index_file(db)).expect("the database is at its live path"),
+            planted.0
+        );
+        assert_eq!(
+            fs::read(index_dir(db).join("fts.sqlite-wal")).expect("so is its log"),
+            planted.1,
+            "the log was moved back beside its database, byte for byte"
+        );
+        assert_eq!(
+            quarantine_contents(db),
+            Vec::<String>::new(),
+            "no quarantine directory is left holding half the evidence"
+        );
+
+        let report = Indexer::recover(db, &[], Timestamp::from_millis(8))
+            .expect("once the obstacle is gone, recover succeeds");
+        let quarantine = report.quarantine.expect("the pair was moved");
+        assert_eq!(
+            fs::read(quarantine.join(INDEX_FILE)).expect("the database is in quarantine"),
+            planted.0
+        );
+        assert_eq!(
+            fs::read(quarantine.join("fts.sqlite-wal")).expect("beside its log"),
+            planted.1
+        );
+        assert_eq!(
+            quarantine_contents(db).len(),
+            3,
+            "{:?}",
+            quarantine_contents(db)
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_a_move_that_fails_part_way_is_rolled_back_so_the_database_and_its_log_stay_together()
+     {
+        let scratch = Scratch::new("move-rolled-back");
+        let mut db = product(&scratch);
+        let planted = plant_an_index_whose_log_holds_a_commit(&db, &scratch);
+        let result = {
+            let _failing = fail_moves(|from| {
+                from.file_name() == Some(std::ffi::OsStr::new(INDEX_FILE))
+                    && from.parent().and_then(Path::file_name)
+                        == Some(std::ffi::OsStr::new(INDEX_DIR))
+            });
+            Indexer::recover(&mut db, &[], Timestamp::from_millis(7))
+        };
+        assert_rolled_back_then_recovered_together(&mut db, &planted, result);
+    }
+
+    #[test]
+    fn ori_t_0035_a_file_that_cannot_be_moved_back_is_named_exactly_and_nothing_is_rebuilt() {
+        let scratch = Scratch::new("move-stranded");
+        let mut db = product(&scratch);
+        let planted = plant_an_index_whose_log_holds_a_commit(&db, &scratch);
+        let result = {
+            let _failing = fail_moves(|from| {
+                let name = from.file_name().and_then(std::ffi::OsStr::to_str);
+                let parent = from.parent().and_then(Path::file_name);
+                let grandparent = from
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name);
+                (name == Some(INDEX_FILE) && parent == Some(std::ffi::OsStr::new(INDEX_DIR)))
+                    || (name == Some("fts.sqlite-wal")
+                        && grandparent == Some(std::ffi::OsStr::new(QUARANTINE_DIR)))
+            });
+            Indexer::recover(&mut db, &[], Timestamp::from_millis(7))
+        };
+        let Err(IndexerError::QuarantineIncomplete {
+            quarantine,
+            stranded,
+            ..
+        }) = &result
+        else {
+            panic!("a failed move is reported as such: {result:?}");
+        };
+        assert_eq!(stranded, &vec![quarantine.join("fts.sqlite-wal")]);
+        let message = result.as_ref().expect_err("checked above").to_string();
+        assert!(
+            message.contains(&quarantine.join("fts.sqlite-wal").display().to_string()),
+            "the error names the stranded file: {message}"
+        );
+        assert_eq!(
+            fs::read(quarantine.join("fts.sqlite-wal")).expect("the stranded log"),
+            planted.1,
+            "a stranded file is kept, never deleted"
+        );
+        assert_eq!(
+            fs::read(index_file(&db)).expect("the database never moved"),
+            planted.0,
+            "and nothing was rebuilt over it"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ori_t_0035_an_index_file_that_cannot_be_renamed_leaves_the_database_and_its_log_together() {
+        // The review's exact reproduction, with a real file the operating
+        // system refuses to rename (`chflags uchg`), not the test seam.
+        struct Unlock(PathBuf);
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("chflags")
+                    .arg("nouchg")
+                    .arg(&self.0)
+                    .status();
+            }
+        }
+        let scratch = Scratch::new("move-immutable");
+        let mut db = product(&scratch);
+        let planted = plant_an_index_whose_log_holds_a_commit(&db, &scratch);
+        let file = index_file(&db);
+        let status = std::process::Command::new("chflags")
+            .arg("uchg")
+            .arg(&file)
+            .status()
+            .expect("chflags runs");
+        assert!(status.success(), "the file was made immutable");
+        let unlock = Unlock(file.clone());
+        assert!(
+            fs::rename(&file, scratch.path.join("probe")).is_err(),
+            "the precondition: the file really cannot be renamed"
+        );
+        let result = Indexer::recover(&mut db, &[], Timestamp::from_millis(7));
+        drop(unlock);
+        assert_rolled_back_then_recovered_together(&mut db, &planted, result);
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 7: every stored column compared; counters that describe the
+    // write.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_incremental_sync_repairs_a_title_or_body_changed_out_of_band_with_kind_and_checksum_untouched()
+     {
+        let target = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("x.md", DocumentKind::Section, "X", "xray"),
+        ];
+        let tampers = [
+            (
+                "another body",
+                "UPDATE documents SET body = 'other' WHERE path = 'x.md'",
+            ),
+            (
+                "another title",
+                "UPDATE documents SET title = 'Y' WHERE path = 'x.md'",
+            ),
+            (
+                "a NULL body",
+                "UPDATE documents SET body = NULL WHERE path = 'x.md'",
+            ),
+            (
+                "a title stored as a blob of the same bytes",
+                "UPDATE documents SET title = CAST('X' AS BLOB) WHERE path = 'x.md'",
+            ),
+            (
+                "a body stored as a number",
+                "UPDATE documents SET body = 42 WHERE path = 'x.md'",
+            ),
+        ];
+        for (label, tamper) in tampers {
+            let scratch = Scratch::new("tamper-columns");
+            let db = product(&scratch);
+            let file = index_file(&db);
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&target).expect("full rebuild");
+            let expected = raw_rows(&file);
+            Connection::open(&file)
+                .expect("a raw connection")
+                .execute_batch(tamper)
+                .expect("apply the tamper");
+            assert_ne!(
+                raw_rows(&file),
+                expected,
+                "{label}: the tamper changed a row"
+            );
+
+            let first = indexer
+                .incremental_sync(&target)
+                .unwrap_or_else(|error| panic!("{label}: incremental_sync must succeed: {error}"));
+            assert_eq!(
+                raw_rows(&file),
+                expected,
+                "{label}: incremental_sync must leave exactly what full_rebuild stores"
+            );
+            assert_eq!(
+                (first.upserted, first.replaced, first.removed),
+                (1, 1, 0),
+                "{label}"
+            );
+            let second = indexer.incremental_sync(&target).expect("resync");
+            assert_eq!(
+                (second.upserted, second.removed),
+                (0, 0),
+                "{label}: settles"
+            );
+            assert_eq!(
+                indexer
+                    .all_documents()
+                    .expect("every row reads back again")
+                    .len(),
+                2,
+                "{label}"
+            );
+            assert_eq!(
+                indexer.search("xray", 10).expect("search").hits.len(),
+                1,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0035_the_report_counters_describe_every_row_each_write_deleted_and_inserted() {
+        // Stored before each write: a.md (unchanged in the target), x.md
+        // twice (the target changes it), old.md (not in the target) and a
+        // row with no text path. The target adds new.md.
+        let seed = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("x.md", DocumentKind::Section, "X", "xray"),
+            doc("old.md", DocumentKind::Section, "O", "oscar"),
+        ];
+        let target = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("x.md", DocumentKind::Section, "X", "xray changed"),
+            doc("new.md", DocumentKind::Section, "N", "november"),
+        ];
+        for method in ["full_rebuild", "incremental_sync"] {
+            let scratch = Scratch::new("counters");
+            let db = product(&scratch);
+            let file = index_file(&db);
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&seed).expect("seed");
+            Connection::open(&file)
+                .expect("a raw connection")
+                .execute_batch(
+                    "INSERT INTO documents (path, kind, title, body, checksum) \
+                     VALUES ('x.md', 'section', 'X', 'xray', 1); \
+                     INSERT INTO documents (path, kind, title, body, checksum) \
+                     VALUES (NULL, 'section', 'N', 'nothing', 1);",
+                )
+                .expect("store a second x.md row and a row with no path");
+            let before = raw_rows(&file).len();
+            assert_eq!(before, 5);
+
+            let report = if method == "full_rebuild" {
+                indexer.full_rebuild(&target)
+            } else {
+                indexer.incremental_sync(&target)
+            }
+            .expect("the write succeeds");
+            assert_eq!(
+                before - report.removed - report.replaced + report.upserted,
+                report.total,
+                "{method}: the counters account for every row: {report:?}"
+            );
+            assert_eq!(report.total, raw_rows(&file).len(), "{method}");
+            let expected = if method == "full_rebuild" {
+                // Every stored row is dropped: old.md and the pathless row
+                // are not in the target; a.md and both x.md rows are.
+                IndexReport {
+                    upserted: 3,
+                    removed: 2,
+                    replaced: 3,
+                    total: 3,
+                }
+            } else {
+                // a.md is left alone; both x.md rows are replaced by one.
+                IndexReport {
+                    upserted: 2,
+                    removed: 2,
+                    replaced: 2,
+                    total: 3,
+                }
+            };
+            assert_eq!(report, expected, "{method}");
         }
     }
 
