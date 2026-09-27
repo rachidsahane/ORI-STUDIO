@@ -47,12 +47,49 @@
 //! [`FreshnessTracker::list_stale`] has a fourth, for a document it has no
 //! text for because the repository walk left it out:
 //! [`StaleReason::NotIndexed`]. The file is still in the repository, so
-//! nothing on record for it is dropped: every record on a document, a file
-//! or anything under a directory the walk left out is listed with the
-//! reason the walk gave, and with the drift audit's divergence when one is
-//! on record (`list_stale`'s doc; the indexer's module doc, "A file left
-//! out is not a file removed", has what the index holds for such a file:
-//! none of its documents).
+//! nothing on record for it is dropped: every record on something the walk
+//! left out is listed with the reason the walk gave, and with the drift
+//! audit's divergence when one is on record (`list_stale`'s doc; the
+//! indexer's module doc, "A file left out is not a file removed", has what
+//! the index holds for such a file: none of its documents).
+//!
+//! # What a skip covers: one document, or a whole file
+//!
+//! Every entry the walk left out says what it covers, through
+//! [`SkipReason::scope`], and a record is matched to it by that scope and
+//! nothing else, never by the shape of the entry's key:
+//!
+//! - A file-scoped entry ([`SkipScope::File`]) is a file, a symbolic link
+//!   or a directory the walk did not read. It covers a record at its path,
+//!   at any document path of that file (`<file>#<anchor>`) and at anything
+//!   under that directory: nothing there was read, so nothing there can be
+//!   checked.
+//! - A document-scoped entry ([`SkipScope::Document`]) is one document of a
+//!   file the walk did read and split, left out for its size. It covers a
+//!   record at exactly that document path and no other, even when that
+//!   path is the file's bare path (the text above the file's first
+//!   heading). The file was read, so every other document path of it is
+//!   judged by the corpus: in it and checked, or not in it and removed. A
+//!   section genuinely removed from a file whose preamble is past the cap
+//!   is removed, never pinned as left out.
+//!
+//! A record on a file's own path that is not a document path (the drift
+//! audit's divergence on the file, the `Document` of `spec/DATA_MODEL.md`
+//! section 2) names the whole file. The file was read, and is still in the
+//! repository, when the corpus holds a document of it or a document-scoped
+//! entry names one; a divergence on it is then listed, as
+//! [`StaleReason::Divergence`] beside the file's indexed documents, or as
+//! [`StaleReason::NotIndexed`] with that entry's reason when every document
+//! the file split into was left out for its size (a file of one section
+//! grown past the document cap). Any other record no entry covers is gone,
+//! and not listed: one for a document no longer in a file the walk read,
+//! and every one on a file no longer in the repository.
+//!
+//! Every listing here can be cleared. A record under a document-scoped
+//! entry is checked like any other once its document is back under the cap
+//! (fresh when its text is the verified text, or once re-verified), and is
+//! removed once the document is removed from its file; a file-level
+//! divergence ends with the file's next verification, as it does anywhere.
 //!
 //! # What does not make a document stale
 //!
@@ -92,6 +129,7 @@ use std::collections::BTreeSet;
 use ori_core::types::Timestamp;
 
 use crate::indexer::SkipReason;
+use crate::indexer::SkipScope;
 use crate::indexer::document_file;
 
 /// Whether one document's last verification against the code still holds:
@@ -137,11 +175,14 @@ pub enum StaleReason {
         /// When the drift audit found it.
         detected_at: Timestamp,
     },
-    /// The repository walk left the document, its file, or a directory
-    /// holding it out of the index, so its text could not be checked
-    /// against anything on record, while the file is still in the
-    /// repository. Only [`FreshnessTracker::list_stale`] reports this, for a
-    /// path it holds a record for.
+    /// The repository walk left out what the record names, so its text
+    /// could not be checked against anything on record, while the file is
+    /// still in the repository: the document itself (a document-scoped
+    /// skip), its file or a directory holding it (a file-scoped skip), or,
+    /// for a record on a file's own path, every document the file split
+    /// into (the module doc's "What a skip covers"). Only
+    /// [`FreshnessTracker::list_stale`] reports this, for a path it holds a
+    /// record for.
     NotIndexed {
         /// Why the walk left it out, in the walk's own terms.
         skipped: SkipReason,
@@ -353,24 +394,42 @@ impl FreshnessTracker {
     /// says nothing about any one section's text and makes none of them
     /// fresh; each section is judged by its own record.
     ///
-    /// A file the walk left out is still in the repository too, though
-    /// nothing of it is in `current`. Every record whose path is not in
-    /// `current` and that `not_indexed` covers (its own path, its file's
-    /// path, or a directory holding that file is a key) is listed as
-    /// [`StaleReason::NotIndexed`], with the walk's reason and any
-    /// divergence on record, whether that record is a verification, a
+    /// Something the walk left out is still in the repository too, though
+    /// none of its text is in `current`. Every record whose path is not in
+    /// `current` and that an entry of `not_indexed` covers, by that entry's
+    /// [`SkipReason::scope`] (the module doc's "What a skip covers"), is
+    /// listed as [`StaleReason::NotIndexed`], with the walk's reason and
+    /// any divergence on record, whether that record is a verification, a
     /// divergence or both: its text could not be checked, so it is not
     /// fresh, and nothing the drift audit filed disappears while the file
-    /// exists. A review found round 8 dropping the divergence on a file one
-    /// non-UTF-8 byte, or an ADR grown past the document cap, had taken out
-    /// of the index, so the product read as ready. An entry left out with
-    /// no record on it is not listed: nothing about it was ever verified or
-    /// filed, and the walk's own list names it.
+    /// exists. A file-scoped entry covers a record at its path, at a
+    /// document of that file, or under that directory; a document-scoped
+    /// entry covers a record at exactly its document path, and never a
+    /// sibling document of the same file, even when its key is the file's
+    /// bare path. A review found round 8 dropping the divergence on a file
+    /// one non-UTF-8 byte, or an ADR grown past the document cap, had taken
+    /// out of the index, so the product read as ready. An entry left out
+    /// with no record on it is not listed: nothing about it was ever
+    /// verified or filed, and the walk's own list names it.
     ///
-    /// Only a record whose file has nothing in `current` and is not covered
-    /// by `not_indexed` is gone, and not reported at all, matching the
-    /// indexer's own rule that a removed document disappears rather than
-    /// lingers.
+    /// A document-scoped entry also says its file was read and is still in
+    /// the repository, so a divergence on record for that file's own path
+    /// is listed even when every document the file split into was left out
+    /// for its size, and so nothing of it is in `current`: as
+    /// [`StaleReason::NotIndexed`], carrying the first such entry's reason
+    /// (in path order) and the divergence. A review found round 9 dropping
+    /// it: a single-section file grown past the document cap left an entry
+    /// keyed `<file>#<anchor>`, which the record at the file's path never
+    /// matched.
+    ///
+    /// Only a record that no entry covers, whose file has nothing in
+    /// `current` and no document-scoped entry, is gone, and not reported at
+    /// all; so is a record for a document removed from a file the walk
+    /// read. That matches the indexer's own rule that a removed document
+    /// disappears rather than lingers. A review found round 9 pinning such a
+    /// record for good when the file's preamble was past the document cap,
+    /// by reading the preamble's entry, keyed at the file's bare path, as
+    /// the whole file.
     #[must_use]
     pub fn list_stale(
         &self,
@@ -387,6 +446,14 @@ impl FreshnessTracker {
             }
         }
         let files: BTreeSet<&str> = current.keys().map(|key| document_file(key)).collect();
+        // Each file the walk read and split, one or more of whose documents
+        // it left out: the file's path, with the first such entry's reason.
+        let mut split_files: BTreeMap<&str, &SkipReason> = BTreeMap::new();
+        for (key, reason) in not_indexed {
+            if reason.scope() == SkipScope::Document {
+                split_files.entry(document_file(key)).or_insert(reason);
+            }
+        }
         for (path, entry) in &self.documents {
             if current.contains_key(path) {
                 continue;
@@ -401,15 +468,23 @@ impl FreshnessTracker {
                 });
                 continue;
             }
-            if !files.contains(path.as_str()) {
+            let Some((description, detected_at)) = &entry.divergence else {
                 continue;
-            }
-            if let Some((description, detected_at)) = &entry.divergence {
+            };
+            if files.contains(path.as_str()) {
                 stale.push(StaleDocument {
                     path: path.clone(),
                     reason: StaleReason::Divergence {
                         description: description.clone(),
                         detected_at: *detected_at,
+                    },
+                });
+            } else if let Some(skipped) = split_files.get(path.as_str()) {
+                stale.push(StaleDocument {
+                    path: path.clone(),
+                    reason: StaleReason::NotIndexed {
+                        skipped: (*skipped).clone(),
+                        divergence: Some((description.clone(), *detected_at)),
                     },
                 });
             }
@@ -431,9 +506,12 @@ impl FreshnessTracker {
     }
 }
 
-/// Why the walk left out `path`, if `not_indexed` covers it: `path` itself,
-/// the file it belongs to ([`document_file`]), or a directory holding that
-/// file is a key of `not_indexed`.
+/// Why the walk left out `path`, if an entry of `not_indexed` covers it by
+/// that entry's [`SkipReason::scope`]: an entry of either scope keyed at
+/// `path` itself, or a file-scoped entry keyed at the file `path` belongs
+/// to ([`document_file`]) or at a directory holding that file. A
+/// document-scoped entry keyed at the file's bare path (the text above its
+/// first heading) is that one document, and never covers a sibling.
 fn left_out<'a>(
     not_indexed: &'a BTreeMap<String, SkipReason>,
     path: &str,
@@ -443,7 +521,10 @@ fn left_out<'a>(
     }
     let mut enclosing = document_file(path);
     loop {
-        if let Some(reason) = not_indexed.get(enclosing) {
+        if let Some(reason) = not_indexed
+            .get(enclosing)
+            .filter(|reason| reason.scope() == SkipScope::File)
+        {
             return Some(reason);
         }
         enclosing = enclosing.rsplit_once('/')?.0;
@@ -928,5 +1009,120 @@ mod tests {
                 divergence: None,
             }
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Round 10: a skip entry says whether it covers one document or a
+    // whole file, and a record is matched by that.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_026_a_document_scoped_skip_covers_its_own_document_and_its_files_divergence_never_a_sibling()
+     {
+        let too_large = |path: &str| SkipReason::DocumentTooLarge {
+            path: path.to_owned(),
+            byte_len: 70_000,
+        };
+        assert_eq!(too_large("x").scope(), SkipScope::Document);
+        assert_eq!(SkipReason::Symlink.scope(), SkipScope::File);
+        assert_eq!(
+            SkipReason::FileTooLarge { byte_len: 2 << 20 }.scope(),
+            SkipScope::File
+        );
+
+        // A file of one section, past the cap, with a divergence on the
+        // file; a file whose preamble is past the cap, with one section
+        // kept and one removed; and a file of two sections, one past the
+        // cap, with a divergence on the file.
+        let single = ["spec", "RISK_MAP.md"].join("/");
+        let single_section = format!("{single}#risk-map");
+        let preamble = ["spec", "PREAMBLE.md"].join("/");
+        let kept = format!("{preamble}#kept");
+        let removed = format!("{preamble}#removed");
+        let split = ["spec", "SPLIT.md"].join("/");
+        let split_indexed = format!("{split}#small");
+        let split_large = format!("{split}#large");
+
+        let mut tracker = FreshnessTracker::new();
+        let verified = Timestamp::from_millis(1_000);
+        let found = Timestamp::from_millis(2_000);
+        tracker.record_verification(single_section.clone(), verified, "risk text");
+        tracker.record_divergence(single.clone(), "SINGLE-DIVERGENCE", found);
+        tracker.record_verification(preamble.clone(), verified, "preamble text");
+        tracker.record_verification(kept.clone(), verified, "kept text");
+        tracker.record_verification(removed.clone(), verified, "removed text");
+        tracker.record_divergence(removed.clone(), "REMOVED-DIVERGENCE", found);
+        tracker.record_verification(split_indexed.clone(), verified, "small text");
+        tracker.record_divergence(split.clone(), "SPLIT-DIVERGENCE", found);
+
+        let current = corpus(&[
+            (kept.as_str(), "kept text"),
+            (split_indexed.as_str(), "small text"),
+        ]);
+        let not_indexed: BTreeMap<String, SkipReason> = [
+            (single_section.clone(), too_large(&single_section)),
+            (preamble.clone(), too_large(&preamble)),
+            (split_large.clone(), too_large(&split_large)),
+        ]
+        .into_iter()
+        .collect();
+
+        let report = tracker.list_stale(&current, &not_indexed);
+        assert_eq!(report.documents_covered, 2);
+        let divergence = |text: &str| Some((text.to_owned(), found));
+        let expected = vec![
+            StaleDocument {
+                path: preamble.clone(),
+                reason: StaleReason::NotIndexed {
+                    skipped: too_large(&preamble),
+                    divergence: None,
+                },
+            },
+            StaleDocument {
+                path: single.clone(),
+                reason: StaleReason::NotIndexed {
+                    skipped: too_large(&single_section),
+                    divergence: divergence("SINGLE-DIVERGENCE"),
+                },
+            },
+            StaleDocument {
+                path: single_section.clone(),
+                reason: StaleReason::NotIndexed {
+                    skipped: too_large(&single_section),
+                    divergence: None,
+                },
+            },
+            StaleDocument {
+                path: split.clone(),
+                reason: StaleReason::Divergence {
+                    description: "SPLIT-DIVERGENCE".to_owned(),
+                    detected_at: found,
+                },
+            },
+        ];
+        assert_eq!(
+            report.stale, expected,
+            "the preamble and the single section are listed as left out, the single \
+             file's divergence with them; the split file's divergence beside its indexed \
+             section; the section removed from the preamble's file is removed"
+        );
+
+        // The same entries read as whole files would pin the removed
+        // section to the preamble's skip; read as documents they do not.
+        assert!(
+            report.stale.iter().all(|document| document.path != removed),
+            "{report:?}"
+        );
+
+        // A re-review of the single file ends its divergence while its one
+        // section is still past the cap; the section's record stays.
+        tracker.record_verification(single.clone(), Timestamp::from_millis(3_000), "the file");
+        let listed: Vec<String> = tracker
+            .list_stale(&current, &not_indexed)
+            .stale
+            .into_iter()
+            .map(|document| document.path)
+            .collect();
+        assert_eq!(listed, [preamble, single_section, split]);
     }
 }
