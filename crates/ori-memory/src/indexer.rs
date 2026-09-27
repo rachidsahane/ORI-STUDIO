@@ -8034,8 +8034,8 @@ mod tests {
         const CHILD: &str = "ORI_T_0035_CHECK_OOM_CHILD";
         const ROOT: &str = "ORI_T_0035_CHECK_OOM_ROOT";
         const WRITER: &str = "ORI_T_0035_CHECK_OOM_WRITER";
-        const MARGINS: std::ops::RangeInclusive<u64> = 12 * 1024..=64 * 1024;
-        const STEP: usize = 256;
+        const COARSE: std::ops::RangeInclusive<u64> = 64 * 1024..=512 * 1024;
+        const FINE: std::ops::Range<u64> = 12 * 1024..64 * 1024;
         let corpus: Vec<IndexableDocument> = (0..500)
             .map(|n| {
                 doc(
@@ -8097,7 +8097,8 @@ mod tests {
 
         let (mut ok, mut out_of_memory, mut corrupt, mut damaged, mut other) =
             (0usize, 0usize, 0usize, 0usize, 0usize);
-        for margin in MARGINS.rev().step_by(STEP) {
+        let margins = COARSE.rev().step_by(4096).chain(FINE.rev().step_by(256));
+        for margin in margins {
             if with_writer {
                 let _ = writer.add_or_replace(&doc(
                     "churn.md",
