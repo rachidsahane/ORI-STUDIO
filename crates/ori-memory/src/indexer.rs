@@ -230,9 +230,11 @@
 //!   past that, and a document longer than 64 KiB of title and body
 //!   ([`SkipReason::DocumentTooLarge`]), which no writer stores: "Query
 //!   cost is bounded by bytes", below;
-//! - a `.md` file that would take the walk past its budget of documents
-//!   or of bytes ([`SkipReason::WalkDocumentLimit`],
-//!   [`SkipReason::WalkByteLimit`]): "What one walk costs", below;
+//! - a `.md` file that splits into more than 1,024 documents
+//!   ([`SkipReason::FileDocumentLimit`]), and one that would take the walk
+//!   past its budget of documents or of bytes
+//!   ([`SkipReason::WalkDocumentLimit`], [`SkipReason::WalkByteLimit`]):
+//!   "What one walk costs", below;
 //! - `spec/design/`, as a whole ([`SkipReason::Excluded`]; above).
 //!
 //! Nothing else is left out. Every other line of every file the walk reads
@@ -277,13 +279,37 @@
 //! documents and reads at most `MAX_WALK_BYTES` (16 MiB) of file text into
 //! them, in all. A file that would take it past either is left out whole
 //! and recorded ([`SkipReason::WalkDocumentLimit`],
-//! [`SkipReason::WalkByteLimit`]); its split stops as soon as it passes
-//! what is left, so the file never costs more than that; a file whose
-//! reported length is past what is left, or any file once no document is
-//! left, is left out without being read at all; and a later, smaller file
-//! that still fits is read. Files are reached in name order, so which
-//! ones are left out does not depend on the filesystem. This repository's
-//! own `spec/` is 213 documents and about 187 KB today.
+//! [`SkipReason::WalkByteLimit`]); a file whose reported length is past
+//! what is left, or any file once no document is left, is left out without
+//! being read at all; and a later, smaller file that still fits is read.
+//! Files are reached in name order, so which ones are left out does not
+//! depend on the filesystem. This repository's own `spec/` is 213
+//! documents and about 187 KB today.
+//!
+//! No one file can spend the walk's budget. One file is read up to
+//! `MAX_FILE_BYTES`, a sixteenth of the bytes, and split into at most
+//! `MAX_FILE_DOCUMENTS` (1,024), a sixteenth of the documents: a file past
+//! that is left out whole, its split stopped as soon as it passes the cap,
+//! and recorded for itself ([`SkipReason::FileDocumentLimit`]). A review
+//! found round 7 letting one file take everything: a 32 KiB file of 16,384
+//! bare `#` lines, named to sort first, spent the whole document budget, so
+//! every later file was recorded as past it, and a criteria file of 16,384
+//! rows repeating one identifier did the same while storing one document.
+//! Every document split is still counted, the ones left out as repeats or
+//! as too large included, because each costs the walk a skip-list entry
+//! (`MAX_WALK_DOCUMENTS`'s doc has the arithmetic); the cap is what keeps
+//! that from being one file's to spend.
+//!
+//! A walk that runs out anyway, which now takes sixteen files at the cap,
+//! is not a set of documents to sync by: a file left out because the walk
+//! ran out before it may hold documents the index already has, and
+//! [`Indexer::incremental_sync`] removes whatever its target set lacks. The
+//! review found [`Indexer::collect_from_repo`] dropping the skip list, so
+//! the file that spent the budget silently removed the rest of the index
+//! while the sync returned `Ok`. `collect_from_repo` now refuses such a
+//! walk ([`IndexerError::WalkBudgetExhausted`], naming every file left
+//! out); [`Indexer::walk_repo`] still returns it, with the list, for a
+//! caller that decides otherwise.
 //!
 //! Measured on this build (release, macOS, peak resident memory of a
 //! process that only walks): one 1 MiB file of empty headings, 185 MB
@@ -292,7 +318,8 @@
 //! once, 16,384 documents from sixteen files of about 1 MiB, 38 MB, the
 //! most measured within them. Not bounded, and growing with the tree
 //! rather than with any one file's contents: the skip list, one entry per
-//! entry left out, and the directory listings held at once, one per level
+//! entry left out (and one per document left out, which the document
+//! budget counts), and the directory listings held at once, one per level
 //! of the directory being walked (names and types only: one directory is
 //! open at a time, whatever the depth).
 //!
@@ -1027,17 +1054,29 @@ pub enum SkipReason {
         /// Its `title` and `body` length together, in bytes.
         byte_len: usize,
     },
-    /// A `.md` file left out whole because splitting it would have taken
-    /// the walk past `MAX_WALK_DOCUMENTS` (16,384) documents in all; the
-    /// split stopped as soon as it passed what was left (the module doc's
-    /// "What one walk costs").
+    /// A `.md` file left out whole because its documents would have taken
+    /// the walk past `MAX_WALK_DOCUMENTS` (16,384) documents in all (the
+    /// module doc's "What one walk costs"). The file itself may be
+    /// ordinary: the walk ran out of budget before it, so
+    /// [`Indexer::collect_from_repo`] refuses a walk holding one of these.
     WalkDocumentLimit {
         /// How many documents the walk had left when it reached the file.
         remaining: usize,
     },
+    /// A `.md` file left out whole because it splits into more than
+    /// `MAX_FILE_DOCUMENTS` (1,024) documents, a sixteenth of the walk's
+    /// budget, so that no one file can spend what every other file needs;
+    /// its split stopped as soon as it passed that (the module doc's "What
+    /// one walk costs").
+    FileDocumentLimit {
+        /// The most documents one file may split into.
+        limit: usize,
+    },
     /// A `.md` file left out whole, unsplit, because its text would have
     /// taken the walk past `MAX_WALK_BYTES` (16 MiB) read in all (the
-    /// module doc's "What one walk costs").
+    /// module doc's "What one walk costs"). As with
+    /// [`SkipReason::WalkDocumentLimit`], the walk ran out, not the file,
+    /// and [`Indexer::collect_from_repo`] refuses a walk holding one.
     WalkByteLimit {
         /// The file's length in bytes.
         byte_len: u64,
@@ -1195,6 +1234,21 @@ pub enum IndexerError {
         /// Why.
         reason: &'static str,
     },
+    /// [`Indexer::collect_from_repo`] refused a walk its budget cut short:
+    /// the walk left files out because it had run out of documents or bytes
+    /// before reaching them ([`SkipReason::WalkDocumentLimit`],
+    /// [`SkipReason::WalkByteLimit`]), not for anything in those files, so
+    /// they may hold documents the index already has, and a set without
+    /// them, handed to [`Indexer::incremental_sync`] or
+    /// [`Indexer::full_rebuild`], would remove those documents and return
+    /// `Ok` (the module doc's "What one walk costs").
+    /// [`Indexer::walk_repo`] still returns such a walk, with every entry it
+    /// left out, for a caller that decides otherwise.
+    WalkBudgetExhausted {
+        /// Every file the walk left out for want of budget, with its
+        /// reason, in walk order; never empty.
+        left_out: Vec<SkippedEntry>,
+    },
     /// [`Indexer::recover`] could not move every index file into
     /// quarantine, and moved back every file it had already moved that it
     /// could. Nothing was rebuilt. When `stranded` is empty the index files
@@ -1303,6 +1357,20 @@ impl fmt::Display for IndexerError {
                  repository, which a sync would read as every document removed",
                 path.display()
             ),
+            Self::WalkBudgetExhausted { left_out } => {
+                write!(
+                    f,
+                    "the repository walk ran out of its budget and left {} file(s) out",
+                    left_out.len()
+                )?;
+                if let Some(first) = left_out.first() {
+                    write!(f, ", the first {}", first.path.display())?;
+                }
+                f.write_str(
+                    "; refusing to hand back a document set a sync would read as their documents \
+                     removed (Indexer::walk_repo returns the walk with every entry it left out)",
+                )
+            }
             Self::QuarantineIncomplete {
                 path,
                 source,
@@ -1350,7 +1418,8 @@ impl std::error::Error for IndexerError {
             | Self::RecoveryRefused { .. }
             | Self::OpenRefused { .. }
             | Self::DocumentTooLarge { .. }
-            | Self::NoSpecDirectory { .. } => None,
+            | Self::NoSpecDirectory { .. }
+            | Self::WalkBudgetExhausted { .. } => None,
         }
     }
 }
@@ -1694,8 +1763,30 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// strings, a set entry), so a file of empty headings, two bytes each,
 /// turned a 1 MiB file into 524,288 documents and about 200 MB of memory in
 /// a review. 16,384 is about 77 times the 213 documents this repository's
-/// own `spec/` produces today.
+/// own `spec/` produces today. Every document a file splits into is
+/// counted, the ones the walk then leaves out (a repeated path, one over
+/// [`MAX_DOCUMENT_BYTES`]) included, because each of those costs the walk
+/// an entry in its skip list as a kept one costs an entry in its result:
+/// counting only the kept ones would leave the skip list bounded by
+/// nothing but [`MAX_WALK_BYTES`], about 1.7 million ten-byte criteria rows
+/// repeating one identifier. What keeps one file from spending this
+/// budget is [`MAX_FILE_DOCUMENTS`].
 const MAX_WALK_DOCUMENTS: usize = 16_384;
+
+/// The most documents one file may split into: 1,024, a sixteenth of
+/// [`MAX_WALK_DOCUMENTS`], the same share of the walk's documents that
+/// [`MAX_FILE_BYTES`] is of [`MAX_WALK_BYTES`]. A file past it is left out
+/// whole and recorded ([`SkipReason::FileDocumentLimit`]), and its split
+/// stops as soon as it passes the cap. A review found one 32 KiB file of
+/// 16,384 bare `#` lines, sorting first, spending the whole walk's budget,
+/// so that every later file, this repository's own specification
+/// included, was left out, and a sync then removed their documents and
+/// returned `Ok`; and a criteria file of 16,384 rows repeating one
+/// identifier doing the same while storing one document. No one file can
+/// now spend more than its share. The file of this repository's `spec/`
+/// with the most documents today has about 45, so this is over twenty
+/// times what is needed.
+const MAX_FILE_DOCUMENTS: usize = MAX_WALK_DOCUMENTS / 16;
 
 /// The most bytes of file text one [`Indexer::walk_repo`] reads into
 /// documents, in all: 16 MiB, the module doc's "What one walk costs". The
@@ -2550,11 +2641,37 @@ impl Indexer<'_> {
     /// without its list of what was skipped and why. Call `walk_repo` to see
     /// that list.
     ///
+    /// A walk its own budget cut short is refused, never returned: a file
+    /// left out because the walk ran out of documents or bytes before
+    /// reaching it may hold documents the index already has, and this set
+    /// is what a sync removes documents by. A review found round 7
+    /// returning such a set here with the skip list dropped, so one added
+    /// file that spent the budget silently removed the rest of the index
+    /// while the sync returned `Ok`. Every other entry the walk leaves out is
+    /// left out for something in that entry alone (a link, a file too large,
+    /// a repeated path, a file that splits into too many documents), and
+    /// removes only that entry's own documents.
+    ///
     /// # Errors
     ///
-    /// As [`Indexer::walk_repo`].
+    /// As [`Indexer::walk_repo`], and [`IndexerError::WalkBudgetExhausted`]
+    /// if the walk left any file out for want of budget.
     pub fn collect_from_repo(repo_root: &Path) -> Result<Vec<IndexableDocument>, IndexerError> {
-        Ok(Self::walk_repo(repo_root)?.documents)
+        let walk = Self::walk_repo(repo_root)?;
+        let left_out: Vec<SkippedEntry> = walk
+            .skipped
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    entry.reason,
+                    SkipReason::WalkDocumentLimit { .. } | SkipReason::WalkByteLimit { .. }
+                )
+            })
+            .collect();
+        if !left_out.is_empty() {
+            return Err(IndexerError::WalkBudgetExhausted { left_out });
+        }
+        Ok(walk.documents)
     }
 
     /// Walks `repo_root/spec` for the canonical documents this indexer is
@@ -2576,8 +2693,9 @@ impl Indexer<'_> {
     /// [`RepoWalk::skipped`] with the reason; see the module doc. Symbolic
     /// links, non-regular files, files not named `.md`, non-UTF-8 paths,
     /// unreadable entries, repeated document paths, files over 1 MiB,
-    /// documents over 64 KiB and files past the walk's own budget (16,384
-    /// documents and 16 MiB of text in all) are left out and listed there
+    /// documents over 64 KiB, files of more than 1,024 documents and files
+    /// past the walk's own budget (16,384 documents and 16 MiB of text in
+    /// all) are left out and listed there
     /// too; see the module doc's "What the repository walk never reads"
     /// and "What one walk costs". The walk's stack use does not depend on
     /// the tree's depth. Entries are visited in name order, so
@@ -3184,11 +3302,13 @@ impl WalkBudget {
 
 /// Reads one regular `.md` file the walk reached and appends its documents
 /// to `walk`, or records why it was left out: [`walk_markdown`]'s per-file
-/// half. A file whose text would take the walk past what `budget` has left
-/// of [`MAX_WALK_BYTES`], or whose split would take it past what is left
-/// of [`MAX_WALK_DOCUMENTS`], is left out whole, and the split stops as
-/// soon as it passes that, so the file costs no more than the budget
-/// allows.
+/// half. A file that splits into more than [`MAX_FILE_DOCUMENTS`] is left
+/// out whole, its split stopped as soon as it passes that, so no one file
+/// costs more than its share; a file whose text would take the walk past
+/// what `budget` has left of [`MAX_WALK_BYTES`], or whose documents would
+/// take it past what is left of [`MAX_WALK_DOCUMENTS`], is left out whole
+/// too, recorded as the walk's budget running out, which
+/// [`Indexer::collect_from_repo`] refuses.
 fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, budget: &mut WalkBudget) {
     // Never defaulted to the absolute path: an identity that silently
     // became absolute the one time stripping failed would reintroduce
@@ -3280,17 +3400,18 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, budget: &m
     let is_adr = components.len() == 3 && components[0] == "spec" && components[1] == "adr";
     let is_criteria =
         components.len() == 3 && components[0] == "spec" && components[1] == "criteria";
-    let limit = budget.documents;
+    // Every file splits under the same cap, whatever the walk has left, so
+    // a file past it is recorded for what it is, and a file past only what
+    // the walk has left is recorded as the walk running out.
+    let limit = MAX_FILE_DOCUMENTS;
     let documents = if is_adr {
-        (limit >= 1).then(|| {
-            let title = first_heading(&text).unwrap_or_else(|| relative.clone());
-            vec![IndexableDocument::new(
-                relative,
-                DocumentKind::Adr,
-                title,
-                text,
-            )]
-        })
+        let title = first_heading(&text).unwrap_or_else(|| relative.clone());
+        Some(vec![IndexableDocument::new(
+            relative,
+            DocumentKind::Adr,
+            title,
+            text,
+        )])
     } else if is_criteria {
         criteria_documents(&relative, &text, limit).and_then(|(mut rows, rest)| {
             // A criteria file with no criterion row in it is split exactly
@@ -3312,10 +3433,21 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, budget: &m
     let Some(documents) = documents else {
         walk.skipped.push(SkippedEntry {
             path,
-            reason: SkipReason::WalkDocumentLimit { remaining: limit },
+            reason: SkipReason::FileDocumentLimit { limit },
         });
         return;
     };
+    if documents.len() > budget.documents {
+        walk.skipped.push(SkippedEntry {
+            path,
+            reason: SkipReason::WalkDocumentLimit {
+                remaining: budget.documents,
+            },
+        });
+        return;
+    }
+    // Every document split is charged, kept or left out below, for the
+    // reason MAX_WALK_DOCUMENTS gives.
     budget.bytes -= byte_len;
     budget.documents -= documents.len();
     let seen = &mut budget.seen;
@@ -3443,7 +3575,8 @@ fn first_heading(text: &str) -> Option<String> {
 /// the first heading is a document too" records the review that found
 /// every line above a first heading discarded. `None`, with the split
 /// stopped where it passed, if `text` holds more than `limit` documents:
-/// the walk's budget, "What one walk costs" in the module doc.
+/// the walk passes `MAX_FILE_DOCUMENTS`, "What one walk costs" in the
+/// module doc.
 ///
 /// Two defects an earlier adversarial review found are fixed here too.
 /// First, a line starting with `#` *inside a fenced code block* (three or
@@ -3599,7 +3732,7 @@ fn heading_anchor(title: &str) -> String {
 /// directory, which produced no document at all while every sync
 /// returned `Ok`. None of it is dropped now. `None`, with the split
 /// stopped where it passed, if `text` holds more than `limit` criteria
-/// rows (the walk's budget, as [`section_documents`] takes it).
+/// rows (the per-file cap, as [`section_documents`] takes it).
 fn criteria_documents(
     relative_path: &str,
     text: &str,
@@ -3797,6 +3930,12 @@ mod tests {
             },
             IndexerError::Locked {
                 path: PathBuf::from("index/fts.sqlite"),
+            },
+            IndexerError::WalkBudgetExhausted {
+                left_out: vec![SkippedEntry {
+                    path: PathBuf::from("spec"),
+                    reason: SkipReason::WalkDocumentLimit { remaining: 0 },
+                }],
             },
         ];
         for error in errors {
@@ -7655,8 +7794,10 @@ mod tests {
         // what the quadratic one did; each run is on a thread, so a
         // regression fails at the bound instead of running for minutes.
         // Since round 7 a walk splits at most MAX_WALK_DOCUMENTS documents,
-        // so the whole file is split here by the splitter itself, and the
-        // walk, whose split stops at its budget, records the file instead.
+        // and since round 8 one file at most MAX_FILE_DOCUMENTS, so the
+        // whole file is split here by the splitter itself, and the walk,
+        // whose split stops at the per-file cap, records the file instead,
+        // for itself.
         const BOUND: Duration = Duration::from_secs(20);
         let scratch = Scratch::new("repeated-headings");
         let runbooks = scratch.path.join("spec").join("runbooks");
@@ -7707,8 +7848,8 @@ mod tests {
             walk.skipped,
             vec![SkippedEntry {
                 path: runbooks.join("repeat.md"),
-                reason: SkipReason::WalkDocumentLimit {
-                    remaining: MAX_WALK_DOCUMENTS
+                reason: SkipReason::FileDocumentLimit {
+                    limit: MAX_FILE_DOCUMENTS
                 },
             }]
         );
@@ -8856,18 +8997,31 @@ mod tests {
         // nothing bounded the number of files. A walk now splits at most
         // MAX_WALK_DOCUMENTS documents and reads at most MAX_WALK_BYTES of
         // text into them; a file past either is left out whole, recorded,
-        // and a later file that still fits is read.
+        // and a later file that still fits is read. Since round 8 no one
+        // file may split into more than MAX_FILE_DOCUMENTS, so it takes
+        // sixteen files at that cap to spend the documents, and a walk that
+        // spent either budget is refused by collect_from_repo.
 
-        // The document budget: a file of all but one document, then a file
-        // of two (over by one), then a file of one (exactly the last).
+        // The document budget: sixteen files at the per-file cap but for
+        // one document, then a file of two (over by one), then a file of
+        // one (exactly the last).
         let documents = Scratch::new("walk-document-budget");
         let spec = documents.path.join("spec");
         fs::create_dir_all(&spec).expect("create spec/");
-        fs::write(
-            spec.join("1-fill.md"),
-            "# a\n".repeat(MAX_WALK_DOCUMENTS - 1),
-        )
-        .expect("write a file of short sections");
+        let files = MAX_WALK_DOCUMENTS / MAX_FILE_DOCUMENTS;
+        assert_eq!(files, 16);
+        for n in 0..files {
+            let sections = if n + 1 == files {
+                MAX_FILE_DOCUMENTS - 1
+            } else {
+                MAX_FILE_DOCUMENTS
+            };
+            fs::write(
+                spec.join(format!("1-fill-{n:02}.md")),
+                "# a\n".repeat(sections),
+            )
+            .expect("write a file of short sections");
+        }
         fs::write(spec.join("2-over.md"), "# b\n\nover\n\n# c\n\nover\n")
             .expect("write a file one document over what is left");
         fs::write(spec.join("3-fits.md"), "# d\n\nfits\n").expect("write a file that fits");
@@ -8899,8 +9053,18 @@ mod tests {
         );
         assert_eq!(
             assert_every_entry_is_indexed_or_skipped(&documents.path, &walk),
-            4
+            files + 3
         );
+        match Indexer::collect_from_repo(&documents.path) {
+            Err(error @ IndexerError::WalkBudgetExhausted { .. }) => {
+                assert_eq!(error.methodology_ref().section, 25);
+                let IndexerError::WalkBudgetExhausted { left_out } = &error else {
+                    unreachable!()
+                };
+                assert_eq!(left_out, &walk.skipped, "{error}");
+            }
+            other => panic!("a walk that ran out of documents is refused: {other:?}"),
+        }
 
         // The byte budget: seventeen files of sixteen near-cap sections
         // each, of which sixteen fit, then a small file that still fits.
@@ -8941,6 +9105,12 @@ mod tests {
             assert_every_entry_is_indexed_or_skipped(&bytes.path, &walk),
             18
         );
+        match Indexer::collect_from_repo(&bytes.path) {
+            Err(IndexerError::WalkBudgetExhausted { left_out }) => {
+                assert_eq!(left_out, walk.skipped);
+            }
+            other => panic!("a walk that ran out of bytes is refused: {other:?}"),
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -9536,5 +9706,133 @@ mod tests {
             (1, 0, 0),
             "only the new section is written: {report:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 8, item 1 (MEDIUM): one odd file spent the walk's budget, and a
+    // sync then removed the rest of the index.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_one_odd_file_never_spends_the_walks_budget_and_a_walk_cut_short_never_reaches_a_sync()
+     {
+        // The review's two files, each added to a repository whose index
+        // already held its real documents: spec/!.md, 16,384 bare '#'
+        // lines (32 KiB) sorting first; and a criteria file of 16,384 rows
+        // repeating one identifier, which stored one document. Each spent
+        // the whole document budget, every later file was recorded as past
+        // it, and collect_from_repo followed by incremental_sync removed
+        // the real documents and returned Ok.
+        let scratch = Scratch::new("odd-file-budget");
+        let spec = scratch.path.join("spec");
+        for directory in ["adr", "criteria", "runbooks"] {
+            fs::create_dir_all(spec.join(directory)).expect("create a directory");
+        }
+        fs::write(
+            spec.join(concat!("PROJECT_BRIEF", ".md")),
+            "# Brief\n\nbriefword\n",
+        )
+        .expect("write the brief");
+        fs::write(
+            spec.join("adr").join("0001-first.md"),
+            "# ADR-0001: First\n\nadrword\n",
+        )
+        .expect("write an ADR");
+        fs::write(
+            spec.join("runbooks").join("real.md"),
+            "# Real\n\nrunbookword\n",
+        )
+        .expect("write a runbook");
+        let real = Indexer::collect_from_repo(&scratch.path).expect("walk the real repository");
+        assert_eq!(real.len(), 3);
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        indexer.full_rebuild(&real).expect("seed");
+        let assert_real_documents_indexed = |indexer: &Indexer<'_>, label: &str| {
+            for word in ["briefword", "adrword", "runbookword"] {
+                let found = indexer.search(word, 10).expect("search");
+                assert_eq!(
+                    (found.hits.len(), found.documents_covered),
+                    (1, 3),
+                    "{label}: {word}"
+                );
+            }
+        };
+
+        let odd_files = [
+            (spec.join("!.md"), "#\n".repeat(MAX_WALK_DOCUMENTS)),
+            (
+                spec.join("criteria").join("0.md"),
+                "| ORI-X-1 |\n".repeat(MAX_WALK_DOCUMENTS),
+            ),
+        ];
+        for (odd, text) in &odd_files {
+            let label = odd.display().to_string();
+            fs::write(odd, text).expect("add the odd file");
+            let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+            assert_eq!(
+                walk.skipped,
+                vec![SkippedEntry {
+                    path: odd.clone(),
+                    reason: SkipReason::FileDocumentLimit {
+                        limit: MAX_FILE_DOCUMENTS
+                    },
+                }],
+                "{label}: the odd file is left out, for itself"
+            );
+            assert_eq!(
+                walk.documents, real,
+                "{label}: every real file is still walked"
+            );
+            let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+            let report = indexer.incremental_sync(&documents).expect("sync");
+            assert_eq!(
+                (
+                    report.upserted,
+                    report.removed,
+                    report.replaced,
+                    report.total
+                ),
+                (0, 0, 0, 3),
+                "{label}"
+            );
+            assert_real_documents_indexed(&indexer, &label);
+            fs::remove_file(odd).expect("remove the odd file");
+        }
+
+        // Sixteen files at the cap still spend the documents: the walk
+        // records every later file as past the budget, and collect_from_repo
+        // refuses rather than hand a sync a set without them.
+        let files = MAX_WALK_DOCUMENTS / MAX_FILE_DOCUMENTS;
+        for n in 0..files {
+            fs::write(
+                spec.join(format!("!{n:02}.md")),
+                "#\n".repeat(MAX_FILE_DOCUMENTS),
+            )
+            .expect("write a file at the cap");
+        }
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        assert_eq!(walk.documents.len(), MAX_WALK_DOCUMENTS);
+        let past: Vec<&Path> = walk
+            .skipped
+            .iter()
+            .filter(|entry| entry.reason == SkipReason::WalkDocumentLimit { remaining: 0 })
+            .map(|entry| entry.path.as_path())
+            .collect();
+        assert_eq!(past.len(), 3, "{:?}", walk.skipped);
+        match Indexer::collect_from_repo(&scratch.path) {
+            Err(error @ IndexerError::WalkBudgetExhausted { .. }) => {
+                let IndexerError::WalkBudgetExhausted { left_out } = &error else {
+                    unreachable!()
+                };
+                assert_eq!(left_out.len(), 3, "{error}");
+                assert!(error.to_string().contains("3 file(s)"), "{error}");
+            }
+            other => panic!(
+                "a walk cut short is refused: {:?}",
+                other.map(|documents| documents.len())
+            ),
+        }
+        assert_real_documents_indexed(&indexer, "after the refusal");
     }
 }
