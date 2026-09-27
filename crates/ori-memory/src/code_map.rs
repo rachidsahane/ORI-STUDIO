@@ -129,7 +129,8 @@
 //!   refuses every FIFO already in place, and not one swapped in between the
 //!   two calls (see "Threat model").
 //! - **Size.** [`CodeMapOptions::max_file_bytes`] caps how much of any one
-//!   file is read, default 8 MiB. The bound is enforced on the bytes
+//!   file is read, default 1 MiB (8 MiB until round 7; see "Time" and
+//!   "Memory" for why not more). The bound is enforced on the bytes
 //!   actually read, through [`std::io::Read::take`]`(cap + 1)`, not on a
 //!   `stat`ed size trusted in advance: a file that grows, or that lies about
 //!   its length (a virtual filesystem entry, for instance), is still cut off
@@ -142,19 +143,47 @@
 //!   happened to measure first: every loop over content this module read
 //!   from the repository checks a wall-clock deadline, and whatever it
 //!   cannot finish before that deadline is a recorded `TimedOut`, never a
-//!   hang, and never presented as if it were complete. Concretely, the
-//!   stages, each under its own deadline:
+//!   hang, and never presented as if it were complete. One loop over
+//!   content is not this module's to change, tree-sitter's end-of-input
+//!   error recovery, which checks nothing; the size cap bounds it instead,
+//!   and the per-file bound below includes it. Concretely, the stages,
+//!   each under its own deadline:
 //!   - **Per file** (reading, parsing, extraction, and test detection,
 //!     together): [`CodeMapOptions::file_timeout`] plus a size-proportional
 //!     allowance (`per_file_budget`; see its doc for why a fixed bound alone
-//!     is wrong for roughly half the builds that check it). Parsing is
-//!     bounded through [`tree_sitter::Parser::parse_with_options`]'s
-//!     progress callback, which tree-sitter polls periodically. Extraction
+//!     is wrong for roughly half the builds that check it), which every
+//!     part of the step that can be interrupted checks, plus, past that,
+//!     the one part that cannot. Parsing is bounded through
+//!     [`tree_sitter::Parser::parse_with_options`]'s progress callback,
+//!     which tree-sitter polls periodically while it parses, and not while
+//!     it recovers from an error at the end of its input: an input that
+//!     ends inside deep nesting its grammar finds ambiguous (Go
+//!     `a[a[a[...`, Python `x = (a,(a,...`, TypeScript `a<a<...` or
+//!     `(a,(a,...`) has it pop its whole parse stack along every path it
+//!     kept, up to 64, and rebuild each, with no poll, so that phase runs to
+//!     its end once begun (until round 7 this doc said the parse was polled
+//!     throughout). The review of round 6 measured it at the old 8 MiB cap:
+//!     22.5 seconds with no poll, the file's step taking 32 seconds against
+//!     its 13-second budget (26 against 8 with a zero `file_timeout`), at
+//!     3.6 to 4.2 GB resident; round 7 measured the same file's peak
+//!     footprint at 10.7 GB. Nothing but
+//!     the file's size bounds that phase, which is why the default
+//!     [`CodeMapOptions::max_file_bytes`] is 1 MiB since round 7: the worst
+//!     shape measured at that size (Go `a[a[...`) took 2.2 seconds for the
+//!     whole step in a release build, inside its 6-second budget, and 7.4
+//!     seconds in a debug build (tree-sitter's C compiled unoptimized),
+//!     past it. So the bound this module states for one file's step is its
+//!     budget plus 8 seconds per MiB of the file, for that phase: 14
+//!     seconds for a file at the default cap, at default options
+//!     (`tests::ori_t_0036_one_file_at_the_default_cap_ends_within_its_stated_bound`
+//!     maps that shape at the cap and holds it to that). A host that needs
+//!     a tighter bound sets a smaller cap: the phase's cost falls with the
+//!     size (1.2 seconds in a debug build at 256 KiB). Extraction
 //!     is bounded by this module's own traversal helpers (`for_each_node`,
 //!     `for_each_sibling_group`, and, since round 7, the walk that finds
 //!     Rust `use` and `mod` declarations at any depth,
 //!     `rust_declaration_edges`) and every language's top-level scan loop,
-//!     each of which checks the same deadline. `use crate::...` resolution
+//!     each of which checks the same budget. `use crate::...` resolution
 //!     (`RustModuleIndex::advance`) checks it too, periodically during its
 //!     own walk, not only between the `use` items around it: a single
 //!     pathological `use` path is exactly what escaped the per-file check in
@@ -205,6 +234,13 @@
 //!     [`Coverage::spec_citation_scan`] is where its own incompleteness is
 //!     recorded, with the reason, not a demotion of an already-successful
 //!     `Module`; see that field's doc for why.
+//!   - **Outside any deadline**, and reading no file's content: the walk
+//!     (see "What is not bounded"), the `use crate::` index
+//!     (`RustModuleIndex::build`), built once per map in time linear in the
+//!     walk's paths plus sorting them, and the final sort of each module's
+//!     lists, `n log n` in entries that the file's size bounds (at most one
+//!     interface per two bytes of it, about half a million at the 1 MiB
+//!     default).
 //!
 //!   A file whose syntax is small but pathologically nested (deeply
 //!   bracketed input is the classic case) is bounded by time even when it is
@@ -294,7 +330,7 @@
 //!   2000 modules each cited under 500 long headings (the heading copied
 //!   into every citation), both from repositories that hold still.
 //!   - *While scanning:* one document at a time, read into one buffer of at
-//!     most `max_file_bytes + 1` bytes (8 MiB by default) and dropped before
+//!     most `max_file_bytes + 1` bytes (1 MiB by default) and dropped before
 //!     the next is read, every line searched in place as a slice of that
 //!     buffer and never copied (`CitationScan::scan_document`). Besides the
 //!     buffer: the list of document paths and the record of entries not
@@ -382,23 +418,29 @@
 //!     nothing else. The densest shape is one interface per two bytes of
 //!     source (each is its own name in the source, and two names need a
 //!     byte between them: `var A,A,...,A int` in Go), 41 bytes kept per two
-//!     read, so at most about 20.5 times the file's size, about 172 MB for a
-//!     file of 8 MiB that is nothing but such a list, not counting the
-//!     allocator's rounding
+//!     read, so at most about 20.5 times the file's size, about 21.5 MB for
+//!     a file at the 1 MiB default that is nothing but such a list (172 MB
+//!     at the old 8 MiB one), not counting the allocator's rounding
 //!     (`tests::ori_t_0036_retained_interface_bytes_stay_within_the_stated_factor_of_the_file`
 //!     checks the factor on that shape).
 //!   - *While one file is parsed and extracted:* its bytes (at most
-//!     `max_file_bytes + 1`), tree-sitter's tree for it, and what
-//!     extraction builds, all dropped, but for what its [`Module`] keeps,
-//!     before the next file is read: files are processed one at a time. The
-//!     tree is tree-sitter's own, and it grows with the file's node count,
-//!     which only [`CodeMapOptions::max_file_bytes`] bounds. The densest
-//!     shapes measured (a node for every byte or two, as in
-//!     `import a,a,...`) peaked at 230 to 240 bytes per byte of source:
-//!     241 MB for a 1 MiB file, 953 MB for a 4 MiB one, 1.8 to 2.0 GB for
-//!     one at the 8 MiB default (release builds on macOS, round 6's
-//!     measurement, the whole process's peak footprint). A host that cannot
-//!     spare that sets a smaller `max_file_bytes`.
+//!     `max_file_bytes + 1`), tree-sitter's tree and parse state for it,
+//!     and what extraction builds, all dropped, but for what its [`Module`]
+//!     keeps, before the next file is read: files are processed one at a
+//!     time. Tree-sitter's share grows with the file's size, which only
+//!     [`CodeMapOptions::max_file_bytes`] bounds. For most dense shapes it
+//!     peaks at about 230 to 280 bytes per byte of source (round 6
+//!     measured `import a,a,...`, 241 MB for a 1 MiB file; round 7 deeply
+//!     unclosed brackets). For the ambiguous nesting that makes the
+//!     end-of-input recovery slow (see "Time"), it is 1.4 to 1.9 KB per
+//!     byte, most of it that recovery's copies of the parse stack: 1.4 to
+//!     1.9 GB peak footprint for a file at the 1 MiB default (round 7's
+//!     measurement, release and debug builds alike on macOS), where round
+//!     6's figure of 1.8 to 2.0 GB was for the 8 MiB default and missed
+//!     this shape, which reached 10.7 GB there; that is the other reason
+//!     the default is 1 MiB. A host that cannot spare that sets a smaller
+//!     `max_file_bytes`: at 256 KiB the same shapes peaked at 0.4 to 0.5
+//!     GB.
 //! - **What is not bounded.** There is no cap on the total number of files or
 //!   total bytes walked, and no `.gitignore` is honored: a `target/` or
 //!   `node_modules/` directory is walked like any other, its files seen,
@@ -1215,8 +1257,13 @@ impl CodeMap {
 /// "Untrusted input" section for why each exists.
 #[derive(Clone, Copy, Debug)]
 pub struct CodeMapOptions {
-    /// The largest file this module will read. Default 8 MiB. Enforced on
-    /// bytes actually read, not a `stat`ed size taken on trust.
+    /// The largest file this module will read, source or `spec/`
+    /// document. Default 1 MiB: the end-of-input recovery tree-sitter runs
+    /// without polling any deadline, and the memory it takes, grow with a
+    /// file's size, and at the 8 MiB default this had until round 7 one
+    /// file could take half a minute and 10 GB (see the module doc's
+    /// "Time" and "Memory"). Enforced on bytes actually read, not a
+    /// `stat`ed size taken on trust.
     pub max_file_bytes: u64,
     /// The longest this module gives itself for one file's *whole* step,
     /// parsing and extraction together. Default 5 seconds. Renamed from
@@ -1224,7 +1271,7 @@ pub struct CodeMapOptions {
     /// was itself a defect (see the module doc's "Quadratic extraction").
     pub file_timeout: Duration,
     /// The most bytes the whole `spec/` citation scan reads, across every
-    /// document together. Default 64 MiB (eight documents at the default
+    /// document together. Default 64 MiB (64 documents at the default
     /// `max_file_bytes`). Enforced on bytes actually read: the scan reads at
     /// most one byte past it, and a corpus larger than this is scanned up to
     /// the first document that does not fit and reported as
@@ -1235,7 +1282,7 @@ pub struct CodeMapOptions {
 impl Default for CodeMapOptions {
     fn default() -> Self {
         Self {
-            max_file_bytes: 8 * 1024 * 1024,
+            max_file_bytes: 1024 * 1024,
             file_timeout: Duration::from_secs(5),
             max_spec_bytes: 64 * 1024 * 1024,
         }
@@ -1947,8 +1994,9 @@ fn open_failure_reason(path: &Path, follow_final_symlink: bool, err: &io::Error)
 ///
 /// `stated_len`, the handle's own reported length, only sizes the buffer up
 /// front, and never past `cap + 1`: without it, `read_to_end` grows the
-/// buffer by doubling, so a read of just over 8 MiB could hold a 16 MiB
-/// allocation, and briefly both it and the 8 MiB one it replaced. A length
+/// buffer by doubling, so a read of just over the cap could hold an
+/// allocation of twice the cap, and briefly both it and the one it
+/// replaced. A length
 /// that lies costs at most one `cap + 1` allocation; it is never what
 /// decides anything.
 fn read_capped(opened: fs::File, cap: u64, stated_len: u64) -> io::Result<Vec<u8>> {
@@ -1997,6 +2045,12 @@ fn language_of(rel: &str) -> Option<Language> {
 /// counts) cost far more time than one second per MiB of the *small* inputs
 /// that trigger them, so a fixed floor plus a modest per-MiB allowance is
 /// nowhere near enough budget for either to pass.
+///
+/// This is the budget every part of the step that can be interrupted
+/// checks, not the step's whole bound: tree-sitter's end-of-input error
+/// recovery polls nothing, and can run past it once begun. The module doc's
+/// "Time" states the bound with that phase included, the budget plus 8
+/// seconds per MiB of the file (`tests::per_file_bound`).
 fn per_file_budget(options: &CodeMapOptions, file_bytes: u64) -> Duration {
     /// Below this, the allowance is exactly zero, not a rounded-up sliver of
     /// one: an ordinary small file (this module's own fixtures included)
@@ -7565,9 +7619,16 @@ mod tests {
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let root = dir.clone();
+        // `a_slow.rs` is about 3 MB, over the 1 MiB default cap since round
+        // 7; the cap is raised so that it is still parsed, which is what
+        // holds the map open while the swap lands.
+        let options = CodeMapOptions {
+            max_file_bytes: 8 * 1024 * 1024,
+            ..CodeMapOptions::default()
+        };
         std::thread::spawn(move || {
             let _ = started_tx.send(());
-            let _ = done_tx.send(build_code_map(&root));
+            let _ = done_tx.send(build_code_map_with_options(&root, &options));
         });
         started_rx
             .recv_timeout(Duration::from_secs(10))
@@ -8556,7 +8617,13 @@ mod tests {
         // Assembled, not written whole: see the fixture-path comment earlier
         // in this file.
         write(&dir, &format!("spec/{}.md", "x"), &doc);
-        let map = build_code_map(&dir).expect("maps");
+        // The document is about 2.1 MB, over the 1 MiB default cap since
+        // round 7; the cap is raised so that it is read.
+        let options = CodeMapOptions {
+            max_file_bytes: 8 * 1024 * 1024,
+            ..CodeMapOptions::default()
+        };
+        let map = build_code_map_with_options(&dir, &options).expect("maps");
         assert_eq!(map.coverage.spec_citation_scan, SpecScan::Complete);
         assert_eq!(map.modules.len(), modules);
         assert!(
@@ -10379,6 +10446,66 @@ mod tests {
         assert_eq!(
             modules_again, modules,
             "the same tree gives the same citations"
+        );
+        drop(guard);
+    }
+
+    /// The bound the module doc's "Time" states for one file's whole step:
+    /// its budget (`per_file_budget`), which every part of the step that
+    /// can be interrupted checks, plus 8 seconds per MiB of the file for
+    /// tree-sitter's end-of-input error recovery, which polls nothing once
+    /// begun. The worst measured cost of that phase at the 1 MiB default
+    /// cap was about 6 seconds in this ticket's debug build (the step's
+    /// whole 7.4 seconds, less a 1.3-second parse) and under 2.2 in
+    /// release.
+    fn per_file_bound(options: &CodeMapOptions, file_bytes: u64) -> Duration {
+        const RECOVERY_ALLOWANCE_MICROS_PER_MIB: u64 = 8_000_000;
+        per_file_budget(options, file_bytes).saturating_add(Duration::from_micros(
+            file_bytes.saturating_mul(RECOVERY_ALLOWANCE_MICROS_PER_MIB) / (1024 * 1024),
+        ))
+    }
+
+    /// Item 1 (HIGH): tree-sitter polls no deadline while it recovers from
+    /// an error at the end of its input, and for deep nesting its grammar
+    /// finds ambiguous that recovery grows with the file: at the old 8 MiB
+    /// default the review of round 6 measured one file's step at 26 to 32
+    /// seconds against a 13-second budget, and 10.7 GB. The default cap is
+    /// now 1 MiB, and the module doc states the bound with that phase in
+    /// it. Two halves: at default options the stated bound for a file at
+    /// the cap is at most 14 seconds (which the old cap breaks, at 77, and
+    /// is what keeps the phase short); and the worst shape measured (Go
+    /// `var x = a[a[...`, about 1.8 GB while it parses) mapped at the cap
+    /// ends inside it.
+    #[test]
+    fn ori_t_0036_one_file_at_the_default_cap_ends_within_its_stated_bound() {
+        let options = CodeMapOptions::default();
+        let cap = options.max_file_bytes;
+        let bound = per_file_bound(&options, cap);
+        assert!(
+            bound <= Duration::from_secs(14),
+            "at default options one file's step is stated to end within {bound:?}; the size cap \
+             ({cap} bytes) is what keeps the unpolled end-of-input phase inside 14 s"
+        );
+        let dir = temp_dir("worst-parse-at-cap");
+        let guard = DropGuard(dir.clone());
+        let head = "package p\nvar x = ";
+        let cap_bytes = usize::try_from(cap).expect("the cap fits in memory");
+        let body = "a[".repeat((cap_bytes - head.len()) / 2);
+        write(&dir, "m.go", &format!("{head}{body}"));
+        let start = Instant::now();
+        let map = build_code_map(&dir).expect("maps");
+        let elapsed = start.elapsed();
+        assert_eq!(map.coverage.files_seen, 1, "{:?}", map.coverage);
+        assert!(
+            map.coverage.files_skipped.is_empty()
+                || map.coverage.files_skipped[0].reason == SkipReason::TimedOut,
+            "mapped, or timed out, never anything else: {:?}",
+            map.coverage
+        );
+        assert!(
+            elapsed <= bound,
+            "the worst shape measured at the default cap took {elapsed:?}, past its stated bound \
+             of {bound:?}"
         );
         drop(guard);
     }
