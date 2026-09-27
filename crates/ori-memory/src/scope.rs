@@ -2271,30 +2271,26 @@ fn attributed_evidence(
             record.structured().len()
         )));
     }
-    for entry in &run {
-        let naming = stored
-            .values()
-            .filter(|other| other.blob_id == entry.blob_id)
-            .count();
-        if naming != 1 {
-            return Err(refuse(format!(
-                "evidence {} is named by {naming} evidence events",
-                entry.blob_id
-            )));
-        }
-    }
 
-    // The blobs themselves, read through the barrier; a second read, so each
-    // one is held to appearing exactly once, for this record.
+    // The blobs themselves, read through the barrier. The evidence file is
+    // named by the evidence id, so each id in the run must be named by no
+    // other evidence event in the log, the run's own included, or the file
+    // may hold another submission's raw text: every blob carrying one of the
+    // run's ids is read back, and there must be exactly one per run entry,
+    // each for this record. Being a second read, it also holds the log to
+    // what the first read showed.
     let wanted: BTreeSet<&Id> = run.iter().map(|entry| &entry.blob_id).collect();
     let blobs: Vec<EvidenceBlob> = barrier::read_evidence(db)
         .map_err(barrier_unreadable)?
         .into_iter()
         .filter(|blob| wanted.contains(blob.id()))
         .collect();
-    if blobs.len() != run.len() || blobs.iter().any(|blob| blob.record_id() != record_id) {
+    if wanted.len() != run.len()
+        || blobs.len() != run.len()
+        || blobs.iter().any(|blob| blob.record_id() != record_id)
+    {
         return Err(refuse(
-            "the evidence read back does not match the record's run".to_owned(),
+            "an evidence id of the record is named by another evidence event, so its file may hold another submission's raw text".to_owned(),
         ));
     }
     Ok(blobs)
@@ -5997,6 +5993,59 @@ mod tests {
             "RECZ",
             RecordKind::ClosingReport,
             &[("summary", "EVSHARED")],
+        )
+        .expect("a submission");
+        refused(
+            &mut w.p,
+            standard(),
+            &qa,
+            &evidence(&id("RECX")),
+            "evidence_not_attributable",
+        );
+
+        // A failed resubmission under the same record id reused the record's
+        // evidence id, overwriting its file: refused, though every event
+        // naming that id names this record.
+        let mut w = world("evidence-id-resubmitted");
+        let qa = principal_for(Role::Qa, &w.ticket_m);
+        submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECX",
+            RecordKind::Finding,
+            &one_field,
+        )
+        .expect("a submission");
+        block_evidence_file(&w.p, "EVB");
+        submit(
+            &mut w.p,
+            300,
+            "AUTHOR",
+            "RECX",
+            RecordKind::ClosingReport,
+            &[("summary", "EVX"), ("detail", "EVB")],
+        )
+        .expect_err("the second field cannot be stored");
+        refused(
+            &mut w.p,
+            standard(),
+            &qa,
+            &evidence(&id("RECX")),
+            "evidence_not_attributable",
+        );
+
+        // Two fields of one record stored under one evidence id: the second
+        // overwrote the first's file.
+        let mut w = world("evidence-id-twice-in-record");
+        let qa = principal_for(Role::Qa, &w.ticket_m);
+        submit(
+            &mut w.p,
+            200,
+            "AUTHOR",
+            "RECX",
+            RecordKind::Finding,
+            &[("summary", "EVX"), ("detail", "EVX")],
         )
         .expect("a submission");
         refused(
