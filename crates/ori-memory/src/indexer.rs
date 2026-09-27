@@ -202,8 +202,14 @@
 //!   link into `spec/design/` indexed exactly the mock data the exclusion
 //!   above keeps out, and a link out of the repository would have read
 //!   whatever it pointed at;
-//! - a `.md` entry that is not a regular file, such as a named pipe, which
+//! - an entry that is not a regular file, such as a named pipe, which
 //!   would block the walk forever on read ([`SkipReason::NotARegularFile`]);
+//! - a regular file whose name does not carry the `.md` extension exactly,
+//!   in lower case, `.MD` and `.markdown` included
+//!   ([`SkipReason::NotMarkdown`]): the walk reads only `.md` files, the
+//!   extension every specification file in this repository has, and a
+//!   review found round 6 dropping every other file with no record while
+//!   this list said nothing else was left out;
 //! - a `.md` file whose path under the repository is not UTF-8
 //!   ([`SkipReason::NonUtf8Path`]): a lossy conversion would map two
 //!   different names onto one identity;
@@ -912,9 +918,15 @@ pub struct SkippedEntry {
 pub enum SkipReason {
     /// A symbolic link, to a file or a directory: never followed.
     Symlink,
-    /// A `.md` entry that is not a regular file (a named pipe, a socket, a
-    /// device): never opened.
+    /// An entry that is not a regular file, a directory or a symbolic link
+    /// (a named pipe, a socket, a device), whatever its name: never opened.
     NotARegularFile,
+    /// A regular file whose name does not carry the `.md` extension,
+    /// exactly and in lower case: `NOTES.MD`, `notes.markdown`, a file
+    /// named `.md` (which has no extension), `openapi.yaml`. The walk reads
+    /// only `.md` files, and records every other file rather than dropping
+    /// it silently.
+    NotMarkdown,
     /// A `.md` file whose path under the repository is not valid UTF-8.
     NonUtf8Path,
     /// A file or directory that could not be read; `error` is the
@@ -2451,10 +2463,10 @@ impl Indexer<'_> {
     /// sideways crate under `spec/LLD.md` section 2's dependency direction)
     /// are read. `spec/design/` is never entered, and is listed in
     /// [`RepoWalk::skipped`] with the reason; see the module doc. Symbolic
-    /// links, non-regular files, non-UTF-8 paths, unreadable entries,
-    /// repeated document paths, files over 1 MiB and documents over 64 KiB
-    /// are left out and listed there too; see the module doc's "What the
-    /// repository walk never reads". Entries are visited in name order, so
+    /// links, non-regular files, files not named `.md`, non-UTF-8 paths,
+    /// unreadable entries, repeated document paths, files over 1 MiB and
+    /// documents over 64 KiB are left out and listed there too; see the
+    /// module doc's "What the repository walk never reads". Entries are visited in name order, so
     /// the result does not depend on the filesystem's own directory order.
     ///
     /// A walk that returns `Ok` walked a real `spec/` directory: when there
@@ -2921,13 +2933,17 @@ fn walk_markdown(
             }
             continue;
         }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
-            continue;
-        }
         if !file_type.is_file() {
             walk.skipped.push(SkippedEntry {
                 path,
                 reason: SkipReason::NotARegularFile,
+            });
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+            walk.skipped.push(SkippedEntry {
+                path,
+                reason: SkipReason::NotMarkdown,
             });
             continue;
         }
@@ -6265,6 +6281,9 @@ mod tests {
             .to_owned();
         let walk = Indexer::walk_repo(&repo_root).expect("walk this repository");
         let (files, checked) = assert_every_non_blank_line_is_indexed(&repo_root, &walk);
+        // And every entry under spec/ is either read or recorded (round 7:
+        // a file not named .md was neither).
+        assert!(assert_every_entry_is_indexed_or_skipped(&repo_root, &walk) >= files);
         assert!(
             files > 20,
             "a vacuous walk would pass the check above for the wrong reason: {files} files"
@@ -8168,6 +8187,98 @@ mod tests {
             assert_eq!(b.search("bravo", 10).expect("search").hits.len(), 1);
             assert_eq!(b.search("alpha", 10).expect("search").hits.len(), 0);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 4 (MEDIUM): files not named .md were dropped with no record.
+    // ---------------------------------------------------------------------
+
+    /// Asserts that every entry under `repo_root/spec` other than a
+    /// directory, found independently of the walk and never through a link,
+    /// is either the file some document in `walk` came from or at or under
+    /// an entry `walk` recorded as skipped. Returns how many entries were
+    /// checked.
+    fn assert_every_entry_is_indexed_or_skipped(repo_root: &Path, walk: &RepoWalk) -> usize {
+        fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).expect("list a directory") {
+                let entry = entry.expect("a directory entry");
+                if entry.file_type().expect("an entry's type").is_dir() {
+                    visit(&entry.path(), out);
+                } else {
+                    out.push(entry.path());
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        visit(&repo_root.join("spec"), &mut entries);
+        for entry in &entries {
+            let recorded = walk
+                .skipped
+                .iter()
+                .any(|skipped| entry.starts_with(&skipped.path));
+            let relative: Vec<String> = entry
+                .strip_prefix(repo_root)
+                .expect("under the root")
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            let relative = relative.join("/");
+            let anchored = format!("{relative}#");
+            let indexed = walk
+                .documents
+                .iter()
+                .any(|document| document.path == relative || document.path.starts_with(&anchored));
+            assert!(
+                recorded || indexed,
+                "{relative} is neither indexed nor recorded as skipped: {:?}",
+                walk.skipped
+            );
+        }
+        entries.len()
+    }
+
+    #[test]
+    fn ori_t_0035_every_file_the_walk_does_not_read_is_recorded_including_markdown_by_another_name()
+    {
+        // The review's files: Markdown spelled .MD and .markdown, a file
+        // named .md (which has no extension), and a YAML file, each holding
+        // a unique word. Round 6 dropped all four with a silent continue:
+        // none indexed, none in the skip list, and a sync reported Ok.
+        let scratch = Scratch::new("not-markdown");
+        let spec = scratch.path.join("spec");
+        fs::create_dir_all(spec.join("api")).expect("create spec/api");
+        fs::write(spec.join("control.md"), "# Control\n\nwombatcontrol\n")
+            .expect("write a control file");
+        let others = [
+            spec.join("NOTES.MD"),
+            spec.join("extra.markdown"),
+            spec.join(".md"),
+            spec.join("api").join("openapi.yaml"),
+        ];
+        for (n, other) in others.iter().enumerate() {
+            fs::write(other, format!("# Other\n\nwombat{n}\n")).expect("write a file");
+        }
+
+        let walk = Indexer::walk_repo(&scratch.path).expect("walk");
+        let recorded: BTreeSet<PathBuf> = walk
+            .skipped
+            .iter()
+            .filter(|entry| entry.reason == SkipReason::NotMarkdown)
+            .map(|entry| entry.path.clone())
+            .collect();
+        assert_eq!(
+            recorded,
+            others.iter().cloned().collect::<BTreeSet<PathBuf>>(),
+            "every file not named .md is recorded, with its reason: {:?}",
+            walk.skipped
+        );
+        assert_eq!(walk.skipped.len(), others.len(), "{:?}", walk.skipped);
+        let paths: Vec<&str> = walk.documents.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, [concat!("spec/control", ".md", "#control")]);
+        assert_eq!(
+            assert_every_entry_is_indexed_or_skipped(&scratch.path, &walk),
+            others.len() + 1
+        );
     }
 
     // ---------------------------------------------------------------------
