@@ -163,6 +163,11 @@
 //! platform treats it as a separator (Windows) and nowhere else, so joining
 //! the components is the whole normalization.
 //!
+//! A file's encoding signature is not its content either: a leading
+//! byte-order mark is dropped when the file is read, so a file saved with
+//! one splits into exactly the documents, identities and titles it does
+//! without (`read_capped`'s doc has the review that found otherwise).
+//!
 //! # Duplicate paths: skipped by the walk, refused by the writers
 //!
 //! [`Indexer::full_rebuild`] and [`Indexer::incremental_sync`] both call
@@ -3205,6 +3210,15 @@ const DESIGN_EXCLUSION: &str = "spec/design/ is excluded as a whole: escalation 
 /// filesystem reports it, or as far as this read got, whichever is more),
 /// so a file that grows between the size check and the read is still
 /// bounded.
+///
+/// A leading byte-order mark (U+FEFF, the bytes `EF BB BF` many Windows
+/// editors save) is dropped: it says how the file is encoded, and is no
+/// part of its text. A review found it kept, so the file's first line,
+/// `\u{FEFF}# Title`, was not read as a heading: the first section's
+/// identity moved from `path#anchor` to the bare path, its title became
+/// the path, and an ADR's title became its first `##` heading, from a
+/// change of encoding signature alone. A U+FEFF anywhere else is text and
+/// is kept.
 fn read_capped(path: &Path) -> std::io::Result<Result<String, u64>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
@@ -3218,10 +3232,17 @@ fn read_capped(path: &Path) -> std::io::Result<Result<String, u64>> {
     if read > MAX_FILE_BYTES {
         return Ok(Err(read.max(reported)));
     }
-    String::from_utf8(bytes)
-        .map(Ok)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    let mut text = String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if text.starts_with(BYTE_ORDER_MARK) {
+        text.drain(..BYTE_ORDER_MARK.len_utf8());
+    }
+    Ok(Ok(text))
 }
+
+/// U+FEFF, which at the very start of a file is a byte-order mark:
+/// [`read_capped`] drops it there.
+const BYTE_ORDER_MARK: char = '\u{FEFF}';
 
 /// The text of the first ATX heading in `text`, with leading `#`s and
 /// whitespace stripped.
@@ -8598,6 +8619,77 @@ mod tests {
         assert_eq!(
             assert_every_entry_is_indexed_or_skipped(&scratch.path, &walk),
             others.len() + 1
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 6 (LOW): a byte-order mark hid a file's first heading.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_a_byte_order_mark_changes_no_document_identity_title_or_text() {
+        // The review prepended EF BB BF, and nothing else, to three files:
+        // round 6 moved a section file's first section from path#anchor to
+        // the bare path, titled it by the path, and titled an ADR by its
+        // first ## heading. The same files with and without the mark now
+        // walk to the same documents.
+        let files = [
+            (
+                ["spec", "NOTES.md"].join("/"),
+                "# Notes: Ori Studio\n\nLow-level words.\n\n## Crates\n\ncrate words\n",
+            ),
+            (
+                ["spec", "adr", "ADR-9001-mark.md"].join("/"),
+                "# ADR-9001: A marked decision\n\nStatus: accepted\n\n## Context\n\nwhy\n",
+            ),
+            (
+                ["spec", "criteria", "phase-9.md"].join("/"),
+                "# Criteria\n\n| ID | Expected |\n|---|---|\n| ORI-P9-001 | first |\n",
+            ),
+        ];
+        let plain = Scratch::new("bom-plain");
+        let marked = Scratch::new("bom-marked");
+        for (relative, text) in &files {
+            for (root, prefix) in [(&plain.path, ""), (&marked.path, "\u{FEFF}")] {
+                let file = root.join(relative);
+                fs::create_dir_all(file.parent().expect("a parent")).expect("create a directory");
+                fs::write(&file, format!("{prefix}{text}")).expect("write");
+            }
+        }
+        assert_eq!(
+            &fs::read(marked.path.join(&files[0].0)).expect("read")[..3],
+            [0xEF, 0xBB, 0xBF],
+            "the marked copy starts with the three bytes of a byte-order mark"
+        );
+
+        let plain_walk = Indexer::walk_repo(&plain.path).expect("walk the plain copy");
+        let marked_walk = Indexer::walk_repo(&marked.path).expect("walk the marked copy");
+        assert!(marked_walk.skipped.is_empty(), "{:?}", marked_walk.skipped);
+        assert_eq!(
+            marked_walk.documents, plain_walk.documents,
+            "a byte-order mark changes no path, kind, title or text"
+        );
+        let by_path: BTreeMap<&str, &IndexableDocument> = marked_walk
+            .documents
+            .iter()
+            .map(|document| (document.path.as_str(), document))
+            .collect();
+        let notes = format!("{}#notes-ori-studio", files[0].0);
+        assert_eq!(by_path[notes.as_str()].title, "Notes: Ori Studio");
+        assert!(
+            !by_path.contains_key(files[0].0.as_str()),
+            "no preamble document"
+        );
+        assert_eq!(
+            by_path[files[1].0.as_str()].title,
+            "ADR-9001: A marked decision"
+        );
+        assert!(
+            marked_walk
+                .documents
+                .iter()
+                .all(|document| !document.body.contains('\u{FEFF}')),
+            "the mark is in no stored text"
         );
     }
 
