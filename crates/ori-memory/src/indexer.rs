@@ -276,9 +276,8 @@
 //! [`crate::freshness::FreshnessTracker`] never deletes a record, and
 //! [`crate::freshness::FreshnessTracker::list_stale`] takes, beside the
 //! index's corpus, the walk's [`RepoWalk::not_indexed`], the entries it
-//! left out with the reason for each: every record on a document, a file
-//! or anything under a directory the walk left out, a divergence the drift
-//! audit filed included, is listed as
+//! left out with the reason for each: every record on something the walk
+//! left out, a divergence the drift audit filed included, is listed as
 //! [`crate::freshness::StaleReason::NotIndexed`], carrying that reason and
 //! the divergence. Only a record whose file is neither in the corpus nor
 //! left out reads as removed. A review found round 8 dropping the
@@ -287,6 +286,37 @@
 //! document cap, took the file out of the index and its divergence out of
 //! the stale list, with every call returning `Ok`
 //! (`tests::ori_p1_026_a_divergence_on_a_file_the_walk_leaves_out_stays_listed_with_the_reason`).
+//!
+//! What "something the walk left out" covers is decided once, per reason,
+//! by [`SkipReason::scope`], and never read off the shape of an entry's
+//! key. There are two scopes:
+//!
+//! - File-scoped ([`SkipScope::File`]): a file, a symbolic link or a
+//!   directory the walk did not read at all, keyed by its path under the
+//!   repository root. It covers a record at that path, at any document of
+//!   that file and at anything under that directory: none of it was read.
+//! - Document-scoped ([`SkipScope::Document`]): one document of a file the
+//!   walk did read and split, left out for its size
+//!   ([`SkipReason::DocumentTooLarge`]), keyed by that document's own path.
+//!   It covers a record at exactly that path and no other. Its key is the
+//!   file's bare path when the document is the text above the first
+//!   heading (or a file with no heading, or an ADR), and it still covers
+//!   that one document: a section genuinely removed from such a file is
+//!   removed, as from any file the walk read, never kept listed as left
+//!   out. It also says the file itself was read and is still in the
+//!   repository, so a divergence filed on the file's own path is kept when
+//!   every document the file split into was left out for its size (a
+//!   single-section file grown past the document cap), listed as not
+//!   indexed with that document's size and the divergence.
+//!
+//! A review found round 9 reading one flat key for both, with two
+//! results: a divergence on a single-section file grown past the document
+//! cap was dropped, because the key was `<file>#<anchor>` and the record
+//! the file's path; and a section removed from a file whose preamble was
+//! past the cap stayed listed for good, because the preamble's key, the
+//! file's bare path, was read as the whole file
+//! (`tests::ori_p1_026_a_divergence_on_a_file_every_document_of_which_is_past_the_cap_stays_listed`,
+//! `tests::ori_p1_026_a_section_removed_from_a_file_whose_preamble_is_past_the_cap_is_removed_not_pinned`).
 //!
 //! # What one walk costs
 //!
@@ -1185,6 +1215,55 @@ impl fmt::Display for SkipReason {
     }
 }
 
+impl SkipReason {
+    /// What an entry left out for this reason covers: one document, or a
+    /// whole file, link or directory (the module doc's "A file left out is
+    /// not a file removed"). Decided here, per reason, and never read off
+    /// the shape of an entry's key: a document's key is a file's bare path
+    /// whenever the document is the text above the file's first heading.
+    /// The match names every reason, so a reason added later has to decide
+    /// its scope before it compiles. AICD §25.
+    #[must_use]
+    pub const fn scope(&self) -> SkipScope {
+        match self {
+            Self::DocumentTooLarge { .. } | Self::DuplicateDocumentPath { .. } => {
+                SkipScope::Document
+            }
+            Self::Symlink
+            | Self::NotARegularFile
+            | Self::NotMarkdown
+            | Self::NonUtf8Path
+            | Self::Unreadable { .. }
+            | Self::FileTooLarge { .. }
+            | Self::WalkDocumentLimit { .. }
+            | Self::FileDocumentLimit { .. }
+            | Self::WalkByteLimit { .. } => SkipScope::File,
+        }
+    }
+}
+
+/// What one entry of [`RepoWalk::not_indexed`] covers, the one thing
+/// [`crate::freshness::FreshnessTracker::list_stale`] matches a record
+/// against it by ([`SkipReason::scope`]; the module doc's "A file left out
+/// is not a file removed"): AICD §25.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SkipScope {
+    /// One document of a file the walk read and split, left out on its
+    /// own, keyed by that document's path: it covers a record at exactly
+    /// that path and nothing else. The file was read, so each of its other
+    /// document paths is in the index or was removed from the file. A
+    /// document key is a file's bare path when the document is the text
+    /// above the file's first heading (or a whole file with no heading, or
+    /// an ADR); it still covers that one document, never the file's
+    /// sections.
+    Document,
+    /// A file, a symbolic link or a directory the walk did not read at all,
+    /// keyed by its path under the repository root: it covers a record at
+    /// that path, at any document path of that file, and at anything under
+    /// that directory, since none of it was read.
+    File,
+}
+
 /// What one [`Indexer::walk_repo`] found: AICD §25.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RepoWalk {
@@ -1208,11 +1287,16 @@ impl RepoWalk {
     /// is not a file removed"): AICD §25.
     ///
     /// A document the walk split and then left out for its size is keyed
-    /// by its own document path; every other entry, a file, a link or a
-    /// directory, by its path under the repository root, `/`-joined, as a
-    /// document path is. A repeated document path is not here: that path
-    /// is in the index, holding the earlier document. Nor is an entry whose
-    /// path is not UTF-8, which no document path or record can name.
+    /// by its own document path, and covers that document only
+    /// ([`SkipScope::Document`]); every other entry, a file, a link or a
+    /// directory, is keyed by its path under the repository root,
+    /// `/`-joined, as a document path is, and covers everything at or under
+    /// that path ([`SkipScope::File`]). Each value's
+    /// [`SkipReason::scope`] says which, so a document key that is a file's
+    /// bare path (the text above its first heading) is never read as the
+    /// whole file. A repeated document path is not here: that path is in
+    /// the index, holding the earlier document. Nor is an entry whose path
+    /// is not UTF-8, which no document path or record can name.
     #[must_use]
     pub fn not_indexed(&self) -> BTreeMap<String, SkipReason> {
         let mut out = BTreeMap::new();
@@ -10615,5 +10699,356 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 10: what a skip covers. A document-scoped skip covers its own
+    // document and says its file was read; a file-scoped one covers the
+    // whole file, link or directory.
+    // ---------------------------------------------------------------------
+
+    /// Every document `indexer` holds, path to body: the corpus
+    /// `FreshnessTracker::list_stale` is handed.
+    fn indexed_corpus(indexer: &Indexer<'_>) -> BTreeMap<String, String> {
+        indexer
+            .all_documents()
+            .expect("read the corpus back")
+            .into_iter()
+            .map(|(document, _)| (document.path, document.body))
+            .collect()
+    }
+
+    /// Walks `scratch` and syncs `indexer` to it, returning the walk.
+    fn walk_and_sync(scratch: &Scratch, indexer: &mut Indexer<'_>) -> RepoWalk {
+        let walk = Indexer::collect_from_repo(&scratch.path)
+            .expect("no file left out for want of budget, so the walk is returned");
+        indexer.incremental_sync(&walk.documents).expect("sync");
+        walk
+    }
+
+    /// Text past `MAX_DOCUMENT_BYTES` and well within `MAX_FILE_BYTES`.
+    fn past_the_document_cap(word: &str) -> String {
+        let text = format!("{word} paragraph ").repeat(5_000);
+        assert!(text.len() > MAX_DOCUMENT_BYTES && (text.len() as u64) < MAX_FILE_BYTES);
+        text
+    }
+
+    #[test]
+    fn ori_p1_026_a_divergence_on_a_file_every_document_of_which_is_past_the_cap_stays_listed() {
+        use crate::freshness::FreshnessTracker;
+        use crate::freshness::StaleReason;
+
+        // The review's shape: a file of one section, the way the risk map
+        // and every runbook are written, grown past the 64 KiB document cap
+        // and kept under the 1 MiB file cap, with the drift audit's
+        // divergence filed on the file's own path.
+        let scratch = Scratch::new("one-section-past-cap");
+        fs::create_dir_all(scratch.path.join("spec").join("runbooks")).expect("create spec/");
+        let risk = ["spec", "RISK_MAP.md"].join("/");
+        let runbook = ["spec", "runbooks", "recover-engine.md"].join("/");
+        let kept = ["spec", "PRD.md"].join("/");
+        let heading = |relative: &str| {
+            if *relative == risk {
+                "# Risk map\n\n"
+            } else if *relative == runbook {
+                "# Runbook: recover engine\n\n"
+            } else {
+                "# Product requirements\n\n"
+            }
+        };
+        for relative in [&risk, &runbook, &kept] {
+            fs::write(
+                scratch.path.join(relative),
+                format!("{}the text of {relative}\n", heading(relative)),
+            )
+            .expect("write a spec file");
+        }
+        let risk_section = format!("{risk}#risk-map");
+        let runbook_section = format!("{runbook}#runbook-recover-engine");
+
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        assert!(walk.not_indexed().is_empty(), "{:?}", walk.skipped);
+        let mut tracker = FreshnessTracker::new();
+        for (path, body) in indexed_corpus(&indexer) {
+            tracker.record_verification(path, Timestamp::from_millis(1_000), body);
+        }
+        let found = Timestamp::from_millis(2_000);
+        for relative in [&risk, &runbook] {
+            tracker.record_divergence(relative.clone(), format!("DIVERGENCE {relative}"), found);
+        }
+        let before = tracker.list_stale(&indexed_corpus(&indexer), &walk.not_indexed());
+        let listed: Vec<&str> = before.stale.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(listed, [risk.as_str(), runbook.as_str()], "{before:?}");
+
+        // Each single-section file grown past the document cap.
+        for relative in [&risk, &runbook] {
+            fs::write(
+                scratch.path.join(relative),
+                format!(
+                    "{}the text of {relative}\n{}\n",
+                    heading(relative),
+                    past_the_document_cap("grown")
+                ),
+            )
+            .expect("grow a file past the document cap");
+        }
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let not_indexed = walk.not_indexed();
+        let keys: Vec<&str> = not_indexed.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [risk_section.as_str(), runbook_section.as_str()],
+            "the reviewer's shape: each skip keyed by the document, never by the file"
+        );
+        assert!(
+            not_indexed
+                .values()
+                .all(|reason| reason.scope() == SkipScope::Document),
+            "{not_indexed:?}"
+        );
+        let current = indexed_corpus(&indexer);
+        assert_eq!(
+            current.keys().map(String::as_str).collect::<Vec<_>>(),
+            [format!("{kept}#product-requirements").as_str()],
+            "nothing of either grown file is in the index"
+        );
+
+        let report = tracker.list_stale(&current, &not_indexed);
+        assert_eq!(report.documents_covered, 1);
+        let listed: Vec<(&str, &StaleReason)> = report
+            .stale
+            .iter()
+            .map(|document| (document.path.as_str(), &document.reason))
+            .collect();
+        let not_indexed_with =
+            |section: &String, divergence: Option<&String>| StaleReason::NotIndexed {
+                skipped: not_indexed[section].clone(),
+                divergence: divergence.map(|file| (format!("DIVERGENCE {file}"), found)),
+            };
+        let expected = [
+            (risk.as_str(), not_indexed_with(&risk_section, Some(&risk))),
+            (risk_section.as_str(), not_indexed_with(&risk_section, None)),
+            (
+                runbook.as_str(),
+                not_indexed_with(&runbook_section, Some(&runbook)),
+            ),
+            (
+                runbook_section.as_str(),
+                not_indexed_with(&runbook_section, None),
+            ),
+        ];
+        assert_eq!(
+            listed,
+            expected
+                .iter()
+                .map(|(path, reason)| (*path, reason))
+                .collect::<Vec<_>>(),
+            "each file's divergence stays listed with the walk's reason, beside its \
+             section's record"
+        );
+        let line = report.stale[0].reason.divergence();
+        assert!(
+            line.contains(&format!("DIVERGENCE {risk}"))
+                && line.contains(&not_indexed[&risk_section].to_string()),
+            "the line carries the drift audit's text and the document's size: {line}"
+        );
+    }
+
+    #[test]
+    fn ori_p1_026_a_section_removed_from_a_file_whose_preamble_is_past_the_cap_is_removed_not_pinned()
+     {
+        use crate::freshness::FreshnessTracker;
+        use crate::freshness::StaleReason;
+
+        // The review's regression: the text above a file's first heading
+        // is a document at the file's bare path, so its skip is keyed there,
+        // and a record for a section genuinely removed from that file was
+        // read as left out, listed for good and never clearable.
+        let scratch = Scratch::new("preamble-past-cap");
+        fs::create_dir_all(scratch.path.join("spec")).expect("create spec/");
+        let file = ["spec", "PREAMBLE.md"].join("/");
+        let gone = format!("{file}#gone");
+        let keep = format!("{file}#keep");
+        let sections = "# Keep\n\nthe keepword text\n";
+        fs::write(
+            scratch.path.join(&file),
+            format!("the preamble\n\n# Gone\n\nthe goneword text\n\n{sections}"),
+        )
+        .expect("write a spec file");
+
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        assert!(walk.not_indexed().is_empty(), "{:?}", walk.skipped);
+        let corpus = indexed_corpus(&indexer);
+        assert_eq!(
+            corpus.keys().map(String::as_str).collect::<Vec<_>>(),
+            [file.as_str(), gone.as_str(), keep.as_str()]
+        );
+        let mut tracker = FreshnessTracker::new();
+        for (path, body) in corpus {
+            tracker.record_verification(path, Timestamp::from_millis(1_000), body);
+        }
+        tracker.record_divergence(
+            gone.clone(),
+            "GONE-DIVERGENCE",
+            Timestamp::from_millis(2_000),
+        );
+
+        // The preamble grown past the document cap, and the section
+        // removed, in one edit.
+        fs::write(
+            scratch.path.join(&file),
+            format!("{}\n\n{sections}", past_the_document_cap("preamble")),
+        )
+        .expect("grow the preamble and remove a section");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let not_indexed = walk.not_indexed();
+        assert_eq!(
+            not_indexed.keys().map(String::as_str).collect::<Vec<_>>(),
+            [file.as_str()],
+            "the preamble's skip is keyed at the file's bare path: {not_indexed:?}"
+        );
+        assert_eq!(not_indexed[&file].scope(), SkipScope::Document);
+        let current = indexed_corpus(&indexer);
+        assert_eq!(
+            current.keys().map(String::as_str).collect::<Vec<_>>(),
+            [keep.as_str()]
+        );
+
+        let report = tracker.list_stale(&current, &not_indexed);
+        assert_eq!(report.documents_covered, 1);
+        assert_eq!(
+            report.stale,
+            [crate::freshness::StaleDocument {
+                path: file.clone(),
+                reason: StaleReason::NotIndexed {
+                    skipped: not_indexed[&file].clone(),
+                    divergence: None,
+                },
+            }],
+            "the preamble, the one document left out, is listed; the removed \
+             section's record is removed, not pinned by the preamble's skip, and the \
+             kept section is fresh"
+        );
+
+        // The preamble back under the cap as it was verified: nothing left.
+        fs::write(
+            scratch.path.join(&file),
+            format!("the preamble\n\n{sections}"),
+        )
+        .expect("shrink the preamble");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let report = tracker.list_stale(&indexed_corpus(&indexer), &walk.not_indexed());
+        assert_eq!(report.documents_covered, 2);
+        assert!(report.stale.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn ori_p1_026_a_record_past_the_cap_clears_once_its_document_is_back_under_it_and_current() {
+        use crate::freshness::FreshnessTracker;
+        use crate::freshness::StaleReason;
+
+        let scratch = Scratch::new("clears-under-cap");
+        fs::create_dir_all(scratch.path.join("spec").join("runbooks")).expect("create spec/");
+        let file = ["spec", "runbooks", "deploy.md"].join("/");
+        let section = format!("{file}#deploy");
+        let original = "# Deploy\n\nthe deployword text\n";
+        let grown = format!("{original}{}\n", past_the_document_cap("grown"));
+        fs::write(scratch.path.join(&file), original).expect("write a spec file");
+
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        walk_and_sync(&scratch, &mut indexer);
+        let mut tracker = FreshnessTracker::new();
+        for (path, body) in indexed_corpus(&indexer) {
+            tracker.record_verification(path, Timestamp::from_millis(1_000), body);
+        }
+        tracker.record_divergence(
+            file.clone(),
+            "DEPLOY-DIVERGENCE",
+            Timestamp::from_millis(2_000),
+        );
+        let listed = |tracker: &FreshnessTracker, indexer: &Indexer<'_>, walk: &RepoWalk| {
+            tracker
+                .list_stale(&indexed_corpus(indexer), &walk.not_indexed())
+                .stale
+                .into_iter()
+                .map(|document| (document.path, document.reason))
+                .collect::<Vec<_>>()
+        };
+
+        // Past the cap: the section's record and the file's divergence are
+        // both listed as left out.
+        fs::write(scratch.path.join(&file), &grown).expect("grow past the cap");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let now = listed(&tracker, &indexer, &walk);
+        assert_eq!(
+            now.iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [file.as_str(), section.as_str()],
+            "{now:?}"
+        );
+        assert!(
+            now.iter()
+                .all(|(_, reason)| matches!(reason, StaleReason::NotIndexed { .. }))
+        );
+
+        // A re-review of the file ends its divergence even while the section
+        // is past the cap; the section's own record, whose text cannot be
+        // checked, stays listed.
+        tracker.record_verification(file.clone(), Timestamp::from_millis(3_000), "the file");
+        let now = listed(&tracker, &indexer, &walk);
+        assert_eq!(
+            now.iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [section.as_str()],
+            "{now:?}"
+        );
+
+        // Back under the cap with the text it was verified at: current and
+        // fresh, so nothing is listed.
+        fs::write(scratch.path.join(&file), original).expect("shrink back under the cap");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let now = listed(&tracker, &indexer, &walk);
+        assert!(now.is_empty(), "{now:?}");
+
+        // Past the cap again, then back under it with new text: listed as
+        // changed until the section is verified again.
+        fs::write(scratch.path.join(&file), &grown).expect("grow past the cap again");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        assert_eq!(listed(&tracker, &indexer, &walk).len(), 1);
+        let edited = "# Deploy\n\nthe deployword text, edited\n";
+        fs::write(scratch.path.join(&file), edited).expect("shrink with new text");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let now = listed(&tracker, &indexer, &walk);
+        assert_eq!(
+            now,
+            [(
+                section.clone(),
+                StaleReason::ChangedSinceVerification {
+                    verified_at: Timestamp::from_millis(1_000)
+                }
+            )]
+        );
+        let body = indexed_corpus(&indexer)[&section].clone();
+        tracker.record_verification(section.clone(), Timestamp::from_millis(4_000), body);
+        let now = listed(&tracker, &indexer, &walk);
+        assert!(now.is_empty(), "{now:?}");
+
+        // Past the cap once more, then the file genuinely removed: gone,
+        // and so is everything listed for it.
+        fs::write(scratch.path.join(&file), &grown).expect("grow past the cap a third time");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        assert_eq!(listed(&tracker, &indexer, &walk).len(), 1);
+        fs::remove_file(scratch.path.join(&file)).expect("remove the file");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        assert!(walk.not_indexed().is_empty(), "{:?}", walk.skipped);
+        let now = listed(&tracker, &indexer, &walk);
+        assert!(now.is_empty(), "{now:?}");
     }
 }
