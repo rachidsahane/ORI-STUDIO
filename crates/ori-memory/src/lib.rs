@@ -11,3 +11,4 @@ pub mod barrier;
 pub mod code_map;
 pub mod freshness;
 pub mod indexer;
+pub mod scope;
