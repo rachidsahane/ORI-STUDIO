@@ -77,8 +77,11 @@
 //! a real `Document.verified_against_code_at`.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use ori_core::types::Timestamp;
+
+use crate::indexer::document_file;
 
 /// Whether one document's last verification against the code still holds:
 /// AICD §25.
@@ -172,7 +175,9 @@ struct TrackedDocument {
 /// One stale document, as [`FreshnessTracker::list_stale`] reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaleDocument {
-    /// The document's path, as given to `check`.
+    /// The document's path: a key of the corpus `list_stale` was given, or
+    /// the path of a file whose sections that corpus holds, for a
+    /// divergence filed against the whole file (`list_stale`'s doc).
     pub path: String,
     /// Why it is stale.
     pub reason: StaleReason,
@@ -280,7 +285,7 @@ impl FreshnessTracker {
     }
 
     /// Checks every document in `current`, keyed by path with its text right
-    /// now, and reports the stale ones with their divergence.
+    /// now, and reports the stale ones with their divergence, in path order.
     ///
     /// `current` is the live corpus a caller (the indexer's
     /// [`crate::indexer::Indexer::all_documents`], most naturally) hands in
@@ -288,6 +293,20 @@ impl FreshnessTracker {
     /// this tracker was once told about but that no longer exists in the
     /// repository is not reported at all, matching the indexer's own rule
     /// that a removed document disappears rather than lingers.
+    ///
+    /// The index's corpus is keyed by section, `<file>#<anchor>` (and a
+    /// file's bare path for the text above its first heading), while the
+    /// `Document` of `spec/DATA_MODEL.md` section 2, which the drift audit
+    /// files a divergence against, is the file. So a divergence on record
+    /// for a file whose sections `current` holds is listed, under the
+    /// file's path, whether or not `current` has a key at exactly that
+    /// path: the file is still in the repository. A review found round 7
+    /// dropping it as if the file had been removed, so a product whose
+    /// product requirements diverged read as ready, with every one of its
+    /// indexed sections verified. A verification recorded at a file's path
+    /// says nothing about any one section's text and makes none of them
+    /// fresh; each section is judged by its own record. Only a tracked path
+    /// whose file has nothing in `current` is gone.
     #[must_use]
     pub fn list_stale(&self, current: &BTreeMap<String, String>) -> StaleReport {
         let mut stale = Vec::new();
@@ -299,6 +318,22 @@ impl FreshnessTracker {
                 });
             }
         }
+        let files: BTreeSet<&str> = current.keys().map(|key| document_file(key)).collect();
+        for (path, entry) in &self.documents {
+            if current.contains_key(path) || !files.contains(path.as_str()) {
+                continue;
+            }
+            if let Some((description, detected_at)) = &entry.divergence {
+                stale.push(StaleDocument {
+                    path: path.clone(),
+                    reason: StaleReason::Divergence {
+                        description: description.clone(),
+                        detected_at: *detected_at,
+                    },
+                });
+            }
+        }
+        stale.sort_by(|left, right| left.path.cmp(&right.path));
         StaleReport {
             documents_covered: current.len(),
             stale,
@@ -517,5 +552,122 @@ mod tests {
         tracker.record_verification("a", Timestamp::from_millis(1), "x");
         tracker.record_divergence("b", "drift", Timestamp::from_millis(2));
         assert_eq!(tracker.tracked_count(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // Round 8, item 4: the index's corpus is keyed by section, a
+    // divergence by file.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_026_a_divergence_filed_against_a_file_is_listed_when_the_corpus_is_the_indexs_sections()
+     {
+        // The review: list_stale fed from Indexer::all_documents, as its doc
+        // says, gets keys of the form <file>#<anchor>, while the drift
+        // audit files a divergence against the file, the Document of
+        // spec/DATA_MODEL.md section 2. Round 7 read the file's path as no
+        // longer in the repository: with every indexed section verified,
+        // the divergences filed against the product requirements and the
+        // criteria file were dropped, and the report read as ready.
+        use crate::indexer::DocumentKind;
+        use crate::indexer::IndexableDocument;
+        use crate::indexer::Indexer;
+
+        let prd = ["spec", "PRD.md"].join("/");
+        let criteria = ["spec", "criteria", "phase-1.md"].join("/");
+        let role = ["spec", "agents", "qa.md"].join("/");
+        let hashed = ["spec", "runbooks", "a#b.md"].join("/");
+        let documents = vec![
+            IndexableDocument::new(
+                format!("{prd}#1-users"),
+                DocumentKind::Section,
+                "1. Users",
+                "users text",
+            ),
+            IndexableDocument::new(
+                format!("{prd}#2-seats"),
+                DocumentKind::Section,
+                "2. Seats",
+                "seats text",
+            ),
+            IndexableDocument::new(
+                format!("{criteria}#ORI-P1-026"),
+                DocumentKind::Criterion,
+                "ORI-P1-026",
+                "| ORI-P1-026 | F |",
+            ),
+            IndexableDocument::new(
+                role.clone(),
+                DocumentKind::Section,
+                role.clone(),
+                "role text",
+            ),
+            IndexableDocument::new(
+                format!("{hashed}#steps"),
+                DocumentKind::Section,
+                "Steps",
+                "steps text",
+            ),
+        ];
+        let mut indexer = Indexer::open_in_memory().expect("an in-memory index opens");
+        indexer.full_rebuild(&documents).expect("build the index");
+        let current: BTreeMap<String, String> = indexer
+            .all_documents()
+            .expect("read the corpus back")
+            .into_iter()
+            .map(|(document, _)| (document.path, document.body))
+            .collect();
+        assert!(
+            !current.contains_key(&prd) && !current.contains_key(&criteria),
+            "the precondition: neither file is itself a key of the index's corpus"
+        );
+
+        let mut tracker = FreshnessTracker::new();
+        for (path, body) in &current {
+            tracker.record_verification(path.clone(), Timestamp::from_millis(1_000), body.clone());
+        }
+        let found = Timestamp::from_millis(2_000);
+        tracker.record_divergence(prd.clone(), "PRD-DIVERGENCE: K-02 drifted", found);
+        tracker.record_divergence(criteria.clone(), "a criterion the code misses", found);
+        // Gone: a file with nothing in the corpus, and the path a file
+        // whose own name holds a '#' would give if cut at that '#'.
+        tracker.record_divergence(["docs", "REMOVED.md"].join("/"), "gone", found);
+        tracker.record_divergence(["spec", "runbooks", "a"].join("/"), "no such file", found);
+
+        let report = tracker.list_stale(&current);
+        assert_eq!(report.documents_covered, 5);
+        let listed: Vec<&str> = report.stale.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            listed,
+            [prd.as_str(), criteria.as_str()],
+            "each file-level divergence is listed under its file: {report:?}"
+        );
+        assert!(
+            report.stale[0]
+                .reason
+                .divergence()
+                .contains("PRD-DIVERGENCE: K-02 drifted"),
+            "with the drift audit's own text: {report:?}"
+        );
+
+        // A file whose own name holds a '#' is the file of its sections.
+        tracker.record_divergence(hashed.clone(), "hashed divergence", found);
+        assert!(
+            tracker
+                .list_stale(&current)
+                .stale
+                .iter()
+                .any(|document| document.path == hashed)
+        );
+
+        // A verification of the file is the re-review that ends it.
+        tracker.record_verification(prd.clone(), Timestamp::from_millis(3_000), "the whole file");
+        let listed: Vec<String> = tracker
+            .list_stale(&current)
+            .stale
+            .into_iter()
+            .map(|document| document.path)
+            .collect();
+        assert_eq!(listed, [criteria, hashed]);
     }
 }
