@@ -255,8 +255,37 @@
 //! did not exist and for a `spec/` that was a file; handed to
 //! [`Indexer::incremental_sync`], the documented pairing, that walk removed
 //! every document and returned `Ok`, and [`Indexer::collect_from_repo`]
-//! drops the skip list, so even the round 6 record of a linked `spec/` gave
-//! its caller nothing to notice.
+//! dropped the skip list, so even the round 6 record of a linked `spec/`
+//! gave its caller nothing to notice.
+//!
+//! # A file left out is not a file removed
+//!
+//! Every entry the walk leaves out ("What the repository walk never
+//! reads", above) is still in the repository; the walk only did not read
+//! it. What the index holds for such a file, decided rather than left
+//! to fall out: none of its documents. The walk hands a sync none of them,
+//! so [`Indexer::incremental_sync`] removes whatever the index held for the
+//! file, as it does for a file deleted. The index holds only text the walk
+//! read from the repository as it stands; keeping the last text it read
+//! would serve, and let the freshness tracker weigh a verification
+//! against, text the file may no longer hold (a file turned unreadable by
+//! one byte, or grown past a cap, has changed).
+//!
+//! What must survive is the file's freshness record, and it does.
+//! [`crate::freshness::FreshnessTracker`] never deletes a record, and
+//! [`crate::freshness::FreshnessTracker::list_stale`] takes, beside the
+//! index's corpus, the walk's [`RepoWalk::not_indexed`], the entries it
+//! left out with the reason for each: every record on a document, a file
+//! or anything under a directory the walk left out, a divergence the drift
+//! audit filed included, is listed as
+//! [`crate::freshness::StaleReason::NotIndexed`], carrying that reason and
+//! the divergence. Only a record whose file is neither in the corpus nor
+//! left out reads as removed. A review found round 8 dropping the
+//! divergence: [`Indexer::collect_from_repo`] threw the skip list away, and
+//! one Windows-1252 byte in a specification file, or an ADR grown past the
+//! document cap, took the file out of the index and its divergence out of
+//! the stale list, with every call returning `Ok`
+//! (`tests::ori_p1_026_a_divergence_on_a_file_the_walk_leaves_out_stays_listed_with_the_reason`).
 //!
 //! # What one walk costs
 //!
@@ -1106,6 +1135,55 @@ pub enum SkipReason {
     },
 }
 
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Symlink => {
+                f.write_str("a symbolic link, which the repository walk never follows")
+            }
+            Self::NotARegularFile => {
+                f.write_str("not a regular file, which the repository walk never opens")
+            }
+            Self::NotMarkdown => {
+                f.write_str("not named .md, and the repository walk reads only .md files")
+            }
+            Self::NonUtf8Path => f.write_str("its path is not UTF-8"),
+            Self::Unreadable { error } => write!(f, "it could not be read: {error}"),
+            Self::DuplicateDocumentPath { path } => {
+                write!(
+                    f,
+                    "its document path {path} was already taken by an earlier document"
+                )
+            }
+            Self::FileTooLarge { byte_len } => write!(
+                f,
+                "the file is {byte_len} bytes, over the {MAX_FILE_BYTES}-byte cap on one file"
+            ),
+            Self::DocumentTooLarge { path, byte_len } => write!(
+                f,
+                "the document {path} is {byte_len} bytes of title and body, over the \
+                 {MAX_DOCUMENT_BYTES}-byte cap on one document"
+            ),
+            Self::WalkDocumentLimit { remaining } => write!(
+                f,
+                "the walk had {remaining} of its {MAX_WALK_DOCUMENTS} documents left when it \
+                 reached the file"
+            ),
+            Self::FileDocumentLimit { limit } => {
+                write!(f, "the file splits into more than {limit} documents")
+            }
+            Self::WalkByteLimit {
+                byte_len,
+                remaining,
+            } => write!(
+                f,
+                "the file is {byte_len} bytes and the walk had {remaining} of its \
+                 {MAX_WALK_BYTES} bytes left"
+            ),
+        }
+    }
+}
+
 /// What one [`Indexer::walk_repo`] found: AICD §25.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RepoWalk {
@@ -1114,6 +1192,55 @@ pub struct RepoWalk {
     pub documents: Vec<IndexableDocument>,
     /// Every entry left out, with the reason, in walk order.
     pub skipped: Vec<SkippedEntry>,
+    /// The repository root the walk was given, which every path in
+    /// `skipped` is under: what [`RepoWalk::not_indexed`] strips from them.
+    root: PathBuf,
+}
+
+impl RepoWalk {
+    /// Every entry this walk left out that a document or a freshness record
+    /// could name, keyed the way they name it, with the reason: the input
+    /// [`crate::freshness::FreshnessTracker::list_stale`] takes beside the
+    /// index's corpus, so a record for a file that is still in the
+    /// repository but was not read is listed with that reason, never
+    /// dropped as if the file were gone (the module doc's "A file left out
+    /// is not a file removed"): AICD §25.
+    ///
+    /// A document the walk split and then left out for its size is keyed
+    /// by its own document path; every other entry, a file, a link or a
+    /// directory, by its path under the repository root, `/`-joined, as a
+    /// document path is. A repeated document path is not here: that path
+    /// is in the index, holding the earlier document. Nor is an entry whose
+    /// path is not UTF-8, which no document path or record can name.
+    #[must_use]
+    pub fn not_indexed(&self) -> BTreeMap<String, SkipReason> {
+        let mut out = BTreeMap::new();
+        for entry in &self.skipped {
+            let key = match &entry.reason {
+                SkipReason::DuplicateDocumentPath { .. } => continue,
+                SkipReason::DocumentTooLarge { path, .. } => path.clone(),
+                _ => match repository_path(&self.root, &entry.path) {
+                    Some(key) => key,
+                    None => continue,
+                },
+            };
+            out.entry(key).or_insert_with(|| entry.reason.clone());
+        }
+        out
+    }
+}
+
+/// `path`'s components under `root`, joined with `/`, the way the walk
+/// names a document's file; `None` if `path` is not under `root` or a
+/// component is not UTF-8.
+fn repository_path(root: &Path, path: &Path) -> Option<String> {
+    let components = path
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<&str>>>()?;
+    Some(components.join("/"))
 }
 
 /// A refusal from this module: AICD §25.
@@ -2687,8 +2814,8 @@ impl Indexer<'_> {
     /// stepped back between two of them, and no name is ever reused;
     /// `recovered_at` records when, and this module reads no clock itself,
     /// for the reason `ProductDb::open`'s `opened_at` gives. `documents` is the
-    /// target set the fresh index is rebuilt from, normally
-    /// [`Indexer::collect_from_repo`]'s. The damaged file is never opened,
+    /// target set the fresh index is rebuilt from, normally the documents of
+    /// [`Indexer::collect_from_repo`]'s walk. The damaged file is never opened,
     /// so no damage can make this fail. An `index/fts.sqlite` (or side
     /// file) that is a symbolic link or a file with a second name, which
     /// [`Indexer::open`] refuses, is moved like any other file: the link, or
@@ -2744,10 +2871,12 @@ impl Indexer<'_> {
     }
 
     /// Walks `repo_root` for the canonical documents this indexer is
-    /// permitted to hold, and returns them ready for [`Indexer::full_rebuild`]
-    /// or [`Indexer::incremental_sync`]: [`Indexer::walk_repo`]'s documents,
-    /// without its list of what was skipped and why. Call `walk_repo` to see
-    /// that list.
+    /// permitted to hold, and returns the walk: its documents, ready for
+    /// [`Indexer::full_rebuild`] or [`Indexer::incremental_sync`], and every
+    /// entry it left out, whose [`RepoWalk::not_indexed`] is what
+    /// [`crate::freshness::FreshnessTracker::list_stale`] takes beside the
+    /// index's corpus. The documented pairing is this walk's documents to
+    /// the sync, and the same walk's `not_indexed` to `list_stale`.
     ///
     /// A walk its own budget cut short is refused, never returned: a file
     /// left out because the walk ran out of documents or bytes before
@@ -2756,30 +2885,40 @@ impl Indexer<'_> {
     /// returning such a set here with the skip list dropped, so one added
     /// file that spent the budget silently removed the rest of the index
     /// while the sync returned `Ok`. Every other entry the walk leaves out is
-    /// left out for something in that entry alone (a link, a file too large,
-    /// a repeated path, a file that splits into too many documents), and
-    /// removes only that entry's own documents.
+    /// left out for something in that entry alone (a link, a file too large
+    /// or unreadable, a repeated path, a file that splits into too many
+    /// documents), and a sync removes only that entry's own documents.
+    ///
+    /// Such an entry is still in the repository, though, and a review found
+    /// round 8 returning only the documents here: the skip list was thrown
+    /// away, the sync removed the entry's documents, and the freshness
+    /// tracker, fed from the index's corpus alone, then read the file as
+    /// removed and dropped the divergence the drift audit had filed on it,
+    /// so a product read as ready. The walk is returned whole now, so the
+    /// list reaches the tracker (the module doc's "A file left out is not a
+    /// file removed").
     ///
     /// # Errors
     ///
     /// As [`Indexer::walk_repo`], and [`IndexerError::WalkBudgetExhausted`]
     /// if the walk left any file out for want of budget.
-    pub fn collect_from_repo(repo_root: &Path) -> Result<Vec<IndexableDocument>, IndexerError> {
+    pub fn collect_from_repo(repo_root: &Path) -> Result<RepoWalk, IndexerError> {
         let walk = Self::walk_repo(repo_root)?;
         let left_out: Vec<SkippedEntry> = walk
             .skipped
-            .into_iter()
+            .iter()
             .filter(|entry| {
                 matches!(
                     entry.reason,
                     SkipReason::WalkDocumentLimit { .. } | SkipReason::WalkByteLimit { .. }
                 )
             })
+            .cloned()
             .collect();
         if !left_out.is_empty() {
             return Err(IndexerError::WalkBudgetExhausted { left_out });
         }
-        Ok(walk.documents)
+        Ok(walk)
     }
 
     /// Walks `repo_root/spec` for the canonical documents this indexer is
@@ -2823,7 +2962,10 @@ impl Indexer<'_> {
     /// or subdirectory below it never fails the walk.
     pub fn walk_repo(repo_root: &Path) -> Result<RepoWalk, IndexerError> {
         let spec_dir = repo_root.join("spec");
-        let mut walk = RepoWalk::default();
+        let mut walk = RepoWalk {
+            root: repo_root.to_owned(),
+            ..RepoWalk::default()
+        };
         match std::fs::symlink_metadata(&spec_dir) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(if std::fs::symlink_metadata(repo_root).is_err() {
@@ -4287,7 +4429,9 @@ mod tests {
             .expect("write the mock design artifact");
         fs::write(spec.join("PRD.md"), "# PRD\n\nreal content\n").expect("write a real document");
 
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let documents = Indexer::collect_from_repo(&scratch.path)
+            .expect("collect")
+            .documents;
         assert!(
             !documents.is_empty(),
             "the real document must still be collected"
@@ -4332,7 +4476,9 @@ mod tests {
         )
         .expect("write an ADR");
 
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let documents = Indexer::collect_from_repo(&scratch.path)
+            .expect("collect")
+            .documents;
 
         let criterion = documents
             .iter()
@@ -4692,7 +4838,9 @@ mod tests {
         )
         .expect("write depth-3 file");
 
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let documents = Indexer::collect_from_repo(&scratch.path)
+            .expect("collect")
+            .documents;
         let paths: Vec<&str> = documents.iter().map(|d| d.path.as_str()).collect();
 
         // Built with `concat!` rather than one literal: this repository's
@@ -4747,8 +4895,12 @@ mod tests {
             .expect("write the same ADR in both checkouts");
         }
 
-        let a = Indexer::collect_from_repo(&checkout_a).expect("collect from checkout A");
-        let b = Indexer::collect_from_repo(&checkout_b).expect("collect from checkout B");
+        let a = Indexer::collect_from_repo(&checkout_a)
+            .expect("collect from checkout A")
+            .documents;
+        let b = Indexer::collect_from_repo(&checkout_b)
+            .expect("collect from checkout B")
+            .documents;
         let mut a_paths: Vec<&str> = a.iter().map(|d| d.path.as_str()).collect();
         let mut b_paths: Vec<&str> = b.iter().map(|d| d.path.as_str()).collect();
         a_paths.sort_unstable();
@@ -5398,7 +5550,11 @@ mod tests {
 
         let mut indexer = Indexer::open_in_memory().expect("an in-memory index");
         indexer
-            .full_rebuild(&Indexer::collect_from_repo(&scratch.path).expect("collect"))
+            .full_rebuild(
+                &Indexer::collect_from_repo(&scratch.path)
+                    .expect("collect")
+                    .documents,
+            )
             .expect("index the walk");
         for word in ["designword", "tokenword", "screenword", "runbookword"] {
             let found = indexer.search(word, 10).expect("search");
@@ -5697,7 +5853,8 @@ mod tests {
             .expect("crates/ori-memory sits two levels under the repository root")
             .to_owned();
         let documents = Indexer::collect_from_repo(&repo_root)
-            .expect("this repository's own spec/ tree must always collect");
+            .expect("this repository's own spec/ tree must always collect")
+            .documents;
         assert!(
             documents.len() > 100,
             "a vacuous collection would pass every assertion below for the wrong reason: \
@@ -5742,7 +5899,9 @@ mod tests {
         )
         .expect("write a two-heading document nested under an adr-named directory");
 
-        let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let documents = Indexer::collect_from_repo(&scratch.path)
+            .expect("collect")
+            .documents;
 
         let checklist_docs: Vec<&IndexableDocument> = documents
             .iter()
@@ -6811,7 +6970,9 @@ mod tests {
             "Review is a checklist, never a summary",
         ];
 
-        let first = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let first = Indexer::collect_from_repo(&scratch.path)
+            .expect("collect")
+            .documents;
         let first_paths: Vec<&str> = first.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(first_paths, vec![bare]);
         let mut indexer = Indexer::open_in_memory().expect("in-memory index opens");
@@ -6824,7 +6985,9 @@ mod tests {
 
         fs::write(&role, format!("{before}\n## Notes\n\nA later note.\n"))
             .expect("append one heading");
-        let second = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        let second = Indexer::collect_from_repo(&scratch.path)
+            .expect("collect")
+            .documents;
         let second_paths: Vec<&str> = second.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(
             second_paths,
@@ -9429,7 +9592,9 @@ mod tests {
         fs::create_dir_all(real.join("spec")).expect("create spec/");
         fs::write(real.join("spec").join("PRD.md"), "# PRD\n\nreal content\n")
             .expect("write a real document");
-        let documents = Indexer::collect_from_repo(&real).expect("walk the real repository");
+        let documents = Indexer::collect_from_repo(&real)
+            .expect("walk the real repository")
+            .documents;
         let db = product(&scratch);
         let mut indexer = Indexer::open(&db).expect("open on-disk index");
         indexer.full_rebuild(&documents).expect("seed");
@@ -9881,7 +10046,9 @@ mod tests {
             "# Real\n\nrunbookword\n",
         )
         .expect("write a runbook");
-        let real = Indexer::collect_from_repo(&scratch.path).expect("walk the real repository");
+        let real = Indexer::collect_from_repo(&scratch.path)
+            .expect("walk the real repository")
+            .documents;
         assert_eq!(real.len(), 3);
         let db = product(&scratch);
         let mut indexer = Indexer::open(&db).expect("open on-disk index");
@@ -9922,7 +10089,9 @@ mod tests {
                 walk.documents, real,
                 "{label}: every real file is still walked"
             );
-            let documents = Indexer::collect_from_repo(&scratch.path).expect("collect");
+            let documents = Indexer::collect_from_repo(&scratch.path)
+                .expect("collect")
+                .documents;
             let report = indexer.incremental_sync(&documents).expect("sync");
             assert_eq!(
                 (
@@ -9968,7 +10137,7 @@ mod tests {
             }
             other => panic!(
                 "a walk cut short is refused: {:?}",
-                other.map(|documents| documents.len())
+                other.map(|walk| walk.documents.len())
             ),
         }
         assert_real_documents_indexed(&indexer, "after the refusal");
@@ -10208,6 +10377,242 @@ mod tests {
                 "{options:?}: and then it settles"
             );
             assert_eq!(indexer.search("alpha", 10).expect("search").hits.len(), 1);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 9, item 1: a file still in the repository but left out by the
+    // walk dropped out of the index, and the drift audit's divergence on
+    // it out of the stale list.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_026_a_divergence_on_a_file_the_walk_leaves_out_stays_listed_with_the_reason() {
+        use crate::freshness::FreshnessTracker;
+        use crate::freshness::StaleDocument;
+        use crate::freshness::StaleReason;
+
+        // The review's two reproductions, a byte that is not UTF-8 in a
+        // specification file and an ADR grown past the document cap, and
+        // every other way one file is left out: past the file cap, split
+        // into too many documents, a symbolic link, a directory that
+        // cannot be read. One file is deleted, and one is left alone.
+        let scratch = Scratch::new("drift-record-kept");
+        let spec = scratch.path.join("spec");
+        for directory in ["adr", "runbooks"] {
+            fs::create_dir_all(spec.join(directory)).expect("create a directory");
+        }
+        let unreadable = ["spec", "EVENTS.md"].join("/");
+        let adr = ["spec", "adr", "ADR-0002-single.md"].join("/");
+        let huge = ["spec", "HUGE.md"].join("/");
+        let many = ["spec", "MANY.md"].join("/");
+        let linked = ["spec", "LINKED.md"].join("/");
+        let in_locked_dir = ["spec", "runbooks", "deploy.md"].join("/");
+        let removed = ["spec", "REMOVED.md"].join("/");
+        let kept = ["spec", "PRD.md"].join("/");
+        let mut files = vec![
+            (unreadable.clone(), "eventword"),
+            (adr.clone(), "adrword"),
+            (huge.clone(), "hugeword"),
+            (many.clone(), "manyword"),
+            (removed.clone(), "removedword"),
+            (kept.clone(), "keptword"),
+        ];
+        if cfg!(unix) {
+            files.push((linked.clone(), "linkedword"));
+            files.push((in_locked_dir.clone(), "deployword"));
+        }
+        for (relative, word) in &files {
+            fs::write(
+                scratch.path.join(relative),
+                format!("# Title {word}\n\n## Part\n\nthe {word} text\n"),
+            )
+            .expect("write a spec file");
+        }
+
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        let walk = Indexer::collect_from_repo(&scratch.path).expect("collect");
+        assert!(walk.not_indexed().is_empty(), "{:?}", walk.skipped);
+        indexer.full_rebuild(&walk.documents).expect("seed");
+        let corpus = |indexer: &Indexer<'_>| -> BTreeMap<String, String> {
+            indexer
+                .all_documents()
+                .expect("read the corpus back")
+                .into_iter()
+                .map(|(document, _)| (document.path, document.body))
+                .collect()
+        };
+        let mut tracker = FreshnessTracker::new();
+        for (path, body) in corpus(&indexer) {
+            tracker.record_verification(path, Timestamp::from_millis(1_000), body);
+        }
+        let found = Timestamp::from_millis(2_000);
+        for (relative, _) in &files {
+            tracker.record_divergence(relative.clone(), format!("DIVERGENCE {relative}"), found);
+        }
+        let before = tracker.list_stale(&corpus(&indexer), &walk.not_indexed());
+        assert_eq!(
+            before.stale.len(),
+            files.len(),
+            "the precondition: every file's divergence is listed: {before:?}"
+        );
+
+        // The edits.
+        let mut bytes = fs::read(scratch.path.join(&unreadable)).expect("read");
+        bytes.extend_from_slice(b"it\x92s a Windows-1252 apostrophe\n");
+        fs::write(scratch.path.join(&unreadable), bytes).expect("a byte that is not UTF-8");
+        fs::write(
+            scratch.path.join(&adr),
+            format!(
+                "# Title adrword\n\nthe adrword text\n{}",
+                "revisited paragraph ".repeat(4_000)
+            ),
+        )
+        .expect("an ADR grown past the document cap");
+        fs::write(
+            scratch.path.join(&huge),
+            format!("# Title hugeword\n\n{}", "h".repeat(1_100_000)),
+        )
+        .expect("a file grown past the file cap");
+        fs::write(
+            scratch.path.join(&many),
+            format!("# Title manyword\n{}", "## a\n".repeat(MAX_FILE_DOCUMENTS)),
+        )
+        .expect("a file of too many documents");
+        fs::remove_file(scratch.path.join(&removed)).expect("remove a file");
+        #[cfg(unix)]
+        let _locked = {
+            fs::remove_file(scratch.path.join(&linked)).expect("remove the file");
+            std::os::unix::fs::symlink("PRD.md", scratch.path.join(&linked))
+                .expect("put a link in its place");
+            LockedDirectory::new(spec.join("runbooks"))
+        };
+
+        let walk = Indexer::collect_from_repo(&scratch.path)
+            .expect("no file left out for want of budget, so the walk is returned");
+        indexer.incremental_sync(&walk.documents).expect("sync");
+        let current = corpus(&indexer);
+        let not_indexed = walk.not_indexed();
+        let report = tracker.list_stale(&current, &not_indexed);
+        assert_eq!(report.documents_covered, current.len());
+
+        let mut left_out = vec![
+            (unreadable.clone(), "Unreadable"),
+            (adr.clone(), "DocumentTooLarge"),
+            (huge.clone(), "FileTooLarge"),
+            (many.clone(), "FileDocumentLimit"),
+        ];
+        if cfg!(unix) {
+            left_out.push((linked.clone(), "Symlink"));
+            left_out.push((in_locked_dir.clone(), "Unreadable"));
+        }
+        for (relative, kind) in &left_out {
+            let listed = report
+                .stale
+                .iter()
+                .find(|document| &document.path == relative)
+                .unwrap_or_else(|| {
+                    panic!("{relative}: its divergence is still listed: {report:?}")
+                });
+            let StaleReason::NotIndexed {
+                skipped,
+                divergence,
+            } = &listed.reason
+            else {
+                panic!("{relative}: listed as not indexed: {listed:?}");
+            };
+            assert!(
+                format!("{skipped:?}").starts_with(kind),
+                "{relative}: with the walk's reason, {kind}: {skipped:?}"
+            );
+            assert_eq!(
+                divergence,
+                &Some((format!("DIVERGENCE {relative}"), found)),
+                "{relative}: with the drift audit's divergence"
+            );
+            let line = listed.reason.divergence();
+            assert!(
+                line.contains(&format!("DIVERGENCE {relative}"))
+                    && line.contains(&skipped.to_string()),
+                "{relative}: {line}"
+            );
+            // Every section verified in it is listed too, never read as
+            // fresh or as gone.
+            let sections: Vec<&StaleReason> = report
+                .stale
+                .iter()
+                .filter(|document| document.path.starts_with(&format!("{relative}#")))
+                .map(|document| &document.reason)
+                .collect();
+            let expected_sections = usize::from(*relative != adr) * 2;
+            assert_eq!(
+                sections.len(),
+                expected_sections,
+                "{relative}: its verified sections: {report:?}"
+            );
+            assert!(
+                sections
+                    .iter()
+                    .all(|reason| matches!(reason, StaleReason::NotIndexed { .. })),
+                "{relative}: {sections:?}"
+            );
+        }
+        assert!(
+            report
+                .stale
+                .iter()
+                .all(|document| document_file(&document.path) != removed),
+            "a file really removed is gone, and its records with it: {report:?}"
+        );
+        let kept_listed: Vec<&StaleDocument> = report
+            .stale
+            .iter()
+            .filter(|document| document_file(&document.path) == kept)
+            .collect();
+        assert_eq!(kept_listed.len(), 1, "{kept_listed:?}");
+        assert!(matches!(
+            kept_listed[0].reason,
+            StaleReason::Divergence { .. }
+        ));
+
+        // What the index holds for a file left out: none of its documents.
+        for (relative, word) in &files {
+            let found = indexer.search(word, 10).expect("search");
+            let in_index = relative == &kept;
+            assert_eq!(
+                found.hits.len(),
+                usize::from(in_index) * 2,
+                "{relative}: {found:?}"
+            );
+        }
+    }
+
+    /// A directory this process cannot list, until the guard is dropped
+    /// (Unix, by its mode), with its mode then put back so it can be
+    /// removed.
+    #[cfg(unix)]
+    struct LockedDirectory(PathBuf);
+
+    #[cfg(unix)]
+    impl LockedDirectory {
+        fn new(directory: PathBuf) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o000))
+                .expect("lock a directory");
+            assert!(
+                fs::read_dir(&directory).is_err(),
+                "this test needs a process the directory mode applies to"
+            );
+            Self(directory)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for LockedDirectory {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
         }
     }
 }

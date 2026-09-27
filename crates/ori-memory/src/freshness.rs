@@ -44,6 +44,16 @@
 //! has been verified, the verification's text still matches, and no
 //! divergence is on record.
 //!
+//! [`FreshnessTracker::list_stale`] has a fourth, for a document it has no
+//! text for because the repository walk left it out:
+//! [`StaleReason::NotIndexed`]. The file is still in the repository, so
+//! nothing on record for it is dropped: every record on a document, a file
+//! or anything under a directory the walk left out is listed with the
+//! reason the walk gave, and with the drift audit's divergence when one is
+//! on record (`list_stale`'s doc; the indexer's module doc, "A file left
+//! out is not a file removed", has what the index holds for such a file:
+//! none of its documents).
+//!
 //! # What does not make a document stale
 //!
 //! Code changing elsewhere in the repository that this document does not
@@ -81,6 +91,7 @@ use std::collections::BTreeSet;
 
 use ori_core::types::Timestamp;
 
+use crate::indexer::SkipReason;
 use crate::indexer::document_file;
 
 /// Whether one document's last verification against the code still holds:
@@ -126,12 +137,27 @@ pub enum StaleReason {
         /// When the drift audit found it.
         detected_at: Timestamp,
     },
+    /// The repository walk left the document, its file, or a directory
+    /// holding it out of the index, so its text could not be checked
+    /// against anything on record, while the file is still in the
+    /// repository. Only [`FreshnessTracker::list_stale`] reports this, for a
+    /// path it holds a record for.
+    NotIndexed {
+        /// Why the walk left it out, in the walk's own terms.
+        skipped: SkipReason,
+        /// The drift audit's divergence on record for the path, if one is:
+        /// its description and when it was found, kept and listed, never
+        /// dropped because the text could not be read.
+        divergence: Option<(String, Timestamp)>,
+    },
 }
 
 impl StaleReason {
     /// A human-readable line for a query result: the drift audit's own
-    /// wording for [`StaleReason::Divergence`], and this module's own
-    /// statement of the mechanical reason otherwise. `list_stale` uses this
+    /// wording for [`StaleReason::Divergence`] (and for a
+    /// [`StaleReason::NotIndexed`] path with a divergence on record, beside
+    /// the walk's reason), and this module's own statement of the
+    /// mechanical reason otherwise. `list_stale` uses this
     /// so every stale document it reports carries one, matching ORI-P1-026's
     /// "the stale document is listed with the divergence" for the two
     /// reasons this module can determine on its own as well as the one the
@@ -150,6 +176,19 @@ impl StaleReason {
                 description,
                 detected_at,
             } => format!("{description} (drift audit, at {detected_at})"),
+            Self::NotIndexed {
+                skipped,
+                divergence: None,
+            } => format!(
+                "not in the index, so its text could not be checked against the code: {skipped}"
+            ),
+            Self::NotIndexed {
+                skipped,
+                divergence: Some((description, detected_at)),
+            } => format!(
+                "{description} (drift audit, at {detected_at}); not in the index, so its text \
+                 could not be checked against the code: {skipped}"
+            ),
         }
     }
 }
@@ -175,9 +214,10 @@ struct TrackedDocument {
 /// One stale document, as [`FreshnessTracker::list_stale`] reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaleDocument {
-    /// The document's path: a key of the corpus `list_stale` was given, or
+    /// The document's path: a key of the corpus `list_stale` was given;
     /// the path of a file whose sections that corpus holds, for a
-    /// divergence filed against the whole file (`list_stale`'s doc).
+    /// divergence filed against the whole file; or a path on record that
+    /// the walk left out ([`StaleReason::NotIndexed`]; `list_stale`'s doc).
     pub path: String,
     /// Why it is stale.
     pub reason: StaleReason,
@@ -285,14 +325,20 @@ impl FreshnessTracker {
     }
 
     /// Checks every document in `current`, keyed by path with its text right
-    /// now, and reports the stale ones with their divergence, in path order.
+    /// now, and reports the stale ones with their divergence, in path order;
+    /// and reports every record on something the repository walk left out,
+    /// named in `not_indexed`, rather than dropping it.
     ///
     /// `current` is the live corpus a caller (the indexer's
     /// [`crate::indexer::Indexer::all_documents`], most naturally) hands in
-    /// at call time, not a set this tracker maintains itself: a document
-    /// this tracker was once told about but that no longer exists in the
-    /// repository is not reported at all, matching the indexer's own rule
-    /// that a removed document disappears rather than lingers.
+    /// at call time, not a set this tracker maintains itself. `not_indexed`
+    /// is what the walk the index was synced from left out,
+    /// [`crate::indexer::RepoWalk::not_indexed`] of
+    /// [`crate::indexer::Indexer::collect_from_repo`]'s walk: every entry
+    /// still in the repository that the walk did not read, keyed by the
+    /// document path, file path or directory path it names, with the
+    /// reason. A caller with no walk, and so nothing left out, passes an
+    /// empty map.
     ///
     /// The index's corpus is keyed by section, `<file>#<anchor>` (and a
     /// file's bare path for the text above its first heading), while the
@@ -305,10 +351,32 @@ impl FreshnessTracker {
     /// product requirements diverged read as ready, with every one of its
     /// indexed sections verified. A verification recorded at a file's path
     /// says nothing about any one section's text and makes none of them
-    /// fresh; each section is judged by its own record. Only a tracked path
-    /// whose file has nothing in `current` is gone.
+    /// fresh; each section is judged by its own record.
+    ///
+    /// A file the walk left out is still in the repository too, though
+    /// nothing of it is in `current`. Every record whose path is not in
+    /// `current` and that `not_indexed` covers (its own path, its file's
+    /// path, or a directory holding that file is a key) is listed as
+    /// [`StaleReason::NotIndexed`], with the walk's reason and any
+    /// divergence on record, whether that record is a verification, a
+    /// divergence or both: its text could not be checked, so it is not
+    /// fresh, and nothing the drift audit filed disappears while the file
+    /// exists. A review found round 8 dropping the divergence on a file one
+    /// non-UTF-8 byte, or an ADR grown past the document cap, had taken out
+    /// of the index, so the product read as ready. An entry left out with
+    /// no record on it is not listed: nothing about it was ever verified or
+    /// filed, and the walk's own list names it.
+    ///
+    /// Only a record whose file has nothing in `current` and is not covered
+    /// by `not_indexed` is gone, and not reported at all, matching the
+    /// indexer's own rule that a removed document disappears rather than
+    /// lingers.
     #[must_use]
-    pub fn list_stale(&self, current: &BTreeMap<String, String>) -> StaleReport {
+    pub fn list_stale(
+        &self,
+        current: &BTreeMap<String, String>,
+        not_indexed: &BTreeMap<String, SkipReason>,
+    ) -> StaleReport {
         let mut stale = Vec::new();
         for (path, content) in current {
             if let Freshness::Stale(reason) = self.check(path, content) {
@@ -320,7 +388,20 @@ impl FreshnessTracker {
         }
         let files: BTreeSet<&str> = current.keys().map(|key| document_file(key)).collect();
         for (path, entry) in &self.documents {
-            if current.contains_key(path) || !files.contains(path.as_str()) {
+            if current.contains_key(path) {
+                continue;
+            }
+            if let Some(skipped) = left_out(not_indexed, path) {
+                stale.push(StaleDocument {
+                    path: path.clone(),
+                    reason: StaleReason::NotIndexed {
+                        skipped: skipped.clone(),
+                        divergence: entry.divergence.clone(),
+                    },
+                });
+                continue;
+            }
+            if !files.contains(path.as_str()) {
                 continue;
             }
             if let Some((description, detected_at)) = &entry.divergence {
@@ -350,9 +431,33 @@ impl FreshnessTracker {
     }
 }
 
+/// Why the walk left out `path`, if `not_indexed` covers it: `path` itself,
+/// the file it belongs to ([`document_file`]), or a directory holding that
+/// file is a key of `not_indexed`.
+fn left_out<'a>(
+    not_indexed: &'a BTreeMap<String, SkipReason>,
+    path: &str,
+) -> Option<&'a SkipReason> {
+    if let Some(reason) = not_indexed.get(path) {
+        return Some(reason);
+    }
+    let mut enclosing = document_file(path);
+    loop {
+        if let Some(reason) = not_indexed.get(enclosing) {
+            return Some(reason);
+        }
+        enclosing = enclosing.rsplit_once('/')?.0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a walk that left nothing out hands `list_stale`.
+    fn nothing_left_out() -> BTreeMap<String, SkipReason> {
+        BTreeMap::new()
+    }
 
     fn corpus(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
         entries
@@ -382,7 +487,7 @@ mod tests {
         );
 
         let current = corpus(&[("spec/PRD.md", "the original text")]);
-        let report = tracker.list_stale(&current);
+        let report = tracker.list_stale(&current, &nothing_left_out());
 
         assert_eq!(
             report.documents_covered, 1,
@@ -410,7 +515,7 @@ mod tests {
         );
 
         let current = corpus(&[("spec/LLD.md", "unchanged text")]);
-        let report = tracker.list_stale(&current);
+        let report = tracker.list_stale(&current, &nothing_left_out());
 
         assert_eq!(
             report.documents_covered, 1,
@@ -427,7 +532,7 @@ mod tests {
         tracker.record_divergence("spec/LLD.md", "drifted", Timestamp::from_millis(2_000));
 
         let current = corpus(&[("spec/PRD.md", "fresh"), ("spec/LLD.md", "fresh once")]);
-        let report = tracker.list_stale(&current);
+        let report = tracker.list_stale(&current, &nothing_left_out());
 
         assert_eq!(report.documents_covered, 2);
         assert_eq!(report.stale.len(), 1);
@@ -529,7 +634,7 @@ mod tests {
             Timestamp::from_millis(1_000),
             "text",
         );
-        let report = tracker.list_stale(&current);
+        let report = tracker.list_stale(&current, &nothing_left_out());
 
         assert_eq!(report.documents_covered, 1);
         assert!(
@@ -634,7 +739,7 @@ mod tests {
         tracker.record_divergence(["docs", "REMOVED.md"].join("/"), "gone", found);
         tracker.record_divergence(["spec", "runbooks", "a"].join("/"), "no such file", found);
 
-        let report = tracker.list_stale(&current);
+        let report = tracker.list_stale(&current, &nothing_left_out());
         assert_eq!(report.documents_covered, 5);
         let listed: Vec<&str> = report.stale.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(
@@ -654,7 +759,7 @@ mod tests {
         tracker.record_divergence(hashed.clone(), "hashed divergence", found);
         assert!(
             tracker
-                .list_stale(&current)
+                .list_stale(&current, &nothing_left_out())
                 .stale
                 .iter()
                 .any(|document| document.path == hashed)
@@ -663,11 +768,165 @@ mod tests {
         // A verification of the file is the re-review that ends it.
         tracker.record_verification(prd.clone(), Timestamp::from_millis(3_000), "the whole file");
         let listed: Vec<String> = tracker
-            .list_stale(&current)
+            .list_stale(&current, &nothing_left_out())
             .stale
             .into_iter()
             .map(|document| document.path)
             .collect();
         assert_eq!(listed, [criteria, hashed]);
+    }
+
+    // -----------------------------------------------------------------
+    // Round 9, item 1: a record on something the walk left out, a file
+    // still in the repository, is listed with the walk's reason and any
+    // divergence, never dropped as if the file were gone.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_026_every_record_on_something_the_walk_left_out_is_listed_with_the_reason_and_the_divergence()
+     {
+        let file = |name: &str| ["spec", name].join("/");
+        let unreadable = file("EVENTS.md");
+        let adr = ["spec", "adr", "ADR-0002-single.md"].join("/");
+        let linked = file("LINKED.md");
+        let locked_dir = ["spec", "runbooks"].join("/");
+        let in_locked_dir = format!("{locked_dir}/deploy.md#deploy");
+        let untracked = file("UNTRACKED.md");
+        let removed = file("REMOVED.md");
+        let indexed = format!("{}#prd", file("PRD.md"));
+
+        let mut tracker = FreshnessTracker::new();
+        let verified = Timestamp::from_millis(1_000);
+        let found = Timestamp::from_millis(2_000);
+        tracker.record_verification(format!("{unreadable}#stream"), verified, "stream text");
+        tracker.record_divergence(unreadable.clone(), "EVENTS-DIVERGENCE", found);
+        tracker.record_verification(adr.clone(), verified, "adr text");
+        tracker.record_divergence(adr.clone(), "ADR-DIVERGENCE", found);
+        tracker.record_divergence(linked.clone(), "LINKED-DIVERGENCE", found);
+        tracker.record_verification(in_locked_dir.clone(), verified, "deploy text");
+        tracker.record_divergence(removed.clone(), "gone with its file", found);
+        tracker.record_verification(indexed.clone(), verified, "prd text");
+
+        let current = corpus(&[(indexed.as_str(), "prd text")]);
+        let not_indexed: BTreeMap<String, SkipReason> = [
+            (
+                unreadable.clone(),
+                SkipReason::Unreadable {
+                    error: "stream did not contain valid UTF-8".to_owned(),
+                },
+            ),
+            (
+                adr.clone(),
+                SkipReason::DocumentTooLarge {
+                    path: adr.clone(),
+                    byte_len: 70_000,
+                },
+            ),
+            (linked.clone(), SkipReason::Symlink),
+            (
+                locked_dir.clone(),
+                SkipReason::Unreadable {
+                    error: "permission denied".to_owned(),
+                },
+            ),
+            (untracked, SkipReason::FileTooLarge { byte_len: 2 << 20 }),
+        ]
+        .into_iter()
+        .collect();
+
+        let report = tracker.list_stale(&current, &not_indexed);
+        assert_eq!(report.documents_covered, 1);
+        let listed: Vec<(&str, &StaleReason)> = report
+            .stale
+            .iter()
+            .map(|document| (document.path.as_str(), &document.reason))
+            .collect();
+        let divergence = |text: &str| Some((text.to_owned(), found));
+        let expected: Vec<(String, StaleReason)> = vec![
+            (
+                unreadable.clone(),
+                StaleReason::NotIndexed {
+                    skipped: not_indexed[&unreadable].clone(),
+                    divergence: divergence("EVENTS-DIVERGENCE"),
+                },
+            ),
+            (
+                format!("{unreadable}#stream"),
+                StaleReason::NotIndexed {
+                    skipped: not_indexed[&unreadable].clone(),
+                    divergence: None,
+                },
+            ),
+            (
+                linked.clone(),
+                StaleReason::NotIndexed {
+                    skipped: SkipReason::Symlink,
+                    divergence: divergence("LINKED-DIVERGENCE"),
+                },
+            ),
+            (
+                adr.clone(),
+                StaleReason::NotIndexed {
+                    skipped: not_indexed[&adr].clone(),
+                    divergence: divergence("ADR-DIVERGENCE"),
+                },
+            ),
+            (
+                in_locked_dir.clone(),
+                StaleReason::NotIndexed {
+                    skipped: not_indexed[&locked_dir].clone(),
+                    divergence: None,
+                },
+            ),
+        ];
+        assert_eq!(
+            listed,
+            expected
+                .iter()
+                .map(|(path, reason)| (path.as_str(), reason))
+                .collect::<Vec<_>>(),
+            "every record on something left out is listed, in path order, with the \
+             walk's reason and its divergence; the removed file's and the fresh \
+             document's are not, and an untracked left-out file is not invented"
+        );
+        let line = report.stale[0].reason.divergence();
+        assert!(
+            line.contains("EVENTS-DIVERGENCE") && line.contains("valid UTF-8"),
+            "the line carries the drift audit's text and the walk's reason: {line}"
+        );
+        assert!(
+            report.stale[1]
+                .reason
+                .divergence()
+                .contains("not in the index"),
+            "{:?}",
+            report.stale[1]
+        );
+
+        // The same records with nothing left out: the round 8 reading, in
+        // which each of these files is gone, for comparison.
+        assert!(
+            tracker
+                .list_stale(&current, &nothing_left_out())
+                .stale
+                .is_empty()
+        );
+
+        // A re-review that verifies the file again ends its divergence; the
+        // record is still listed while the walk leaves the file out.
+        tracker.record_verification(unreadable.clone(), Timestamp::from_millis(3_000), "x");
+        let after = tracker.list_stale(&current, &not_indexed);
+        let events = after
+            .stale
+            .iter()
+            .find(|document| document.path == unreadable)
+            .expect("still listed");
+        assert_eq!(
+            events.reason,
+            StaleReason::NotIndexed {
+                skipped: not_indexed[&unreadable].clone(),
+                divergence: None,
+            }
+        );
     }
 }
