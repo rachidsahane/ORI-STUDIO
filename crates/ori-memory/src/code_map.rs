@@ -271,7 +271,20 @@
 //!   [`SkipReason::GitMetadata`] and is never opened. It is reported under
 //!   its own in-root path, never its target's, so a link and its target are
 //!   two distinct entries in [`Coverage`], the way two distinct files always
-//!   are. A symlink to a directory is never descended into either, and is
+//!   are. They are not two reads: a file is read, parsed and extracted
+//!   once, under the first of its paths opened (plain entries before links,
+//!   each in path order), and every other path that reaches it (a link to
+//!   it, a link to such a link, or, on unix, a hard link) is
+//!   [`SkipReason::SameFileAs`], naming that path, decided on the opened
+//!   handle's own device and inode (off unix, the resolved path) before a
+//!   byte is read. Until round 8 each link was read and mapped again, a
+//!   whole [`Module`] per link, so the per-file bounds under "Time" and
+//!   "Memory" held once per link, not once per file: the review of round 7
+//!   mapped one file at the size cap and 40 links to it, a checkout of
+//!   about 1 MiB, at 1.4 GB resident, 27.6 MB more per link, and nothing
+//!   capped the number of links
+//!   (`tests::ori_t_0036_links_to_one_file_are_read_once_not_once_per_link`).
+//!   A symlink to a directory is never descended into either, and is
 //!   recorded as [`SkipReason::SymlinkedDirectory`], not silently absent:
 //!   the walk saw it and made a decision about it, unlike an ordinary
 //!   subdirectory, which is not a "file" candidate at all.
@@ -406,7 +419,8 @@
 //!     were: one import name costs about two bytes of source, and the
 //!     review of round 5 measured 1.78 GB of such copies kept for one 4 MiB
 //!     Python file (`import a,a,...`) at an 850-byte path, each symlink to
-//!     the file adding as much again.
+//!     the file adding as much again (since round 8 a link to a file
+//!     already read adds one skip record instead; see "Symlinks").
 //!   - *Kept per module, the rest:* its path, at most 500 citations (above),
 //!     and its interfaces, entry points and covering tests, none of which
 //!     holds a copy of the module's path. Each of those is a fixed-size
@@ -422,7 +436,9 @@
 //!     a file at the 1 MiB default that is nothing but such a list (172 MB
 //!     at the old 8 MiB one), not counting the allocator's rounding
 //!     (`tests::ori_t_0036_retained_interface_bytes_stay_within_the_stated_factor_of_the_file`
-//!     checks the factor on that shape).
+//!     checks the factor on that shape). Every bound in this item and the
+//!     one above is per file read, and a file is read once however many
+//!     paths reach it (see "Symlinks").
 //!   - *While one file is parsed and extracted:* its bytes (at most
 //!     `max_file_bytes + 1`), tree-sitter's tree and parse state for it,
 //!     and what extraction builds, all dropped, but for what its [`Module`]
@@ -451,8 +467,13 @@
 //!   silently assumed away. The same holds for the number of entries under
 //!   `spec/`, which are listed (paths only) before any is read, and for the
 //!   number of interfaces, entry points and covering tests one module keeps,
-//!   which only its file's size bounds (see "Memory"). Races with a
-//!   live writer are out of scope; see "Threat model".
+//!   which only its file's size bounds (see "Memory"). What each entry
+//!   costs is bounded, though: its own content, read once, so a symlink or
+//!   hard link to content already read costs one [`SkippedFile`], and the
+//!   map follows the checkout's entries and its distinct content, nothing
+//!   else (until round 8 a link cost a whole parse and a whole [`Module`];
+//!   see "Symlinks"). Races with a live writer are out of scope; see
+//!   "Threat model".
 //!
 //! # Quadratic extraction, and what stays fast
 //!
@@ -502,7 +523,14 @@
 //! found. A `self` member stands for its group's prefix, resolved as the
 //! prefix is and written as the prefix (with its ` as` alias, if any);
 //! until round 7 it was walked as a path segment named `self`, so a file
-//! named `self.rs` beside the prefix's own file took its place. The text
+//! named `self.rs` beside the prefix's own file took its place. A member
+//! that starts with `self` or `super` under a prefix that is itself a run
+//! of them (`use super::{super::x::X};`, `use self::{super::B};`) climbs
+//! from the module the prefix reached, as its ungrouped path does; until
+//! round 8 it was looked up as a child module named `super`, found none,
+//! and resolved to the prefix's own file, or to the importing file itself,
+//! a complete-looking edge to the wrong module. A global group, `use
+//! ::{a};`, writes its member `::a`, as `use ::a;` does. The text
 //! spent spelling out unresolved members is capped (a long prefix over many
 //! members would otherwise cost their product); past the cap, the rest are
 //! recorded once, together, as the declaration exactly as written, in one
@@ -529,31 +557,62 @@
 //!
 //! - **Rust.** `mod name;` is looked up where Rust looks: `name.rs` or
 //!   `name/mod.rs` in the declaring file's directory, below its stem unless
-//!   it is `mod.rs`, `lib.rs` or `main.rs`, below each enclosing inline
-//!   module's name. A `use` path starting with `crate`, `self` or `super` is
-//!   walked from the file's crate root (the nearest directory above it
-//!   holding `lib.rs` or `main.rs`), from the module it is written
-//!   in, or one module up per `super`, and resolves to the deepest file
-//!   along it; the module a file is, is its path below its crate root. Any
-//!   other path (`std::`, another crate's name, a member of the same
-//!   workspace included, a name in scope) is not looked up. Declarations
-//!   are found at any depth, inside inline modules and function bodies as
-//!   well as at the top level. Not followed: `#[path]` attributes,
-//!   `include!`, and a binary under `src/bin/`, which is read as a module
-//!   of the library beside it.
-//! - **TypeScript.** A relative specifier (`./`, `../`) is looked up as
-//!   `.ts`, `.tsx`, `index.ts` or `index.tsx`; any other (a package, a
-//!   `tsconfig` path alias, an absolute path) is not, since the
-//!   `tsconfig.json` and `node_modules` that decide it are not read. Only
-//!   top-level `import` and `export ... from` statements are read; a
-//!   dynamic `import()` or a `require` call is not an edge.
+//!   it is `mod.rs` or a crate root file, below each enclosing inline
+//!   module's name. A crate root file is one Cargo roots a crate at by its
+//!   own conventions: `lib.rs` or `main.rs`; each `*.rs` directly in a
+//!   package's `tests`, `examples` or `benches` directory, or in its
+//!   `src/bin`; and a package's `build.rs`, where a package is a
+//!   directory holding `Cargo.toml`, `src/lib.rs` or `src/main.rs`
+//!   (`rust_crate_root_of`). Until round 8 only `lib.rs` and `main.rs`
+//!   were, so a `mod common;` in
+//!   `tests/it.rs` was looked up as `tests/it/common.rs`, where Rust never
+//!   looks, and a binary under `src/bin/` was read as a module of the
+//!   library beside it. A `use` path starting with `crate`, `self` or
+//!   `super` is walked from the file's crate root (the directory of its
+//!   crate root file: the nearest of those target directories above it, or
+//!   directory holding `lib.rs` or `main.rs`), from the module it is
+//!   written in, or one module up per `super`, and resolves to the deepest
+//!   file along it; the module a file is, is its path below its crate
+//!   root. Any other path (`std::`, another crate's name, a member of the
+//!   same workspace included, a name in scope) is not looked up.
+//!   Declarations are found at any depth, inside inline modules and
+//!   function bodies as well as at the top level. Not followed: `#[path]`
+//!   attributes, `include!`, a target a `Cargo.toml` places elsewhere with
+//!   `path = ...` (no manifest is read), and the target directories of a
+//!   package whose own directory is outside the mapped root.
+//! - **TypeScript.** A relative specifier (`./`, `../`, `.`, `..`) is
+//!   looked up in TypeScript's own order (`resolve_ts_relative`): a `.js`,
+//!   `.jsx`, `.mjs` or `.cjs` extension replaced by its TypeScript
+//!   counterpart (the `./b.js` a `NodeNext` or ESM project writes for
+//!   `b.ts`) or a declaration file, then `.ts`, `.tsx`, `.d.ts`, `.js` or
+//!   `.jsx` added, then the specifier as written (a JSON file, a
+//!   stylesheet), then a directory's `index`. Until round 8 only `.ts`,
+//!   `.tsx`, `index.ts` and `index.tsx` were added to the specifier as
+//!   written, so every `./b.js` came out [`EdgeResolution::NotFound`], with
+//!   `b.ts` a module of the same map. A target it finds may be a file this
+//!   map does not parse (`.mts`, `.cts`, `.js`, `.json`); the edge is
+//!   still [`EdgeResolution::Resolved`], a file the walk found. Any other
+//!   specifier (a package, a `tsconfig` path alias, an absolute path) is
+//!   not looked up, since the `tsconfig.json` and `node_modules` that
+//!   decide it are not read. Only top-level `import` and `export ... from`
+//!   statements are read; a dynamic `import()` or a `require` call is not
+//!   an edge.
 //! - **Python.** A relative import (`from . import a`, `from ..pkg import
 //!   b`, `from . import *`) is looked up against the importing file's own
-//!   directory, the mapped root counting as a package, and never above it.
-//!   An absolute import (`import app.core`, `from app.core import cache`)
-//!   is not looked up: which directory is on `sys.path` is not in the
-//!   source. Only top-level statements are read, so an import inside a
-//!   function, a `try` block or an `if TYPE_CHECKING:` block is not an edge.
+//!   directory, the mapped root counting as a package, and never above it:
+//!   a package (`__init__`) before a module file of the same name, as
+//!   Python's own path finder does; from a source file the source (`.py`)
+//!   before a stub (`.pyi`), and from a stub the stub first, as a type
+//!   checker reads it. A name imported from the package itself (`from .
+//!   import a`) that is no submodule is taken from the package's own
+//!   `__init__`, which Python looks in first. Until round 8 neither a stub
+//!   nor the `__init__` was looked for, so every import between the stubs
+//!   of a stub package, and every name from a package's `__init__`, came
+//!   out [`EdgeResolution::NotFound`]. An absolute import (`import
+//!   app.core`, `from app.core import cache`) is not looked up: which
+//!   directory is on `sys.path` is not in the source. Only top-level
+//!   statements are read, so an import inside a function, a `try` block or
+//!   an `if TYPE_CHECKING:` block is not an edge.
 //! - **Go.** No import is looked up: a Go import path names a package, a
 //!   directory, and placing one inside the repository needs its `go.mod`,
 //!   which is not read.
@@ -640,6 +699,10 @@
 //! edge to either file from run to run; it is now built in sorted order
 //! from paths that cannot collide
 //! (`tests::ori_t_0036_the_rust_index_is_the_same_whatever_order_the_path_set_yields`).
+//!
+//! Which of a file's several paths is the one read (see "Symlinks") is
+//! decided the same way on every run: plain entries before links, each in
+//! path order, never by a hash set's iteration.
 //!
 //! One input is not the repository: time. A stage that reaches its
 //! deadline records that it did ([`SkipReason::TimedOut`] for a file,
@@ -1096,6 +1159,24 @@ pub enum SkipReason {
         /// The budget that ran out, in bytes.
         budget: u64,
     },
+    /// It is the same file as another entry of the walk, which this map
+    /// read in its place, so it was not read, parsed or extracted again: a
+    /// symlink to a file the map already read (its target, when the walk
+    /// found that as a plain file, or an earlier link to the same target),
+    /// or, on unix, a hard link to one. Decided by the opened handle's own
+    /// device and inode on unix, and by the resolved path elsewhere, before
+    /// anything is read. Plain entries are read before symlinks, each in
+    /// path order, so a link's target is the one mapped whenever the walk
+    /// found it. Until round 8 every link was read and parsed in full again,
+    /// and kept its own [`Module`], so one file at the size cap and many
+    /// links to it (a checkout of about 1 MiB) could demand any amount of
+    /// memory and time.
+    SameFileAs {
+        /// The path, relative to the mapped root, the file was read under:
+        /// its [`Module`], or its own [`SkippedFile`] entry saying why it
+        /// was not mapped.
+        path: String,
+    },
 }
 
 impl fmt::Display for SkipReason {
@@ -1117,6 +1198,9 @@ impl fmt::Display for SkipReason {
                     f,
                     "not scanned: the spec/ corpus used up its {budget} byte budget first"
                 )
+            }
+            Self::SameFileAs { path } => {
+                write!(f, "the same file as {path}, read under that path")
             }
         }
     }
@@ -1348,9 +1432,23 @@ pub fn build_code_map_with_options(root: &Path, options: &CodeMapOptions) -> Res
     let mut skipped: Vec<SkippedFile> = walk.pre_skipped;
     let mut files_parsed_clean = 0usize;
     let mut files_parsed_with_errors = 0usize;
+    let mut read_under = ReadUnder::new();
 
-    for file in &walk.files {
-        match process_file(file, &known, &rust_index, options, &root_canon) {
+    // Plain entries first, then symlinks, each in path order: a file is read
+    // once, under the first of its paths opened, so a link's target is the
+    // path that is mapped whenever the walk found it (see
+    // `SkipReason::SameFileAs`).
+    let plain = walk.files.iter().filter(|file| !file.was_symlink);
+    let links = walk.files.iter().filter(|file| file.was_symlink);
+    for file in plain.chain(links) {
+        match process_file(
+            file,
+            &known,
+            &rust_index,
+            options,
+            &root_canon,
+            &mut read_under,
+        ) {
             Ok(module) => {
                 if module.parsed_with_errors {
                     files_parsed_with_errors += 1;
@@ -2083,14 +2181,46 @@ fn per_file_budget(options: &CodeMapOptions, file_bytes: u64) -> Duration {
 /// edge's [`EdgeTarget`], so a resolved edge never copies a path.
 type KnownPaths = HashSet<Arc<str>>;
 
+/// What identifies one file's content whatever path reaches it: its device
+/// and inode on unix, read from the opened handle.
+#[cfg(unix)]
+type ContentIdentity = (u64, u64);
+
+/// What identifies one file's content whatever path reaches it: its
+/// resolved path, off unix, where `std` has no stable file index to read
+/// (a hard link is then not recognised as the file it shares content with).
+#[cfg(not(unix))]
+type ContentIdentity = PathBuf;
+
+/// Every file already read in this map, by [`ContentIdentity`], and the
+/// path it was read under: the walk's own allocation of that path, shared.
+type ReadUnder = HashMap<ContentIdentity, Arc<str>>;
+
+/// `meta`'s [`ContentIdentity`]: its device and inode, from the handle.
+#[cfg(unix)]
+fn content_identity(meta: &fs::Metadata, _resolved: &Path) -> ContentIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+    (meta.dev(), meta.ino())
+}
+
+/// `resolved`'s [`ContentIdentity`]: the resolved path itself.
+#[cfg(not(unix))]
+fn content_identity(_meta: &fs::Metadata, resolved: &Path) -> ContentIdentity {
+    resolved.to_path_buf()
+}
+
 /// Turns one candidate file into a [`Module`], or the [`SkipReason`] it was
-/// skipped for.
+/// skipped for. `read_under` is every file already read in this map, and
+/// gains this one: a file already in it is [`SkipReason::SameFileAs`],
+/// decided on the opened handle before anything is read, so one file is
+/// read, parsed and extracted at most once however many paths reach it.
 fn process_file(
     file: &CandidateFile,
     known: &KnownPaths,
     rust_index: &RustModuleIndex,
     options: &CodeMapOptions,
     root_canon: &Path,
+    read_under: &mut ReadUnder,
 ) -> std::result::Result<Module, SkipReason> {
     let language = language_of(&file.rel).ok_or(SkipReason::UnsupportedLanguage)?;
 
@@ -2105,7 +2235,7 @@ fn process_file(
     // review of the third round found the symlink branch still opening
     // blocking, and hung it forever that way. What each branch does beyond
     // that:
-    let (opened, meta) = if file.was_symlink {
+    let (opened, meta, identity) = if file.was_symlink {
         // This entry was already a symlink when the walk validated it
         // in-root and outside `.git`. Re-validating immediately before this
         // open narrows that window from "the whole walk plus every earlier
@@ -2121,15 +2251,32 @@ fn process_file(
         if resolved_path_enters_git(root_canon, &resolved) {
             return Err(SkipReason::GitMetadata);
         }
-        open_regular_file(&file.abs, true)?
+        let (opened, meta) = open_regular_file(&file.abs, true)?;
+        let identity = content_identity(&meta, &resolved);
+        (opened, meta, identity)
     } else {
         // This entry was a plain, non-symlink file when the walk saw it: it
         // was never meant to follow a symlink at all, so if the path now
         // names one (swapped in after the walk), the open itself refuses it
         // on every platform this was verified on; see
         // `open_regular_file_no_follow`'s doc for which those are.
-        open_regular_file(&file.abs, false)?
+        let (opened, meta) = open_regular_file(&file.abs, false)?;
+        let identity = content_identity(&meta, &file.abs);
+        (opened, meta, identity)
     };
+
+    // Read once, whatever reaches it: before round 8 each link to a file
+    // (and each hard link) was read, parsed and extracted in full again,
+    // and kept a `Module` of its own.
+    if let Some(first) = read_under.get(&identity) {
+        return Err(SkipReason::SameFileAs {
+            path: first.to_string(),
+        });
+    }
+    let own_path = known
+        .get(file.rel.as_str())
+        .map_or_else(|| Arc::from(file.rel.as_str()), Arc::clone);
+    read_under.insert(identity, own_path);
 
     let deadline = Instant::now() + per_file_budget(options, meta.len());
 
@@ -2525,8 +2672,10 @@ fn rust_is_public(node: Node) -> bool {
 
 /// The directory `use crate::...` paths in `rel` resolve against: the
 /// nearest ancestor of `rel` (walking up towards the mapped root, `rel`'s own
-/// directory included) that itself directly contains a `lib.rs` or
-/// `main.rs`, empty string when that ancestor is the mapped root itself.
+/// directory included) that is a Cargo target directory (see
+/// [`rust_crate_root_of`]) or itself directly contains a `lib.rs` or
+/// `main.rs`, empty string when that ancestor is the mapped root itself;
+/// for a package's `build.rs`, the package's own directory.
 ///
 /// `None` when no such ancestor exists among the files this map saw, which
 /// happens when the mapped root is neither a crate's own `src/` directory
@@ -2539,22 +2688,99 @@ fn rust_is_public(node: Node) -> bool {
 /// file's `crate::` paths resolve against its own nearest crate root, not a
 /// single global guess, which also gives each crate in a mapped workspace
 /// its own correct answer.
+///
+/// Test-only since round 8: resolution goes through
+/// [`rust_crate_root_of`], which also says whether `rel` is its crate's
+/// root file. This is that function's directory alone, which the crate-root
+/// tests call.
+#[cfg(test)]
 fn rust_crate_root(rel: &str, known: &KnownPaths) -> Option<String> {
+    rust_crate_root_of(rel, known).map(|root| root.dir)
+}
+
+/// Where one Rust file's crate is rooted, as [`rust_crate_root_of`] found
+/// it.
+struct RustCrateRoot {
+    /// The directory `crate::` paths walk from, root-relative, empty for
+    /// the mapped root.
+    dir: String,
+    /// Whether the file is its crate's root file itself: its module path
+    /// is empty, and its `mod name;` names `name.rs` or `name/mod.rs`
+    /// beside it, in `dir`, not below its own stem.
+    is_root_file: bool,
+}
+
+/// Whether `dir` (root-relative, empty for the mapped root) is a Cargo
+/// package's own directory, as far as the walk's paths show: it holds
+/// `Cargo.toml`, `src/lib.rs` or `src/main.rs`. The manifest itself is
+/// not read.
+fn rust_is_package_dir(dir: &str, known: &KnownPaths) -> bool {
+    ["Cargo.toml", "src/lib.rs", "src/main.rs"]
+        .iter()
+        .any(|name| known.contains(join_dir(dir, name).as_str()))
+}
+
+/// Whether the directory whose components are `dir` is one Cargo
+/// discovers crate roots in, one per `*.rs` file directly inside it: a
+/// package's `tests`, `examples` or `benches` directory, or its `src/bin`.
+fn rust_is_target_dir(dir: &[String], known: &KnownPaths) -> bool {
+    let package = match dir {
+        [package @ .., last] if matches!(last.as_str(), "tests" | "examples" | "benches") => {
+            package
+        }
+        [package @ .., src, bin] if src == "src" && bin == "bin" => package,
+        _ => return false,
+    };
+    rust_is_package_dir(&package.join("/"), known)
+}
+
+/// Where `rel`'s crate is rooted, by Cargo's own conventions for where a
+/// crate root file lives, read from the walk's paths alone (no manifest is
+/// read, so a target a `Cargo.toml` moves elsewhere with `path = ...` is
+/// not found):
+///
+/// - a package's `build.rs` is the root of its own crate, beside it;
+/// - every `*.rs` directly in a package's `tests`, `examples` or `benches`
+///   directory, or in its `src/bin`, is a crate root of its own, and every
+///   file below such a directory belongs to a crate rooted there (a
+///   subdirectory holding its own `main.rs`, `examples/demo/main.rs` say,
+///   is a crate root directory itself, found first on the way up);
+/// - otherwise, the nearest directory directly holding a `lib.rs` or
+///   `main.rs` (the file itself when it is one of them).
+///
+/// A package directory is one [`rust_is_package_dir`] recognises. Until
+/// round 8 only the last rule existed, so a `mod common;` in
+/// `tests/it.rs` was looked up as `tests/it/common.rs`, below the file's
+/// stem, where Rust never looks: the shared-test-helper layout
+/// `tests/common/mod.rs` came out [`EdgeResolution::NotFound`], and a file
+/// planted at `tests/it/common.rs` came out as a resolved edge to the wrong
+/// module. A binary under `src/bin/` was read as a module of the library
+/// beside it.
+fn rust_crate_root_of(rel: &str, known: &KnownPaths) -> Option<RustCrateRoot> {
+    let (own_dir, file_name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if file_name == "build.rs" && rust_is_package_dir(own_dir, known) {
+        return Some(RustCrateRoot {
+            dir: own_dir.to_owned(),
+            is_root_file: true,
+        });
+    }
     let mut dir = dir_components(rel);
     loop {
         let prefix = dir.join("/");
-        let lib = if prefix.is_empty() {
-            "lib.rs".to_owned()
-        } else {
-            format!("{prefix}/lib.rs")
-        };
-        let main = if prefix.is_empty() {
-            "main.rs".to_owned()
-        } else {
-            format!("{prefix}/main.rs")
-        };
-        if known.contains(lib.as_str()) || known.contains(main.as_str()) {
-            return Some(prefix);
+        let directly_in = prefix == own_dir;
+        if rust_is_target_dir(&dir, known) {
+            return Some(RustCrateRoot {
+                dir: prefix,
+                is_root_file: directly_in,
+            });
+        }
+        if known.contains(join_dir(&prefix, "lib.rs").as_str())
+            || known.contains(join_dir(&prefix, "main.rs").as_str())
+        {
+            return Some(RustCrateRoot {
+                dir: prefix,
+                is_root_file: directly_in && matches!(file_name, "lib.rs" | "main.rs"),
+            });
         }
         if dir.is_empty() {
             return None;
@@ -2680,9 +2906,9 @@ impl RustModuleIndex {
         self.as_file.as_ref().or(self.as_mod_dir.as_ref())
     }
 
-    /// The trie node standing for `crate_root` (from [`rust_crate_root`]),
-    /// where every `use crate::...` path's walk starts. `None` when no Rust
-    /// file lives under it at all.
+    /// The trie node standing for `crate_root` (the directory
+    /// [`rust_crate_root_of`] found), where every `use crate::...` path's
+    /// walk starts. `None` when no Rust file lives under it at all.
     fn crate_root_node(&self, crate_root: &str) -> Option<&Self> {
         let mut node = self;
         for seg in crate_root.split('/').filter(|s| !s.is_empty()) {
@@ -2732,11 +2958,12 @@ impl RustModuleIndex {
         (cursor, true)
     }
 
-    /// Longest-prefix match of `crate_root` (from [`rust_crate_root`]) then
-    /// `segments`, one hop per segment: O(total segment count), not O(count
-    /// squared). `crate_root` alone, with no further segment, is never a
-    /// resolution by itself, matching the original search's `take` range
-    /// (which never tried zero segments either). Checks `deadline` the way
+    /// Longest-prefix match of `crate_root` (a directory
+    /// [`rust_crate_root_of`] found) then `segments`, one hop per segment:
+    /// O(total segment count), not O(count squared). `crate_root` alone,
+    /// with no further segment, is never a resolution by itself, matching
+    /// the original search's `take` range (which never tried zero segments
+    /// either). Checks `deadline` the way
     /// [`RustModuleIndex::advance`] does, and returns whatever was found
     /// before it passed; see that function for why that is never a wrong
     /// answer presented as final.
@@ -2803,8 +3030,9 @@ struct RustScope<'i> {
     crate_cursor: Option<TrieCursor<'i>>,
     /// The trie node of the directory a `mod name;` written in this module
     /// names its file in (`name.rs` or `name/mod.rs` below it): the file's
-    /// own directory, plus its stem unless it is `mod.rs`, `lib.rs` or
-    /// `main.rs`, plus each enclosing inline module's name. `None` for an
+    /// own directory, plus its stem unless it is `mod.rs` or its crate's
+    /// root file (see [`rust_crate_root_of`]), plus each enclosing inline
+    /// module's name. `None` for an
     /// ancestor, where no declaration of this file is written, and when no
     /// Rust file lives under that directory.
     mod_node: Option<&'i RustModuleIndex>,
@@ -2813,23 +3041,26 @@ struct RustScope<'i> {
 /// The scopes of `rel`'s own module and of each ancestor up to its crate
 /// root (the root first, `rel`'s own last), and the index of its own;
 /// `None` when `deadline` passed while they were built. `crate_root` is
-/// what [`rust_crate_root`] found for `rel`, and `crate_start` that
+/// what [`rust_crate_root_of`] found for `rel`, and `crate_start` its
 /// directory's trie node. The module path below the crate root is the
 /// file's directories there, then its stem, except that `mod.rs` owns its
-/// directory and `lib.rs` or `main.rs` directly in the crate root is the
-/// crate root itself. Without a crate root there is one scope, with no
+/// directory and a crate root file (`lib.rs` or `main.rs` directly in the
+/// crate root, or any file Cargo roots a crate at: a target such as
+/// `tests/it.rs`, or `build.rs`) is the crate root itself, and owns its
+/// directory too. Without a crate root there is one scope, with no
 /// ancestor and no crate walk, so `crate::`, `self::` and `super::` paths
 /// all resolve to nothing, and only `mod name;` is looked up.
 fn rust_file_scopes<'i>(
     rel: &str,
-    crate_root: Option<&str>,
+    crate_root: Option<&RustCrateRoot>,
     crate_start: Option<&'i RustModuleIndex>,
     index: &'i RustModuleIndex,
     deadline: Instant,
 ) -> Option<(Vec<RustScope<'i>>, usize)> {
     let (dir, file_name) = rel.rsplit_once('/').unwrap_or(("", rel));
     let stem = file_name.strip_suffix(".rs").unwrap_or(file_name);
-    let owns_directory = matches!(stem, "mod" | "lib" | "main");
+    let is_crate_root_file = crate_root.is_some_and(|root| root.is_root_file);
+    let owns_directory = stem == "mod" || is_crate_root_file;
     let mut mod_node = Some(index);
     for segment in dir
         .split('/')
@@ -2846,13 +3077,12 @@ fn rust_file_scopes<'i>(
         };
         return Some((vec![own], 0));
     };
-    let below = if crate_root.is_empty() {
+    let below = if crate_root.dir.is_empty() {
         dir
     } else {
-        dir.strip_prefix(crate_root)
+        dir.strip_prefix(crate_root.dir.as_str())
             .map_or("", |rest| rest.trim_start_matches('/'))
     };
-    let is_crate_root_file = below.is_empty() && matches!(stem, "lib" | "main");
     let mut scopes = vec![RustScope {
         parent: None,
         crate_cursor: Some(TrieCursor {
@@ -2905,12 +3135,39 @@ enum UseRoot<'i> {
     /// included), `std`, or a name in scope. Never looked up:
     /// [`EdgeResolution::NotAttempted`].
     Untracked,
-    /// The path starts with `crate`, `self` or `super`, and its walk
-    /// through the index has reached this far.
+    /// Every segment so far is `self` or `super`: the path stands at a
+    /// module, the scope the declaration is written in or one of its
+    /// ancestors (`None` past the crate root, which resolves nothing), and
+    /// `cursor` is that module's own walk. A `self` or `super` segment
+    /// after it still climbs, as it does at the start of a path: that is
+    /// what makes `use super::{super::x::X};` the same edge as `use
+    /// super::super::x::X;`. Until round 8 a group's `super::` prefix left
+    /// its members an ordinary walk, and a member starting with `super`
+    /// was looked up as a child module named `super`, so it resolved to the
+    /// prefix's own file, a complete-looking edge to the wrong module.
+    AtScope {
+        /// The module the path stands at, an index into the file's scopes.
+        scope: Option<usize>,
+        /// That module's walk through the index.
+        cursor: TrieCursor<'i>,
+    },
+    /// The path starts with `crate`, `self` or `super`, has a named segment
+    /// after its leading run of those, and its walk through the index has
+    /// reached this far.
     Tracked(TrieCursor<'i>),
 }
 
 impl<'i> UseRoot<'i> {
+    /// The path standing at `scope`, of the scopes in `context`.
+    fn at_scope(scope: Option<usize>, context: UseContext<'_, 'i>) -> Self {
+        Self::AtScope {
+            scope,
+            cursor: scope
+                .and_then(|index| context.scopes[index].crate_cursor)
+                .unwrap_or(TrieCursor::DEAD),
+        }
+    }
+
     /// The file a path whose segments are all taken names, or why it names
     /// none.
     fn outcome(self) -> std::result::Result<&'i Arc<str>, EdgeResolution> {
@@ -2918,8 +3175,16 @@ impl<'i> UseRoot<'i> {
             Self::Tracked(TrieCursor {
                 best: Some(resolved),
                 ..
-            }) => Ok(resolved),
-            Self::Tracked(_) => Err(EdgeResolution::NotFound),
+            })
+            | Self::AtScope {
+                cursor:
+                    TrieCursor {
+                        best: Some(resolved),
+                        ..
+                    },
+                ..
+            } => Ok(resolved),
+            Self::Tracked(_) | Self::AtScope { .. } => Err(EdgeResolution::NotFound),
             Self::Undecided | Self::Untracked => Err(EdgeResolution::NotAttempted),
         }
     }
@@ -2929,11 +3194,15 @@ impl<'i> UseRoot<'i> {
 /// decide how it is rooted: `crate` starts at the file's crate root; a run
 /// of `self` and `super` starts at the scope the declaration is written in,
 /// one scope up per `super` (past the crate root, a walk that resolves
-/// nothing); anything else is not tracked. A tracked path then advances
-/// its walk through the index (see [`RustModuleIndex::advance`]). The
-/// `bool` is `false` when `deadline` cut the walk short. Until round 7 only
-/// `crate` was tracked, and a `self::` or `super::` path was recorded as
-/// if it named something outside the repository.
+/// nothing); anything else is not tracked. A path still standing at a scope
+/// ([`UseRoot::AtScope`], the prefix of a group such as `super::{...}`)
+/// takes a further run of `self` and `super` the same way, from the scope
+/// it reached, so a grouped member climbs exactly as its ungrouped path
+/// does. A tracked path then advances its walk through the index (see
+/// [`RustModuleIndex::advance`]). The `bool` is `false` when `deadline` cut
+/// the walk short. Until round 7 only `crate` was tracked, and a `self::`
+/// or `super::` path was recorded as if it named something outside the
+/// repository.
 fn extend_use_root<'i>(
     root: UseRoot<'i>,
     segments: &[&str],
@@ -2950,30 +3219,38 @@ fn extend_use_root<'i>(
                 }),
                 &segments[1..],
             ),
-            Some("self" | "super") => {
-                let mut scope = Some(context.scope);
-                let mut taken = 0usize;
-                for &segment in segments {
-                    if taken.is_multiple_of(256) && Instant::now() >= deadline {
-                        return (UseRoot::Undecided, false);
-                    }
-                    match segment {
-                        "self" => {}
-                        "super" => {
-                            scope = scope.and_then(|index| context.scopes[index].parent);
-                        }
-                        _ => break,
-                    }
-                    taken += 1;
-                }
-                let cursor = scope
-                    .and_then(|index| context.scopes[index].crate_cursor)
-                    .unwrap_or(TrieCursor::DEAD);
-                (UseRoot::Tracked(cursor), &segments[taken..])
-            }
+            Some("self" | "super") => (UseRoot::at_scope(Some(context.scope), context), segments),
             Some(_) => return (UseRoot::Untracked, true),
         },
         decided => (decided, segments),
+    };
+    let (root, rest) = match root {
+        UseRoot::AtScope { scope, .. } => {
+            let mut scope = scope;
+            let mut taken = 0usize;
+            for &segment in rest {
+                if taken.is_multiple_of(256) && Instant::now() >= deadline {
+                    return (root, false);
+                }
+                match segment {
+                    "self" => {}
+                    "super" => {
+                        scope = scope.and_then(|index| context.scopes[index].parent);
+                    }
+                    _ => break,
+                }
+                taken += 1;
+            }
+            let at = UseRoot::at_scope(scope, context);
+            let rest = &rest[taken..];
+            match at {
+                UseRoot::AtScope { cursor, .. } if !rest.is_empty() => {
+                    (UseRoot::Tracked(cursor), rest)
+                }
+                _ => return (at, true),
+            }
+        }
+        other => (other, rest),
     };
     match root {
         UseRoot::Tracked(cursor) => {
@@ -3102,11 +3379,10 @@ fn render_use_member(
     parts.reverse();
     match self_tail {
         Some(tail) => {
-            let mut rendered = if parts.is_empty() {
-                "self".to_owned()
-            } else {
-                parts.join("::")
-            };
+            let mut rendered = parts.join("::");
+            if rendered.is_empty() {
+                rendered.push_str("self");
+            }
             rendered.push_str(tail);
             rendered
         }
@@ -3213,8 +3489,19 @@ fn rust_use_edges(
                     continue;
                 };
                 let Some(path) = node.child_by_field_name("path") else {
-                    // `use ::{a, b};`: no prefix of its own.
-                    stack.push((list, root, prefix));
+                    // `use ::{a, b};`: a global path, whose prefix is the
+                    // empty text before its `::`, so a member is written
+                    // `::a`, as `use ::a;` records it (until round 8 it
+                    // was `a`). How the members resolve is unchanged: the
+                    // ungrouped path's segments do not include the `::`
+                    // either.
+                    let rendered_len = prefix.map_or(0, |index| prefixes[index].rendered_len + 2);
+                    prefixes.push(UsePrefix {
+                        parent: prefix,
+                        text: "",
+                        rendered_len,
+                    });
+                    stack.push((list, root, Some(prefixes.len() - 1)));
                     continue;
                 };
                 let (root, completed) =
@@ -3262,9 +3549,12 @@ fn rust_use_edges(
                 }
                 let member = text(node, source);
                 let prefix_len = prefix.map_or(0, |index| prefixes[index].rendered_len);
+                // Exactly the length `render_use_member` gives, so the
+                // budget counts what is actually spent: a `self` member is
+                // its prefix, or `self` when the prefix renders empty.
                 let rendered_len = match (prefix, self_tail) {
-                    (Some(_), Some(tail)) => prefix_len + tail.len(),
-                    (None, Some(tail)) => "self".len() + tail.len(),
+                    (_, Some(tail)) if prefix_len == 0 => "self".len() + tail.len(),
+                    (_, Some(tail)) => prefix_len + tail.len(),
                     (Some(_), None) => prefix_len + 2 + member.len(),
                     (None, None) => member.len(),
                 };
@@ -3388,17 +3678,13 @@ fn extract_rust(
     deadline: Instant,
 ) -> (Extracted, bool) {
     let mut out = Extracted::new();
-    let crate_root = rust_crate_root(rel, known);
+    let crate_root = rust_crate_root_of(rel, known);
     let crate_start = crate_root
-        .as_deref()
-        .and_then(|crate_root| rust_index.crate_root_node(crate_root));
-    let Some((mut scopes, file_scope)) = rust_file_scopes(
-        rel,
-        crate_root.as_deref(),
-        crate_start,
-        rust_index,
-        deadline,
-    ) else {
+        .as_ref()
+        .and_then(|crate_root| rust_index.crate_root_node(&crate_root.dir));
+    let Some((mut scopes, file_scope)) =
+        rust_file_scopes(rel, crate_root.as_ref(), crate_start, rust_index, deadline)
+    else {
         return (out, false);
     };
     let mut cursor = root.walk();
@@ -3559,30 +3845,109 @@ fn string_literal_text<'a>(node: Node<'a>, source: &'a [u8]) -> &'a str {
     text(node, source).trim_matches(|c| c == '"' || c == '\'' || c == '`')
 }
 
+/// The file a relative TypeScript specifier names, looked up among the
+/// files the walk found in the order TypeScript's own resolver tries them
+/// (its `tryAddingExtensions`, with TypeScript, declaration and JavaScript
+/// files all allowed):
+///
+/// 1. When the specifier's last segment has an extension, that extension
+///    replaced: `.js` or `.ts` by `.ts`, `.tsx`, `.d.ts`, `.js`, `.jsx`;
+///    `.jsx` or `.tsx` by `.tsx`, `.ts`, `.d.ts`, `.jsx`, `.js`; `.mjs` or
+///    `.mts` by `.mts`, `.d.mts`, `.mjs`; `.cjs` or `.cts` by `.cts`,
+///    `.d.cts`, `.cjs`; `.json` by `.d.json.ts`, `.json`; any other `.x`
+///    by `.d.x.ts`. This is what resolves the `./b.js` a `NodeNext` or ESM
+///    project is required to write for `b.ts`.
+/// 2. `.ts`, `.tsx`, `.d.ts`, `.js`, `.jsx` added to the whole specifier.
+/// 3. The specifier exactly as written (a stylesheet, an asset, a file with
+///    no extension), when it names a file the walk found.
+/// 4. The specifier as a directory: its `index` with each of the
+///    extensions in step 2.
+///
+/// A specifier ending in `/` names a directory, and only step 4 applies.
+/// Until round 8 only `.ts`, `.tsx`, `index.ts` and `index.tsx` were added
+/// to the specifier as written, so every `./b.js` import of an ESM
+/// TypeScript repository came out [`EdgeResolution::NotFound`], with `b.ts`
+/// a module of the same map. One candidate buffer is reused, so a lookup
+/// allocates once however many candidates it tries.
 fn resolve_ts_relative<'k>(
     rel: &str,
     specifier: &str,
     known: &'k KnownPaths,
 ) -> Option<&'k Arc<str>> {
+    const ADDED: [&str; 5] = [".ts", ".tsx", ".d.ts", ".js", ".jsx"];
+    const FROM_JSX: [&str; 5] = [".tsx", ".ts", ".d.ts", ".jsx", ".js"];
+    const FROM_MJS: [&str; 3] = [".mts", ".d.mts", ".mjs"];
+    const FROM_CJS: [&str; 3] = [".cts", ".d.cts", ".cjs"];
+    const FROM_JSON: [&str; 2] = [".d.json.ts", ".json"];
+
     let base = dir_components(rel);
     let joined = normalize_join(&base, specifier)?;
-    [
-        format!("{joined}.ts"),
-        format!("{joined}.tsx"),
-        format!("{joined}/index.ts"),
-        format!("{joined}/index.tsx"),
-    ]
-    .into_iter()
-    .find_map(|candidate| known.get(candidate.as_str()))
+    let mut candidate = String::with_capacity(joined.len() + 16);
+    let mut look = |parts: &[&str]| -> Option<&'k Arc<str>> {
+        candidate.clear();
+        parts.iter().for_each(|part| candidate.push_str(part));
+        known.get(candidate.as_str())
+    };
+
+    if !specifier.ends_with('/') && !joined.is_empty() {
+        let file_name = joined.rsplit('/').next().unwrap_or(&joined);
+        let extension = file_name
+            .rfind('.')
+            .filter(|&dot| dot > 0)
+            .map(|dot| &file_name[dot + 1..]);
+        if let Some(extension) = extension {
+            let stem = &joined[..joined.len() - extension.len() - 1];
+            let replacements: &[&str] = match extension {
+                "js" | "ts" => &ADDED,
+                "jsx" | "tsx" => &FROM_JSX,
+                "mjs" | "mts" => &FROM_MJS,
+                "cjs" | "cts" => &FROM_CJS,
+                "json" => &FROM_JSON,
+                _ => &[],
+            };
+            for replacement in replacements {
+                if let Some(found) = look(&[stem, replacement]) {
+                    return Some(found);
+                }
+            }
+            if replacements.is_empty()
+                && let Some(found) = look(&[stem, ".d.", extension, ".ts"])
+            {
+                return Some(found);
+            }
+        }
+        for added in ADDED {
+            if let Some(found) = look(&[&joined, added]) {
+                return Some(found);
+            }
+        }
+        if let Some(found) = look(&[&joined]) {
+            return Some(found);
+        }
+    }
+    let index = join_dir(&joined, "index");
+    ADDED.iter().find_map(|added| look(&[&index, added]))
+}
+
+/// Whether a TypeScript module specifier is relative, by TypeScript's own
+/// test: `.` or `..`, alone or followed by `/`.
+fn ts_specifier_is_relative(specifier: &str) -> bool {
+    matches!(specifier, "." | "..") || specifier.starts_with("./") || specifier.starts_with("../")
 }
 
 /// Records one TypeScript import or re-export's edge into `sink`: a
-/// relative specifier (`./`, `../`) is looked up among the files in the
-/// map, [`EdgeResolution::Resolved`] or [`EdgeResolution::NotFound`]; any
-/// other (a package, a `tsconfig` path alias such as `@/lib`, an absolute
-/// path) is [`EdgeResolution::NotAttempted`], the specifier as written.
+/// relative specifier (`./`, `../`, `.` or `..`) is looked up among the
+/// files the walk found ([`resolve_ts_relative`]),
+/// [`EdgeResolution::Resolved`] or [`EdgeResolution::NotFound`]; any other
+/// (a package, a `tsconfig` path alias such as `@/lib`, an absolute path)
+/// is [`EdgeResolution::NotAttempted`], the specifier as written. Nothing
+/// is looked up once the sink is full: the lookup is the costly part, and
+/// its answer could not be kept.
 fn ts_import_edge(rel: &str, specifier: &str, known: &KnownPaths, sink: &mut EdgeSink) {
-    if specifier.starts_with("./") || specifier.starts_with("../") {
+    if !sink.has_room() {
+        return;
+    }
+    if ts_specifier_is_relative(specifier) {
         sink.push_looked_up(resolve_ts_relative(rel, specifier, known), specifier);
     } else {
         sink.push_unresolved(specifier, EdgeResolution::NotAttempted);
@@ -3759,20 +4124,26 @@ const MAX_SPELLED_RELATIVE_IMPORT_DOTS: usize = 32;
 /// [`EdgeResolution::NotAttempted`] edge, the module as written, as in
 /// [`python_import_edges`]. A relative import (`from . import a`, `from
 /// ..pkg import b`) is looked up against the importing file's own
-/// directory, climbing one level per dot beyond the first:
+/// directory, climbing one level per dot beyond the first, as a package or
+/// a module file, source or stub ([`python_module_file`]):
 /// [`EdgeResolution::Resolved`], or [`EdgeResolution::NotFound`] when no
-/// file in the map matches. A relative `import *` with no module after its
-/// dots (`from . import *`) imports the package itself, so its edge is to
-/// that directory's `__init__.py`, written as its dots when there is none;
-/// until round 7 it gave no edge at all. What makes this bounded in the
-/// size of the statement,
-/// which the round-3 version was not (the review of that round measured one
-/// 8 MiB statement of `K` dots and `M` names costing `K x M`, over two
-/// minutes, because the dot prefix was rebuilt for every name and nothing
-/// inside the loop read the clock):
+/// file in the map matches. A name imported from the package itself (`from
+/// . import a`) that is no submodule is a name the package's own
+/// `__init__` defines or imports, so its edge is to that file
+/// ([`python_package_init`]), which Python imports first in any case; in
+/// the package's own `__init__`, that is the importing file itself. A
+/// relative `import *` with no module after its dots (`from . import *`)
+/// imports the package itself, so its edge is to that directory's
+/// `__init__`, written as its dots when there is none; until round 7 it
+/// gave no edge at all. What makes this bounded in the size of the
+/// statement, which the round-3 version was not (the review of that round
+/// measured one 8 MiB statement of `K` dots and `M` names costing `K x M`,
+/// over two minutes, because the dot prefix was rebuilt for every name and
+/// nothing inside the loop read the clock):
 ///
 /// - The dots are counted once, and the climb is one `truncate`, not a loop
-///   of `K` pops.
+///   of `K` pops; the package's directory is joined, and its `__init__`
+///   looked up, once per statement, not once per name.
 /// - A climb past the mapped root is never resolved: the target is outside
 ///   this map, so it cannot name a file in it. (The round-3 version clamped
 ///   such a climb to the root, resolving `from .. import b` in a top-level
@@ -3835,27 +4206,38 @@ fn python_import_from_edges(
     } else {
         format!("[{dots} leading dots]")
     };
-    let resolve = |segments: &[&str]| -> Option<&Arc<str>> {
-        let mut target_dir = base.clone()?;
-        target_dir.extend(segments.iter().map(|segment| (*segment).to_owned()));
-        let joined = target_dir.join("/");
-        [format!("{joined}.py"), format!("{joined}/__init__.py")]
-            .into_iter()
-            .find_map(|candidate| known.get(candidate.as_str()))
-    };
+    // The package the dots name, as a root-relative directory, joined once
+    // per statement rather than once per name.
+    let package_dir: Option<String> = base.map(|base| base.join("/"));
+    // A stub is read by a type checker, which looks for stubs first; any
+    // other file is run, and Python itself imports the source.
+    let stub_first = rel.ends_with(".pyi");
 
     if let Some(dotted) = dotted {
-        let segments: Vec<&str> = dotted.split('.').collect();
-        sink.push_looked_up(resolve(&segments), &format!("{prefix}{dotted}"));
+        let module = package_dir.as_deref().map(|package| {
+            let path: Vec<&str> = dotted.split('.').map(str::trim).collect();
+            join_dir(package, &path.join("/"))
+        });
+        let found = module
+            .as_deref()
+            .and_then(|module| python_module_file(module, stub_first, known));
+        sink.push_looked_up(found, &format!("{prefix}{dotted}"));
         return true;
     }
 
-    // `from . import *`: the package itself, whose file is its directory's
-    // `__init__.py` (a module file named after the directory is not it).
-    // Only the first thing after `import` is looked at, with a check per
-    // child: a statement of a million names must not be walked to find out
-    // it has no `*` (round 7's first version did, 270 ms past an expired
-    // deadline in a debug build).
+    // The package itself, whose file is its directory's `__init__` (a
+    // module file named after the directory is not it): what `from . import
+    // *` imports, and what `from . import name` imports first, whatever
+    // `name` turns out to be.
+    let package = package_dir
+        .as_deref()
+        .and_then(|package| python_package_init(package, stub_first, known));
+
+    // `from . import *`: the package itself. Only the first thing after
+    // `import` is looked at, with a check per child: a statement of a
+    // million names must not be walked to find out it has no `*` (round
+    // 7's first version did, 270 ms past an expired deadline in a debug
+    // build).
     let mut wildcard = false;
     let mut after_import = false;
     let mut cursor = node.walk();
@@ -3870,14 +4252,6 @@ fn python_import_from_edges(
         after_import |= child.kind() == "import";
     }
     if wildcard {
-        let package = base.as_ref().and_then(|base| {
-            let candidate = if base.is_empty() {
-                "__init__.py".to_owned()
-            } else {
-                format!("{}/__init__.py", base.join("/"))
-            };
-            known.get(candidate.as_str())
-        });
         sink.push_looked_up(package, &prefix);
         return true;
     }
@@ -3899,11 +4273,78 @@ fn python_import_from_edges(
             Some(text(name_node, source))
         };
         let Some(name_text) = name_text else { continue };
-        if !sink.push_looked_up(resolve(&[name_text]), &format!("{prefix}{name_text}")) {
+        // A submodule of the package when one is there; otherwise a name
+        // the package's own `__init__` defines or imports, which is where
+        // Python looks first. Until round 8 only the submodule was looked
+        // for, and a name from the `__init__`, a file of the same map, came
+        // out `NotFound`.
+        let found = package_dir
+            .as_deref()
+            .and_then(|package| {
+                python_module_file(&join_dir(package, name_text), stub_first, known)
+            })
+            .or(package);
+        if !sink.push_looked_up(found, &format!("{prefix}{name_text}")) {
             return true;
         }
     }
     true
+}
+
+/// The file of the package at root-relative directory `package` (empty for
+/// the mapped root, which counts as a package): its `__init__.py`, or its
+/// `__init__.pyi`, the stub first when `stub_first`.
+fn python_package_init<'k>(
+    package: &str,
+    stub_first: bool,
+    known: &'k KnownPaths,
+) -> Option<&'k Arc<str>> {
+    let order = if stub_first {
+        ["__init__.pyi", "__init__.py"]
+    } else {
+        ["__init__.py", "__init__.pyi"]
+    };
+    order
+        .iter()
+        .find_map(|init| known.get(join_dir(package, init).as_str()))
+}
+
+/// The file of the Python module at root-relative `module` (its dotted
+/// name's segments joined with `/`), among the files the walk found. A
+/// package (`module/__init__.py`) comes before a module file
+/// (`module.py`), as in Python's own path finder. A file that is run (`.py`)
+/// looks for source files first and stubs (`.pyi`) after, which is what a
+/// stub-only package has; a stub looks for stubs first, as a type checker
+/// reading it does (`__init__.pyi`, `__init__.py`, `.pyi`, `.py`). Until
+/// round 8 only `module.py` and then `module/__init__.py` were tried, so
+/// every relative import between the stubs of a stub package was
+/// [`EdgeResolution::NotFound`].
+fn python_module_file<'k>(
+    module: &str,
+    stub_first: bool,
+    known: &'k KnownPaths,
+) -> Option<&'k Arc<str>> {
+    const RUN: [(bool, &str); 4] = [
+        (true, ".py"),
+        (false, ".py"),
+        (true, ".pyi"),
+        (false, ".pyi"),
+    ];
+    const STUB: [(bool, &str); 4] = [
+        (true, ".pyi"),
+        (true, ".py"),
+        (false, ".pyi"),
+        (false, ".py"),
+    ];
+    let order = if stub_first { &STUB } else { &RUN };
+    order.iter().find_map(|&(is_package, extension)| {
+        let candidate = if is_package {
+            format!("{}{extension}", join_dir(module, "__init__"))
+        } else {
+            format!("{module}{extension}")
+        };
+        known.get(candidate.as_str())
+    })
 }
 
 /// Records into `sink` the edges of one Python `import a, b.c as d`
@@ -6580,6 +7021,15 @@ mod tests {
     /// resolved target's path, not its own, so a link and its target became
     /// two `Module`s at the same path (and, separately, could turn `.git`
     /// content into a module; see the next test).
+    ///
+    /// Round 8 changed what the link's own entry is, not whose path it
+    /// carries: a link to a file the map already reads under another path
+    /// is no longer read, parsed and mapped a second time (see
+    /// `tests::ori_t_0036_links_to_one_file_are_read_once_not_once_per_link`
+    /// for why), so until then this test asserted a `Module` at the link's
+    /// path, and now asserts the link's own `SkippedFile`, naming the path
+    /// the file was read under. Both halves stay exact: the link is under
+    /// its own path, and the target is mapped once.
     #[cfg(unix)]
     #[test]
     fn ori_t_0036_a_symlinked_file_is_reported_under_its_own_path_not_its_targets() {
@@ -6589,14 +7039,23 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("real.rs"), dir.join("alias.rs"))
             .expect("create symlink");
         let map = build_code_map(&dir).expect("maps");
-        assert!(map.modules.iter().any(|m| m.path == "real.rs"));
-        assert!(
-            map.modules.iter().any(|m| m.path == "alias.rs"),
-            "the symlink's own path must appear as a module: {:?}",
-            map.modules.iter().map(|m| &m.path).collect::<Vec<_>>()
+        let modules: Vec<&str> = map.modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(
+            modules,
+            vec!["real.rs"],
+            "real.rs must be mapped exactly once, and never under the link's path too"
         );
-        let real_count = map.modules.iter().filter(|m| m.path == "real.rs").count();
-        assert_eq!(real_count, 1, "real.rs must not be duplicated");
+        assert_eq!(
+            map.coverage.files_skipped,
+            vec![SkippedFile {
+                path: "alias.rs".to_owned(),
+                reason: SkipReason::SameFileAs {
+                    path: "real.rs".to_owned(),
+                },
+            }],
+            "the symlink must be recorded under its own path, naming its target's"
+        );
+        assert_eq!(map.coverage.files_seen, 2);
         drop(guard);
     }
 
@@ -6658,7 +7117,14 @@ mod tests {
         };
         let known = KnownPaths::new();
         let index = RustModuleIndex::build(&known);
-        let result = process_file(&candidate, &known, &index, &CodeMapOptions::default(), &dir);
+        let result = process_file(
+            &candidate,
+            &known,
+            &index,
+            &CodeMapOptions::default(),
+            &dir,
+            &mut ReadUnder::new(),
+        );
         assert!(
             result.is_err(),
             "a path that became a symlink after the walk classified it as a plain file must be \
@@ -7478,6 +7944,7 @@ mod tests {
                 &index,
                 &CodeMapOptions::default(),
                 &root,
+                &mut ReadUnder::new(),
             )
         });
         assert_eq!(result, Err(SkipReason::NotARegularFile));
@@ -7514,6 +7981,7 @@ mod tests {
                 &index,
                 &CodeMapOptions::default(),
                 &root,
+                &mut ReadUnder::new(),
             )
         });
         assert_eq!(result, Err(SkipReason::NotARegularFile));
@@ -10508,6 +10976,479 @@ mod tests {
             "the worst shape measured at the default cap took {elapsed:?}, past its stated bound \
              of {bound:?}"
         );
+        drop(guard);
+    }
+
+    // -----------------------------------------------------------------
+    // ORI-T-0036 adversarial review, round 8 (2026-09-27). One test per
+    // item, each failing before its fix and passing after; the report's
+    // plant table says which plant each one catches.
+    // -----------------------------------------------------------------
+
+    /// Item 1: Claim A, "a grouped use gives exactly the edges of its
+    /// ungrouped equivalent", did not hold for a member starting with
+    /// `super` under a `super::` or `self::` prefix, all valid Rust (the
+    /// review compiled the fixture with rustc). The member was walked from
+    /// the prefix's module as a child named `super`, found none, and came
+    /// back as a resolved edge to the prefix's own file, or to the
+    /// importing file itself. Each grouped form sits in its own module
+    /// beside its ungrouped equivalent, both three modules deep, and both
+    /// must give the one edge expected, text included. A global-path group
+    /// is here too: `use ::{serde};` recorded `serde` where `use ::serde;`
+    /// records `::serde`.
+    #[test]
+    fn ori_t_0036_a_grouped_member_that_starts_with_super_climbs_from_its_prefix() {
+        let dir = temp_dir("grouped-super-member");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "src/lib.rs", "pub mod a;\n");
+        write(&dir, "src/a.rs", "pub mod x;\npub mod b;\n");
+        write(&dir, "src/a/x.rs", "pub struct X;\n");
+        let cases: [(&str, &str, &str, EdgeResolution); 8] = [
+            (
+                "use super::{super::x::X};",
+                "use super::super::x::X;",
+                "src/a/x.rs",
+                EdgeResolution::Resolved,
+            ),
+            (
+                "use self::{super::BX};",
+                "use self::super::BX;",
+                "src/a/b.rs",
+                EdgeResolution::Resolved,
+            ),
+            (
+                "use super::{super::{self as amod}};",
+                "use super::super as amod;",
+                "src/a.rs",
+                EdgeResolution::Resolved,
+            ),
+            (
+                "use super::{super::*};",
+                "use super::super::*;",
+                "src/a.rs",
+                EdgeResolution::Resolved,
+            ),
+            (
+                "use super::{super::x::{self}};",
+                "use super::super::x;",
+                "src/a/x.rs",
+                EdgeResolution::Resolved,
+            ),
+            (
+                "use self::{super::{super::{x::{X}}}};",
+                "use self::super::super::x::X;",
+                "src/a/x.rs",
+                EdgeResolution::Resolved,
+            ),
+            (
+                "use super::{super::{super::Z}};",
+                "use super::super::super::Z;",
+                "super::super::super::Z",
+                EdgeResolution::NotFound,
+            ),
+            (
+                "use ::{serde};",
+                "use ::serde;",
+                "::serde",
+                EdgeResolution::NotAttempted,
+            ),
+        ];
+        let mut b = String::from("pub struct BX;\n");
+        for (index, (grouped, ungrouped, _, _)) in cases.iter().enumerate() {
+            b.push_str(&format!("pub mod g{index};\npub mod u{index};\n"));
+            write(
+                &dir,
+                &format!("src/a/b/g{index}.rs"),
+                &format!("{grouped}\n"),
+            );
+            write(
+                &dir,
+                &format!("src/a/b/u{index}.rs"),
+                &format!("{ungrouped}\n"),
+            );
+        }
+        write(&dir, "src/a/b.rs", &b);
+        let map = build_code_map(&dir).expect("maps");
+        for (index, (grouped, ungrouped, to, how)) in cases.iter().enumerate() {
+            let expected = vec![((*to).to_owned(), *how)];
+            assert_eq!(
+                edge_pairs(&map, &format!("src/a/b/u{index}.rs")),
+                expected,
+                "the ungrouped form `{ungrouped}`"
+            );
+            assert_eq!(
+                edge_pairs(&map, &format!("src/a/b/g{index}.rs")),
+                expected,
+                "the grouped form `{grouped}` must give exactly what `{ungrouped}` gives"
+            );
+        }
+        drop(guard);
+    }
+
+    /// Item 2: every symlink to one in-root file was read, parsed and
+    /// extracted again and kept a `Module` of its own, so the per-file time
+    /// and memory bounds applied once per link: the review mapped one
+    /// 1 MiB Go file and 40 links to it (a checkout of about 1 MiB) at 1.4
+    /// GB resident, 27.6 MB more per link. A file is now read once, under
+    /// the first of its paths opened (plain entries before links), and
+    /// every other path to it is recorded under its own name as
+    /// `SkipReason::SameFileAs`, naming that path: links to the file
+    /// (absolute, relative, to another link, sorting before the target),
+    /// a hard link, and links to a file the walk does not map itself.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_links_to_one_file_are_read_once_not_once_per_link() {
+        use std::os::unix::fs::symlink;
+        let dir = temp_dir("links-read-once");
+        let guard = DropGuard(dir.clone());
+        let names = 5000;
+        write(
+            &dir,
+            "big.go",
+            &format!("package p\nvar A{} int\n", ",A".repeat(names - 1)),
+        );
+        let links = 30;
+        for index in 0..links {
+            symlink(dir.join("big.go"), dir.join(format!("l{index:02}.go"))).expect("link");
+        }
+        symlink("big.go", dir.join("a_first.go")).expect("relative link sorting first");
+        symlink(dir.join("l00.go"), dir.join("chain.go")).expect("link to a link");
+        fs::hard_link(dir.join("big.go"), dir.join("hard.go")).expect("hard link");
+        write(&dir, "data.txt", "package q\nvar T int\n");
+        symlink(dir.join("data.txt"), dir.join("t1.go")).expect("link to an unmapped file");
+        symlink(dir.join("data.txt"), dir.join("t2.go")).expect("second link to it");
+
+        let map = build_code_map(&dir).expect("maps");
+        let modules: Vec<&str> = map.modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(
+            modules,
+            vec!["big.go", "t1.go"],
+            "one module per file, whatever links to it"
+        );
+        let interfaces: usize = map.modules.iter().map(|m| m.interfaces.len()).sum();
+        assert_eq!(
+            interfaces,
+            names + 1,
+            "the file's interfaces are kept once, not once per link"
+        );
+        let mut expected: Vec<SkippedFile> = (0..links)
+            .map(|index| format!("l{index:02}.go"))
+            .chain(["a_first.go", "chain.go", "hard.go"].map(str::to_owned))
+            .map(|path| SkippedFile {
+                path,
+                reason: SkipReason::SameFileAs {
+                    path: "big.go".to_owned(),
+                },
+            })
+            .collect();
+        expected.push(SkippedFile {
+            path: "data.txt".to_owned(),
+            reason: SkipReason::UnsupportedLanguage,
+        });
+        expected.push(SkippedFile {
+            path: "t2.go".to_owned(),
+            reason: SkipReason::SameFileAs {
+                path: "t1.go".to_owned(),
+            },
+        });
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(map.coverage.files_skipped, expected);
+        assert_eq!(map.coverage.files_seen, links + 7);
+        assert_eq!(
+            map.coverage.files_seen,
+            map.coverage.files_parsed_clean
+                + map.coverage.files_parsed_with_errors
+                + map.coverage.files_skipped.len()
+        );
+        drop(guard);
+    }
+
+    /// Item 3: a relative TypeScript import written with a `.js` extension
+    /// (what `NodeNext` and ESM projects must write for `b.ts`) was looked
+    /// up as `b.js.ts`, `b.js.tsx`, `b.js/index.ts` and `b.js/index.tsx`
+    /// and came out `NotFound`, with `b.ts` a module of the same map; the
+    /// review found 4536 such edges in one real monorepo. Every specifier
+    /// here names a file the walk found, but one, by TypeScript's own order:
+    /// an extension replaced (`.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, a
+    /// declaration file), added, the specifier as written (JSON, a
+    /// stylesheet), and a directory's `index`.
+    #[test]
+    fn ori_t_0036_typescript_esm_specifiers_resolve_to_their_typescript_source() {
+        let dir = temp_dir("ts-esm-specifiers");
+        let guard = DropGuard(dir.clone());
+        let targets = [
+            "web/b.ts",
+            "web/lib/c.ts",
+            "web/comp/d.tsx",
+            "web/e.tsx",
+            "web/m.mts",
+            "web/k.cts",
+            "web/data.json",
+            "web/plain.js",
+            "web/dir/index.ts",
+            "web/styles.css",
+            "web/both.ts",
+            "web/both.js",
+            "web/config.dev.ts",
+            "web/typed.d.ts",
+            "top.ts",
+        ];
+        for target in targets {
+            write(&dir, target, "export const v = 1;\n");
+        }
+        write(
+            &dir,
+            "web/a.ts",
+            "import { b } from './b.js';\n\
+             import { c } from './lib/c.js';\n\
+             import { d } from './comp/d.jsx';\n\
+             import { e } from './e.js';\n\
+             import { m } from './m.mjs';\n\
+             import { k } from './k.cjs';\n\
+             import { b2 } from './b';\n\
+             import data from './data.json';\n\
+             import { p } from './plain.js';\n\
+             import { bt } from './b.ts';\n\
+             import { i } from './dir';\n\
+             import { i2 } from './dir/';\n\
+             import './styles.css';\n\
+             import { g } from './gone.js';\n\
+             import { both } from './both.js';\n\
+             import { dv } from './config.dev';\n\
+             import { t } from './typed.js';\n\
+             export { up } from '../top.js';\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let resolved = |to: &str| (to.to_owned(), EdgeResolution::Resolved);
+        let mut expected = vec![
+            resolved("web/b.ts"),
+            resolved("web/lib/c.ts"),
+            resolved("web/comp/d.tsx"),
+            resolved("web/e.tsx"),
+            resolved("web/m.mts"),
+            resolved("web/k.cts"),
+            resolved("web/b.ts"),
+            resolved("web/data.json"),
+            resolved("web/plain.js"),
+            resolved("web/b.ts"),
+            resolved("web/dir/index.ts"),
+            resolved("web/dir/index.ts"),
+            resolved("web/styles.css"),
+            ("./gone.js".to_owned(), EdgeResolution::NotFound),
+            resolved("web/both.ts"),
+            resolved("web/config.dev.ts"),
+            resolved("web/typed.d.ts"),
+            resolved("top.ts"),
+        ];
+        expected.sort();
+        assert_eq!(edge_pairs(&map, "web/a.ts"), expected);
+        drop(guard);
+    }
+
+    /// Item 4: a relative Python import was looked up as `<name>.py` or
+    /// `<name>/__init__.py` only, so every import between the stubs of a
+    /// stub package (`.pyi`, which the walk maps as Python) was `NotFound`,
+    /// and so was every `from . import name` whose name the package's own
+    /// `__init__` defines, the first place Python looks. Covered here: stub
+    /// to stub (module and package), a stub preferring the stub and a
+    /// source file preferring the source when both exist, a stub-only
+    /// package imported from source, a relative wildcard in a stub package,
+    /// names from the `__init__` (aliased too) beside a real submodule, a
+    /// package preferred over a module file of the same name (Python's own
+    /// order; until round 8 the module file came first), and a namespace
+    /// package with nothing to find, still `NotFound`.
+    #[test]
+    fn ori_t_0036_python_relative_imports_find_stubs_and_names_from_the_package_init() {
+        let dir = temp_dir("py-stubs-and-init-names");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "stubs/pkg/__init__.pyi",
+            "from .sub import X as X\nfrom .deep import Y\n",
+        );
+        write(&dir, "stubs/pkg/sub.pyi", "class X: ...\n");
+        write(&dir, "stubs/pkg/deep/__init__.pyi", "class Y: ...\n");
+        write(&dir, "stubs/pkg/both.py", "Z = 1\n");
+        write(&dir, "stubs/pkg/both.pyi", "Z: int\n");
+        write(&dir, "stubs/pkg/user.pyi", "from .both import Z\n");
+        write(&dir, "stubs/pkg/user.py", "from .both import Z\n");
+        write(&dir, "stubs/pkg/star.pyi", "from . import *\n");
+        write(&dir, "py/pkg2/__init__.py", "def helper():\n    return 1\n");
+        write(&dir, "py/pkg2/sub2.py", "x = 1\n");
+        write(
+            &dir,
+            "py/pkg2/mod.py",
+            "from . import helper\nfrom . import sub2\nfrom . import helper as h, sub2 as s\n",
+        );
+        write(&dir, "py/ns/m.py", "from . import gone\n");
+        write(&dir, "py/pkgmod/__init__.py", "q = 1\n");
+        write(&dir, "py/pkgmod.py", "q = 2\n");
+        write(&dir, "py/user2.py", "from .pkgmod import q\n");
+        write(&dir, "py/stubonly/__init__.pyi", "s: int\n");
+        write(&dir, "py/user3.py", "from .stubonly import s\n");
+        let map = build_code_map(&dir).expect("maps");
+        let resolved = |to: &str| (to.to_owned(), EdgeResolution::Resolved);
+        assert_eq!(
+            edge_pairs(&map, "stubs/pkg/__init__.pyi"),
+            vec![
+                resolved("stubs/pkg/deep/__init__.pyi"),
+                resolved("stubs/pkg/sub.pyi")
+            ]
+        );
+        assert_eq!(
+            edge_pairs(&map, "stubs/pkg/user.pyi"),
+            vec![resolved("stubs/pkg/both.pyi")],
+            "a stub is read by a type checker, which takes the stub"
+        );
+        assert_eq!(
+            edge_pairs(&map, "stubs/pkg/user.py"),
+            vec![resolved("stubs/pkg/both.py")],
+            "a source file is run, and Python imports the source"
+        );
+        assert_eq!(
+            edge_pairs(&map, "stubs/pkg/star.pyi"),
+            vec![resolved("stubs/pkg/__init__.pyi")]
+        );
+        assert_eq!(
+            edge_pairs(&map, "py/pkg2/mod.py"),
+            vec![
+                resolved("py/pkg2/__init__.py"),
+                resolved("py/pkg2/__init__.py"),
+                resolved("py/pkg2/sub2.py"),
+                resolved("py/pkg2/sub2.py"),
+            ]
+        );
+        assert_eq!(
+            edge_pairs(&map, "py/ns/m.py"),
+            vec![(".gone".to_owned(), EdgeResolution::NotFound)],
+            "no submodule and no package file: nothing in the map is the target"
+        );
+        assert_eq!(
+            edge_pairs(&map, "py/user2.py"),
+            vec![resolved("py/pkgmod/__init__.py")]
+        );
+        assert_eq!(
+            edge_pairs(&map, "py/user3.py"),
+            vec![resolved("py/stubonly/__init__.pyi")]
+        );
+        drop(guard);
+    }
+
+    /// Item 5: `mod name;` in a crate root not named `lib.rs` or `main.rs`
+    /// was looked up below the file's stem (`tests/it/common.rs` for
+    /// `tests/it.rs`), where Rust never looks, so the shared-test-helper
+    /// layout `tests/common/mod.rs` was `NotFound`, and a file planted at
+    /// `tests/it/common.rs` became a resolved edge to the wrong module.
+    /// Cargo roots a crate at each file directly in a package's `tests`,
+    /// `examples` and `benches`, at each in `src/bin`, and at `build.rs`;
+    /// each is looked up beside itself now, for `mod` and for `crate::` and
+    /// `self::` alike, with a decoy below each stem. A package is
+    /// recognised by `src/lib.rs` (as in the review's fixture, which had no
+    /// manifest) or by `Cargo.toml`, and a directory named `tests` that is
+    /// not a package's (inside `src`, or under a directory that is no
+    /// package) is read as before.
+    #[test]
+    fn ori_t_0036_mod_in_a_cargo_target_root_is_looked_up_beside_it() {
+        let dir = temp_dir("cargo-target-roots");
+        let guard = DropGuard(dir.clone());
+        let files: [(&str, &str); 25] = [
+            ("rs/src/lib.rs", "pub mod util;\nmod tests;\n"),
+            ("rs/src/util.rs", "pub fn u() {}\n"),
+            ("rs/src/tests.rs", "mod inner;\nmod deep;\n"),
+            ("rs/src/tests/inner.rs", "pub fn i() {}\n"),
+            ("rs/src/tests/deep.rs", "mod inner2;\n"),
+            ("rs/src/tests/deep/inner2.rs", "pub fn i2() {}\n"),
+            ("rs/src/tests/inner2.rs", "pub fn decoy() {}\n"),
+            (
+                "rs/tests/it.rs",
+                "mod common;\nuse common::setup;\nuse self::common::setup as s2;\n\
+                 use crate::common::setup as s3;\n",
+            ),
+            (
+                "rs/tests/common/mod.rs",
+                "pub mod dataset;\npub fn setup() {}\nuse crate::common::dataset::D;\n",
+            ),
+            ("rs/tests/common/dataset.rs", "pub struct D;\n"),
+            ("rs/tests/it/common.rs", "pub fn decoy() {}\n"),
+            ("rs/examples/demo.rs", "mod helpers;\nfn main() {}\n"),
+            ("rs/examples/helpers.rs", "pub fn h() {}\n"),
+            ("rs/examples/demo/helpers.rs", "pub fn decoy() {}\n"),
+            ("rs/examples/multi/main.rs", "mod part;\nfn main() {}\n"),
+            ("rs/examples/multi/part.rs", "pub fn p() {}\n"),
+            ("rs/benches/b.rs", "mod bh;\nfn main() {}\n"),
+            ("rs/benches/bh.rs", "pub fn x() {}\n"),
+            ("rs/build.rs", "mod buildhelp;\nfn main() {}\n"),
+            ("rs/buildhelp.rs", "pub fn y() {}\n"),
+            (
+                "rs/src/bin/tool.rs",
+                "mod cli;\nuse crate::cli::run;\nfn main() {}\n",
+            ),
+            ("rs/src/bin/cli.rs", "pub fn run() {}\n"),
+            ("rs/src/bin/tool/cli.rs", "pub fn decoy() {}\n"),
+            ("pkg2/tests/t.rs", "mod h;\n"),
+            ("pkg2/tests/h.rs", "pub fn h() {}\n"),
+        ];
+        for (path, content) in files {
+            write(&dir, path, content);
+        }
+        write(&dir, "pkg2/Cargo.toml", "[package]\nname = \"pkg2\"\n");
+        write(&dir, "other/tests/x.rs", "mod y;\n");
+        write(&dir, "other/tests/x/y.rs", "pub fn y() {}\n");
+        write(&dir, "other/tests/y.rs", "pub fn decoy() {}\n");
+        let map = build_code_map(&dir).expect("maps");
+        let resolved = |to: &str| (to.to_owned(), EdgeResolution::Resolved);
+        let expected: [(&str, Vec<(String, EdgeResolution)>); 12] = [
+            (
+                "rs/tests/it.rs",
+                vec![
+                    ("common::setup".to_owned(), EdgeResolution::NotAttempted),
+                    resolved("rs/tests/common/mod.rs"),
+                    resolved("rs/tests/common/mod.rs"),
+                    resolved("rs/tests/common/mod.rs"),
+                ],
+            ),
+            (
+                "rs/tests/common/mod.rs",
+                vec![
+                    resolved("rs/tests/common/dataset.rs"),
+                    resolved("rs/tests/common/dataset.rs"),
+                ],
+            ),
+            (
+                "rs/examples/demo.rs",
+                vec![resolved("rs/examples/helpers.rs")],
+            ),
+            (
+                "rs/examples/multi/main.rs",
+                vec![resolved("rs/examples/multi/part.rs")],
+            ),
+            ("rs/benches/b.rs", vec![resolved("rs/benches/bh.rs")]),
+            ("rs/build.rs", vec![resolved("rs/buildhelp.rs")]),
+            (
+                "rs/src/bin/tool.rs",
+                vec![resolved("rs/src/bin/cli.rs"), resolved("rs/src/bin/cli.rs")],
+            ),
+            (
+                "rs/src/lib.rs",
+                vec![resolved("rs/src/tests.rs"), resolved("rs/src/util.rs")],
+            ),
+            (
+                "rs/src/tests.rs",
+                vec![
+                    resolved("rs/src/tests/deep.rs"),
+                    resolved("rs/src/tests/inner.rs"),
+                ],
+            ),
+            (
+                "rs/src/tests/deep.rs",
+                vec![resolved("rs/src/tests/deep/inner2.rs")],
+            ),
+            ("pkg2/tests/t.rs", vec![resolved("pkg2/tests/h.rs")]),
+            ("other/tests/x.rs", vec![resolved("other/tests/x/y.rs")]),
+        ];
+        for (module, edges) in expected {
+            assert_eq!(edge_pairs(&map, module), edges, "{module}");
+        }
         drop(guard);
     }
 }
