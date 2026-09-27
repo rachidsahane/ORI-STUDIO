@@ -123,7 +123,9 @@
 //! flowchart TB
 //!   T[target: &[IndexableDocument]] --> C{full_rebuild or incremental_sync}
 //!   C -->|full_rebuild| COUNT[count every stored row: at a target path, or not] --> CLEAR[DROP and CREATE documents] --> ADDALL[INSERT every target document] --> COMMIT[transaction commit]
-//!   C -->|incremental_sync| CURRENT[every stored row: rowid and every column]
+//!   C -->|incremental_sync| OPTION{an FTS5 option stored that this build never sets?}
+//!   OPTION -->|yes: rebuild exactly as full_rebuild, in this transaction| COUNT
+//!   OPTION -->|no| CURRENT[every stored row: rowid and every column]
 //!   CURRENT --> DIFF{diff against target, by path}
 //!   DIFF -->|path not text, or path not in target| DEL[DELETE the rows]
 //!   DIFF -->|path new, or any column stored differs, or two rows share it| UPSERT[DELETE WHERE path, then INSERT]
@@ -461,17 +463,38 @@
 //! directly. Every other failure that is not a held lock, on every read and
 //! every write this module makes, is settled by asking SQLite rather than by
 //! guessing from the error code (`classify`): `PRAGMA quick_check`, on the
-//! same connection, inside the same snapshot when the failing statement had
-//! one. It checks every b-tree page and, in the SQLite this workspace
-//! bundles, also runs FTS5's own inverted-index check through the virtual
-//! table's integrity method. It is a read: it takes no write lock, so a
-//! concurrent writer can neither refuse it nor be locked out by it. It runs
-//! inside a savepoint after first opening a cursor on the table, because
-//! FTS5 refreshes its per-connection view of the index only when a cursor
-//! opens and its integrity method reads that view as it stands: measured
-//! while building this, a bare `PRAGMA quick_check` on a healthy index
-//! another connection had just written reported "checksum mismatch" 133
-//! times in 200, and 0 in 200 opened this way. The rule:
+//! same connection, in a clean read snapshot of the file as committed. It
+//! checks every b-tree page and, in the SQLite this workspace bundles, also
+//! runs FTS5's own inverted-index check through the virtual table's
+//! integrity method. It is a read: it takes no write lock, so a concurrent
+//! writer can neither refuse it nor be locked out by it.
+//!
+//! The snapshot is clean because whatever transaction the failed statement
+//! was part of is rolled back first, and the check then runs in a read
+//! transaction of its own, ended with a rollback, so the connection is left
+//! in no transaction at all. The caller is returning the error, and its own
+//! transaction would be rolled back as it returns; nothing is lost by
+//! ending it first. A review found round 8 running the check inside that
+//! transaction instead: SQLite rolls back only the failed statement, so the
+//! write transaction, what its earlier statements wrote and FTS5's
+//! in-memory view of it (pending data, a structure record a failed flush
+//! left half-updated) were all still there, and the check read them. With
+//! two legal FTS5 options another writer had set (`pgsz` 64, `automerge`
+//! 0), a genuine out-of-memory error in `incremental_sync` came back
+//! `Corrupt` from a healthy index, which sends a caller to
+//! [`Indexer::recover`] to quarantine it
+//! (`tests::ori_t_0035_the_check_never_reads_the_write_transaction_a_failed_statement_left_open`,
+//! `tests::ori_t_0035_a_write_that_fails_part_way_through_its_transaction_never_calls_a_healthy_index_corrupt`).
+//! Rolling back discards FTS5's in-memory state along with the pages, and
+//! [`Indexer::incremental_sync`] no longer keeps an FTS5 option this build
+//! did not set (its doc has why).
+//!
+//! The check's own read transaction first opens a cursor on the table,
+//! because FTS5 refreshes its per-connection view of the index only when a
+//! cursor opens and its integrity method reads that view as it stands:
+//! measured while building this, a bare `PRAGMA quick_check` on a healthy
+//! index another connection had just written reported "checksum mismatch"
+//! 133 times in 200, and 0 in 200 opened this way. The rule:
 //!
 //! - the check reports damage in a page it read, or itself fails with
 //!   `SQLITE_CORRUPT` or `SQLITE_NOTADB`: `Corrupt`, carrying the original
@@ -966,7 +989,8 @@ pub struct IndexReport {
     /// Target documents written: every one of them for
     /// [`Indexer::full_rebuild`]; for [`Indexer::incremental_sync`], each
     /// one new at its path or whose stored row was not exactly what this
-    /// build writes for it.
+    /// build writes for it, or every one of them when it rebuilt an index
+    /// holding an FTS5 option this build did not set.
     pub upserted: usize,
     /// Stored rows deleted whose path is not in the target set (or is not
     /// text at all, so no target document could name it).
@@ -974,7 +998,8 @@ pub struct IndexReport {
     /// Stored rows deleted at a path that is in the target set, to make
     /// room for the target's document there: the old version of every
     /// document rewritten, and any second row sharing its path. For
-    /// [`Indexer::full_rebuild`], every stored row at a target path.
+    /// [`Indexer::full_rebuild`], and an [`Indexer::incremental_sync`] that
+    /// rebuilt the table, every stored row at a target path.
     pub replaced: usize,
     /// The index's total live document count after this call, read inside
     /// the same transaction as the writes, before it commits.
@@ -1528,14 +1553,30 @@ fn report_names_an_unread_page(text: &str) -> bool {
 /// table's integrity method; a row naming damage found by either is
 /// [`Integrity::Damaged`] even if a later step of the pragma fails.
 ///
-/// It runs inside a savepoint (which nests inside whatever transaction
-/// `conn` is already in, or opens one), after first opening a cursor on the
-/// table in that same snapshot. That order is load-bearing: FTS5 keeps a
-/// per-connection cache of the index's structure and refreshes it only when
-/// a cursor opens, and its integrity method reads the cache as it stands.
-/// Measured while building this: after another connection's commits, a
-/// bare `PRAGMA quick_check` on a perfectly healthy index reported "fts5:
-/// checksum mismatch" 133 times in 200; opened this way, 0 in 200
+/// It reads a clean snapshot of the file as committed, never a write
+/// transaction a failed statement left open (the module doc's "What is
+/// reported as corrupt, and what is not" has the review): any transaction
+/// `conn` is in is rolled back first, which also discards FTS5's in-memory
+/// state for it, and the check runs in a read transaction of its own,
+/// ended with a rollback, so `conn` is left in no transaction at all. The
+/// rollback is prepared before anything else, so ending the check never
+/// needs memory to prepare it; if it cannot be prepared, or the caller's
+/// transaction cannot be ended, the verdict is [`Integrity::Undetermined`]
+/// and nothing is read. A read statement of the caller's still in progress
+/// in no transaction keeps its own snapshot, which the check then shares;
+/// that snapshot holds nothing uncommitted. Round 8 ran the check inside a
+/// savepoint of whatever transaction `conn` was in, and a review found a
+/// damaged file making both ends of that savepoint fail, which left every
+/// later call on the connection refused as a transaction within a
+/// transaction.
+///
+/// Within that read transaction it first opens a cursor on the table. That
+/// order is load-bearing: FTS5 keeps a per-connection cache of the index's
+/// structure and refreshes it only when a cursor opens, and its integrity
+/// method reads the cache as it stands. Measured while building this: after
+/// another connection's commits, a bare `PRAGMA quick_check` on a perfectly
+/// healthy index reported "fts5: checksum mismatch" 133 times in 200;
+/// opened this way, 0 in 200
 /// (`tests::ori_t_0035_the_check_never_reads_a_stale_view_of_an_index_another_connection_changed`).
 ///
 /// A row that begins "unable to validate" is FTS5 saying it could not run
@@ -1547,17 +1588,26 @@ fn report_names_an_unread_page(text: &str) -> bool {
 /// ([`report_names_an_unread_page`] has the measurement), so every row is
 /// read before a verdict is given.
 fn quick_check(conn: &Connection) -> Integrity {
-    if conn.execute_batch("SAVEPOINT ori_quick_check").is_err() {
+    let Ok(mut rollback) = conn.prepare("ROLLBACK") else {
+        return Integrity::Undetermined;
+    };
+    if !conn.is_autocommit() && (rollback.execute([]).is_err() || !conn.is_autocommit()) {
+        return Integrity::Undetermined;
+    }
+    if conn.execute_batch("BEGIN DEFERRED").is_err() {
         return Integrity::Undetermined;
     }
     let verdict = quick_check_in_one_snapshot(conn);
-    if conn.execute_batch("RELEASE ori_quick_check").is_err() {
-        let _ = conn.execute_batch("ROLLBACK TO ori_quick_check; RELEASE ori_quick_check");
+    for _ in 0..2 {
+        if conn.is_autocommit() {
+            break;
+        }
+        let _ = rollback.execute([]);
     }
     verdict
 }
 
-/// [`quick_check`]'s body, run inside its savepoint.
+/// [`quick_check`]'s body, run inside its own read transaction.
 fn quick_check_in_one_snapshot(conn: &Connection) -> Integrity {
     match conn.query_row(
         "SELECT count(*) FROM documents WHERE rowid = 0",
@@ -1633,8 +1683,10 @@ fn classify_without_check(path: &Path, context: &str, source: rusqlite::Error) -
 /// what is not", as code. A lock is [`IndexerError::Locked`] and
 /// `SQLITE_CORRUPT`/`SQLITE_NOTADB` is [`IndexerError::Corrupt`], directly;
 /// anything else asks [`quick_check`] on `conn` (the same connection, or
-/// the same transaction, which derefs to one) and is `Corrupt` only when
-/// the check reports [`Integrity::Damaged`]. When it reports
+/// the caller's transaction, which derefs to one, and which the check
+/// rolls back before it reads anything, so every caller returns the error
+/// straight away) and is `Corrupt` only when the check reports
+/// [`Integrity::Damaged`]. When it reports
 /// [`Integrity::Intact`] or [`Integrity::Undetermined`] the original error is
 /// returned unchanged as [`IndexerError::Sqlite`]: a check that could not
 /// run (out of memory, busy) is never evidence of damage. The original
@@ -2094,37 +2146,79 @@ impl<'db> Indexer<'db> {
             .conn
             .transaction()
             .map_err(|source| classify_without_check(&path, "begin transaction", source))?;
-        let (removed, replaced) = Self::rows_a_rebuild_discards(&tx, documents, &path)?;
+        let report = Self::rebuild_on(&tx, documents, &path)?;
+        commit(tx).map_err(|source| classify(&self.conn, &path, "commit", source))?;
+        Ok(report)
+    }
+
+    /// [`Indexer::full_rebuild`]'s body, inside the write transaction `tx`
+    /// its caller opened and commits: counts what the drop discards, drops
+    /// and recreates the table, inserts every document, and reads `total`
+    /// before the commit (the module doc's "Reads and writes share one
+    /// transaction"). [`Indexer::incremental_sync`] runs it too, for an
+    /// index holding an FTS5 option this build did not set.
+    fn rebuild_on(
+        tx: &Connection,
+        documents: &[IndexableDocument],
+        path: &Path,
+    ) -> Result<IndexReport, IndexerError> {
+        let (removed, replaced) = Self::rows_a_rebuild_discards(tx, documents, path)?;
         tx.execute_batch("DROP TABLE documents;")
             .map_err(|source| {
                 classify(
-                    &tx,
-                    &path,
+                    tx,
+                    path,
                     "drop the documents table for a full rebuild",
                     source,
                 )
             })?;
         tx.execute_batch(CREATE_TABLE_SQL).map_err(|source| {
             classify(
-                &tx,
-                &path,
+                tx,
+                path,
                 "recreate the documents table for a full rebuild",
                 source,
             )
         })?;
         for document in documents {
-            Self::insert(&tx, document, &path)?;
+            Self::insert(tx, document, path)?;
         }
-        // Read inside the transaction, before commit: see the module doc's
-        // "Reads and writes share one transaction".
-        let total = Self::total_indexed_on(&tx, &path)?;
-        commit(tx).map_err(|source| classify(&self.conn, &path, "commit", source))?;
+        let total = Self::total_indexed_on(tx, path)?;
         Ok(IndexReport {
             upserted: documents.len(),
             removed,
             replaced,
             total,
         })
+    }
+
+    /// Whether `documents_config`, the table where FTS5 keeps the options
+    /// set on the index, holds any row but the one FTS5 writes itself when
+    /// the table is created, its format `version`. This build sets no
+    /// option; any other row (`pgsz`, `automerge`, `rank`,
+    /// `secure-delete`, or any option a later FTS5 adds) was set by another
+    /// writer through SQL. A file with no such table holds no option.
+    fn holds_an_option_this_build_did_not_set(
+        conn: &Connection,
+        display_path: &Path,
+    ) -> Result<bool, IndexerError> {
+        let has_config_table: bool = conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_schema \
+                 WHERE type = 'table' AND name = 'documents_config'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|source| classify(conn, display_path, "look up the config table", source))?;
+        if !has_config_table {
+            return Ok(false);
+        }
+        conn.query_row(
+            "SELECT count(*) > 0 FROM documents_config WHERE k IS NOT 'version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| classify(conn, display_path, "read the FTS5 options", source))
     }
 
     /// Every row a [`Indexer::full_rebuild`] to `documents` is about to
@@ -2227,15 +2321,28 @@ impl<'db> Indexer<'db> {
     /// [`Indexer::all_documents`]'s doc gives: nothing here is read from
     /// bookkeeping held in memory.
     ///
+    /// Nor does it keep an FTS5 option this build did not set. FTS5 stores
+    /// options in the index itself (`pgsz`, `automerge`, `rank`,
+    /// `secure-delete` and the rest), and another writer can set any of
+    /// them through SQL; this build sets none, and [`Indexer::full_rebuild`]
+    /// drops them with the table. A review found this method keeping them,
+    /// and a pair of them (`pgsz` 64 with `automerge` 0) is the condition
+    /// under which it found a genuine out-of-memory error called `Corrupt`
+    /// (the module doc's "What is reported as corrupt, and what is not").
+    /// So when the index holds any option this build did not set, this
+    /// method rebuilds the table exactly as `full_rebuild` does, in the same
+    /// transaction, and reports it as `full_rebuild` would: every target
+    /// document upserted, every stored row removed or replaced.
+    ///
     /// What it trusts, stated rather than left to be found: the rows the
-    /// `documents` table returns. It does not check that FTS5's inverted
-    /// index still agrees with those rows (a writer that edits the shadow
-    /// tables directly can leave a row that reads back exactly right and
-    /// searches wrongly, which [`IndexerError::Corrupt`] reports once a
-    /// search trips over it), nor the table's own definition (a writer that
-    /// recreates the table with another tokenizer and the same rows is not
-    /// noticed). [`Indexer::full_rebuild`] replaces both, and is the answer
-    /// to either.
+    /// `documents` table returns, when no such option is set. It does not
+    /// check that FTS5's inverted index still agrees with those rows (a
+    /// writer that edits the shadow tables directly can leave a row that
+    /// reads back exactly right and searches wrongly, which
+    /// [`IndexerError::Corrupt`] reports once a search trips over it), nor
+    /// the table's own definition (a writer that recreates the table with
+    /// another tokenizer and the same rows is not noticed).
+    /// [`Indexer::full_rebuild`] replaces both, and is the answer to either.
     ///
     /// # Errors
     ///
@@ -2257,6 +2364,14 @@ impl<'db> Indexer<'db> {
             .conn
             .transaction()
             .map_err(|source| classify_without_check(&path, "begin transaction", source))?;
+
+        // An option this build never sets is a difference like any other,
+        // and only a rebuild removes one: see the doc above.
+        if Self::holds_an_option_this_build_did_not_set(&tx, &path)? {
+            let report = Self::rebuild_on(&tx, documents, &path)?;
+            commit(tx).map_err(|source| classify(&self.conn, &path, "commit", source))?;
+            return Ok(report);
+        }
 
         // Read inside the transaction just opened, not before it: see the
         // doc above.
@@ -9857,5 +9972,242 @@ mod tests {
             ),
         }
         assert_real_documents_indexed(&indexer, "after the refusal");
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 9, item 2: the diagnosis read a write transaction a failed
+    // statement had left open, and FTS5's in-memory view of it.
+    // ---------------------------------------------------------------------
+
+    /// SQLite's verdict on the committed file at `file`, through a fresh
+    /// connection of its own, so with nothing of any other connection's
+    /// uncommitted state or cached view: `PRAGMA integrity_check`, a read
+    /// that also runs FTS5's inverted-index check, and, when `write` is
+    /// set and so no other connection may be holding the write lock,
+    /// FTS5's own `integrity-check` command too. An oracle independent of
+    /// `quick_check`.
+    fn committed_file_is_healthy(file: &Path, write: bool) -> bool {
+        let raw = Connection::open(file).expect("a raw connection");
+        let integrity: String = raw
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .expect("run PRAGMA integrity_check");
+        integrity == "ok"
+            && (!write
+                || raw
+                    .execute(
+                        "INSERT INTO documents(documents) VALUES('integrity-check')",
+                        [],
+                    )
+                    .is_ok())
+    }
+
+    #[test]
+    fn ori_t_0035_the_check_never_reads_the_write_transaction_a_failed_statement_left_open() {
+        // What round 8's classify did after a failed statement inside a
+        // write transaction: SQLite rolls back only that statement, so the
+        // transaction, and whatever earlier statements in it wrote, was
+        // still open, and quick_check read it. Here the earlier statement
+        // leaves an FTS5 shadow row the index does not account for, the
+        // kind of half-written state the review's out-of-memory run left
+        // in FTS5's own view; the committed file is healthy throughout.
+        let scratch = Scratch::new("check-clean-snapshot");
+        let db = product(&scratch);
+        let file = index_file(&db);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        indexer
+            .full_rebuild(&sweep_corpus()[..40])
+            .expect("seed the corpus");
+        let out_of_memory = || {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOMEM),
+                Some("out of memory".to_owned()),
+            )
+        };
+        let tx = indexer.conn.transaction().expect("begin a write");
+        tx.execute(
+            "INSERT INTO documents_docsize(id, sz) VALUES (999999, x'00')",
+            [],
+        )
+        .expect("an earlier statement of the transaction writes");
+        assert_eq!(
+            quick_check_in_one_snapshot(&tx),
+            Integrity::Damaged,
+            "the precondition: read inside that transaction, the index looks damaged"
+        );
+        assert!(
+            committed_file_is_healthy(&file, false),
+            "while the file is not"
+        );
+
+        let error = classify(&tx, &file, "delete one document", out_of_memory());
+        assert!(
+            matches!(&error, IndexerError::Sqlite { source, .. }
+                if source.sqlite_error_code() == Some(ErrorCode::OutOfMemory)),
+            "a healthy index is never called Corrupt: {error:?}"
+        );
+        assert!(
+            tx.is_autocommit(),
+            "the diagnosis ends the failed write and leaves no transaction open"
+        );
+        drop(tx);
+        assert!(committed_file_is_healthy(&file, true));
+        assert_eq!(
+            indexer
+                .search("needle", 100)
+                .expect("the Indexer is still usable")
+                .documents_covered,
+            40
+        );
+        indexer
+            .add_or_replace(&doc("after.md", DocumentKind::Section, "A", "after"))
+            .expect("and still writes");
+    }
+
+    #[test]
+    fn ori_t_0035_a_write_that_fails_part_way_through_its_transaction_never_calls_a_healthy_index_corrupt()
+     {
+        // The same through the public API: another writer's triggers on
+        // FTS5's shadow tables make every document delete also write a
+        // stray docsize row, and refuse one insert. incremental_sync
+        // deletes first, so by the time the refused insert fails, its
+        // transaction holds the stray row; the committed file never does.
+        let scratch = Scratch::new("sync-fails-part-way");
+        let db = product(&scratch);
+        let file = index_file(&db);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        let seed = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("b.md", DocumentKind::Section, "B", "beta"),
+        ];
+        indexer.full_rebuild(&seed).expect("seed");
+        Connection::open(&file)
+            .expect("another writer")
+            .execute_batch(
+                "CREATE TRIGGER stray AFTER DELETE ON documents_content BEGIN \
+                     INSERT INTO documents_docsize(id, sz) VALUES (old.id + 1000000, x'00'); \
+                 END; \
+                 CREATE TRIGGER refuse BEFORE INSERT ON documents_content \
+                     WHEN new.c0 = 'refused.md' BEGIN \
+                     SELECT RAISE(ABORT, 'refused by another writer'); \
+                 END;",
+            )
+            .expect("install the triggers");
+        assert!(committed_file_is_healthy(&file, true), "the precondition");
+
+        let target = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("refused.md", DocumentKind::Section, "R", "refused"),
+        ];
+        match indexer.incremental_sync(&target) {
+            Err(IndexerError::Sqlite { source, .. }) => assert_eq!(
+                source.sqlite_error_code(),
+                Some(ErrorCode::ConstraintViolation),
+                "the trigger's refusal, as it is: {source:?}"
+            ),
+            other => panic!("a healthy index is never called Corrupt: {other:?}"),
+        }
+        assert!(
+            committed_file_is_healthy(&file, true),
+            "and it is still healthy"
+        );
+        let dump: Vec<String> = indexer
+            .all_documents()
+            .expect("the Indexer is still usable")
+            .into_iter()
+            .map(|(document, _)| document.path)
+            .collect();
+        assert_eq!(dump, ["a.md", "b.md"], "the failed sync changed nothing");
+    }
+
+    /// Every row of `documents_config`, FTS5's table of the options set on
+    /// the index, as text, sorted.
+    fn fts5_config(file: &Path) -> Vec<String> {
+        let raw = Connection::open(file).expect("a raw connection");
+        let mut statement = raw
+            .prepare("SELECT k, v FROM documents_config ORDER BY k")
+            .expect("prepare");
+        statement
+            .query_map([], |row| {
+                Ok(format!("{:?}={:?}", row.get_ref(0)?, row.get_ref(1)?))
+            })
+            .expect("run")
+            .collect::<rusqlite::Result<_>>()
+            .expect("read every config row")
+    }
+
+    #[test]
+    fn ori_t_0035_incremental_sync_never_keeps_an_fts5_option_this_build_did_not_set() {
+        // The review's precondition for the false Corrupt: another writer
+        // set two legal FTS5 options through SQL (pgsz 64, automerge 0).
+        // full_rebuild dropped them; incremental_sync kept them. Every
+        // option FTS5 takes is set the same way, rank and secure-delete
+        // included.
+        let target = vec![
+            doc("a.md", DocumentKind::Section, "A", "alpha"),
+            doc("b.md", DocumentKind::Section, "B", "beta"),
+        ];
+        let reference = Scratch::new("config-reference");
+        let reference_db = product(&reference);
+        {
+            let mut indexer = Indexer::open(&reference_db).expect("open the reference");
+            indexer
+                .full_rebuild(&target)
+                .expect("the reference rebuild");
+        }
+        let expected_config = fts5_config(&index_file(&reference_db));
+        let expected_rows = raw_rows(&index_file(&reference_db));
+
+        for options in [
+            &["('pgsz', 64)", "('automerge', 0)"][..],
+            &["('rank', 'bm25(10.0, 1.0)')"][..],
+            &["('secure-delete', 1)"][..],
+            &[
+                "('crisismerge', 2)",
+                "('usermerge', 2)",
+                "('deletemerge', 0)",
+            ][..],
+        ] {
+            let scratch = Scratch::new("config-foreign");
+            let db = product(&scratch);
+            let file = index_file(&db);
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&target).expect("seed");
+            assert_eq!(fts5_config(&file), expected_config);
+            let raw = Connection::open(&file).expect("another writer");
+            for option in options {
+                raw.execute(
+                    &format!("INSERT INTO documents(documents, rank) VALUES {option}"),
+                    [],
+                )
+                .expect("set an FTS5 option");
+            }
+            drop(raw);
+            assert_ne!(
+                fts5_config(&file),
+                expected_config,
+                "{options:?}: the precondition, the option is stored"
+            );
+
+            let report = indexer.incremental_sync(&target).expect("sync");
+            assert_eq!(
+                fts5_config(&file),
+                expected_config,
+                "{options:?}: after a sync the index holds only what a rebuild writes"
+            );
+            assert_eq!(raw_rows(&file), expected_rows, "{options:?}");
+            assert_eq!(
+                target.len() - report.removed - report.replaced + report.upserted,
+                report.total,
+                "{options:?}: the counters describe the write: {report:?}"
+            );
+            assert_eq!(report.total, target.len(), "{options:?}");
+            let again = indexer.incremental_sync(&target).expect("resync");
+            assert_eq!(
+                (again.upserted, again.removed, again.replaced),
+                (0, 0, 0),
+                "{options:?}: and then it settles"
+            );
+            assert_eq!(indexer.search("alpha", 10).expect("search").hits.len(), 1);
+        }
     }
 }
