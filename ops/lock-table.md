@@ -360,3 +360,15 @@ The citation checker's rule set, which `ops/phase-1-backlog.md` batch 6 listed a
 **Claim 61 extended.** ORI-T-0039's targeted repair round writes `crates/ori-memory/src/barrier.rs`, additively: the barrier records which fields its cap cut in the `memory.record_created` payload, so the operational log can say a claim field was cut instead of parsing half an entry as a path. `spec/RISK_MAP.md` tiers `barrier.rs` 2, so that change is tier 2 whatever the rest of ORI-T-0039 is. No other claim holds `barrier.rs`: ORI-T-0037's claim was released when pull request 66 merged. No existing test of `barrier.rs` may change; a change that would need one stops as `test_modified`.
 
 **State after this section:** the claims held are 20, 60, 61 and 62. The next free identifier is ORI-T-0123.
+
+---
+
+## ORI-T-0123 allocated
+
+Written by the lead on 2026-09-27 under [[R31]] rule 1.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0123 | Amend ADR-0002 to state [[R38]]: the lead session merges tier 0 and tier 1 once every check passes, and the operator merges every tier 2 change personally | `spec/adr/ADR-0002-single-operator.md`, and any other statement in `spec/` the decision makes false | 2, `spec/RISK_MAP.md` (ADRs) | dispatched to the documentation role, branch `docs/adr-0002-lead-merges-tier-0-and-1` | 2026-09-27 |
+
+**State after this section:** the claims held are 20, 60, 61 and 62. The next free identifier is ORI-T-0124.
