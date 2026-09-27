@@ -655,9 +655,14 @@
 //! write-ahead log may hold the damaged index's last committed transactions,
 //! which the database file itself does not. They move as one unit: if one
 //! move fails, every file already moved is moved back, the directory made
-//! for them is removed if that leaves it empty, and
-//! [`IndexerError::QuarantineIncomplete`] names any file that could not be
-//! put back; nothing is rebuilt. A review found round 5 returning at the
+//! for them is left where it is, empty if every file went back, and
+//! [`IndexerError::QuarantineIncomplete`] names it and any file that could
+//! not be put back; nothing is rebuilt. No quarantine directory is ever
+//! removed, so no name is ever made twice: a review found round 8 removing
+//! the empty directory of a recovery it had rolled back, and the next
+//! recovery, handed the same `recovered_at`, then made exactly that name
+//! again and filled it, so the path the failed call's error named held
+//! another recovery's evidence. A review found round 5 returning at the
 //! first failure, with the log already in quarantine and the database still
 //! live: the next open then served the index as it stood before the log's
 //! transactions, with no error, and a retry quarantined the database in a
@@ -1237,10 +1242,11 @@ pub enum IndexerError {
     /// [`Indexer::recover`] could not move every index file into
     /// quarantine, and moved back every file it had already moved that it
     /// could. Nothing was rebuilt. When `stranded` is empty the index files
-    /// are exactly where they were before the call (and the empty
-    /// quarantine directory made for them is gone again); otherwise each
-    /// path in it is a file that is in `quarantine` and could not be put
-    /// back, and every other file is at its live path.
+    /// are exactly where they were before the call, and the quarantine
+    /// directory made for them is left in place, empty, so that no later
+    /// recovery ever takes its name; otherwise each path in it is a file
+    /// that is in `quarantine` and could not be put back, and every other
+    /// file is at its live path.
     QuarantineIncomplete {
         /// The file whose move failed, at its live path.
         path: PathBuf,
@@ -1364,8 +1370,10 @@ impl fmt::Display for IndexerError {
             } if stranded.is_empty() => write!(
                 f,
                 "{} could not be moved into quarantine: {source}; every file already moved \
-                 was put back, so the index files are where they were and nothing was rebuilt",
-                path.display()
+                 was put back, so the index files are where they were and nothing was rebuilt \
+                 ({} is left empty, and no later recovery reuses its name)",
+                path.display(),
+                quarantine.display()
             ),
             Self::QuarantineIncomplete {
                 path,
@@ -2927,11 +2935,14 @@ fn refuse_symlink(dir: &Path) -> Result<(), IndexerError> {
 /// then served the database without its write-ahead log, silently, as it
 /// stood before the log's transactions, and a retry quarantined the
 /// database in a second directory, apart from its log. Now a failed move
-/// moves every file already moved back to its live path, last moved first,
-/// and removes the directory made for them if that leaves it empty
-/// (`remove_dir`, which refuses a directory that is not empty, so it can
-/// never remove a file); [`IndexerError::QuarantineIncomplete`] names any
-/// file that could not be put back.
+/// moves every file already moved back to its live path, last moved first;
+/// [`IndexerError::QuarantineIncomplete`] names the directory and any file
+/// that could not be put back. The directory itself is left in place, even
+/// when that leaves it empty: its count then stays taken, so
+/// [`unique_quarantine_dir`] never makes its name again, and the path the
+/// error names is never overwritten with, or merged into by, a later
+/// recovery's evidence. A review found round 8 removing it, and the next
+/// recovery at the same `recovered_at` making the same name.
 ///
 /// It moves files and links, and nothing else. A review found round 7
 /// deciding only that an entry existed and then renaming it whatever it
@@ -2985,9 +2996,6 @@ fn quarantine_index_files(
                     stranded.push(quarantined.clone());
                 }
             }
-            if stranded.is_empty() {
-                let _ = std::fs::remove_dir(&destination);
-            }
             return Err(IndexerError::QuarantineIncomplete {
                 path: from,
                 source,
@@ -3018,8 +3026,10 @@ fn quarantine_index_files(
 /// already in `quarantine_root` with a name of that shape (1 for the
 /// first), and `millis` is `recovered_at`: `create_dir`, not
 /// `create_dir_all`, so a name already taken is never reused, whatever
-/// made it. A timestamp before the Unix epoch is written as zero rather
-/// than with a sign.
+/// made it. This module never removes a directory this made, a rolled
+/// back recovery's included ([`quarantine_index_files`]), so a count once
+/// taken stays taken and no name is ever made twice. A timestamp before
+/// the Unix epoch is written as zero rather than with a sign.
 ///
 /// The count comes first so the names sort in the order recoveries
 /// happened. A review found round 7 naming the directory
@@ -8001,22 +8011,29 @@ mod tests {
     }
 
     /// Asserts a failed recover left the planted pair exactly where it was,
-    /// then recovers again and asserts both went into one directory.
+    /// and its quarantine directory in place and empty, then recovers again
+    /// and asserts both went into one directory, a new one.
     fn assert_rolled_back_then_recovered_together(
         db: &mut ProductDb,
         planted: &(Vec<u8>, Vec<u8>),
         result: Result<RecoveryReport, IndexerError>,
     ) {
-        match &result {
-            Err(IndexerError::QuarantineIncomplete { path, stranded, .. }) => {
+        let failed = match &result {
+            Err(IndexerError::QuarantineIncomplete {
+                path,
+                stranded,
+                quarantine,
+                ..
+            }) => {
                 assert_eq!(path.file_name(), Some(std::ffi::OsStr::new(INDEX_FILE)));
                 assert!(
                     stranded.is_empty(),
                     "every moved file was put back: {stranded:?}"
                 );
+                quarantine.clone()
             }
             other => panic!("a failed move is reported as such: {other:?}"),
-        }
+        };
         let message = result.expect_err("checked above").to_string();
         assert!(message.contains("put back"), "{message}");
         assert_eq!(
@@ -8028,15 +8045,22 @@ mod tests {
             planted.1,
             "the log was moved back beside its database, byte for byte"
         );
+        let failed_name = failed
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             quarantine_contents(db),
-            Vec::<String>::new(),
-            "no quarantine directory is left holding half the evidence"
+            vec![failed_name.clone()],
+            "no quarantine directory is left holding half the evidence: the failed \
+             recovery's own is left in place, empty"
         );
 
         let report = Indexer::recover(db, &[], Timestamp::from_millis(8))
             .expect("once the obstacle is gone, recover succeeds");
         let quarantine = report.quarantine.expect("the pair was moved");
+        assert_ne!(quarantine, failed, "into a directory of its own");
         assert_eq!(
             fs::read(quarantine.join(INDEX_FILE)).expect("the database is in quarantine"),
             planted.0
@@ -8045,11 +8069,79 @@ mod tests {
             fs::read(quarantine.join("fts.sqlite-wal")).expect("beside its log"),
             planted.1
         );
+        let contents = quarantine_contents(db);
+        assert_eq!(contents.len(), 4, "{contents:?}");
+        assert!(
+            !contents
+                .iter()
+                .any(|entry| entry.starts_with(&format!("{failed_name}/"))),
+            "the failed recovery's directory still holds nothing: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_a_rolled_back_recoverys_quarantine_directory_name_is_never_reused() {
+        // The review's reproduction: a recovery whose move of the database
+        // fails is rolled back, and a second recovery handed the same
+        // recovered_at succeeds. Round 8 removed the first one's empty
+        // directory, so the second made exactly that name again and filled
+        // it: the path the first error named held other evidence.
+        let scratch = Scratch::new("quarantine-no-reuse");
+        let mut db = product(&scratch);
+        let planted = plant_an_index_whose_log_holds_a_commit(&db, &scratch);
+        let at = Timestamp::from_millis(7);
+        let result = {
+            let _failing = fail_moves(|from| {
+                from.file_name() == Some(std::ffi::OsStr::new(INDEX_FILE))
+                    && from.parent().and_then(Path::file_name)
+                        == Some(std::ffi::OsStr::new(INDEX_DIR))
+            });
+            Indexer::recover(&mut db, &[], at)
+        };
+        let Err(IndexerError::QuarantineIncomplete {
+            quarantine: failed,
+            stranded,
+            ..
+        }) = &result
+        else {
+            panic!("a failed move is reported as such: {result:?}");
+        };
+        assert!(stranded.is_empty(), "{stranded:?}");
+        assert!(
+            failed.is_dir(),
+            "the failed recovery's directory is left in place: {}",
+            failed.display()
+        );
         assert_eq!(
-            quarantine_contents(db).len(),
-            3,
-            "{:?}",
-            quarantine_contents(db)
+            fs::read_dir(failed).expect("list it").count(),
+            0,
+            "and it is empty, every file having gone back"
+        );
+
+        let report = Indexer::recover(&mut db, &[], at)
+            .expect("the same recovery, at the same time, once the obstacle is gone");
+        let quarantine = report.quarantine.expect("the pair was moved");
+        assert_ne!(
+            &quarantine, failed,
+            "a name a rolled-back recovery made is never made again"
+        );
+        assert_eq!(
+            fs::read_dir(failed).expect("list it again").count(),
+            0,
+            "nothing is ever merged into the failed recovery's directory"
+        );
+        let name = |path: &Path| path.file_name().expect("a name").to_owned();
+        assert!(
+            name(failed) < name(&quarantine),
+            "and the names still sort in the order the recoveries happened"
+        );
+        assert_eq!(
+            fs::read(quarantine.join(INDEX_FILE)).expect("the database is in quarantine"),
+            planted.0
+        );
+        assert_eq!(
+            fs::read(quarantine.join("fts.sqlite-wal")).expect("beside its log"),
+            planted.1
         );
     }
 
