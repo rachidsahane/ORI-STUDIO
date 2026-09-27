@@ -2969,14 +2969,13 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// never reads".
 fn walk_markdown(repo_root: &Path, spec_dir: &Path, walk: &mut RepoWalk) -> std::io::Result<()> {
     let mut budget = WalkBudget::new();
-    let mut listings: Vec<Vec<std::fs::DirEntry>> = vec![entries_in_reverse_name_order(spec_dir)?];
+    let mut listings: Vec<Vec<ListedEntry>> = vec![entries_in_reverse_name_order(spec_dir)?];
     while let Some(listing) = listings.last_mut() {
-        let Some(entry) = listing.pop() else {
+        let Some((path, file_type)) = listing.pop() else {
             listings.pop();
             continue;
         };
-        let path = entry.path();
-        let file_type = match entry.file_type() {
+        let file_type = match file_type {
             Ok(file_type) => file_type,
             Err(error) => {
                 walk.skipped.push(SkippedEntry {
@@ -3040,13 +3039,31 @@ fn walk_markdown(repo_root: &Path, spec_dir: &Path, walk: &mut RepoWalk) -> std:
     Ok(())
 }
 
+/// One entry of a directory listing: its path, and what kind of entry it
+/// is (never following a link), as read when the directory was listed.
+type ListedEntry = (PathBuf, std::io::Result<std::fs::FileType>);
+
 /// Every entry of the directory `dir`, sorted by name, last name first, so
 /// that popping from the end visits them in name order. Fails if the
 /// directory cannot be listed, or any entry of it cannot be read.
-fn entries_in_reverse_name_order(dir: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
-    let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
-    Ok(entries)
+///
+/// It keeps each entry's path and type, never the `DirEntry` itself: on
+/// Unix a `DirEntry` holds its directory's open handle, so listings kept
+/// for every level of a deep tree would hold one file descriptor per
+/// level, and past the process's limit a directory would be recorded as
+/// unreadable for no reason of its own. Here the handle is closed before
+/// this returns, so a walk holds one open directory at a time.
+fn entries_in_reverse_name_order(dir: &Path) -> std::io::Result<Vec<ListedEntry>> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        entries.push((entry.file_name(), entry.path(), entry.file_type()));
+    }
+    entries.sort_by(|(left, ..), (right, ..)| right.cmp(left));
+    Ok(entries
+        .into_iter()
+        .map(|(_, path, file_type)| (path, file_type))
+        .collect())
 }
 
 /// What one walk has left to spend, and the document paths it has already
@@ -8412,6 +8429,43 @@ mod tests {
     // Item 2: the walk crashed on a deep tree, and nothing bounded a walk.
     // ---------------------------------------------------------------------
 
+    /// As [`run_in_child_process`], with the child's limit on open files
+    /// lowered to `limit` first, by `ulimit -n` in a shell that then runs
+    /// the child: cargo raises the limit it hands the tests it runs, so a
+    /// limit a process may really have is seen only this way.
+    #[cfg(unix)]
+    fn run_in_child_process_with_open_file_limit(
+        name: &str,
+        env: &str,
+        extra_env: &[(&str, &str)],
+        limit: u32,
+    ) {
+        let exe = std::env::current_exe().expect("the test binary's own path");
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("ulimit -n \"$0\" && exec \"$@\"")
+            .arg(limit.to_string())
+            .arg(exe)
+            .args([name, "--exact", "--nocapture", "--test-threads=1"])
+            .env(env, "1");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("the test binary runs as a child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "the child run of {name} failed:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the child must have run exactly {name}, not zero tests:\n{stdout}"
+        );
+        eprint!("{stderr}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn ori_t_0035_a_tree_as_deep_as_the_path_limit_allows_is_walked_on_a_small_stack() {
@@ -8421,11 +8475,14 @@ mod tests {
         // thread optimized) aborted the whole process with a stack
         // overflow. Here, 400 levels on a 256 KiB thread, where the
         // recursion needs several MiB; a child process, since an overflow
-        // aborts every test in the process it happens in.
+        // aborts every test in the process it happens in. The child may
+        // also open no more than 64 files: a walk that kept every level's
+        // directory open would record the deep levels as unreadable.
         const CHILD: &str = "ORI_T_0035_DEEP_WALK_CHILD";
         const ROOT: &str = "ORI_T_0035_DEEP_WALK_ROOT";
         const DEPTH: usize = 400;
         const STACK: usize = 256 * 1024;
+        const OPEN_FILES: u32 = 64;
         let Some(root) = std::env::var_os(ROOT).filter(|_| std::env::var_os(CHILD).is_some())
         else {
             let scratch = Scratch::new("deep-walk");
@@ -8437,10 +8494,11 @@ mod tests {
             fs::write(deepest.join("deep.md"), "# Deep\n\ndeepmarker\n").expect("write");
             fs::write(scratch.path.join("spec").join("top.md"), "# Top\n\ntop\n").expect("write");
             let root = scratch.path.to_str().expect("a UTF-8 scratch path");
-            run_in_child_process(
+            run_in_child_process_with_open_file_limit(
                 "indexer::tests::ori_t_0035_a_tree_as_deep_as_the_path_limit_allows_is_walked_on_a_small_stack",
                 CHILD,
                 &[(ROOT, root)],
+                OPEN_FILES,
             );
             return;
         };
