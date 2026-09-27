@@ -629,7 +629,15 @@
 //!   not looked up, since the `tsconfig.json` and `node_modules` that
 //!   decide it are not read. Only top-level `import` and `export ... from`
 //!   statements are read; a dynamic `import()` or a `require` call is not
-//!   an edge.
+//!   an edge. A specifier is the value of its string, escape sequences
+//!   decoded by JavaScript's rules for strict code, and a `\` in that value
+//!   is read as `/`, as TypeScript reads it; a string whose value cannot be
+//!   known for certain (a legacy octal escape, half of a surrogate pair
+//!   alone, a malformed escape) is [`EdgeResolution::Undecodable`] and
+//!   never looked up. Until round 9 a specifier was the text before its
+//!   string's first escape, so `'./a\x62'` and `'./a\nb'` were both
+//!   [`EdgeResolution::Resolved`] edges to `a.ts`, a file neither names
+//!   (`tests::ori_t_0036_typescript_specifiers_are_decoded_before_they_are_looked_up`).
 //! - **Python.** A relative import (`from . import a`, `from ..pkg import
 //!   b`, `from . import *`) is looked up against the importing file's own
 //!   directory, the mapped root counting as a package, and never above it:
@@ -748,6 +756,7 @@
 //! "Time": until round 7 the `spec/` scan was not, and an ordinary product
 //! repository gave a different map on most runs).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -899,7 +908,10 @@ pub struct DependencyEdge {
     /// edge that resolves to the same file rather than copied per edge; see
     /// [`EdgeTarget`]. Otherwise, the import target as written in the source
     /// (a crate name, a `crate::` or `super::` path, a bare or relative
-    /// specifier, a dotted import, a Go import path). Five bounded
+    /// specifier, a dotted import, a Go import path), where a TypeScript
+    /// specifier is its string's value, escapes decoded, or, when that
+    /// value could not be known ([`EdgeResolution::Undecodable`]), the text
+    /// between its quotes, escapes and all. Five bounded
     /// departures from "as written": a member of a grouped Rust `use` is
     /// written as its own full path (its group's prefix, `::`, the member),
     /// and a `self` member as its group's prefix (followed by its ` as`
@@ -967,6 +979,17 @@ pub enum EdgeResolution {
     /// `NotAttempted`; which, and how many, is not recorded. Until round 7
     /// this edge looked like any other unresolved one.
     Folded,
+    /// The target is a TypeScript string literal whose value this module
+    /// could not know for certain, so it was never looked up, and `to` is
+    /// the text between its quotes exactly as written, escapes and all: a
+    /// legacy octal escape (`\1`) or `\8` or `\9`, which a module's strict
+    /// code forbids; an escape naming half of a UTF-16 surrogate pair
+    /// alone, which no UTF-8 path can hold; a malformed escape, or an error
+    /// the parser found inside the literal. It may name a file of this
+    /// repository. Until round 9 no TypeScript escape was decoded, and a
+    /// specifier with one was cut at its first escape and looked up as
+    /// that, which could resolve it to a file it does not name.
+    Undecodable,
 }
 
 /// Where a [`DependencyEdge`] points, as text: read it as a `&str` (it
@@ -4237,15 +4260,147 @@ fn ts_specifier_is_relative(specifier: &str) -> bool {
 /// is [`EdgeResolution::NotAttempted`], the specifier as written. Nothing
 /// is looked up once the sink is full: the lookup is the costly part, and
 /// its answer could not be kept.
-fn ts_import_edge(rel: &str, specifier: &str, known: &KnownPaths, sink: &mut EdgeSink) {
+///
+/// The specifier is the string's value ([`ts_string_value`]), never its
+/// source text: until round 9 it was the text before the string's first
+/// escape sequence, so `'./a\nb'`, `'./a\x62'` and `'./a\` at the end of a
+/// line with `b'` on the next (a line continuation) all came out as `./a`,
+/// a `Resolved` edge to `a.ts` that the import does not name. A value that
+/// holds `\` is looked up with `/` in its place, as TypeScript's own
+/// resolver reads it (its `normalizeSlashes`, and its relative test, which
+/// takes `.\` as it takes `./`). A string whose value cannot be known for
+/// certain is recorded as [`EdgeResolution::Undecodable`], its text as
+/// written, and is never looked up.
+fn ts_import_edge(
+    rel: &str,
+    specifier_node: Node,
+    source: &[u8],
+    known: &KnownPaths,
+    sink: &mut EdgeSink,
+) {
     if !sink.has_room() {
         return;
     }
-    if ts_specifier_is_relative(specifier) {
-        sink.push_looked_up(resolve_ts_relative(rel, specifier, known), specifier);
+    let Some(specifier) = ts_string_value(specifier_node, source) else {
+        let as_written =
+            ts_string_body(specifier_node, source).unwrap_or_else(|| text(specifier_node, source));
+        sink.push_unresolved(as_written, EdgeResolution::Undecodable);
+        return;
+    };
+    let lookup = if specifier.contains('\\') {
+        Cow::Owned(specifier.replace('\\', "/"))
     } else {
-        sink.push_unresolved(specifier, EdgeResolution::NotAttempted);
+        Cow::Borrowed(&*specifier)
+    };
+    if ts_specifier_is_relative(&lookup) {
+        sink.push_looked_up(resolve_ts_relative(rel, &lookup, known), &specifier);
+    } else {
+        sink.push_unresolved(&specifier, EdgeResolution::NotAttempted);
     }
+}
+
+/// The text between a TypeScript string literal's quotes, exactly as
+/// written, escapes and all; `None` unless it opens and closes with the
+/// same quote, `'` or `"`.
+fn ts_string_body<'a>(node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
+    let raw = text(node, source);
+    let quote = raw.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    raw.strip_prefix(quote)?.strip_suffix(quote)
+}
+
+/// The value of the TypeScript string literal `node`, its escape sequences
+/// decoded by JavaScript's own rules for a module, which is strict code:
+/// `\n`, `\r`, `\t`, `\b`, `\f`, `\v`, `\0` (not before a digit), `\xHH`,
+/// `\uHHHH` and `\u{H...}` (a UTF-16 surrogate pair, written as two
+/// escapes, is one character), a line continuation (a `\` before a line
+/// terminator stands for nothing), and any other escaped character standing
+/// for itself. `None` when the value cannot be known for certain, and the
+/// caller must not look it up: a legacy octal escape, `\8` or `\9`, which
+/// strict code forbids (TypeScript reports them and still builds a value);
+/// an escape naming half of a surrogate pair alone, which no UTF-8 path can
+/// hold; a malformed escape, an unescaped line break, or any error the
+/// parser found inside the literal. Borrowed when there is nothing to
+/// decode.
+fn ts_string_value<'a>(node: Node<'a>, source: &'a [u8]) -> Option<Cow<'a, str>> {
+    if node.kind() != "string" || node.has_error() {
+        return None;
+    }
+    let body = ts_string_body(node, source)?;
+    if !body.contains(['\\', '\n', '\r']) {
+        return Some(Cow::Borrowed(body));
+    }
+    let mut value = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    // A high surrogate an escape has named, waiting for its low half.
+    let mut high: Option<u32> = None;
+    while let Some(c) = chars.next() {
+        let unit = match c {
+            '\n' | '\r' => return None,
+            '\\' => match chars.next()? {
+                '\n' | '\u{2028}' | '\u{2029}' => continue,
+                '\r' => {
+                    chars.next_if_eq(&'\n');
+                    continue;
+                }
+                'n' => 0x0A,
+                'r' => 0x0D,
+                't' => 0x09,
+                'b' => 0x08,
+                'f' => 0x0C,
+                'v' => 0x0B,
+                '0' if !chars.peek().is_some_and(char::is_ascii_digit) => 0,
+                '0'..='9' => return None,
+                'x' => {
+                    let high_digit = chars.next()?.to_digit(16)?;
+                    high_digit * 16 + chars.next()?.to_digit(16)?
+                }
+                'u' => ts_unicode_escape(&mut chars)?,
+                itself => u32::from(itself),
+            },
+            other => u32::from(other),
+        };
+        match (high.take(), unit) {
+            (Some(first), 0xDC00..=0xDFFF) => {
+                value.push(char::from_u32(
+                    0x10000 + ((first - 0xD800) << 10) + (unit - 0xDC00),
+                )?);
+            }
+            (Some(_), _) | (None, 0xDC00..=0xDFFF) => return None,
+            (None, 0xD800..=0xDBFF) => high = Some(unit),
+            (None, _) => value.push(char::from_u32(unit)?),
+        }
+    }
+    if high.is_some() {
+        return None;
+    }
+    Some(Cow::Owned(value))
+}
+
+/// The code unit or code point a `\u` escape names, read from what follows
+/// the `u`: four hex digits, or one or more in braces, at most `0x10FFFF`.
+/// `None` for anything else.
+fn ts_unicode_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<u32> {
+    if chars.next_if_eq(&'{').is_none() {
+        let mut value = 0;
+        for _ in 0..4 {
+            value = value * 16 + chars.next()?.to_digit(16)?;
+        }
+        return Some(value);
+    }
+    let mut value: u32 = 0;
+    let mut digits = 0usize;
+    loop {
+        let c = chars.next()?;
+        if c == '}' {
+            break;
+        }
+        value = value * 16 + c.to_digit(16)?;
+        if value > 0x10_FFFF {
+            return None;
+        }
+        digits += 1;
+    }
+    (digits > 0).then_some(value)
 }
 
 /// Pushes onto `items` the interfaces one exported TypeScript declaration
@@ -4321,14 +4476,12 @@ fn extract_typescript(
         match child.kind() {
             "import_statement" => {
                 if let Some(source_node) = child.child_by_field_name("source") {
-                    let specifier = string_literal_text(source_node, source);
-                    ts_import_edge(rel, specifier, known, &mut out.edges);
+                    ts_import_edge(rel, source_node, source, known, &mut out.edges);
                 }
             }
             "export_statement" => {
                 if let Some(source_node) = child.child_by_field_name("source") {
-                    let specifier = string_literal_text(source_node, source);
-                    ts_import_edge(rel, specifier, known, &mut out.edges);
+                    ts_import_edge(rel, source_node, source, known, &mut out.edges);
                 }
                 if let Some(declaration) = child.child_by_field_name("declaration") {
                     if !ts_declaration_interfaces(
@@ -11946,5 +12099,145 @@ mod tests {
             "the same links, with time to follow them"
         );
         drop(guard);
+    }
+
+    /// Round 9, item 2 (MEDIUM, honesty): a TypeScript specifier was the
+    /// text before its string's first escape sequence, because tree-sitter
+    /// splits a string at every escape and only the first piece was read.
+    /// So `"./a\nb"`, `"./a\x62"` and a line continuation inside `"./a` and
+    /// `b"` were all `Resolved` edges to `a.ts`, which none of them names,
+    /// and the file each does name (`a` newline `b.ts`, `ab.ts`) had no edge.
+    /// Each specifier here names a file the walk found, one whose name
+    /// holds a newline among them, through every kind of escape, and must
+    /// resolve to it and to nothing else: `\` is read as `/`, as
+    /// TypeScript reads it, so a file literally named `dir\c.ts` is not the
+    /// target of `"./dir\\c"`. A value that cannot be known for certain (a
+    /// legacy octal escape, half of a surrogate pair) is `Undecodable`,
+    /// written as in the source, never looked up.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_typescript_specifiers_are_decoded_before_they_are_looked_up() {
+        let dir = temp_dir("ts-escaped-specifiers");
+        let guard = DropGuard(dir.clone());
+        let targets = [
+            "web/a.ts",
+            "web/ab.ts",
+            "web/a\nb.ts",
+            "web/\u{1F600}.ts",
+            "web/caf\u{e9}.ts",
+            "web/dir/c.ts",
+            "web/dir\\c.ts",
+        ];
+        for target in targets {
+            write(&dir, target, "export const v = 1;\n");
+        }
+        write(
+            &dir,
+            "web/m.ts",
+            r#"import { AB } from "./ab";
+import { NL } from "./a\nb";
+import { X } from "./a\x62";
+export { LC } from "./a\
+b";
+import { U4 } from './ab';
+import { UB } from './\u{61}b';
+import { SP } from "./😀";
+import { CF } from "./caf\xe9";
+import { BS } from "./dir\\c";
+import { DOT } from ".\\ab";
+import { Q } from "./a\q";
+import { OC } from "./a\142";
+import { LS } from "./a\uD800";
+import { GN } from "./gone\x21";
+import { PK } from "lod\x61sh";
+"#,
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let module = map
+            .modules
+            .iter()
+            .find(|m| m.path == "web/m.ts")
+            .expect("the importer is mapped");
+        assert!(
+            !module.parsed_with_errors,
+            "every literal here parses clean"
+        );
+        let resolved = |to: &str| (to.to_owned(), EdgeResolution::Resolved);
+        let mut expected = vec![
+            resolved("web/ab.ts"),
+            resolved("web/a\nb.ts"),
+            resolved("web/ab.ts"),
+            resolved("web/ab.ts"),
+            resolved("web/ab.ts"),
+            resolved("web/ab.ts"),
+            resolved("web/\u{1F600}.ts"),
+            resolved("web/caf\u{e9}.ts"),
+            resolved("web/dir/c.ts"),
+            resolved("web/ab.ts"),
+            ("./aq".to_owned(), EdgeResolution::NotFound),
+            ("./a\\142".to_owned(), EdgeResolution::Undecodable),
+            ("./a\\uD800".to_owned(), EdgeResolution::Undecodable),
+            ("./gone!".to_owned(), EdgeResolution::NotFound),
+            ("lodash".to_owned(), EdgeResolution::NotAttempted),
+        ];
+        expected.sort();
+        assert_eq!(edge_pairs(&map, "web/m.ts"), expected);
+        drop(guard);
+    }
+
+    /// Round 9, item 2, the decoder itself (`ts_string_value`), one literal
+    /// at a time, as the parser hands it over: each escape JavaScript's
+    /// strict code allows decodes to its value, and each it forbids, or
+    /// that names a value no UTF-8 path can hold, or that is malformed,
+    /// gives no value at all.
+    #[test]
+    fn ori_t_0036_typescript_string_values_follow_javascript_escape_rules() {
+        fn value_of(literal: &str) -> Option<String> {
+            let source = format!("import x from {literal};\n");
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+                .expect("grammar");
+            let tree = parser.parse(&source, None).expect("parses");
+            let root = tree.root_node();
+            let mut cursor = root.walk();
+            let statement = root
+                .children(&mut cursor)
+                .find(|node| node.kind() == "import_statement")?;
+            let node = statement.child_by_field_name("source")?;
+            ts_string_value(node, source.as_bytes()).map(Cow::into_owned)
+        }
+        let decoded = [
+            (r#""./ab""#, "./ab"),
+            (r"'./a\'b'", "./a'b"),
+            (r#""./a\"b""#, "./a\"b"),
+            (r#""./a\\b""#, "./a\\b"),
+            (r#""\n\r\t\b\f\v\0""#, "\n\r\t\u{8}\u{c}\u{b}\0"),
+            (r#""\x41B\u{43}\u{000044}""#, "ABCD"),
+            (r#""😀""#, "\u{1F600}"),
+            (r#""\u{D83D}\u{DE00}""#, "\u{1F600}"),
+            ("\"a\\\r\nb\"", "ab"),
+            ("\"a\\\u{2028}b\"", "ab"),
+            ("\"\\q\\\u{e9}\"", "q\u{e9}"),
+            (r#""\0x""#, "\0x"),
+        ];
+        for (literal, value) in decoded {
+            assert_eq!(value_of(literal).as_deref(), Some(value), "{literal}");
+        }
+        let undecodable = [
+            r#""\01""#,
+            r#""\1""#,
+            r#""\8""#,
+            r#""\uD800""#,
+            r#""\uDE00""#,
+            r#""\uD83Dx""#,
+            r#""\u{110000}""#,
+            r#""\u{}""#,
+            r#""\u12""#,
+            r#""\x4""#,
+        ];
+        for literal in undecodable {
+            assert_eq!(value_of(literal), None, "{literal}");
+        }
     }
 }
