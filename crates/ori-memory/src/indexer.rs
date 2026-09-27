@@ -311,10 +311,11 @@
 //! out); [`Indexer::walk_repo`] still returns it, with the list, for a
 //! caller that decides otherwise.
 //!
-//! Measured on this build (release, macOS, peak resident memory of a
-//! process that only walks): one 1 MiB file of empty headings, 185 MB
-//! before and 3 MB now (recorded, not split past the budget); five such
-//! files, 517 to 593 MB before and 3 MB now; a tree at both budgets at
+//! Measured on round 7's build (release, macOS, peak resident memory of a
+//! process that only walks; the per-file cap since can only lower what one
+//! file costs): one 1 MiB file of empty headings, 185 MB before the walk
+//! had a budget and 3 MB with it (recorded, not split past it); five such
+//! files, 517 to 593 MB before and 3 MB with it; a tree at both budgets at
 //! once, 16,384 documents from sixteen files of about 1 MiB, 38 MB, the
 //! most measured within them. Not bounded, and growing with the tree
 //! rather than with any one file's contents: the skip list, one entry per
