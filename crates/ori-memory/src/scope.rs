@@ -132,9 +132,17 @@
 //!   read (its reader takes the first `"key":"` in the text, so any other
 //!   layout could read differently there), and each value held to its
 //!   rules: two identifiers, a role, a family `ModelFamily::parse` accepts,
-//!   and the runtime `acp` or `headless`. Anything else is refused,
-//!   `identity_record_malformed`, for every requester, as that file's reader
-//!   refuses the whole log over it.
+//!   and the runtime `acp` or `headless`. Anything else refuses every agent
+//!   request, whichever identity the record names,
+//!   `identity_record_malformed`, as that file's reader refuses the whole log
+//!   over it. An operator request reads no `identity.created` event, because
+//!   nothing it is granted depends on a registered role (see "The operator,
+//!   the engine, and other products"), so such a record does not refuse it.
+//!   `registration.rs` accepts a model or a family holding a raw control
+//!   character, which it writes unescaped and this reader refuses, so one
+//!   such registration makes every agent request in the product refuse until
+//!   it is dealt with: that fails closed, and is recorded as a follow-up
+//!   against `ori-broker`.
 //! - **The product**: the [`ProductDb`] the call is made against. Never a
 //!   field of the request.
 //! - **The coder's declared scope**: the rows
@@ -250,12 +258,13 @@
 //!
 //! # Failing closed
 //!
-//! Every unknown is a refusal, logged: [`Actor::System`]; an identity with no
-//! `identity.created` event in this product's log; any `identity.created`
-//! event `crates/ori-broker/src/registration.rs` would refuse or could read
-//! differently (it cannot be told whose it is, or what role); an identity
-//! recorded under a product other than this one, or under two roles; a role
-//! or a source the table does not name; a log that does not verify; a coder
+//! Every unknown is a refusal, logged: [`Actor::System`]; for an agent
+//! request, an identity with no `identity.created` event in this product's
+//! log, any `identity.created` event `crates/ori-broker/src/registration.rs`
+//! would refuse or could read differently (it cannot be told whose it is, or
+//! what role), and an identity recorded under a product other than this one
+//! or under two roles; a role or a source the table does not name; a log
+//! that does not verify; a coder
 //! with no ticket from the log or the engine, an engine ticket the log
 //! contradicts, two log tickets and no engine ticket, a ticket the log ties
 //! to another identity, a credential event
