@@ -153,7 +153,10 @@
 //!   claim of the coder's ticket that the projection's reader cannot read,
 //!   or that serde reads as another module, or whose module is not a path
 //!   [`ModulePath::parse`] accepts, leaves its scope unknown, and is refused,
-//!   `lock_record_malformed`, until the ticket's release. A `lock.*` event
+//!   `lock_record_malformed`, until the ticket's release, whatever later
+//!   claims do to the row the projection keyed it by: another claim of the
+//!   same text, by any ticket, takes that row over but says nothing about
+//!   what the malformed claim holds. A `lock.*` event
 //!   with no ticket column is refused, `lock_record_unattributed`, as that
 //!   projection refuses it: skipped, another ticket's claim outside the
 //!   scope would vanish from that ticket's history and let its records in,
@@ -172,17 +175,25 @@
 //!   ... whether or not it was ever formally revoked", and
 //!   `spec/DATA_MODEL.md` section 4 has every issuance expire with its
 //!   session. A session is live while any one of its issuances to the
-//!   identity is. A `credential.revoked` event ends every issuance of its
-//!   session issued before it, whichever issuance ids it lists, because the
-//!   broker writes one only from `revoke_session`, which lists every
-//!   unrevoked issuance of the session. A credential event is read the way
+//!   identity is. Which issuances are revoked is what `issuance.rs`'s
+//!   `project_issuances` folds, and nothing looser: a session's issuances
+//!   are keyed by issuance id, and a `credential.revoked` event revokes the
+//!   issuances of its own session that it lists and that were issued before
+//!   it, and no other, so a revocation that lists another id, or none,
+//!   leaves the identity's issuance as live here as the broker has it. A
+//!   later issuance of an id the session already holds replaces the earlier
+//!   one there, unrevoked, and is read the same way here; one that hands the
+//!   id to another identity, where either is the requesting identity, is
+//!   refused, since the broker keeps no trace of the earlier holder. A
+//!   credential event is read the way
 //!   `issuance.rs` reads it back, every field it writes required
 //!   (`expires_at` present, a number or `null`), no other field and none
 //!   twice, and the payload byte for byte what its writer writes for the
 //!   values read, since its reader, like registration.rs's, takes the first
 //!   `"key":` in the text: one it would refuse as malformed, or could read as
 //!   another identity's or another session's, is one whose revocation cannot
-//!   be relied on, and is refused here, `assignment_record_malformed`. While the identity holds a live session,
+//!   be relied on, and is refused here, `assignment_record_malformed`. While
+//!   the identity holds a live session,
 //!   so is a lock claim whose session cannot be read, since it may be the
 //!   identity's. Today no module writes `lock.claimed` at all (`LockTable`
 //!   is a pure function, and
@@ -250,12 +261,15 @@
 //! to another identity, a credential event
 //! `crates/ori-broker/src/issuance.rs` would not read back (any field it
 //! writes missing or of another type, `expires_at` included) or could read
-//! differently, a live session of the identity the log also issues to another
+//! differently, an issuance id of a session issued again to another identity
+//! where either is the requesting one, a live session of the identity the
+//! log also issues to another
 //! identity, a lock claim whose session cannot be read while the identity
 //! holds a live session or, for a claim of the assigned ticket, while the log
 //! issues any session to another identity, a `lock.*` event with no ticket
-//! column, a ticket not filed in this product, or a live lock claim of it
-//! that does not parse; a ticket read limit from AICD §17 this module cannot
+//! column, a ticket not filed in this product, or a claim of it since its
+//! last release that does not parse, whoever holds that claim's row now; a
+//! ticket read limit from AICD §17 this module cannot
 //! check; an evidence request for a record id more than one record carries,
 //! or whose evidence cannot be told apart from another submission's. An
 //! expired credential is not an unknown: it is dead, and ties no ticket to
@@ -407,10 +421,18 @@
 //! - The result side is the compiler's as far as the package's own type
 //!   reaches. [`Authorization::filter`] returns an [`Admitted`], which has
 //!   no public constructor either and records the product and the reader it
-//!   was admitted for. A package type that holds only [`Admitted`] values,
-//!   and [`Authorization::evidence`] for an evidence request, cannot be
-//!   handed an unfiltered result. Choosing that type is ORI-T-0039's work,
-//!   and its review has to check that it does.
+//!   was admitted for, and which [`Authorization`] filtered it.
+//!   [`Admitted::was_filtered_by`] answers whether that was a given one, and
+//!   only the one [`Authorization`] whose filter built it answers yes: one
+//!   identity holds authorizations for several tickets in turn, each with
+//!   its own declared scope, and they share their reader and product, so
+//!   those two alone do not tie a result to the authorization it was
+//!   filtered under. A package type that holds only [`Admitted`] values,
+//!   each checked with [`Admitted::was_filtered_by`] against the package's
+//!   own [`Authorization`], and [`Authorization::evidence`] for an evidence
+//!   request, cannot be handed an unfiltered result, or one filtered under
+//!   another authorization. Choosing that type, and making that check, is
+//!   ORI-T-0039's work, and its review has to check that it does.
 //! - Nothing in the type system stops a retrieval from reading around this
 //!   module: `barrier::read_records`, `barrier::read_evidence`, the indexer
 //!   and the code map are all public. The review has to check that nothing
@@ -476,6 +498,7 @@
 //!   Ret->>Ret: query only Authorization::sources
 //!   Ret->>Enf: Authorization::filter(candidates)
 //!   Enf-->>Ret: Admitted, only the admitted candidates
+//!   Ret->>Enf: Admitted::was_filtered_by(its own Authorization)
 //!   Ret-->>Mcp: the context package, holding Admitted values only
 //! ```
 //!
@@ -503,6 +526,8 @@
 use core::fmt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 use ori_core::error::MethodologyRef;
 use ori_core::permission;
@@ -1873,6 +1898,22 @@ impl DeclaredScope {
 /// }
 /// ```
 ///
+/// ```compile_fail
+/// fn touch(a: &mut ori_memory::scope::Authorization) {
+///     let _ = &mut a.serial;
+/// }
+/// ```
+///
+/// Nor can one be copied: each holds a number no other holds, which ties
+/// the [`Admitted`] values its filter builds to it alone
+/// ([`Admitted::was_filtered_by`]).
+///
+/// ```compile_fail
+/// fn copy(a: &ori_memory::scope::Authorization) -> ori_memory::scope::Authorization {
+///     a.clone()
+/// }
+/// ```
+///
 /// The paths resolve, and a real value is reached through its accessors:
 ///
 /// ```
@@ -1892,6 +1933,19 @@ pub struct Authorization {
     sources: BTreeMap<Source, Filter>,
     evidence: Vec<EvidenceBlob>,
     evidence_access_seq: Option<u64>,
+    /// This authorization's number, from [`next_authorization_serial`]: no
+    /// other authorization in the process holds it.
+    serial: u64,
+}
+
+/// The number the next [`Authorization`] is issued under.
+static NEXT_AUTHORIZATION_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// A number no [`Authorization`] in this process has held before. A `u64`
+/// counted up by one per authorization does not wrap in any process's
+/// lifetime.
+fn next_authorization_serial() -> u64 {
+    NEXT_AUTHORIZATION_SERIAL.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
 impl Authorization {
@@ -2007,7 +2061,8 @@ impl Authorization {
 
     /// Keeps only what [`Authorization::admits`]: AICD §25. The result filter
     /// the retrieval applies to everything it gathered, returned as an
-    /// [`Admitted`], which nothing else can build.
+    /// [`Admitted`], which nothing else can build, and which
+    /// [`Admitted::was_filtered_by`] ties to this authorization alone.
     #[must_use]
     pub fn filter(&self, candidates: Vec<Candidate>) -> Admitted {
         Admitted {
@@ -2017,6 +2072,7 @@ impl Authorization {
                 .into_iter()
                 .filter(|candidate| self.admits(candidate))
                 .collect(),
+            filtered_by: self.serial,
         }
     }
 }
@@ -2028,9 +2084,12 @@ impl Authorization {
 /// only way to hold one is for [`Authorization::filter`] to have returned it,
 /// so a package type that holds [`Admitted`] values cannot be handed a result
 /// that was never filtered. It records the product and the reader it was
-/// admitted for, so the package can check both against its own
-/// [`Authorization`]. See the module doc comment, "The seam the retrieval
-/// stands on".
+/// admitted for, and which [`Authorization`] filtered it: the package checks
+/// every one it holds with [`Admitted::was_filtered_by`] against its own
+/// [`Authorization`]. Checking the reader and the product alone would not
+/// do, since one identity holds authorizations for several tickets in turn,
+/// each with its own declared scope, and they share both. See the module
+/// doc comment, "The seam the retrieval stands on".
 ///
 /// Outside this crate none can be built or altered, for the reasons, and
 /// under the same test, given for [`Authorization`]:
@@ -2059,6 +2118,12 @@ impl Authorization {
 /// }
 /// ```
 ///
+/// ```compile_fail
+/// fn touch(a: &mut ori_memory::scope::Admitted) {
+///     let _ = &mut a.filtered_by;
+/// }
+/// ```
+///
 /// The paths resolve, and a real value is reached through its accessors:
 ///
 /// ```
@@ -2071,9 +2136,27 @@ pub struct Admitted {
     product_id: Id,
     reader: Reader,
     candidates: Vec<Candidate>,
+    /// The number of the [`Authorization`] whose filter built this value.
+    filtered_by: u64,
 }
 
 impl Admitted {
+    /// Whether `authorization` is the one whose [`Authorization::filter`]
+    /// built this value: AICD §25, the result side of "Enforced at query
+    /// time".
+    ///
+    /// The check a package holding [`Admitted`] values makes against its own
+    /// [`Authorization`] before it hands any of them out. `true` for that one
+    /// authorization only, and for no other, even one of the same reader and
+    /// product, which is every later authorization of the same identity
+    /// whatever ticket and declared scope it carries.
+    #[must_use]
+    pub fn was_filtered_by(&self, authorization: &Authorization) -> bool {
+        self.filtered_by == authorization.serial
+            && self.product_id == authorization.product_id
+            && self.reader == authorization.reader
+    }
+
     /// The product the results were admitted in: AICD §25.
     #[must_use]
     pub const fn product_id(&self) -> &Id {
@@ -2488,6 +2571,7 @@ impl ScopeEnforcer {
             sources: BTreeMap::new(),
             evidence: Vec::new(),
             evidence_access_seq: None,
+            serial: next_authorization_serial(),
         };
 
         match &request.query {
@@ -3023,9 +3107,14 @@ struct LockFold {
     /// takes the row over. Each holds the claiming ticket and the module as
     /// [`read_claim`] reads it.
     live: BTreeMap<String, (Id, Option<ModulePath>)>,
-    /// The tickets holding a claim the projection's reader cannot read, so
-    /// which row it holds cannot be told, until the ticket's release.
-    unreadable_live: BTreeSet<Id>,
+    /// The tickets that made a claim [`read_claim`] reads no module for
+    /// since their last release: the projection's reader finds no module
+    /// text, serde reads another module or none, or the text is not a path
+    /// [`ModulePath::parse`] accepts. Such a claim leaves its ticket's scope
+    /// unknown until the ticket's release, whatever later claims do to the
+    /// row it keyed: a claim of the same text taking that row over, by this
+    /// ticket or another, says nothing about what the malformed claim holds.
+    malformed_live: BTreeSet<Id>,
     /// Every claim each ticket ever made, released or not, `None` where the
     /// claim cannot be read.
     ever: BTreeMap<Id, Vec<Option<ModulePath>>>,
@@ -3034,8 +3123,10 @@ struct LockFold {
 /// Folds every `lock.*` event of `events` in log order, the way the lock
 /// projection does: a claim upserts the row of its module text, whichever
 /// ticket held it; a release deletes every row of its ticket and no other.
-/// Refused when any lock event carries no ticket ([`lock_holder`]), as the
-/// projection refuses it.
+/// A claim whose module cannot be read also marks its ticket until that
+/// ticket's release ([`LockFold::malformed_live`]), which no later claim
+/// clears. Refused when any lock event carries no ticket ([`lock_holder`]),
+/// as the projection refuses it.
 fn fold_locks(events: &[Event]) -> Result<LockFold, RefusalReason> {
     let mut fold = LockFold::default();
     for event in events {
@@ -3049,18 +3140,16 @@ fn fold_locks(events: &[Event]) -> Result<LockFold, RefusalReason> {
                     .entry(ticket.clone())
                     .or_default()
                     .push(claim.module.clone());
-                match claim.key {
-                    Some(key) => {
-                        fold.live.insert(key, (ticket.clone(), claim.module));
-                    }
-                    None => {
-                        fold.unreadable_live.insert(ticket.clone());
-                    }
+                if claim.module.is_none() {
+                    fold.malformed_live.insert(ticket.clone());
+                }
+                if let Some(key) = claim.key {
+                    fold.live.insert(key, (ticket.clone(), claim.module));
                 }
             }
             LOCK_RELEASED => {
                 fold.live.retain(|_, (holder, _)| holder != ticket);
-                fold.unreadable_live.remove(ticket);
+                fold.malformed_live.remove(ticket);
             }
             _ => {}
         }
@@ -3156,6 +3245,9 @@ where
 
 /// One `credential.issued` event, read.
 struct IssuanceRead {
+    /// The issuance's own id, which `issuance.rs` keys the session's
+    /// issuances by, and which a revocation names.
+    id: Id,
     holder: Id,
     session: Id,
     expires_at: Option<Timestamp>,
@@ -3173,32 +3265,52 @@ fn read_issuance(event: &Event) -> Option<IssuanceRead> {
     if wire.as_issuance_writes_it() != event.payload() {
         return None;
     }
-    if Id::parse(&wire.id).is_err() || wire.scope.trim().is_empty() {
+    if wire.scope.trim().is_empty() {
         return None;
     }
     Some(IssuanceRead {
+        id: Id::parse(&wire.id).ok()?,
         holder: Id::parse(&wire.identity_id).ok()?,
         session: Id::parse(&wire.session_id).ok()?,
         expires_at: wire.expires_at.map(Timestamp::from_millis),
     })
 }
 
-/// Reads a `credential.revoked` event the way `issuance.rs` reads it back,
-/// returning the session it revokes; `None` for one it would refuse or could
-/// read differently, as [`read_issuance`] has it.
-fn read_revocation(event: &Event) -> Option<Id> {
+/// One `credential.revoked` event, read.
+struct RevocationRead {
+    session: Id,
+    /// The issuances it revokes, and the only ones: `issuance.rs` sets
+    /// `revoked_at` on the issuances of `session` these name, and on no
+    /// other.
+    issuance_ids: Vec<Id>,
+}
+
+/// Reads a `credential.revoked` event the way `issuance.rs` reads it back;
+/// `None` for one it would refuse or could read differently, as
+/// [`read_issuance`] has it.
+fn read_revocation(event: &Event) -> Option<RevocationRead> {
     let wire: CredentialRevokedWire = serde_json::from_str(event.payload()).ok()?;
     if wire.as_issuance_writes_it() != event.payload() {
         return None;
     }
-    if wire
+    let issuance_ids = wire
         .issuance_ids
         .iter()
-        .any(|text| Id::parse(text).is_err())
-    {
-        return None;
-    }
-    Id::parse(&wire.session_id).ok()
+        .map(|text| Id::parse(text).ok())
+        .collect::<Option<Vec<Id>>>()?;
+    Some(RevocationRead {
+        session: Id::parse(&wire.session_id).ok()?,
+        issuance_ids,
+    })
+}
+
+/// One issuance as `issuance.rs`'s `project_issuances` holds it after
+/// folding the log: whose it is, when it expires, and whether a revocation
+/// named it.
+struct IssuanceState {
+    holder: Id,
+    expires_at: Option<Timestamp>,
+    revoked: bool,
 }
 
 /// Whether an issuance expiring at `expires_at` is live at `at`: the rule of
@@ -3278,13 +3390,21 @@ impl SessionRecord {
 
 /// Reads every credential event of `events` for `identity` at `at`.
 ///
-/// A session is live while at least one of its issuances to the identity is
-/// neither revoked nor past its `expires_at` at `at`, the rule of
-/// `crates/ori-broker/src/issuance.rs`'s `is_active`. A `credential.revoked`
-/// event ends every issuance of its session issued before it, whichever
-/// issuance ids it lists: the broker writes one only from `revoke_session`,
-/// which lists every unrevoked issuance of the session. Refused when a
-/// credential event is one the broker would not read back.
+/// Each session's issuances are folded as
+/// `crates/ori-broker/src/issuance.rs`'s `project_issuances` folds them for
+/// that session: keyed by issuance id, a later issuance of an id the session
+/// already holds replacing the earlier one, unrevoked, and a
+/// `credential.revoked` event revoking the issuances of its own session that
+/// it lists and that were issued before it, and no other, whatever else the
+/// session holds. A session is live while at least one of its issuances to
+/// the identity is neither revoked nor past its `expires_at` at `at`, the
+/// rule of that file's `is_active`.
+///
+/// Refused when a credential event is one the broker would not read back,
+/// and when an issuance id of a session is issued again to another identity
+/// where either is this one: the broker's fold keeps the later holder and
+/// drops the earlier without a trace, so whose that issuance is cannot be
+/// relied on.
 fn read_sessions(
     events: &[Event],
     identity: &Id,
@@ -3293,14 +3413,15 @@ fn read_sessions(
     let malformed = |event: &Event| RefusalReason::AssignmentRecordMalformed {
         detail: format!("the event at seq {} does not parse", event.seq()),
     };
-    // The expiry of each of the identity's issuances of each session since
-    // that session was last revoked.
-    let mut issued: BTreeMap<Id, Vec<Option<Timestamp>>> = BTreeMap::new();
+    // Every session's issuances, by issuance id, as the broker's fold holds
+    // them at each point of the log.
+    let mut by_session: BTreeMap<Id, BTreeMap<Id, IssuanceState>> = BTreeMap::new();
     let mut issued_to: BTreeMap<Id, BTreeSet<Id>> = BTreeMap::new();
     for event in events {
         match event.kind() {
             CREDENTIAL_ISSUED => {
                 let IssuanceRead {
+                    id,
                     holder,
                     session,
                     expires_at,
@@ -3309,23 +3430,51 @@ fn read_sessions(
                     .entry(session.clone())
                     .or_default()
                     .insert(holder.clone());
-                if &holder == identity {
-                    issued.entry(session).or_default().push(expires_at);
+                let issuances = by_session.entry(session).or_default();
+                if let Some(earlier) = issuances.get(&id)
+                    && earlier.holder != holder
+                    && (&earlier.holder == identity || &holder == identity)
+                {
+                    return Err(RefusalReason::AssignmentRecordMalformed {
+                        detail: format!(
+                            "the event at seq {} issues again, to another identity, an issuance its session already holds",
+                            event.seq()
+                        ),
+                    });
                 }
+                issuances.insert(
+                    id,
+                    IssuanceState {
+                        holder,
+                        expires_at,
+                        revoked: false,
+                    },
+                );
             }
             CREDENTIAL_REVOKED => {
-                let session = read_revocation(event).ok_or_else(|| malformed(event))?;
-                issued.remove(&session);
+                let RevocationRead {
+                    session,
+                    issuance_ids,
+                } = read_revocation(event).ok_or_else(|| malformed(event))?;
+                if let Some(issuances) = by_session.get_mut(&session) {
+                    for id in &issuance_ids {
+                        if let Some(issuance) = issuances.get_mut(id) {
+                            issuance.revoked = true;
+                        }
+                    }
+                }
             }
             _ => {}
         }
     }
-    let live = issued
+    let live = by_session
         .into_iter()
-        .filter(|(_, expiries)| {
-            expiries
-                .iter()
-                .any(|expires_at| unexpired_at(*expires_at, at))
+        .filter(|(_, issuances)| {
+            issuances.values().any(|issuance| {
+                &issuance.holder == identity
+                    && !issuance.revoked
+                    && unexpired_at(issuance.expires_at, at)
+            })
         })
         .map(|(session, _)| session)
         .collect();
@@ -3447,8 +3596,9 @@ fn check_assignment_unshared(
 /// (see the module doc comment, "Which records are inside a declared
 /// scope"). Refused when any lock event of the log carries no ticket, since
 /// whose claim or release it records cannot be told ([`lock_holder`]), and
-/// when a live row of the ticket, or a live claim of it the projection's
-/// reader cannot read, leaves its modules unknown.
+/// when a claim of the ticket since its last release has a module this
+/// module cannot read, which leaves its modules unknown whoever holds that
+/// claim's row now.
 fn declared_scope(events: &[Event], ticket_id: &Id) -> Result<DeclaredScope, RefusalReason> {
     if !ticket_filed(events, ticket_id) {
         return Err(RefusalReason::TicketNotInProduct {
@@ -3459,7 +3609,7 @@ fn declared_scope(events: &[Event], ticket_id: &Id) -> Result<DeclaredScope, Ref
         ticket_id: ticket_id.clone(),
     };
     let fold = fold_locks(events)?;
-    if fold.unreadable_live.contains(ticket_id) {
+    if fold.malformed_live.contains(ticket_id) {
         return Err(malformed());
     }
     let mut held: BTreeSet<ModulePath> = BTreeSet::new();
@@ -5176,20 +5326,81 @@ mod tests {
         granted(&mut w.p, standard(), &coder, &read("code_map"));
     }
 
+    /// A fresh issuance id per call, as the broker's callers supply a fresh
+    /// one per issuance: `issuance.rs` keys a session's issuances by id, so
+    /// two issuances sharing one would be one issuance there.
+    fn next_issuance() -> Id {
+        static ISSUED: AtomicU32 = AtomicU32::new(0);
+        id(&format!(
+            "ISSUANCE{}",
+            ISSUED.fetch_add(1, Ordering::SeqCst)
+        ))
+    }
+
     /// The payload `crates/ori-broker/src/issuance.rs` writes for
-    /// `credential.issued`, field for field.
-    fn issue(p: &mut Product, identity: &Id, session: &Id) {
+    /// `credential.issued`, field for field, for the issuance `issuance`.
+    fn issue_as(p: &mut Product, identity: &Id, session: &Id, issuance: &Id) {
         let payload = format!(
-            "{{\"id\":\"{}\",\"identity_id\":\"{identity}\",\"session_id\":\"{session}\",\"scope\":\"branch\",\"issued_at\":100,\"expires_at\":null}}",
-            id("ISSUANCE")
+            "{{\"id\":\"{issuance}\",\"identity_id\":\"{identity}\",\"session_id\":\"{session}\",\"scope\":\"branch\",\"issued_at\":100,\"expires_at\":null}}"
         );
         append(p, "credential.issued", None, payload);
     }
 
-    fn revoke(p: &mut Product, session: &Id) {
-        let payload =
-            format!("{{\"session_id\":\"{session}\",\"revoked_at\":300,\"issuance_ids\":[]}}");
+    /// `credential.issued` for a fresh issuance of `session` to `identity`.
+    fn issue(p: &mut Product, identity: &Id, session: &Id) {
+        issue_as(p, identity, session, &next_issuance());
+    }
+
+    /// `credential.revoked` for `session` listing exactly `issuances`, laid
+    /// out as `crates/ori-broker/src/issuance.rs` lays it out.
+    fn revoke_listing(p: &mut Product, session: &Id, issuances: &[&Id]) {
+        let listed: Vec<String> = issuances.iter().map(|id| format!("\"{id}\"")).collect();
+        let payload = format!(
+            "{{\"session_id\":\"{session}\",\"revoked_at\":300,\"issuance_ids\":[{}]}}",
+            listed.join(",")
+        );
         append(p, "credential.revoked", None, payload);
+    }
+
+    /// What `issuance.rs`'s `revoke_session` appends for `session`: one
+    /// `credential.revoked` listing every issuance of the session the log
+    /// has not revoked yet, and nothing when there is none. Read from the
+    /// log here, independently of the fold under test.
+    fn revoke(p: &mut Product, session: &Id) {
+        let events = read_log(&mut p.db).expect("the log reads");
+        let mut unrevoked: BTreeSet<String> = BTreeSet::new();
+        for event in &events {
+            let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
+                continue;
+            };
+            if payload["session_id"] != session.as_str() {
+                continue;
+            }
+            match event.kind() {
+                "credential.issued" => {
+                    if let Some(issuance) = payload["id"].as_str() {
+                        unrevoked.insert(issuance.to_owned());
+                    }
+                }
+                "credential.revoked" => {
+                    for listed in payload["issuance_ids"].as_array().into_iter().flatten() {
+                        if let Some(issuance) = listed.as_str() {
+                            unrevoked.remove(issuance);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if unrevoked.is_empty() {
+            return;
+        }
+        let ids: Vec<Id> = unrevoked
+            .iter()
+            .map(|text| Id::parse(text).expect("a fixture issuance id parses"))
+            .collect();
+        let listed: Vec<&Id> = ids.iter().collect();
+        revoke_listing(p, session, &listed);
     }
 
     fn claim_in_session(p: &mut Product, ticket: &Id, module: &str, session: &Id) {
@@ -5327,7 +5538,7 @@ mod tests {
     fn issue_expiring(p: &mut Product, identity: &Id, session: &Id, expires_at: i64) {
         let payload = format!(
             "{{\"id\":\"{}\",\"identity_id\":\"{identity}\",\"session_id\":\"{session}\",\"scope\":\"branch\",\"issued_at\":100,\"expires_at\":{expires_at}}}",
-            id("ISSUANCE")
+            next_issuance()
         );
         append(p, "credential.issued", None, payload);
     }
@@ -8292,7 +8503,7 @@ mod tests {
 
     /// The fields of `Authorization`, spelled out so that adding, removing or
     /// renaming one fails to compile here until the pins are revisited.
-    const AUTHORIZATION_FIELDS: [&str; 8] = [
+    const AUTHORIZATION_FIELDS: [&str; 9] = [
         "reader",
         "product_id",
         "query",
@@ -8301,6 +8512,7 @@ mod tests {
         "sources",
         "evidence",
         "evidence_access_seq",
+        "serial",
     ];
 
     fn authorization_fields_are_exhaustive(authorization: Authorization) {
@@ -8313,17 +8525,19 @@ mod tests {
             sources: _,
             evidence: _,
             evidence_access_seq: _,
+            serial: _,
         } = authorization;
     }
 
     /// The fields of `Admitted`, for the same reason.
-    const ADMITTED_FIELDS: [&str; 3] = ["product_id", "reader", "candidates"];
+    const ADMITTED_FIELDS: [&str; 4] = ["product_id", "reader", "candidates", "filtered_by"];
 
     fn admitted_fields_are_exhaustive(admitted: Admitted) {
         let Admitted {
             product_id: _,
             reader: _,
             candidates: _,
+            filtered_by: _,
         } = admitted;
     }
 
@@ -8639,5 +8853,313 @@ mod tests {
         );
         append(&mut w.p, "credential.revoked", None, payload);
         granted(&mut w.p, standard(), &on_m, &read("code_map"));
+    }
+
+    // -------------------------------------------------------------------
+    // A claim of the coder's ticket whose module cannot be read refuses
+    // until the ticket's release, whoever takes its row over.
+    // -------------------------------------------------------------------
+
+    /// The refusal code `request` gets at the fixed time, `None` for a
+    /// grant.
+    fn outcome(
+        p: &mut Product,
+        principal: &Principal,
+        request: &MemoryRequest,
+    ) -> Option<&'static str> {
+        standard()
+            .authorize(&mut p.db, at(500), principal, request)
+            .err()
+            .map(|err| err.reason().code())
+    }
+
+    #[test]
+    fn ori_p1_022_a_malformed_claim_of_the_coders_ticket_refuses_until_its_release_whoever_claims_its_text_after()
+     {
+        // Each malformed claim, and the module text the lock projection's
+        // reader keys its row by.
+        let cases: [(&str, String, &str); 3] = [
+            (
+                "a path ModulePath::parse refuses",
+                serde_json::json!({ "module": "crates/../escape" }).to_string(),
+                "crates/../escape",
+            ),
+            (
+                "the module twice, which serde refuses",
+                r#"{"module":"crates/q","module":"crates/q"}"#.to_owned(),
+                "crates/q",
+            ),
+            (
+                "a module the two readers read apart",
+                r#"{"note":"module","x":"crates/q","module":"crates/zzz"}"#.to_owned(),
+                "crates/q",
+            ),
+        ];
+        for (index, (label, payload, key)) in cases.iter().enumerate() {
+            for successor_is_own in [false, true] {
+                let mut w = world(&format!("malformed-held-{index}-{successor_is_own}"));
+                let ticket_m = w.ticket_m.clone();
+                let successor = if successor_is_own {
+                    ticket_m.clone()
+                } else {
+                    w.ticket_o.clone()
+                };
+                let label = format!(
+                    "{label}, then claimed by {}",
+                    if successor_is_own {
+                        "the same ticket"
+                    } else {
+                        "another ticket"
+                    }
+                );
+                let coder = principal_for(Role::Coder, &ticket_m);
+                let requests = [
+                    read("code_map"),
+                    context(&ticket_m),
+                    search("q", &[]),
+                    read("operational_record"),
+                ];
+                append(&mut w.p, "lock.claimed", Some(&ticket_m), payload.clone());
+                for request in &requests {
+                    assert_eq!(
+                        outcome(&mut w.p, &coder, request),
+                        Some("lock_record_malformed"),
+                        "{label}, before the takeover: {request:?}"
+                    );
+                }
+                claim(&mut w.p, &successor, key);
+                // The row the projection keyed the malformed claim by is the
+                // successor's now.
+                let events = read_log(&mut w.p.db).expect("the log reads");
+                let fold = fold_locks(&events).expect("every lock event carries a ticket");
+                assert_eq!(
+                    fold.live.get(*key).map(|(holder, _)| holder),
+                    Some(&successor),
+                    "{label}"
+                );
+                for request in &requests {
+                    assert_eq!(
+                        outcome(&mut w.p, &coder, request),
+                        Some("lock_record_malformed"),
+                        "{label}, after the takeover: {request:?}"
+                    );
+                }
+                // Released, it no longer counts, and the ticket holds
+                // nothing.
+                release(&mut w.p, &ticket_m);
+                let package = granted(&mut w.p, standard(), &coder, &read("code_map"));
+                assert!(module_names(&package).is_empty(), "{label}");
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Credentials are folded as ori-broker's issuance.rs folds them.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_022_a_revocation_ends_only_the_issuances_it_lists_as_ori_broker_reads_it() {
+        let coder = identity_of(Role::Coder);
+        let qa = identity_of(Role::Qa);
+        let session = id("SESSIONS");
+        let elsewhere = id("SESSIONELSEWHERE");
+        let mine = id("ISSUANCEMINE");
+        let theirs = id("ISSUANCETHEIRS");
+
+        // The coder holds the session through its issuance, and ticket O was
+        // claimed under it: the engine's M contradicts the log.
+        let mut w = world("revocation-lists");
+        let ticket_m = w.ticket_m.clone();
+        let ticket_o = w.ticket_o.clone();
+        let on_m = agent(&coder).with_assigned_ticket(ticket_m.clone());
+        let unassigned = agent(&coder);
+        issue_as(&mut w.p, &coder, &session, &mine);
+        claim_in_session(&mut w.p, &ticket_o, "crates/other", &session);
+        assert_eq!(
+            outcome(&mut w.p, &on_m, &read("code_map")),
+            Some("assignment_contradicted"),
+            "before any revocation"
+        );
+        // A revocation that does not list the coder's issuance of the
+        // session leaves it live, as ori-broker reads it.
+        let not_mine: [(&str, &Id, Vec<&Id>); 3] = [
+            (
+                "a revocation of the session listing another issuance",
+                &session,
+                vec![&theirs],
+            ),
+            ("a revocation of the session listing none", &session, vec![]),
+            (
+                "a revocation of another session listing the coder's issuance",
+                &elsewhere,
+                vec![&mine],
+            ),
+        ];
+        for (label, revoked, listed) in not_mine {
+            revoke_listing(&mut w.p, revoked, &listed);
+            assert_eq!(
+                outcome(&mut w.p, &on_m, &read("code_map")),
+                Some("assignment_contradicted"),
+                "{label}"
+            );
+            let package = granted(&mut w.p, standard(), &unassigned, &read("code_map"));
+            assert_eq!(package.ticket_id(), Some(&ticket_o), "{label}");
+        }
+        // Listing it ends it: the engine's M stands.
+        revoke_listing(&mut w.p, &session, &[&mine]);
+        let package = granted(&mut w.p, standard(), &on_m, &read("code_map"));
+        assert_eq!(package.ticket_id(), Some(&ticket_m));
+        assert_eq!(module_names(&package), vec!["crates/m"]);
+        // Issued again under the same id, it is live again, as ori-broker's
+        // fold replaces the revoked issuance with the new one.
+        issue_as(&mut w.p, &coder, &session, &mine);
+        assert_eq!(
+            outcome(&mut w.p, &on_m, &read("code_map")),
+            Some("assignment_contradicted"),
+            "issued again"
+        );
+
+        // A revocation revokes only what was issued before it.
+        let mut w = world("revocation-before-issuance");
+        let on_m = agent(&coder).with_assigned_ticket(w.ticket_m.clone());
+        let ticket_o = w.ticket_o.clone();
+        revoke_listing(&mut w.p, &session, &[&mine]);
+        issue_as(&mut w.p, &coder, &session, &mine);
+        claim_in_session(&mut w.p, &ticket_o, "crates/other", &session);
+        assert_eq!(
+            outcome(&mut w.p, &on_m, &read("code_map")),
+            Some("assignment_contradicted"),
+            "revoked before it was issued"
+        );
+
+        // A session issued to the coder and to another identity: revoking
+        // the other identity's issuance leaves the coder's live, and the
+        // session still shared.
+        let mut w = world("revocation-shared");
+        let on_m = agent(&coder).with_assigned_ticket(w.ticket_m.clone());
+        issue_as(&mut w.p, &qa, &session, &theirs);
+        issue_as(&mut w.p, &coder, &session, &mine);
+        assert_eq!(
+            outcome(&mut w.p, &on_m, &read("code_map")),
+            Some("assignment_record_malformed"),
+            "a live session shared"
+        );
+        revoke_listing(&mut w.p, &session, &[&theirs]);
+        assert_eq!(
+            outcome(&mut w.p, &on_m, &read("code_map")),
+            Some("assignment_record_malformed"),
+            "the other identity's issuance revoked, the coder's live"
+        );
+        revoke_listing(&mut w.p, &session, &[&mine]);
+        granted(&mut w.p, standard(), &on_m, &read("code_map"));
+
+        // The coder's issuance id issued again, in its session, to another
+        // identity: ori-broker's fold keeps only the later holder, so whose
+        // it is cannot be relied on, whichever of the two is the coder.
+        for coder_first in [true, false] {
+            let label = if coder_first {
+                "the coder's issuance handed to another identity"
+            } else {
+                "another identity's issuance handed to the coder"
+            };
+            let mut w = world(&format!("reissued-{coder_first}"));
+            let on_m = agent(&coder).with_assigned_ticket(w.ticket_m.clone());
+            let ticket_o = w.ticket_o.clone();
+            let (first, second) = if coder_first {
+                (&coder, &qa)
+            } else {
+                (&qa, &coder)
+            };
+            issue_as(&mut w.p, first, &session, &mine);
+            claim_in_session(&mut w.p, &ticket_o, "crates/other", &session);
+            issue_as(&mut w.p, second, &session, &mine);
+            for principal in [&on_m, &agent(&coder)] {
+                assert_eq!(
+                    outcome(&mut w.p, principal, &read("code_map")),
+                    Some("assignment_record_malformed"),
+                    "{label}"
+                );
+            }
+        }
+        // Handed between two other identities, it changes nothing for the
+        // coder.
+        let mut w = world("reissued-elsewhere");
+        let on_m = agent(&coder).with_assigned_ticket(w.ticket_m.clone());
+        issue_as(&mut w.p, &qa, &elsewhere, &theirs);
+        issue_as(
+            &mut w.p,
+            &identity_of(Role::Operations),
+            &elsewhere,
+            &theirs,
+        );
+        granted(&mut w.p, standard(), &on_m, &read("code_map"));
+    }
+
+    #[test]
+    fn ori_t_0038_the_credential_fold_matches_ori_broker_issuance_project_issuances() {
+        let issuance =
+            fs::read_to_string(repo_file(&["crates", "ori-broker", "src", "issuance.rs"]))
+                .expect("issuance.rs reads");
+        // Keyed by issuance id per session, a later issuance of an id
+        // replacing the earlier one unrevoked, and a revocation revoking the
+        // listed ids of its own session that are already issued.
+        for rule in [
+            "if issuance.session_id.as_str() == session_id.as_str() {",
+            "by_id.insert(issuance.id.as_str().to_owned(), issuance);",
+            "if revoked.session_id.as_str() == session_id.as_str() {",
+            "for id in &revoked.issuance_ids {",
+            "if let Some(existing) = by_id.get_mut(id.as_str()) {",
+            "existing.revoked_at = Some(revoked.revoked_at);",
+            "revoked_at: None,",
+        ] {
+            assert!(
+                issuance.contains(rule),
+                "issuance.rs no longer folds credentials the way this module does: {rule}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // An Admitted value is tied to the one authorization that filtered it.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_022_an_admitted_value_is_recognized_only_by_the_authorization_whose_filter_built_it()
+    {
+        let mut w = world("admitted-tied");
+        let a = w.p.id.clone();
+        let ticket_m = w.ticket_m.clone();
+        let ticket_n = id("TICKETN");
+        file_ticket(&mut w.p, &ticket_n);
+        claim(&mut w.p, &ticket_n, "crates/n");
+        let coder = identity_of(Role::Coder);
+        let on_m = agent(&coder).with_assigned_ticket(ticket_m.clone());
+        let on_n = agent(&coder).with_assigned_ticket(ticket_n.clone());
+        let under_m = granted(&mut w.p, standard(), &on_m, &context(&ticket_m));
+        let under_n = granted(&mut w.p, standard(), &on_n, &context(&ticket_n));
+        let in_m = code_module(&a, "crates/m/src/a.rs");
+        let admitted = under_m.filter(vec![in_m.clone()]);
+        assert_eq!(admitted.candidates(), std::slice::from_ref(&in_m));
+
+        // One identity in one product: N's authorization has the reader and
+        // the product M's result was admitted for, and admits none of it.
+        assert_eq!(admitted.reader(), under_n.reader());
+        assert_eq!(admitted.product_id(), under_n.product_id());
+        assert!(!under_n.admits(&in_m));
+
+        // Only the authorization whose filter built it recognizes it, a copy
+        // of it included.
+        assert!(admitted.was_filtered_by(&under_m));
+        assert!(admitted.clone().was_filtered_by(&under_m));
+        assert!(!admitted.was_filtered_by(&under_n));
+        assert!(!under_m.filter(Vec::new()).was_filtered_by(&under_n));
+        // Not even a later authorization of the same request.
+        let again = granted(&mut w.p, standard(), &on_m, &context(&ticket_m));
+        assert!(!admitted.was_filtered_by(&again));
+        // Nor another reader's.
+        let lead = principal_for(Role::Lead, &ticket_m);
+        let under_lead = granted(&mut w.p, standard(), &lead, &context(&ticket_m));
+        assert!(!admitted.was_filtered_by(&under_lead));
+        assert!(under_lead.filter(vec![in_m]).was_filtered_by(&under_lead));
     }
 }
