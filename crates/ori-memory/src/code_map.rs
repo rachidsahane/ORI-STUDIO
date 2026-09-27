@@ -4262,11 +4262,20 @@ mod tests {
         paths.iter().map(|path| Arc::from(*path)).collect()
     }
 
+    /// A fresh directory for one test. Unique by a process-wide counter,
+    /// not by the clock alone: `SystemTime` has microsecond resolution on
+    /// macOS, and tests that start together read the same value often (84%
+    /// of 2000 rounds of ten threads released at once read a duplicate, in
+    /// round 6). Fifteen tests share `built_fixture`'s label, and in one of
+    /// round 6's plant runs two of them shared a directory until one test's
+    /// guard deleted it under the other, which then found no Python module.
     fn temp_dir(label: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let mut dir = std::env::temp_dir();
         let unique = format!(
-            "ori-t-0036-{label}-{}-{:?}",
+            "ori-t-0036-{label}-{}-{}-{:?}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
