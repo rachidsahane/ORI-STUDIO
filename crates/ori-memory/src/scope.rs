@@ -177,9 +177,12 @@
 //!   broker writes one only from `revoke_session`, which lists every
 //!   unrevoked issuance of the session. A credential event is read the way
 //!   `issuance.rs` reads it back, every field it writes required
-//!   (`expires_at` present, a number or `null`): one it would refuse as
-//!   malformed is one it could not revoke either, and is refused here,
-//!   `assignment_record_malformed`. While the identity holds a live session,
+//!   (`expires_at` present, a number or `null`), no other field and none
+//!   twice, and the payload byte for byte what its writer writes for the
+//!   values read, since its reader, like registration.rs's, takes the first
+//!   `"key":` in the text: one it would refuse as malformed, or could read as
+//!   another identity's or another session's, is one whose revocation cannot
+//!   be relied on, and is refused here, `assignment_record_malformed`. While the identity holds a live session,
 //!   so is a lock claim whose session cannot be read, since it may be the
 //!   identity's. Today no module writes `lock.claimed` at all (`LockTable`
 //!   is a pure function, and
@@ -246,21 +249,21 @@
 //! contradicts, two log tickets and no engine ticket, a ticket the log ties
 //! to another identity, a credential event
 //! `crates/ori-broker/src/issuance.rs` would not read back (any field it
-//! writes missing or of another type, `expires_at` included), a live session
-//! of the identity the log also issues to another identity, a lock claim
-//! whose session cannot be read while the identity holds a live session or,
-//! for a claim of the assigned ticket, while the log issues any session to
-//! another identity, a `lock.*` event with no ticket column, a ticket not
-//! filed in this product, or a live lock claim of it that does not parse; a
-//! ticket read limit from AICD §17 this module cannot check; an evidence
-//! request for a record id more than one record carries, or whose evidence
-//! cannot be told apart from another submission's. An expired credential is
-//! not an unknown: it is dead, and ties no ticket to its identity's live
-//! sessions, though what was claimed under it stays that identity's, so no
-//! other identity is assigned it. Results are filtered by the same rule as
-//! requests ([`Authorization::filter`]): a result this module cannot
-//! classify, cannot place in the product, or cannot place inside a coder's
-//! declared scope is dropped.
+//! writes missing or of another type, `expires_at` included) or could read
+//! differently, a live session of the identity the log also issues to another
+//! identity, a lock claim whose session cannot be read while the identity
+//! holds a live session or, for a claim of the assigned ticket, while the log
+//! issues any session to another identity, a `lock.*` event with no ticket
+//! column, a ticket not filed in this product, or a live lock claim of it
+//! that does not parse; a ticket read limit from AICD §17 this module cannot
+//! check; an evidence request for a record id more than one record carries,
+//! or whose evidence cannot be told apart from another submission's. An
+//! expired credential is not an unknown: it is dead, and ties no ticket to
+//! its identity's live sessions, though what was claimed under it stays that
+//! identity's, so no other identity is assigned it. Results are filtered by
+//! the same rule as requests ([`Authorization::filter`]): a result this
+//! module cannot classify, cannot place in the product, or cannot place
+//! inside a coder's declared scope is dropped.
 //!
 //! # The operator, the engine, and other products
 //!
@@ -1333,12 +1336,12 @@ pub enum RefusalReason {
     },
     /// Which tickets the log ties to the identity cannot be told: a
     /// `credential.issued` or `credential.revoked` event
-    /// `crates/ori-broker/src/issuance.rs` would not read back, a live
-    /// session of the identity the log also issues to another identity,
-    /// while the identity holds a live session a `lock.claimed` event whose
-    /// session cannot be read, or, while the log issues any session to
-    /// another identity, a claim of the assigned ticket whose session cannot
-    /// be read.
+    /// `crates/ori-broker/src/issuance.rs` would not read back or could read
+    /// differently, a live session of the identity the log also issues to
+    /// another identity, while the identity holds a live session a
+    /// `lock.claimed` event whose session cannot be read, or, while the log
+    /// issues any session to another identity, a claim of the assigned ticket
+    /// whose session cannot be read.
     AssignmentRecordMalformed {
         /// Which event.
         detail: String,
@@ -2833,19 +2836,20 @@ impl IdentityCreatedWire {
     fn as_registration_writes_it(&self) -> String {
         format!(
             "{{\"id\":\"{}\",\"product_id\":\"{}\",\"role\":\"{}\",\"model\":\"{}\",\"family\":\"{}\",\"runtime\":\"{}\"}}",
-            registration_escape(&self.id),
-            registration_escape(&self.product_id),
+            broker_escape(&self.id),
+            broker_escape(&self.product_id),
             self.role,
-            registration_escape(&self.model),
-            registration_escape(&self.family),
+            broker_escape(&self.model),
+            broker_escape(&self.family),
             self.runtime,
         )
     }
 }
 
-/// Escapes `"` and `\`, and nothing else, as registration.rs's
-/// `json_escape` does.
-fn registration_escape(text: &str) -> String {
+/// Escapes `"` and `\`, and nothing else, as the `json_escape` of
+/// `crates/ori-broker/src/registration.rs` and of
+/// `crates/ori-broker/src/issuance.rs` each does.
+fn broker_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
@@ -2877,6 +2881,11 @@ struct IdentityRead {
 /// held to its rules: `id` and `product_id` an [`Id`], `role` a [`Role`],
 /// `model` any text, `family` one [`ModelFamily::parse`] accepts, and
 /// `runtime` one of `IDENTITY_RUNTIMES`.
+///
+/// It refuses more than that reader in three ways, each the refusing
+/// direction: the fields in another order than the writer's, an escape the
+/// writer never writes (`\/`, a `\u` escape), and a control character the
+/// writer writes raw and JSON does not allow raw.
 fn read_identity(event: &Event) -> Result<IdentityRead, &'static str> {
     let wire: IdentityCreatedWire = serde_json::from_str(event.payload()).map_err(|_| {
         "does not parse as the six fields ori-broker's registration writes, each once, so whose it is cannot be told"
@@ -3061,32 +3070,78 @@ fn fold_locks(events: &[Event]) -> Result<LockFold, RefusalReason> {
 
 /// `credential.issued`'s payload: every field
 /// `crates/ori-broker/src/issuance.rs` writes, each required the way that
-/// file's own reader requires it. An issuance the broker cannot read back is
-/// one it cannot revoke either, so it is never read here as live.
+/// file's own reader requires it, no other field, and none twice. An
+/// issuance the broker cannot read back is one it cannot revoke either, so it
+/// is never read here as live.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CredentialIssuedWire {
     id: String,
     identity_id: String,
     session_id: String,
     scope: String,
-    /// Required, and not otherwise read: an issuance's liveness is its
-    /// revocation and its `expires_at`, as the broker's `is_active` has it.
-    #[serde(rename = "issued_at")]
-    _issued_at: i64,
+    /// Required, and read only to lay the payload out again: an issuance's
+    /// liveness is its revocation and its `expires_at`, as the broker's
+    /// `is_active` has it.
+    issued_at: i64,
     /// Required, `null` for an issuance only revocation retires.
     #[serde(deserialize_with = "required_nullable_millis")]
     expires_at: Option<i64>,
 }
 
+impl CredentialIssuedWire {
+    /// The exact text issuance.rs's writer produces for these values: the
+    /// six fields in its order with no whitespace, the four text fields
+    /// escaped as its `json_escape` escapes them, and `expires_at` written
+    /// `null` when absent.
+    fn as_issuance_writes_it(&self) -> String {
+        let expires_at = self
+            .expires_at
+            .map_or_else(|| "null".to_owned(), |millis| millis.to_string());
+        format!(
+            "{{\"id\":\"{}\",\"identity_id\":\"{}\",\"session_id\":\"{}\",\"scope\":\"{}\",\"issued_at\":{},\"expires_at\":{}}}",
+            broker_escape(&self.id),
+            broker_escape(&self.identity_id),
+            broker_escape(&self.session_id),
+            broker_escape(&self.scope),
+            self.issued_at,
+            expires_at,
+        )
+    }
+}
+
 /// `credential.revoked`'s payload: every field the broker writes, each
-/// required the way its reader requires it.
+/// required the way its reader requires it, no other field, and none twice.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CredentialRevokedWire {
     session_id: String,
-    /// Required, and not otherwise read.
-    #[serde(rename = "revoked_at")]
-    _revoked_at: i64,
+    /// Required, and read only to lay the payload out again.
+    revoked_at: i64,
     issuance_ids: Vec<String>,
+}
+
+impl CredentialRevokedWire {
+    /// The exact text issuance.rs's writer produces for these values, laid
+    /// out as [`CredentialIssuedWire::as_issuance_writes_it`] describes, the
+    /// issuance ids quoted and separated by bare commas.
+    fn as_issuance_writes_it(&self) -> String {
+        let mut out = format!(
+            "{{\"session_id\":\"{}\",\"revoked_at\":{},\"issuance_ids\":[",
+            broker_escape(&self.session_id),
+            self.revoked_at,
+        );
+        for (index, id) in self.issuance_ids.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            out.push_str(&broker_escape(id));
+            out.push('"');
+        }
+        out.push_str("]}");
+        out
+    }
 }
 
 /// Reads a field that must be present and may be `null`. serde reads a
@@ -3107,9 +3162,17 @@ struct IssuanceRead {
 }
 
 /// Reads a `credential.issued` event the way `issuance.rs` reads it back,
-/// `None` for one it would refuse as malformed.
+/// `None` for one it would refuse as malformed or could read differently.
+///
+/// That file's reader finds each field as the first `"key":` in the text,
+/// as `crates/ori-broker/src/registration.rs`'s does (see [`read_identity`]),
+/// so the payload must be byte for byte what its writer writes for the
+/// values serde read, and those values are held to its rules.
 fn read_issuance(event: &Event) -> Option<IssuanceRead> {
     let wire: CredentialIssuedWire = serde_json::from_str(event.payload()).ok()?;
+    if wire.as_issuance_writes_it() != event.payload() {
+        return None;
+    }
     if Id::parse(&wire.id).is_err() || wire.scope.trim().is_empty() {
         return None;
     }
@@ -3121,9 +3184,13 @@ fn read_issuance(event: &Event) -> Option<IssuanceRead> {
 }
 
 /// Reads a `credential.revoked` event the way `issuance.rs` reads it back,
-/// returning the session it revokes; `None` for one it would refuse.
+/// returning the session it revokes; `None` for one it would refuse or could
+/// read differently, as [`read_issuance`] has it.
 fn read_revocation(event: &Event) -> Option<Id> {
     let wire: CredentialRevokedWire = serde_json::from_str(event.payload()).ok()?;
+    if wire.as_issuance_writes_it() != event.payload() {
+        return None;
+    }
     if wire
         .issuance_ids
         .iter()
@@ -7754,11 +7821,11 @@ mod tests {
             "registration.rs's arguments"
         );
         let mirrored = [
-            "registration_escape(&self.id),",
-            "registration_escape(&self.product_id),",
+            "broker_escape(&self.id),",
+            "broker_escape(&self.product_id),",
             "self.role,",
-            "registration_escape(&self.model),",
-            "registration_escape(&self.family),",
+            "broker_escape(&self.model),",
+            "broker_escape(&self.family),",
             "self.runtime,",
         ]
         .map(|line| format!("            {line}\n"))
@@ -8370,5 +8437,207 @@ mod tests {
                 "no example showing {name}'s path resolves"
             );
         }
+    }
+
+    #[test]
+    fn ori_t_0038_credential_payload_layout_matches_ori_broker_issuance() {
+        let issuance =
+            fs::read_to_string(repo_file(&["crates", "ori-broker", "src", "issuance.rs"]))
+                .expect("issuance.rs reads");
+        let this = module_code();
+        let issued = r#""{{\"id\":\"{}\",\"identity_id\":\"{}\",\"session_id\":\"{}\",\"scope\":\"{}\",\"issued_at\":{},\"expires_at\":{}}}","#;
+        let revoked = r#""{{\"session_id\":\"{}\",\"revoked_at\":{},\"issuance_ids\":[","#;
+        for layout in [issued, revoked] {
+            assert!(issuance.contains(layout), "issuance.rs: {layout}");
+            assert!(this.contains(layout), "this module: {layout}");
+        }
+        let lines = |indent: &str, lines: &[&str]| -> String {
+            lines
+                .iter()
+                .map(|line| format!("{indent}{line}\n"))
+                .collect()
+        };
+        for (theirs, ours) in [
+            (
+                lines(
+                    "        ",
+                    &[
+                        issued,
+                        "json_escape(id.as_str()),",
+                        "json_escape(identity_id.as_str()),",
+                        "json_escape(session_id.as_str()),",
+                        "json_escape(scope.as_str()),",
+                        "issued_at.millis(),",
+                        "expires_at_json,",
+                    ],
+                ),
+                lines(
+                    "            ",
+                    &[
+                        issued,
+                        "broker_escape(&self.id),",
+                        "broker_escape(&self.identity_id),",
+                        "broker_escape(&self.session_id),",
+                        "broker_escape(&self.scope),",
+                        "self.issued_at,",
+                        "expires_at,",
+                    ],
+                ),
+            ),
+            (
+                lines(
+                    "        ",
+                    &[
+                        revoked,
+                        "json_escape(session_id.as_str()),",
+                        "revoked_at.millis(),",
+                    ],
+                ),
+                lines(
+                    "            ",
+                    &[
+                        revoked,
+                        "broker_escape(&self.session_id),",
+                        "self.revoked_at,",
+                    ],
+                ),
+            ),
+            (
+                [
+                    "        if index > 0 {",
+                    "            out.push(',');",
+                    "        }",
+                    "        out.push('\"');",
+                    "        out.push_str(&json_escape(id.as_str()));",
+                    "        out.push('\"');",
+                    "    }",
+                    "    out.push_str(\"]}\");",
+                ]
+                .map(|line| format!("{line}\n"))
+                .concat(),
+                [
+                    "            if index > 0 {",
+                    "                out.push(',');",
+                    "            }",
+                    "            out.push('\"');",
+                    "            out.push_str(&broker_escape(id));",
+                    "            out.push('\"');",
+                    "        }",
+                    "        out.push_str(\"]}\");",
+                ]
+                .map(|line| format!("{line}\n"))
+                .concat(),
+            ),
+        ] {
+            assert!(
+                issuance.contains(&theirs),
+                "issuance.rs no longer writes:\n{theirs}"
+            );
+            assert!(
+                this.contains(&ours),
+                "this module no longer lays out:\n{ours}"
+            );
+        }
+        assert!(issuance.contains(r#"None => "null".to_owned(),"#));
+        assert!(
+            this.contains(r#".map_or_else(|| "null".to_owned(), |millis| millis.to_string());"#)
+        );
+    }
+
+    #[test]
+    fn ori_t_0038_a_credential_event_ori_broker_could_read_differently_is_refused() {
+        let coder = identity_of(Role::Coder);
+        let rival = id("RIVALCODER");
+        let session = id("SESSIONBAD");
+        let other_session = id("SESSIONOTHER");
+        let issuance = id("ISSUANCE");
+        let cases: [(&str, &str, String); 8] = [
+            (
+                "a holder nested ahead of the holder",
+                "credential.issued",
+                format!(
+                    r#"{{"meta":{{"identity_id":"{rival}"}},"id":"{issuance}","identity_id":"{coder}","session_id":"{session}","scope":"branch","issued_at":100,"expires_at":null}}"#
+                ),
+            ),
+            (
+                "the holder twice",
+                "credential.issued",
+                format!(
+                    r#"{{"id":"{issuance}","identity_id":"{coder}","session_id":"{session}","scope":"branch","issued_at":100,"expires_at":null,"identity_id":"{rival}"}}"#
+                ),
+            ),
+            (
+                "a space after a colon",
+                "credential.issued",
+                format!(
+                    r#"{{"id":"{issuance}","identity_id": "{coder}","session_id":"{session}","scope":"branch","issued_at":100,"expires_at":null}}"#
+                ),
+            ),
+            (
+                "the fields in another order than the writer's",
+                "credential.issued",
+                format!(
+                    r#"{{"session_id":"{session}","id":"{issuance}","identity_id":"{coder}","scope":"branch","issued_at":100,"expires_at":null}}"#
+                ),
+            ),
+            (
+                "a field the writer does not write",
+                "credential.issued",
+                format!(
+                    r#"{{"id":"{issuance}","identity_id":"{coder}","session_id":"{session}","scope":"branch","issued_at":100,"expires_at":null,"note":"x"}}"#
+                ),
+            ),
+            (
+                "a revoked session nested ahead of the session",
+                "credential.revoked",
+                format!(
+                    r#"{{"meta":{{"session_id":"{other_session}"}},"session_id":"{session}","revoked_at":300,"issuance_ids":[]}}"#
+                ),
+            ),
+            (
+                "a revoked session twice",
+                "credential.revoked",
+                format!(
+                    r#"{{"session_id":"{session}","revoked_at":300,"issuance_ids":[],"session_id":"{other_session}"}}"#
+                ),
+            ),
+            (
+                "issuance ids laid out otherwise than the writer's",
+                "credential.revoked",
+                format!(r#"{{"session_id":"{session}","revoked_at":300,"issuance_ids":[ ]}}"#),
+            ),
+        ];
+        for (index, (label, kind, payload)) in cases.into_iter().enumerate() {
+            let mut w = world(&format!("broker-layout-{index}"));
+            let on_m = agent(&coder).with_assigned_ticket(w.ticket_m.clone());
+            granted(&mut w.p, standard(), &on_m, &read("code_map"));
+            append(&mut w.p, kind, None, payload);
+            let before = tip(&mut w.p);
+            match standard().authorize(&mut w.p.db, at(500), &on_m, &read("code_map")) {
+                Ok(_) => panic!(
+                    "{label}: granted over a credential event ori-broker could read otherwise"
+                ),
+                Err(err) => {
+                    assert_eq!(
+                        err.reason().code(),
+                        "assignment_record_malformed",
+                        "{label}: {err}"
+                    );
+                    assert!(err.is_logged(), "{label}");
+                }
+            }
+            assert_eq!(tip(&mut w.p), before + 1, "{label}");
+        }
+
+        // Laid out as the writer lays it out, with issuance ids: read.
+        let mut w = world("broker-layout-written");
+        let on_m = agent(&coder).with_assigned_ticket(w.ticket_m.clone());
+        issue(&mut w.p, &coder, &session);
+        let payload = format!(
+            r#"{{"session_id":"{session}","revoked_at":300,"issuance_ids":["{issuance}","{}"]}}"#,
+            id("ISSUANCETWO")
+        );
+        append(&mut w.p, "credential.revoked", None, payload);
+        granted(&mut w.p, standard(), &on_m, &read("code_map"));
     }
 }
