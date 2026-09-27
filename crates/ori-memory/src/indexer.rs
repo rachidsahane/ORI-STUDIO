@@ -267,8 +267,10 @@
 //! them, in all. A file that would take it past either is left out whole
 //! and recorded ([`SkipReason::WalkDocumentLimit`],
 //! [`SkipReason::WalkByteLimit`]); its split stops as soon as it passes
-//! what is left, so the file never costs more than that; and a later, smaller
-//! file that still fits is read. Files are reached in name order, so which
+//! what is left, so the file never costs more than that; a file whose
+//! reported length is past what is left, or any file once no document is
+//! left, is left out without being read at all; and a later, smaller file
+//! that still fits is read. Files are reached in name order, so which
 //! ones are left out does not depend on the filesystem. This repository's
 //! own `spec/` is 213 documents and about 187 KB today.
 //!
@@ -3132,6 +3134,29 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, budget: &m
     // in a file name stays part of that name. See the module doc's
     // "Document identity".
     let relative = components.join("/");
+    // A file that cannot fit what is left of the budget is left out before
+    // it is read, so a spent budget costs the rest of the walk no reading;
+    // its length is checked again once read, in case it grew.
+    if budget.documents == 0 {
+        walk.skipped.push(SkippedEntry {
+            path,
+            reason: SkipReason::WalkDocumentLimit { remaining: 0 },
+        });
+        return;
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(&path)
+        && metadata.len() > budget.bytes
+        && metadata.len() <= MAX_FILE_BYTES
+    {
+        walk.skipped.push(SkippedEntry {
+            path,
+            reason: SkipReason::WalkByteLimit {
+                byte_len: metadata.len(),
+                remaining: budget.bytes,
+            },
+        });
+        return;
+    }
     let text = match read_capped(&path) {
         Ok(Ok(text)) => text,
         Ok(Err(byte_len)) => {
@@ -8523,6 +8548,33 @@ mod tests {
         );
     }
 
+    /// Makes `file` unreadable to this process until the returned guard is
+    /// dropped, where the platform can (Unix, by its mode), so a test can
+    /// tell a file the walk left out unread from one it read.
+    fn make_unreadable(file: &Path) -> impl Drop + use<> {
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(file, fs::Permissions::from_mode(0o000))
+                .expect("make a file unreadable");
+            assert!(
+                fs::read(file).is_err(),
+                "this test needs a process the file mode applies to"
+            );
+        }
+        Restore(file.to_owned())
+    }
+
     #[test]
     fn ori_t_0035_a_walk_splits_and_reads_no_more_than_its_budget_and_records_what_it_left_out() {
         // The review: one 1 MiB file of empty headings made 524,288
@@ -8545,13 +8597,26 @@ mod tests {
         fs::write(spec.join("2-over.md"), "# b\n\nover\n\n# c\n\nover\n")
             .expect("write a file one document over what is left");
         fs::write(spec.join("3-fits.md"), "# d\n\nfits\n").expect("write a file that fits");
+        // Once the budget is spent a file is left out without being read:
+        // this one could not be read at all, and is not recorded as
+        // unreadable.
+        let after = spec.join("4-after.md");
+        fs::write(&after, "# e\n\nafter\n").expect("write a file after the budget");
+        let unreadable = make_unreadable(&after);
         let walk = Indexer::walk_repo(&documents.path).expect("walk");
+        drop(unreadable);
         assert_eq!(
             walk.skipped,
-            vec![SkippedEntry {
-                path: spec.join("2-over.md"),
-                reason: SkipReason::WalkDocumentLimit { remaining: 1 },
-            }]
+            vec![
+                SkippedEntry {
+                    path: spec.join("2-over.md"),
+                    reason: SkipReason::WalkDocumentLimit { remaining: 1 },
+                },
+                SkippedEntry {
+                    path: after,
+                    reason: SkipReason::WalkDocumentLimit { remaining: 0 },
+                },
+            ]
         );
         assert_eq!(walk.documents.len(), MAX_WALK_DOCUMENTS);
         assert_eq!(
@@ -8560,7 +8625,7 @@ mod tests {
         );
         assert_eq!(
             assert_every_entry_is_indexed_or_skipped(&documents.path, &walk),
-            3
+            4
         );
 
         // The byte budget: seventeen files of sixteen near-cap sections
@@ -8578,7 +8643,11 @@ mod tests {
         }
         fs::write(spec.join("99-small.md"), "# Small\n\nsmallmarker\n")
             .expect("write a small file");
+        // The file past the byte budget is left out from its length alone:
+        // it could not be read, and is not recorded as unreadable.
+        let unreadable = make_unreadable(&spec.join("16.md"));
         let walk = Indexer::walk_repo(&bytes.path).expect("walk");
+        drop(unreadable);
         assert_eq!(
             walk.skipped,
             vec![SkippedEntry {
