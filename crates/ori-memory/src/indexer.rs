@@ -621,7 +621,7 @@
 //! the index is derived, and `recover` replaces it.
 //!
 //! Under that proof `recover` moves `fts.sqlite` and any `-wal`, `-journal`
-//! or `-shm` beside it into `index/quarantine/<recovered_at>-<n>/`, and
+//! or `-shm` beside it into `index/quarantine/<n>-<recovered_at>/`, and
 //! never deletes them, because they are the evidence of what went wrong: the
 //! write-ahead log may hold the damaged index's last committed transactions,
 //! which the database file itself does not. They move as one unit: if one
@@ -655,7 +655,7 @@
 //!   DROP --> MUT[&mut ProductDb: the compiler proves no Indexer is alive; the OS lock proves no other engine process]
 //!   MUT --> OWN{product directory absolute, index/ and quarantine/ not links, every entry at an index file's name a file or a link?}
 //!   OWN -->|no| REFUSED[RecoveryRefused: nothing moved]
-//!   OWN -->|yes| MOVE[move -wal, -journal, -shm, then fts.sqlite into index/quarantine/recovered_at-n/]
+//!   OWN -->|yes| MOVE[move -wal, -journal, -shm, then fts.sqlite into index/quarantine/n-recovered_at/]
 //!   MOVE -->|a move fails| BACK[move back every file already moved; QuarantineIncomplete names any that stayed]
 //!   MOVE --> FRESH[create a fresh fts.sqlite]
 //!   FRESH --> REBUILD[full_rebuild from the caller's target set]
@@ -2470,11 +2470,13 @@ impl Indexer<'_> {
     /// # }
     /// ```
     ///
-    /// `recovered_at` names the quarantine directory,
-    /// `<recovered_at in milliseconds, 20 digits>-<n>`, so that directories
-    /// sort in the order recoveries happened and two in one millisecond
-    /// still get distinct names; this module reads no clock itself, for the
-    /// reason `ProductDb::open`'s `opened_at` gives. `documents` is the
+    /// The quarantine directory is named `<n, 20 digits>-<recovered_at in
+    /// milliseconds, 20 digits>`. `n` counts this product's recoveries, one
+    /// more than the highest already in `index/quarantine/`, so the names
+    /// sort in the order recoveries happened even when the caller's clock
+    /// stepped back between two of them, and no name is ever reused;
+    /// `recovered_at` records when, and this module reads no clock itself,
+    /// for the reason `ProductDb::open`'s `opened_at` gives. `documents` is the
     /// target set the fresh index is rebuilt from, normally
     /// [`Indexer::collect_from_repo`]'s. The damaged file is never opened,
     /// so no damage can make this fail. An `index/fts.sqlite` (or side
@@ -2898,19 +2900,49 @@ fn quarantine_index_files(
     Ok((Some(destination), moved))
 }
 
-/// Creates and returns `quarantine_root/<millis, 20 digits>-<n, 3 digits>`
-/// for the smallest `n` not already taken: `create_dir`, not
-/// `create_dir_all`, so "already taken" is decided by the filesystem
-/// atomically, never by a check that could race a second recovery. A
-/// timestamp before the Unix epoch is written as zero rather than with a
-/// sign, which would break the ordering.
+/// Creates and returns `quarantine_root/<n, 20 digits>-<millis, 20
+/// digits>`, where `n` is one more than the highest `n` of any entry
+/// already in `quarantine_root` with a name of that shape (1 for the
+/// first), and `millis` is `recovered_at`: `create_dir`, not
+/// `create_dir_all`, so a name already taken is never reused, whatever
+/// made it. A timestamp before the Unix epoch is written as zero rather
+/// than with a sign.
+///
+/// The count comes first so the names sort in the order recoveries
+/// happened. A review found round 7 naming the directory
+/// `<millis>-<sequence>`, from `recovered_at` alone: `recovered_at` is the
+/// caller's wall clock (this module reads none), which can step back, and
+/// a recovery handed an earlier time than the last one sorted before it,
+/// so the last directory in name order held older evidence than the
+/// newest. Only [`Indexer::recover`] calls this, holding the product
+/// exclusively, so no second recovery of this product reads the same
+/// highest `n`.
 fn unique_quarantine_dir(
     quarantine_root: &Path,
     recovered_at: Timestamp,
 ) -> Result<PathBuf, IndexerError> {
     let millis = u64::try_from(recovered_at.millis()).unwrap_or(0);
-    for sequence in 0..1000u32 {
-        let candidate = quarantine_root.join(format!("{millis:020}-{sequence:03}"));
+    let directory_error = |source: std::io::Error| IndexerError::Directory {
+        path: quarantine_root.to_owned(),
+        source,
+    };
+    let mut ordinal = 0u64;
+    for entry in std::fs::read_dir(quarantine_root).map_err(directory_error)? {
+        let entry = entry.map_err(directory_error)?;
+        if let Some(taken) = entry.file_name().to_str().and_then(quarantine_ordinal) {
+            ordinal = ordinal.max(taken);
+        }
+    }
+    // Nothing else creates names of this shape while the product is held
+    // exclusively, so the first candidate is free; the bound only keeps a
+    // filesystem that reports every name taken from looping for ever.
+    for _ in 0..1000 {
+        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+            directory_error(std::io::Error::other(
+                "a quarantine directory already carries the highest recovery count there is",
+            ))
+        })?;
+        let candidate = quarantine_root.join(format!("{ordinal:020}-{millis:020}"));
         match std::fs::create_dir(&candidate) {
             Ok(()) => return Ok(candidate),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -2922,12 +2954,20 @@ fn unique_quarantine_dir(
             }
         }
     }
-    Err(IndexerError::Directory {
-        path: quarantine_root.to_owned(),
-        source: std::io::Error::other(
-            "a thousand recoveries are already recorded at this millisecond",
-        ),
-    })
+    Err(directory_error(std::io::Error::other(
+        "a thousand quarantine directory names in a row were already taken",
+    )))
+}
+
+/// The recovery count `n` a quarantine directory name of
+/// [`unique_quarantine_dir`]'s shape, `<n, 20 digits>-<millis, 20
+/// digits>`, carries; `None` for any other name. A count too large for a
+/// `u64` reads as `u64::MAX`, so no later name can be made to sort before
+/// it.
+fn quarantine_ordinal(name: &str) -> Option<u64> {
+    let (ordinal, millis) = name.split_once('-')?;
+    let digits = |part: &str| part.len() == 20 && part.bytes().all(|byte| byte.is_ascii_digit());
+    (digits(ordinal) && digits(millis)).then(|| ordinal.parse().unwrap_or(u64::MAX))
 }
 
 /// `std::fs::rename(from, to)`, for every move [`quarantine_index_files`]
@@ -5905,6 +5945,10 @@ mod tests {
 
     #[test]
     fn ori_t_0035_recover_names_quarantine_directories_in_recovery_order_and_never_reuses_one() {
+        // A review found round 7 naming each directory from recovered_at
+        // alone, the caller's wall clock: recoveries at 5, 5 and then 4
+        // sorted the last one first, and this test asserted that order as
+        // correct. The recovery count now comes first in the name.
         let scratch = Scratch::new("quarantine-names");
         let mut db = product(&scratch);
         let corpus = vec![doc("a.md", DocumentKind::Section, "A", "alpha")];
@@ -5937,22 +5981,105 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "00000000000000000005-000",
-                "00000000000000000005-001",
-                "00000000000000000004-000",
+                "00000000000000000001-00000000000000000005",
+                "00000000000000000002-00000000000000000005",
+                "00000000000000000003-00000000000000000004",
             ],
-            "two recoveries in one millisecond get two names; none is reused"
+            "each name carries its recovery's count, then its recovered_at; two recoveries \
+             in one millisecond get two names, and none is reused"
         );
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(
-            sorted,
-            vec![
-                "00000000000000000004-000",
-                "00000000000000000005-000",
-                "00000000000000000005-001",
-            ],
-            "names sort by recovery time, then by order within a millisecond"
+            sorted, names,
+            "names sort in the order recoveries happened, the one whose clock stepped back \
+             included"
+        );
+    }
+
+    /// The path of every row of the index file in the quarantine directory
+    /// `quarantine`, read from a copy of the directory so the evidence
+    /// itself is never opened.
+    fn quarantined_paths(scratch: &Scratch, quarantine: &Path) -> Vec<String> {
+        let copy = scratch.path.join(format!(
+            "copy-of-{}",
+            quarantine.file_name().expect("a name").to_string_lossy()
+        ));
+        fs::create_dir_all(&copy).expect("create the copy");
+        for entry in fs::read_dir(quarantine).expect("list the quarantine directory") {
+            let entry = entry.expect("an entry");
+            fs::copy(entry.path(), copy.join(entry.file_name())).expect("copy a quarantined file");
+        }
+        let raw = Connection::open(copy.join(INDEX_FILE)).expect("open the copy");
+        let mut statement = raw
+            .prepare("SELECT path FROM documents ORDER BY path")
+            .expect("prepare");
+        statement
+            .query_map([], |row| row.get(0))
+            .expect("run")
+            .collect::<rusqlite::Result<_>>()
+            .expect("read every path")
+    }
+
+    #[test]
+    fn ori_t_0035_the_last_quarantine_directory_in_name_order_holds_the_newest_evidence_after_the_clock_steps_back()
+     {
+        // The review's probe: a first recovery at T moves the index holding
+        // "one" and rebuilds it with "two"; the caller's clock then steps
+        // back a second; a second recovery moves the index holding "two".
+        // Round 7's last directory in name order held "one", the older
+        // evidence.
+        let scratch = Scratch::new("quarantine-clock");
+        let mut db = product(&scratch);
+        let body = |word: &str| {
+            vec![doc(
+                &format!("{word}.md"),
+                DocumentKind::Section,
+                word,
+                word,
+            )]
+        };
+        {
+            let mut indexer = Indexer::open(&db).expect("open on-disk index");
+            indexer.full_rebuild(&body("one")).expect("seed");
+        }
+        let at = 1_700_000_003_000;
+        let older = Indexer::recover(&mut db, &body("two"), Timestamp::from_millis(at))
+            .expect("the first recovery")
+            .quarantine
+            .expect("the first index was moved");
+        let newest = Indexer::recover(&mut db, &body("three"), Timestamp::from_millis(at - 1_000))
+            .expect("the second recovery, its clock a second behind")
+            .quarantine
+            .expect("the second index was moved");
+        let quarantine_root = index_dir(&db).join(QUARANTINE_DIR);
+        let mut listing: Vec<std::ffi::OsString> = fs::read_dir(&quarantine_root)
+            .expect("list quarantine/")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        listing.sort();
+        let name = |path: &Path| path.file_name().expect("a name").to_owned();
+        assert_eq!(listing, vec![name(&older), name(&newest)]);
+        assert_eq!(
+            quarantined_paths(&scratch, &newest),
+            ["two.md"],
+            "the last directory in name order holds the newest evidence"
+        );
+        assert_eq!(quarantined_paths(&scratch, &older), ["one.md"]);
+
+        // A count already taken, by whatever made it, orders the next
+        // recovery after it; a name of any other shape is not a count.
+        fs::create_dir(quarantine_root.join("00000000000000000041-00000000000000000000"))
+            .expect("plant a higher count");
+        fs::create_dir(quarantine_root.join("99999999999999999999-x"))
+            .expect("plant a name of another shape");
+        let next = Indexer::recover(&mut db, &body("four"), Timestamp::from_millis(at - 2_000))
+            .expect("the third recovery")
+            .quarantine
+            .expect("the third index was moved");
+        assert_eq!(
+            next.file_name().and_then(|name| name.to_str()),
+            Some(format!("{:020}-{:020}", 42, at - 2_000).as_str())
         );
     }
 
