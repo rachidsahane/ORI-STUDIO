@@ -9647,9 +9647,9 @@ mod tests {
     /// repository resolved `use crate::foo::X;` to either file from run to
     /// run (the review saw both, 5 and 7 times in 12). Twenty-four maps of
     /// one tree, and twenty-four indexes built from sets filled in rotated
-    /// orders, must all give `src/foo.rs`; with two equally likely answers,
-    /// the round-6 build gives the same one every time with a probability
-    /// of about one in eight million.
+    /// orders, must all give `src/foo.rs`; with two roughly equally likely
+    /// answers, the round-6 build gives `src/foo.rs` all 48 times with a
+    /// probability far below one in a trillion.
     #[test]
     fn ori_t_0036_the_rust_index_is_the_same_whatever_order_the_path_set_yields() {
         let dir = temp_dir("rust-index-order");
