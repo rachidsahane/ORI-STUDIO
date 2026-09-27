@@ -144,42 +144,69 @@
 //!   from the repository checks a wall-clock deadline, and whatever it
 //!   cannot finish before that deadline is a recorded `TimedOut`, never a
 //!   hang, and never presented as if it were complete. One loop over
-//!   content is not this module's to change, tree-sitter's end-of-input
-//!   error recovery, which checks nothing; the size cap bounds it instead,
-//!   and the per-file bound below includes it. Concretely, the stages,
-//!   each under its own deadline:
+//!   content is not this module's to change, tree-sitter's own, which
+//!   checks the deadline too coarsely at the end of some inputs to be
+//!   waited for; it runs on a thread of its own, and the step waits for it
+//!   only until its deadline (see "Per file" below). Concretely, the
+//!   stages, each under its own deadline:
 //!   - **Per file** (a symlink's re-validation, opening, reading, parsing,
 //!     extraction, and test detection, together; the re-validation since
 //!     round 9, see "Symlinks"): [`CodeMapOptions::file_timeout`] plus a
 //!     size-proportional allowance (`per_file_budget`; see its doc for why
 //!     a fixed bound alone is wrong for roughly half the builds that check
-//!     it), which every part of the step that can be interrupted checks,
-//!     plus, past that, the one part that cannot. Parsing is bounded through
-//!     [`tree_sitter::Parser::parse_with_options`]'s progress callback,
-//!     which tree-sitter polls periodically while it parses, and not while
-//!     it recovers from an error at the end of its input: an input that
-//!     ends inside deep nesting its grammar finds ambiguous (Go
-//!     `a[a[a[...`, Python `x = (a,(a,...`, TypeScript `a<a<...` or
-//!     `(a,(a,...`) has it pop its whole parse stack along every path it
-//!     kept, up to 64, and rebuild each, with no poll, so that phase runs to
-//!     its end once begun (until round 7 this doc said the parse was polled
-//!     throughout). The review of round 6 measured it at the old 8 MiB cap:
-//!     22.5 seconds with no poll, the file's step taking 32 seconds against
-//!     its 13-second budget (26 against 8 with a zero `file_timeout`), at
-//!     3.6 to 4.2 GB resident; round 7 measured the same file's peak
-//!     footprint at 10.7 GB. Nothing but
-//!     the file's size bounds that phase, which is why the default
-//!     [`CodeMapOptions::max_file_bytes`] is 1 MiB since round 7: the worst
-//!     shape measured at that size (Go `a[a[...`) took 2.2 seconds for the
-//!     whole step in a release build, inside its 6-second budget, and 7.4
-//!     seconds in a debug build (tree-sitter's C compiled unoptimized),
-//!     past it. So the bound this module states for one file's step is its
-//!     budget plus 8 seconds per MiB of the file, for that phase: 14
-//!     seconds for a file at the default cap, at default options
+//!     it). Every part of the step checks it, and the step returns within
+//!     it plus the time to wake the step when its wait ends and, for a
+//!     parse that finished, to drop the parse's tree (under 30 ms for a
+//!     million-node tree in a debug build), whatever tree-sitter is doing
+//!     then, on any machine: 6 seconds plus that for a file at the default
+//!     cap, at default options, since round 10
 //!     (`tests::ori_t_0036_one_file_at_the_default_cap_ends_within_its_stated_bound`
-//!     maps that shape at the cap and holds it to that). A host that needs
-//!     a tighter bound sets a smaller cap: the phase's cost falls with the
-//!     size (1.2 seconds in a debug build at 256 KiB). Extraction
+//!     maps the worst shape measured at the cap and holds it to 6.5).
+//!     Parsing is bounded through
+//!     [`tree_sitter::Parser::parse_with_options`]'s progress callback,
+//!     which tree-sitter calls once per 100 parse actions and from nowhere
+//!     else. That is fine-grained while it consumes input (at most 150 ms
+//!     between two calls in every debug-build run measured), and not at the
+//!     end of an input that ends inside deep nesting its grammar finds
+//!     ambiguous (Go `a[a[a[...`, Python `x = (a,(a,...`, TypeScript
+//!     `a<a<...` or `(a,(a,...`): there each of its few remaining actions
+//!     pops a whole parse stack along every path it kept, up to 64, and
+//!     builds a node of each, and the step that resumes each paused version
+//!     into that recovery and frees each version it drops is not counted as
+//!     an action at all, so a few steps, each proportional to the file's
+//!     size, run between two calls. The free of a cancelled parse's stack,
+//!     when the parser is dropped, polls nothing either. The review of
+//!     round 6 measured the end-of-input stretch at the old 8 MiB cap at
+//!     22.5 seconds, the file's step taking 32 seconds against its
+//!     13-second budget, at 3.6 to 4.2 GB resident, and round 7 the same
+//!     file's peak footprint at 10.7 GB, which is why the default
+//!     [`CodeMapOptions::max_file_bytes`] is 1 MiB since round 7. Until
+//!     round 10 the step's own thread ran the parse, and this doc stated
+//!     its bound as the budget plus 8 seconds per MiB, 14 seconds at the
+//!     cap: a fixed allowance for work whose duration is the machine's
+//!     speed times the file's size, so it held on the machine that set it
+//!     and not on a slower one. This ticket's CI on a macOS runner, after
+//!     round 9, took 22.4 seconds for the worst shape at the cap;
+//!     instrumented, a debug build on a loaded development machine went
+//!     11.4 to 15.3 seconds between two polls at that file's end, 14 to 24
+//!     for its step (29.5 under added CPU and memory-bandwidth load), and
+//!     spent 0.6 to 1.4 seconds freeing the stack of the
+//!     same file cancelled after 1.3 to 3 seconds. Every parse now runs on
+//!     a parse thread, one per calling thread (`ParseThread`), and the step
+//!     stops waiting for it at its deadline and records the file as
+//!     `TimedOut`
+//!     (`tests::ori_t_0036_a_step_stops_waiting_at_its_deadline_while_the_parse_thread_is_busy`),
+//!     so neither stretch is on the step's path. What the parse thread still
+//!     spends after a step gave up on it is the rest of the stretch it was
+//!     in and the free after it, both bounded by the file's size, which the
+//!     cap bounds, not by any deadline (1 to 30 seconds for the worst
+//!     shape at the cap, after steps that each returned by 6.01, in the
+//!     debug-build runs measured, the longest under CPU and memory-bandwidth
+//!     load); it starts no other parse until then, so one parse's
+//!     memory is held at a time, and the next file's parse waits for it
+//!     under that file's own deadline, `TimedOut` if it passes first. A
+//!     host that needs the parse thread free sooner, or less memory held,
+//!     sets a smaller cap. Extraction
 //!     is bounded by this module's own traversal helpers (`for_each_node`,
 //!     `for_each_sibling_group`, and, since round 7, the walk that finds
 //!     Rust `use` and `mod` declarations at any depth,
@@ -245,7 +272,9 @@
 //!     walk's paths plus sorting them, and the final sort of each module's
 //!     lists, `n log n` in entries that the file's size bounds (at most one
 //!     interface per two bytes of it, about half a million at the 1 MiB
-//!     default).
+//!     default). And, off the step's path, on the parse thread: what
+//!     tree-sitter still does for a file after its step stopped waiting,
+//!     which "Per file" above bounds by the file's size.
 //!
 //!   A file whose syntax is small but pathologically nested (deeply
 //!   bracketed input is the classic case) is bounded by time even when it is
@@ -471,10 +500,14 @@
 //!     one above is per file read, and a file is read once however many
 //!     paths reach it (see "Symlinks").
 //!   - *While one file is parsed and extracted:* its bytes (at most
-//!     `max_file_bytes + 1`), tree-sitter's tree and parse state for it,
-//!     and what extraction builds, all dropped, but for what its [`Module`]
-//!     keeps, before the next file is read: files are processed one at a
-//!     time. Tree-sitter's share grows with the file's size, which only
+//!     `max_file_bytes + 1`, one allocation the parse thread shares),
+//!     tree-sitter's tree and parse state for it, and what extraction
+//!     builds, all dropped, but for what its [`Module`] keeps, before the
+//!     next file's parse starts: files are parsed one at a time, one per
+//!     calling thread, on its parse thread (see "Time"), which finishes and
+//!     frees a parse its step stopped waiting for before it starts the next.
+//!     Meanwhile the next file may be read, so at most one more file's
+//!     bytes are held. Tree-sitter's share grows with the file's size, which only
 //!     [`CodeMapOptions::max_file_bytes`] bounds. For most dense shapes it
 //!     peaks at about 230 to 280 bytes per byte of source (round 6
 //!     measured `import a,a,...`, 241 MB for a 1 MiB file; round 7 deeply
@@ -505,8 +538,11 @@
 //!   else (until round 8 a link cost a whole parse and a whole [`Module`];
 //!   see "Symlinks"). Following a symlink entry is bounded per link and,
 //!   in the walk, for all links together (until round 9 it was neither;
-//!   see "Symlinks"). Races with a live writer are out of scope; see
-//!   "Threat model".
+//!   see "Symlinks"). Nor is how long a parse thread keeps working on a
+//!   file after its step stopped waiting, which can outlast the
+//!   [`build_code_map`] call: the file's size bounds that work, not any
+//!   deadline, so its duration is the machine's (see "Time"). Races with a
+//!   live writer are out of scope; see "Threat model".
 //!
 //! # Quadratic extraction, and what stays fast
 //!
@@ -757,6 +793,7 @@
 //! repository gave a different map on most runs).
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -765,7 +802,8 @@ use std::io;
 use std::io::Read as _;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use tree_sitter::{Node, ParseOptions, ParseState, Parser};
@@ -1420,10 +1458,11 @@ impl CodeMap {
 #[derive(Clone, Copy, Debug)]
 pub struct CodeMapOptions {
     /// The largest file this module will read, source or `spec/`
-    /// document. Default 1 MiB: the end-of-input recovery tree-sitter runs
-    /// without polling any deadline, and the memory it takes, grow with a
-    /// file's size, and at the 8 MiB default this had until round 7 one
-    /// file could take half a minute and 10 GB (see the module doc's
+    /// document. Default 1 MiB: the work tree-sitter does at the end of an
+    /// input without polling any deadline, which a step no longer waits for
+    /// but its parse thread still does, and the memory a parse takes, grow
+    /// with a file's size, and at the 8 MiB default this had until round 7
+    /// one file could take half a minute and 10 GB (see the module doc's
     /// "Time" and "Memory"). Enforced on bytes actually read, not a
     /// `stat`ed size taken on trust.
     pub max_file_bytes: u64,
@@ -2461,11 +2500,13 @@ fn language_of(rel: &str) -> Option<Language> {
 /// that trigger them, so a fixed floor plus a modest per-MiB allowance is
 /// nowhere near enough budget for either to pass.
 ///
-/// This is the budget every part of the step that can be interrupted
-/// checks, not the step's whole bound: tree-sitter's end-of-input error
-/// recovery polls nothing, and can run past it once begun. The module doc's
-/// "Time" states the bound with that phase included, the budget plus 8
-/// seconds per MiB of the file (`tests::per_file_bound`).
+/// This is the budget the whole step is held to, since round 10: every
+/// part of it checks this, and it waits for its parse only until this has
+/// passed ([`parse_on_parse_thread`]). Until then tree-sitter's work at the
+/// end of some inputs, which polls too coarsely to be stopped on time, ran
+/// on the step's own thread, and the module doc's "Time" stated the step's
+/// bound as this plus 8 seconds per MiB for it, which a slower machine
+/// broke. See [`ParseThread`] for what that work still costs off the step.
 fn per_file_budget(options: &CodeMapOptions, file_bytes: u64) -> Duration {
     /// Below this, the allowance is exactly zero, not a rounded-up sliver of
     /// one: an ordinary small file (this module's own fixtures included)
@@ -2618,12 +2659,19 @@ fn process_file(
     if bytes.contains(&0u8) {
         return Err(SkipReason::Binary);
     }
-    let Ok(source) = std::str::from_utf8(&bytes) else {
+    // Taken over, not copied: the parse thread reads the same allocation.
+    let Ok(shared) = String::from_utf8(bytes).map(Arc::new) else {
         return Err(SkipReason::Binary);
     };
+    let source: &str = &shared;
 
+    // The parse runs on this thread's parse thread, and this step waits for
+    // it only until `deadline`: tree-sitter polls that deadline too coarsely
+    // at the end of some inputs for its own thread to be the one waiting
+    // (see `ParseThread`).
     let tsx = file.rel.ends_with(".tsx");
-    let tree = parse_bounded(language, tsx, source, deadline).ok_or(SkipReason::TimedOut)?;
+    let tree =
+        parse_on_parse_thread(language, tsx, &shared, deadline).ok_or(SkipReason::TimedOut)?;
     let root = tree.root_node();
     let parsed_with_errors = root.has_error();
 
@@ -2677,8 +2725,13 @@ fn process_file(
     })
 }
 
-/// Parses `source` with a wall-clock `deadline`, returning `None` when
-/// tree-sitter's own progress callback cancels the parse before it finishes.
+/// Parses `source` on the calling thread with a wall-clock `deadline`,
+/// returning `None` when tree-sitter's own progress callback cancels the
+/// parse before it finishes. The calling thread waits for all of it,
+/// tree-sitter's unpolled stretches and the free of a cancelled parse's
+/// stack included (see [`ParseThread`] for how long those run), so a step
+/// never parses this way unless no parse thread can be started
+/// ([`parse_on_parse_thread`]); tests that need a tree to extract from do.
 /// See the module doc's "Time" bound.
 fn parse_bounded(
     language: Language,
@@ -2686,7 +2739,29 @@ fn parse_bounded(
     source: &str,
     deadline: Instant,
 ) -> Option<tree_sitter::Tree> {
-    let mut parser = Parser::new();
+    parse_with(
+        &mut Parser::new(),
+        language,
+        tsx,
+        source.as_bytes(),
+        deadline,
+    )
+}
+
+/// Parses `bytes` with `parser`, cancelling through tree-sitter's progress
+/// callback once `deadline` has passed: `None` when it was cancelled, or
+/// when `language`'s grammar could not be loaded. Tree-sitter calls that
+/// callback once per 100 parse actions and from nowhere else, which is
+/// why a parse runs on a [`ParseThread`]: see its doc for how long can pass
+/// between two calls. `parser` is the caller's so that the caller decides
+/// when the parse state it keeps after a cancelled parse is freed.
+fn parse_with(
+    parser: &mut Parser,
+    language: Language,
+    tsx: bool,
+    bytes: &[u8],
+    deadline: Instant,
+) -> Option<tree_sitter::Tree> {
     let grammar = match (language, tsx) {
         (Language::Rust, _) => tree_sitter_rust::LANGUAGE.into(),
         (Language::TypeScript, true) => tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -2698,7 +2773,6 @@ fn parse_bounded(
         return None;
     }
 
-    let bytes = source.as_bytes();
     let mut cancel = move |_state: &ParseState| Instant::now() >= deadline;
     let parse_options = ParseOptions::new().progress_callback(&mut cancel);
     parser.parse_with_options(
@@ -2706,6 +2780,179 @@ fn parse_bounded(
         None,
         Some(parse_options),
     )
+}
+
+/// The stack a [`ParseThread`] runs on: 8 MiB, a main thread's on Linux
+/// and macOS, so a caller that used to parse on its main thread does not
+/// give tree-sitter less stack now than it had then (a spawned thread's
+/// default is 2 MiB). Reserved, not committed: pages are taken as used.
+const PARSE_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+/// One parse for a [`ParseThread`] to run.
+struct ParseJob {
+    language: Language,
+    tsx: bool,
+    /// The file's source, the allocation the step that queued this reads,
+    /// not a copy, and not kept alive by the queue: a step that stopped
+    /// waiting drops its own reference, which frees the source while the
+    /// job still waits, so steps given up on behind a busy parse thread
+    /// leave no file's bytes behind them, however many there are. The
+    /// parse thread holds it only while it parses.
+    source: Weak<String>,
+    /// The file's deadline: the parse is cancelled at tree-sitter's first
+    /// poll past it, and not started at all when it passed while the job
+    /// waited behind an earlier one.
+    deadline: Instant,
+    /// Where the tree goes (`None` for a cancelled parse). A step that gave
+    /// up has dropped the other end, and the tree is then dropped on the
+    /// parse thread; a job not started is dropped with this unanswered,
+    /// which its step reads as `None`.
+    answer: mpsc::Sender<Option<tree_sitter::Tree>>,
+}
+
+/// The thread every tree-sitter parse one calling thread asks for runs on:
+/// one per calling thread, started at its first parse, running jobs one at
+/// a time in the order they were queued, and ending once the calling thread
+/// has ended and the job it is on is done.
+///
+/// Why the parse is not on the calling thread: the deadline is checked by
+/// tree-sitter, through the progress callback [`parse_with`] gives it, and
+/// tree-sitter calls that once per 100 parse actions and from nowhere else.
+/// While it consumes input an action is small, and a debug build polled at
+/// most 150 ms apart in every run measured. Once the input ends inside
+/// deep nesting its grammar finds ambiguous (Go `a[a[a[...`, Python
+/// `x = (a,(a,...`, TypeScript `a<a<...`), it is not: each of its few
+/// remaining actions recovers from the error by popping a whole parse stack
+/// along every path it kept, up to 64, and building a node of each
+/// (`ts_parser__accept`), and `ts_parser__condense_stack`, which resumes a
+/// paused version into that recovery and frees every version it drops, is
+/// not an action at all. So a few steps, each proportional to the file's
+/// size, run between two polls: for the worst shape at the 1 MiB default,
+/// 11.4 to 15.3 seconds with no poll in a debug build on a loaded
+/// development machine (an M5; this ticket's CI on a macOS runner took
+/// 22.4 seconds for the whole step). And after a parse the deadline did
+/// cancel, dropping the parser frees the stack it had built, which nothing
+/// polls either: 0.6 to 1.4 seconds for the same file cancelled after 1.3
+/// to 3 seconds. How long each takes is the machine's speed times work
+/// that only the file's size bounds, so no fixed allowance holds it on
+/// every machine, and until round 10 the step waited for both.
+///
+/// Now a step waits for its parse only until its deadline
+/// ([`parse_on_parse_thread`]), so neither stretch is on the step's path:
+/// the first can outlast the deadline only on the parse thread, and the
+/// second follows a cancel, which comes only past the deadline. What the
+/// parse thread still spends after a step gave up on it is the rest of the
+/// stretch it was in and the free after it, both bounded by
+/// [`CodeMapOptions::max_file_bytes`]; it starts no other parse until
+/// then, so one parse's state is held at a time, as before, and a job
+/// queued behind it waits under its own file's deadline, and is `TimedOut`
+/// if that passes first.
+struct ParseThread {
+    jobs: mpsc::Sender<ParseJob>,
+}
+
+impl ParseThread {
+    /// Starts one, or `None` when the platform will not start a thread.
+    fn start() -> Option<Self> {
+        let (jobs, queue) = mpsc::channel::<ParseJob>();
+        std::thread::Builder::new()
+            .name("ori-memory-parse".to_owned())
+            .stack_size(PARSE_THREAD_STACK_BYTES)
+            .spawn(move || run_parse_jobs(&queue))
+            .ok()?;
+        Some(Self { jobs })
+    }
+}
+
+thread_local! {
+    /// This thread's [`ParseThread`], once it has asked for a parse.
+    static PARSE_THREAD: RefCell<Option<ParseThread>> = const { RefCell::new(None) };
+}
+
+/// A [`ParseThread`]'s loop: each job in turn, until the calling thread's
+/// end drops the queue's sending side.
+fn run_parse_jobs(queue: &mpsc::Receiver<ParseJob>) {
+    for job in queue {
+        // Its step stopped waiting while an earlier parse was still running
+        // here, or is about to: dropping the job unanswered is its answer.
+        if Instant::now() >= job.deadline {
+            continue;
+        }
+        let Some(source) = job.source.upgrade() else {
+            continue;
+        };
+        let mut parser = Parser::new();
+        let tree = parse_with(
+            &mut parser,
+            job.language,
+            job.tsx,
+            source.as_bytes(),
+            job.deadline,
+        );
+        drop(source);
+        // A step that has stopped waiting sends the tree back, and it is
+        // dropped here, not on the step's thread. Dropping `parser` after a
+        // cancelled parse frees the whole stack it built; its step is not
+        // waiting for that (a parse is cancelled only past the deadline its
+        // step stopped waiting at), but the next job is, which is what
+        // keeps one parse's state held at a time.
+        if let Err(mpsc::SendError(unwanted)) = job.answer.send(tree) {
+            drop(unwanted);
+        }
+        drop(parser);
+    }
+}
+
+/// Queues `job` on `slot`'s [`ParseThread`], starting one when there is
+/// none, or when the one there has ended (which only a panic on it can do).
+/// `false` when no thread could be started, with `job` dropped.
+fn queue_parse(slot: &RefCell<Option<ParseThread>>, job: ParseJob) -> bool {
+    let mut slot = slot.borrow_mut();
+    let job = match slot.as_ref() {
+        Some(thread) => match thread.jobs.send(job) {
+            Ok(()) => return true,
+            Err(mpsc::SendError(job)) => job,
+        },
+        None => job,
+    };
+    *slot = ParseThread::start();
+    slot.as_ref()
+        .is_some_and(|thread| thread.jobs.send(job).is_ok())
+}
+
+/// Parses `source` on this thread's [`ParseThread`] and waits for the tree
+/// at most until `deadline`: `None` when the parse was cancelled, could not
+/// load its grammar, or had not answered by then, each of which the step
+/// records as [`SkipReason::TimedOut`]. When no parse thread can be started,
+/// parses here instead ([`parse_bounded`]), and the step then waits for
+/// all of the parse, as it did until round 10.
+fn parse_on_parse_thread(
+    language: Language,
+    tsx: bool,
+    source: &Arc<String>,
+    deadline: Instant,
+) -> Option<tree_sitter::Tree> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let (answer, answered) = mpsc::channel();
+    let job = ParseJob {
+        language,
+        tsx,
+        source: Arc::downgrade(source),
+        deadline,
+        answer,
+    };
+    let queued = PARSE_THREAD
+        .try_with(|slot| queue_parse(slot, job))
+        .unwrap_or(false);
+    if !queued {
+        return parse_bounded(language, tsx, source, deadline);
+    }
+    answered
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .flatten()
 }
 
 /// A shebang line is checked the same way for every language: the file's
@@ -11374,62 +11621,212 @@ mod tests {
         drop(guard);
     }
 
-    /// The bound the module doc's "Time" states for one file's whole step:
-    /// its budget (`per_file_budget`), which every part of the step that
-    /// can be interrupted checks, plus 8 seconds per MiB of the file for
-    /// tree-sitter's end-of-input error recovery, which polls nothing once
-    /// begun. The worst measured cost of that phase at the 1 MiB default
-    /// cap was about 6 seconds in this ticket's debug build (the step's
-    /// whole 7.4 seconds, less a 1.3-second parse) and under 2.2 in
-    /// release.
-    fn per_file_bound(options: &CodeMapOptions, file_bytes: u64) -> Duration {
-        const RECOVERY_ALLOWANCE_MICROS_PER_MIB: u64 = 8_000_000;
-        per_file_budget(options, file_bytes).saturating_add(Duration::from_micros(
-            file_bytes.saturating_mul(RECOVERY_ALLOWANCE_MICROS_PER_MIB) / (1024 * 1024),
-        ))
+    /// How far past its budget one file's step may return: waking the step
+    /// when its wait for the parse thread ends, the walk and bookkeeping
+    /// around one file, and, for a parse that finished, dropping its tree
+    /// (under 30 ms for a million-node tree in a debug build). None of it
+    /// is tree-sitter's own work, which runs on the parse thread
+    /// (`ParseThread`), so none of it grows with how long tree-sitter runs
+    /// between two polls on a given machine. About 8% of the 6-second
+    /// budget of a file at the default cap.
+    const STEP_GRACE: Duration = Duration::from_millis(500);
+
+    /// Past this, a parse thread that has not come back is taken to be
+    /// stuck, not slow: a hang detector, not a performance bound. The
+    /// longest a parse thread was measured busy after its step gave up was
+    /// 30 seconds (the worst shape at the default cap, a debug build on a
+    /// development machine under CPU and memory-bandwidth load).
+    const PARSE_THREAD_HANG: Duration = Duration::from_secs(300);
+
+    /// The worst shape measured, Go `var x = a[a[a[...` to `bytes` bytes:
+    /// an input that ends inside nesting the grammar finds ambiguous, which
+    /// tree-sitter recovers from, at its end, in a few steps each
+    /// proportional to its size, with no poll between them.
+    fn worst_go_shape(bytes: usize) -> String {
+        let head = "package p\nvar x = ";
+        format!(
+            "{head}{}",
+            "a[".repeat(bytes.saturating_sub(head.len()) / 2)
+        )
     }
 
-    /// Item 1 (HIGH): tree-sitter polls no deadline while it recovers from
-    /// an error at the end of its input, and for deep nesting its grammar
-    /// finds ambiguous that recovery grows with the file: at the old 8 MiB
-    /// default the review of round 6 measured one file's step at 26 to 32
-    /// seconds against a 13-second budget, and 10.7 GB. The default cap is
-    /// now 1 MiB, and the module doc states the bound with that phase in
-    /// it. Two halves: at default options the stated bound for a file at
-    /// the cap is at most 14 seconds (which the old cap breaks, at 77, and
-    /// is what keeps the phase short); and the worst shape measured (Go
-    /// `var x = a[a[...`, about 1.8 GB while it parses) mapped at the cap
-    /// ends inside it.
+    /// Item 1 (HIGH) of the review of round 6, and this ticket's first CI
+    /// run on a macOS runner after round 9. Tree-sitter polls its deadline
+    /// once per 100 parse actions, and once an input ends inside deep
+    /// nesting its grammar finds ambiguous, a few actions, each
+    /// proportional to the file's size, run between two polls: 11.4 to
+    /// 15.3 seconds of them for this file in a debug build on a loaded
+    /// development machine, and the free of a cancelled parse's stack
+    /// after that, with no poll either. Until round 10 the step waited for
+    /// both, so how far past its budget it ran was the machine's speed
+    /// times work only the file's size bounds: this test held that to an
+    /// allowance of 8 seconds per MiB, 14 seconds in all, and CI took
+    /// 22.4. The parse now runs on the parse thread, and the step waits
+    /// for it only until its deadline.
+    ///
+    /// What this proves, on any machine, fast or slow, loaded or not: the
+    /// worst shape measured (about 1.8 GB while it parses), mapped at the
+    /// default cap with default options, returns within its budget of 6
+    /// seconds (which the cap sets: the old 8 MiB cap would give 12.75)
+    /// plus [`STEP_GRACE`], none of which is tree-sitter's work; the file
+    /// is `TimedOut`, or a module parsed with errors, never clean and
+    /// never anything else (a module only when parsing and extraction
+    /// finished inside the budget, which in a release build on a fast
+    /// machine they can); and the work the step gave up on then ends by
+    /// itself, freeing the parse thread for the next parse, rather than
+    /// running on with nothing waiting for it.
     #[test]
     fn ori_t_0036_one_file_at_the_default_cap_ends_within_its_stated_bound() {
         let options = CodeMapOptions::default();
         let cap = options.max_file_bytes;
-        let bound = per_file_bound(&options, cap);
-        assert!(
-            bound <= Duration::from_secs(14),
-            "at default options one file's step is stated to end within {bound:?}; the size cap \
-             ({cap} bytes) is what keeps the unpolled end-of-input phase inside 14 s"
+        let budget = per_file_budget(&options, cap);
+        assert_eq!(
+            budget,
+            Duration::from_secs(6),
+            "a file at the default cap ({cap} bytes) gets file_timeout plus its size's allowance"
         );
         let dir = temp_dir("worst-parse-at-cap");
         let guard = DropGuard(dir.clone());
-        let head = "package p\nvar x = ";
         let cap_bytes = usize::try_from(cap).expect("the cap fits in memory");
-        let body = "a[".repeat((cap_bytes - head.len()) / 2);
-        write(&dir, "m.go", &format!("{head}{body}"));
+        write(&dir, "m.go", &worst_go_shape(cap_bytes));
         let start = Instant::now();
         let map = build_code_map(&dir).expect("maps");
         let elapsed = start.elapsed();
         assert_eq!(map.coverage.files_seen, 1, "{:?}", map.coverage);
+        match (
+            map.modules.as_slice(),
+            map.coverage.files_skipped.as_slice(),
+        ) {
+            ([module], []) => assert!(
+                module.parsed_with_errors,
+                "an input that ends inside `a[` cannot parse clean, took {elapsed:?}"
+            ),
+            ([], [skipped]) => assert_eq!(
+                skipped.reason,
+                SkipReason::TimedOut,
+                "took {elapsed:?}: {:?}",
+                map.coverage
+            ),
+            _ => panic!(
+                "mapped, or timed out, never anything else: {:?}",
+                map.coverage
+            ),
+        }
         assert!(
-            map.coverage.files_skipped.is_empty()
-                || map.coverage.files_skipped[0].reason == SkipReason::TimedOut,
-            "mapped, or timed out, never anything else: {:?}",
-            map.coverage
+            elapsed <= budget + STEP_GRACE,
+            "the worst shape measured at the default cap took {elapsed:?}, past its budget of \
+             {budget:?} plus {STEP_GRACE:?}"
+        );
+        // The same thread's next parse runs once the parse thread is done
+        // with this file: what the step gave up on ends by itself.
+        let freed = Instant::now();
+        let next = parse_on_parse_thread(
+            Language::Go,
+            false,
+            &Arc::new("package p\n".to_owned()),
+            freed + PARSE_THREAD_HANG,
         );
         assert!(
-            elapsed <= bound,
-            "the worst shape measured at the default cap took {elapsed:?}, past its stated bound \
-             of {bound:?}"
+            next.is_some(),
+            "the parse thread was still busy {:?} after the step gave up on its file",
+            freed.elapsed()
+        );
+        drop(guard);
+    }
+
+    /// The step's side of `ParseThread`, with no timing of tree-sitter in
+    /// it: while this thread's parse thread is busy with a parse nothing
+    /// can interrupt (the worst shape at 256 KiB, parsed in full, which
+    /// takes seconds in a debug build and about 0.4 in a release one), a
+    /// parse asked for with a 100 ms deadline comes back empty within that
+    /// plus [`STEP_GRACE`], and a whole map with a 200 ms `file_timeout`
+    /// returns within that plus the grace with its one file `TimedOut`,
+    /// not waiting for the parse ahead of it. A job a step gave up on keeps
+    /// none of its file's bytes alive while it waits. Once the busy parse
+    /// is done the thread runs the next one, and the jobs whose steps gave
+    /// up while they waited are not started. Until round 10 the step's own
+    /// thread ran the parse, so no step returned before tree-sitter did.
+    #[test]
+    fn ori_t_0036_a_step_stops_waiting_at_its_deadline_while_the_parse_thread_is_busy() {
+        let (answer, busy_answered) = mpsc::channel();
+        let busy_source = Arc::new(worst_go_shape(256 * 1024));
+        let queued = PARSE_THREAD.with(|slot| {
+            queue_parse(
+                slot,
+                ParseJob {
+                    language: Language::Go,
+                    tsx: false,
+                    source: Arc::downgrade(&busy_source),
+                    deadline: Instant::now() + PARSE_THREAD_HANG,
+                    answer,
+                },
+            )
+        });
+        assert!(queued, "a parse thread starts");
+
+        let start = Instant::now();
+        let wait = Duration::from_millis(100);
+        let waiting = Arc::new("package p\n".to_owned());
+        let tree = parse_on_parse_thread(Language::Go, false, &waiting, start + wait);
+        let waited = start.elapsed();
+        assert!(
+            tree.is_none(),
+            "the parse ahead of this one was still running, so this one cannot have run"
+        );
+        assert!(
+            waited <= wait + STEP_GRACE,
+            "a 100 ms wait for a busy parse thread took {waited:?}"
+        );
+        let left_behind = Arc::downgrade(&waiting);
+        drop(waiting);
+        assert!(
+            left_behind.upgrade().is_none(),
+            "the queued job must not keep the source of a step that stopped waiting"
+        );
+
+        let dir = temp_dir("step-behind-a-busy-parse");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.go", "package p\n\nfunc F() {}\n");
+        let options = CodeMapOptions {
+            file_timeout: Duration::from_millis(200),
+            ..CodeMapOptions::default()
+        };
+        let start = Instant::now();
+        let map = build_code_map_with_options(&dir, &options).expect("maps");
+        let elapsed = start.elapsed();
+        assert_eq!(
+            map.coverage.files_skipped,
+            vec![SkippedFile {
+                path: "m.go".to_owned(),
+                reason: SkipReason::TimedOut,
+            }],
+            "a step whose budget passes while the parse ahead of it runs is TimedOut"
+        );
+        assert!(
+            elapsed <= options.file_timeout + STEP_GRACE,
+            "a map with a 200 ms file_timeout, behind a busy parse thread, took {elapsed:?}"
+        );
+        assert!(
+            matches!(busy_answered.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "the busy parse must still have been running for the checks above to mean anything"
+        );
+
+        let busy = busy_answered
+            .recv_timeout(PARSE_THREAD_HANG)
+            .expect("the busy parse ends");
+        assert!(
+            busy.is_some_and(|tree| tree.root_node().has_error()),
+            "parsed in full, with its error"
+        );
+        let after = parse_on_parse_thread(
+            Language::Go,
+            false,
+            &Arc::new("package p\n".to_owned()),
+            Instant::now() + PARSE_THREAD_HANG,
+        );
+        assert!(
+            after.is_some_and(|tree| !tree.root_node().has_error()),
+            "the parse thread runs the next parse once it is free"
         );
         drop(guard);
     }
