@@ -279,8 +279,9 @@
 //! once, 16,384 documents from sixteen files of about 1 MiB, 38 MB, the
 //! most measured within them. Not bounded, and growing with the tree
 //! rather than with any one file's contents: the skip list, one entry per
-//! entry left out, and the directory listings open at once, one per level
-//! of the directory being walked.
+//! entry left out, and the directory listings held at once, one per level
+//! of the directory being walked (names and types only: one directory is
+//! open at a time, whatever the depth).
 //!
 //! Nor does a walk's stack grow with the tree: it keeps its place in an
 //! explicit list of directory listings on the heap, not in a recursion. A
@@ -2920,7 +2921,8 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// 1,600 KiB thread in an optimized one), where it should have walked or
 /// recorded it. Its stack use no longer depends on the tree's depth; the
 /// listings it holds are on the heap, one per directory level open at the
-/// time. The order is the recursion's own: a directory's entries are
+/// time, and hold no directory open ([`entries_in_reverse_name_order`]).
+/// The order is the recursion's own: a directory's entries are
 /// visited as soon as the directory itself is reached.
 ///
 /// An adversarial review found an earlier version stripped each file's
