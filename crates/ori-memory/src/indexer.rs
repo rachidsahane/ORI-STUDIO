@@ -304,10 +304,19 @@
 //!   that one document: a section genuinely removed from such a file is
 //!   removed, as from any file the walk read, never kept listed as left
 //!   out. It also says the file itself was read and is still in the
-//!   repository, so a divergence filed on the file's own path is kept when
-//!   every document the file split into was left out for its size (a
-//!   single-section file grown past the document cap), listed as not
-//!   indexed with that document's size and the divergence.
+//!   repository, and that part of its text was not indexed, so every
+//!   record on the file's own path, a verification alone included, is
+//!   listed as not indexed, freshness unknown, with that document's size
+//!   and any divergence, while a document of the file is left out for its
+//!   size; every document of it left out (a single-section file grown past
+//!   the document cap) included. A divergence on a file the index still
+//!   holds documents of is listed as the divergence it is. A review
+//!   found round 10 dropping a verification alone on a file every
+//!   document of which was past the cap, and a divergence on one that a
+//!   re-verification had cleared, so the stale list was empty
+//!   (`tests::ori_p1_026_a_record_on_a_file_every_document_of_which_is_past_the_cap_is_listed_as_freshness_unknown`;
+//!   the same file deleted is removed, not listed,
+//!   `tests::ori_p1_026_a_record_on_a_file_past_the_cap_that_is_then_deleted_is_removed_not_listed`).
 //!
 //! A review found round 9 reading one flat key for both, with two
 //! results: a divergence on a single-section file grown past the document
@@ -10999,14 +11008,15 @@ mod tests {
 
         // A re-review of the file ends its divergence even while the section
         // is past the cap; the section's own record, whose text cannot be
-        // checked, stays listed.
+        // checked, stays listed, and so does the file's, its freshness
+        // unknown (round 10's review: the file's record was dropped here).
         tracker.record_verification(file.clone(), Timestamp::from_millis(3_000), "the file");
         let now = listed(&tracker, &indexer, &walk);
         assert_eq!(
             now.iter()
                 .map(|(path, _)| path.as_str())
                 .collect::<Vec<_>>(),
-            [section.as_str()],
+            [file.as_str(), section.as_str()],
             "{now:?}"
         );
 
@@ -11018,10 +11028,11 @@ mod tests {
         assert!(now.is_empty(), "{now:?}");
 
         // Past the cap again, then back under it with new text: listed as
-        // changed until the section is verified again.
+        // changed until the section is verified again. Past the cap, the
+        // section's record and the file's are both listed.
         fs::write(scratch.path.join(&file), &grown).expect("grow past the cap again");
         let walk = walk_and_sync(&scratch, &mut indexer);
-        assert_eq!(listed(&tracker, &indexer, &walk).len(), 1);
+        assert_eq!(listed(&tracker, &indexer, &walk).len(), 2);
         let edited = "# Deploy\n\nthe deployword text, edited\n";
         fs::write(scratch.path.join(&file), edited).expect("shrink with new text");
         let walk = walk_and_sync(&scratch, &mut indexer);
@@ -11044,11 +11055,290 @@ mod tests {
         // and so is everything listed for it.
         fs::write(scratch.path.join(&file), &grown).expect("grow past the cap a third time");
         let walk = walk_and_sync(&scratch, &mut indexer);
-        assert_eq!(listed(&tracker, &indexer, &walk).len(), 1);
+        assert_eq!(listed(&tracker, &indexer, &walk).len(), 2);
         fs::remove_file(scratch.path.join(&file)).expect("remove the file");
         let walk = walk_and_sync(&scratch, &mut indexer);
         assert!(walk.not_indexed().is_empty(), "{:?}", walk.skipped);
         let now = listed(&tracker, &indexer, &walk);
         assert!(now.is_empty(), "{now:?}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 11: freshness unknown is never fresh. A record on the path of
+    // a file the walk read but none of whose documents it indexed, every
+    // one past the document cap, is listed whatever it holds: a
+    // verification alone, or a divergence a re-verification cleared.
+    // ---------------------------------------------------------------------
+
+    /// One of the three shapes the round 10 check reproduced: a file the
+    /// walk reads and splits, every document of which is past the document
+    /// cap and none past the file cap.
+    struct EveryDocumentPastTheCap {
+        /// The file's path under the repository.
+        file: String,
+        /// Its text with every document past the cap.
+        grown: String,
+        /// Its text with every document back under it.
+        shrunk: String,
+        /// The first, in path order, of the documents the walk leaves out
+        /// of it: the entry whose reason `list_stale` carries.
+        first: String,
+    }
+
+    /// The check's three shapes: a risk map of one heading and a body past
+    /// the cap; a runbook of two sections, both past it; and a criteria
+    /// file of one criterion row past it.
+    fn every_document_past_the_cap() -> Vec<EveryDocumentPastTheCap> {
+        let risk = ["spec", "RISK_MAP.md"].join("/");
+        let runbook = ["spec", "runbooks", "recover-engine.md"].join("/");
+        let criteria = ["spec", "criteria", "phase-1.md"].join("/");
+        let past = past_the_document_cap("grown");
+        vec![
+            EveryDocumentPastTheCap {
+                grown: format!("# Risk map\n\n{past}\n"),
+                shrunk: "# Risk map\n\nthe risk text\n".to_owned(),
+                first: format!("{risk}#risk-map"),
+                file: risk,
+            },
+            EveryDocumentPastTheCap {
+                grown: format!("# One\n\n{past}\n\n# Two\n\n{past}\n"),
+                shrunk: "# One\n\nthe first step\n\n# Two\n\nthe second step\n".to_owned(),
+                first: format!("{runbook}#one"),
+                file: runbook,
+            },
+            EveryDocumentPastTheCap {
+                grown: format!("| ORI-P1-026 | {past} |\n"),
+                shrunk: "| ORI-P1-026 | the criterion |\n".to_owned(),
+                first: format!("{criteria}#ORI-P1-026"),
+                file: criteria,
+            },
+        ]
+    }
+
+    /// Writes a small product requirements file and each shape's grown
+    /// text into `scratch`, returning the requirements file's one document
+    /// path, the one document of the repository the walk indexes.
+    fn write_every_document_past_the_cap(
+        scratch: &Scratch,
+        shapes: &[EveryDocumentPastTheCap],
+    ) -> String {
+        for directory in ["runbooks", "criteria"] {
+            fs::create_dir_all(scratch.path.join("spec").join(directory))
+                .expect("create a directory");
+        }
+        let prd = ["spec", "PRD.md"].join("/");
+        fs::write(
+            scratch.path.join(&prd),
+            "# Product requirements\n\nthe requirements text\n",
+        )
+        .expect("write a spec file");
+        for shape in shapes {
+            fs::write(scratch.path.join(&shape.file), &shape.grown)
+                .expect("write a file every document of which is past the cap");
+        }
+        format!("{prd}#product-requirements")
+    }
+
+    /// Two trackers holding the same verified requirements document and,
+    /// on each shape's own file path, one a verification alone and the
+    /// other a divergence the drift audit filed and a re-verification then
+    /// cleared (`spec/DATA_MODEL.md` section 3's `Stale --> UnderReview`),
+    /// each labelled for an assertion's message.
+    fn records_on_every_file(
+        shapes: &[EveryDocumentPastTheCap],
+        prd_section: &str,
+        corpus: &BTreeMap<String, String>,
+    ) -> Vec<(&'static str, crate::freshness::FreshnessTracker)> {
+        use crate::freshness::FreshnessTracker;
+
+        let mut verification_alone = FreshnessTracker::new();
+        let mut divergence_cleared = FreshnessTracker::new();
+        for tracker in [&mut verification_alone, &mut divergence_cleared] {
+            tracker.record_verification(
+                prd_section,
+                Timestamp::from_millis(1_000),
+                corpus[prd_section].clone(),
+            );
+        }
+        for shape in shapes {
+            verification_alone.record_verification(
+                shape.file.clone(),
+                Timestamp::from_millis(3_000),
+                shape.grown.clone(),
+            );
+            divergence_cleared.record_divergence(
+                shape.file.clone(),
+                format!("DIVERGENCE {}", shape.file),
+                Timestamp::from_millis(2_000),
+            );
+            divergence_cleared.record_verification(
+                shape.file.clone(),
+                Timestamp::from_millis(3_000),
+                shape.grown.clone(),
+            );
+        }
+        vec![
+            ("a verification alone", verification_alone),
+            (
+                "a divergence cleared by a re-verification",
+                divergence_cleared,
+            ),
+        ]
+    }
+
+    #[test]
+    fn ori_p1_026_a_record_on_a_file_every_document_of_which_is_past_the_cap_is_listed_as_freshness_unknown()
+     {
+        use crate::freshness::StaleDocument;
+        use crate::freshness::StaleReason;
+
+        // The round 10 check: each of these files read, split, and none of
+        // its documents indexed, with nothing on record but the drift
+        // audit's verification of the file, or a divergence that
+        // verification cleared. The stale list was empty, so readiness read
+        // as ready over three files whose text nothing had checked.
+        let scratch = Scratch::new("freshness-unknown");
+        let shapes = every_document_past_the_cap();
+        let prd_section = write_every_document_past_the_cap(&scratch, &shapes);
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let not_indexed = walk.not_indexed();
+        let current = indexed_corpus(&indexer);
+        assert_eq!(
+            current.keys().map(String::as_str).collect::<Vec<_>>(),
+            [prd_section.as_str()],
+            "the precondition: nothing of the three files is in the index"
+        );
+        for shape in &shapes {
+            assert!(
+                !not_indexed.contains_key(&shape.file)
+                    && not_indexed.get(&shape.first).map(SkipReason::scope)
+                        == Some(SkipScope::Document),
+                "the precondition: {} was read and split, and its documents left out for \
+                 their size, keyed by the document: {not_indexed:?}",
+                shape.file
+            );
+        }
+        let runbook_documents = not_indexed
+            .keys()
+            .filter(|key| document_file(key) == shapes[1].file)
+            .count();
+        assert_eq!(runbook_documents, 2, "both of the runbook's sections");
+
+        let mut expected: Vec<StaleDocument> = shapes
+            .iter()
+            .map(|shape| StaleDocument {
+                path: shape.file.clone(),
+                reason: StaleReason::NotIndexed {
+                    skipped: not_indexed[&shape.first].clone(),
+                    divergence: None,
+                },
+            })
+            .collect();
+        expected.sort_by(|left, right| left.path.cmp(&right.path));
+        let mut trackers = records_on_every_file(&shapes, &prd_section, &current);
+        for (label, tracker) in &trackers {
+            let report = tracker.list_stale(&current, &not_indexed);
+            assert_eq!(report.documents_covered, 1, "{label}");
+            assert_eq!(
+                report.stale, expected,
+                "{label}: each file's record is listed as freshness unknown, with the walk's \
+                 reason for its first document left out"
+            );
+            for document in &report.stale {
+                let StaleReason::NotIndexed { skipped, .. } = &document.reason else {
+                    panic!("{label}: listed as not indexed: {document:?}");
+                };
+                let line = document.reason.divergence();
+                assert!(
+                    line.starts_with("freshness unknown: ") && line.ends_with(&skipped.to_string()),
+                    "{label}: the line says so, and why: {line}"
+                );
+            }
+        }
+
+        // Back under the cap: every document of each file is in the index,
+        // so the file's record is no longer listed; its documents are
+        // judged by their own records, of which there are none yet.
+        for shape in &shapes {
+            fs::write(scratch.path.join(&shape.file), &shape.shrunk)
+                .expect("shrink a file back under the cap");
+        }
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let not_indexed = walk.not_indexed();
+        assert!(not_indexed.is_empty(), "{:?}", walk.skipped);
+        let current = indexed_corpus(&indexer);
+        assert_eq!(current.len(), 5, "{current:?}");
+        for (label, tracker) in &mut trackers {
+            let report = tracker.list_stale(&current, &not_indexed);
+            assert_eq!(report.documents_covered, 5, "{label}");
+            assert_eq!(report.stale.len(), 4, "{label}: {report:?}");
+            assert!(
+                report.stale.iter().all(|document| {
+                    document.reason == StaleReason::NeverVerified
+                        && shapes.iter().all(|shape| document.path != shape.file)
+                }),
+                "{label}: only the files' documents, never verified: {report:?}"
+            );
+
+            // Re-verified, the file and each of its documents: nothing left.
+            for shape in &shapes {
+                tracker.record_verification(
+                    shape.file.clone(),
+                    Timestamp::from_millis(4_000),
+                    shape.shrunk.clone(),
+                );
+            }
+            for (path, body) in &current {
+                tracker.record_verification(
+                    path.clone(),
+                    Timestamp::from_millis(4_000),
+                    body.clone(),
+                );
+            }
+            let report = tracker.list_stale(&current, &not_indexed);
+            assert_eq!(report.documents_covered, 5, "{label}");
+            assert!(report.stale.is_empty(), "{label}: {report:?}");
+        }
+    }
+
+    #[test]
+    fn ori_p1_026_a_record_on_a_file_past_the_cap_that_is_then_deleted_is_removed_not_listed() {
+        // The control: the same records, and the same files, but each file
+        // genuinely deleted. Nothing of it is in the repository to be
+        // unknown, so every record on it is gone, not listed.
+        let scratch = Scratch::new("freshness-unknown-deleted");
+        let shapes = every_document_past_the_cap();
+        let prd_section = write_every_document_past_the_cap(&scratch, &shapes);
+        let db = product(&scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let current = indexed_corpus(&indexer);
+        let trackers = records_on_every_file(&shapes, &prd_section, &current);
+        for (label, tracker) in &trackers {
+            let report = tracker.list_stale(&current, &walk.not_indexed());
+            assert_eq!(
+                report.stale.len(),
+                shapes.len(),
+                "the precondition, {label}: each file's record is listed: {report:?}"
+            );
+        }
+
+        for shape in &shapes {
+            fs::remove_file(scratch.path.join(&shape.file)).expect("delete a file");
+        }
+        let walk = walk_and_sync(&scratch, &mut indexer);
+        let not_indexed = walk.not_indexed();
+        assert!(not_indexed.is_empty(), "{:?}", walk.skipped);
+        let current = indexed_corpus(&indexer);
+        for (label, tracker) in &trackers {
+            let report = tracker.list_stale(&current, &not_indexed);
+            assert_eq!(report.documents_covered, 1, "{label}");
+            assert!(
+                report.stale.is_empty(),
+                "{label}: a deleted file's records are removed, not listed: {report:?}"
+            );
+        }
     }
 }

@@ -46,12 +46,38 @@
 //!
 //! [`FreshnessTracker::list_stale`] has a fourth, for a document it has no
 //! text for because the repository walk left it out:
-//! [`StaleReason::NotIndexed`]. The file is still in the repository, so
-//! nothing on record for it is dropped: every record on something the walk
-//! left out is listed with the reason the walk gave, and with the drift
-//! audit's divergence when one is on record (`list_stale`'s doc; the
-//! indexer's module doc, "A file left out is not a file removed", has what
-//! the index holds for such a file: none of its documents).
+//! [`StaleReason::NotIndexed`], freshness unknown. The file is still in the
+//! repository, so nothing on record for it is dropped: every record on
+//! something the walk left out is listed with the reason the walk gave, and
+//! with the drift audit's divergence when one is on record (`list_stale`'s
+//! doc; the indexer's module doc, "A file left out is not a file removed",
+//! has what the index holds for such a file: none of its documents).
+//!
+//! # Freshness unknown is never fresh
+//!
+//! This tracker decides freshness by comparing text. For a record whose
+//! text the walk left out, it has nothing to compare: it cannot tell
+//! whether the document changed after the verification on record, so it
+//! cannot say the document is fresh, and saying nothing would let a caller
+//! read "no stale documents" over a document nobody could check. Every
+//! such record is therefore listed as [`StaleReason::NotIndexed`], this
+//! module's "freshness unknown" reason, carrying the walk's own reason for
+//! leaving the text out, whatever the record holds: a verification alone,
+//! a divergence, or a divergence a later verification cleared. Its line
+//! ([`StaleReason::divergence`]) says "freshness unknown" in so many
+//! words. A review found round 10 dropping a verification alone, and a
+//! divergence cleared by a re-verification, on a file the walk read but
+//! none of whose documents it indexed, every one past the document cap (a
+//! risk map of one heading and 70 KB, a runbook of two such sections, a
+//! criteria file of one such row): the stale list was empty, and a
+//! product read as ready over a file whose text nothing had checked
+//! (`tests::ori_p1_026_a_verification_alone_on_a_file_whose_documents_are_past_the_cap_is_listed_as_freshness_unknown`;
+//! the indexer's own tests run the same three shapes through a real walk).
+//!
+//! What is not listed is a record on something genuinely gone: a file no
+//! longer in the repository, or a document no longer in a file the walk
+//! read. The walk does not name those, and they have no text to be
+//! unknown.
 //!
 //! # What a skip covers: one document, or a whole file
 //!
@@ -74,22 +100,43 @@
 //!   is removed, never pinned as left out.
 //!
 //! A record on a file's own path that is not a document path (the drift
-//! audit's divergence on the file, the `Document` of `spec/DATA_MODEL.md`
-//! section 2) names the whole file. The file was read, and is still in the
-//! repository, when the corpus holds a document of it or a document-scoped
-//! entry names one; a divergence on it is then listed, as
-//! [`StaleReason::Divergence`] beside the file's indexed documents, or as
-//! [`StaleReason::NotIndexed`] with that entry's reason when every document
-//! the file split into was left out for its size (a file of one section
-//! grown past the document cap). Any other record no entry covers is gone,
-//! and not listed: one for a document no longer in a file the walk read,
-//! and every one on a file no longer in the repository.
+//! audit's verification or divergence on the file, the `Document` of
+//! `spec/DATA_MODEL.md` section 2) names the whole file. The file was read,
+//! and is still in the repository, when the corpus holds a document of it
+//! or a document-scoped entry names one. Such a record is listed:
+//!
+//! - as [`StaleReason::Divergence`], beside the file's indexed documents,
+//!   when a divergence is on record and the corpus holds a document of the
+//!   file;
+//! - otherwise, while a document-scoped entry names any document of the
+//!   file, as [`StaleReason::NotIndexed`] with the first such entry's
+//!   reason (in path order) and the divergence on record, if any, whether
+//!   the record is a verification alone, a divergence, or a divergence a
+//!   later verification cleared: part or all of the text the record names
+//!   was left out, so its freshness is unknown ("Freshness unknown is never
+//!   fresh", above). Every document the file split into left out for its
+//!   size (a file of one section grown past the document cap, a file of
+//!   several such sections, a criteria file of one such row) is this case.
+//!
+//! A verification alone on the path of a file every document of which is
+//! in the corpus is not listed: each of those documents is checked against
+//! its own record, one with none is [`StaleReason::NeverVerified`], and a
+//! verification at the file's path makes none of them fresh. Any other
+//! record no entry covers is gone, and not listed: one for a document no
+//! longer in a file the walk read, and every one on a file no longer in the
+//! repository.
 //!
 //! Every listing here can be cleared. A record under a document-scoped
 //! entry is checked like any other once its document is back under the cap
 //! (fresh when its text is the verified text, or once re-verified), and is
-//! removed once the document is removed from its file; a file-level
-//! divergence ends with the file's next verification, as it does anywhere.
+//! removed once the document is removed from its file. A record on a
+//! file's own path listed as not indexed stops being listed once no
+//! document of the file is left out (each back under the cap, or removed
+//! from the file), its file's documents then checked by their own records;
+//! a re-verification of the file while a document of it is still left out
+//! ends its divergence, but not the listing, since the text still cannot be
+//! checked. A file-level divergence beside indexed documents ends with the
+//! file's next verification, as it does anywhere.
 //!
 //! # What does not make a document stale
 //!
@@ -175,14 +222,17 @@ pub enum StaleReason {
         /// When the drift audit found it.
         detected_at: Timestamp,
     },
-    /// The repository walk left out what the record names, so its text
-    /// could not be checked against anything on record, while the file is
-    /// still in the repository: the document itself (a document-scoped
-    /// skip), its file or a directory holding it (a file-scoped skip), or,
-    /// for a record on a file's own path, every document the file split
-    /// into (the module doc's "What a skip covers"). Only
-    /// [`FreshnessTracker::list_stale`] reports this, for a path it holds a
-    /// record for.
+    /// Freshness unknown: the repository walk left out what the record
+    /// names, so its text could not be checked against anything on record,
+    /// while the file is still in the repository: the document itself (a
+    /// document-scoped skip), its file or a directory holding it (a
+    /// file-scoped skip), or, for a record on a file's own path, one or
+    /// more of the documents the file split into, left out for their size
+    /// (the module doc's "What a skip covers"). Reported for every such
+    /// record, a verification alone included, since a text nobody could
+    /// check is never fresh (the module doc's "Freshness unknown is never
+    /// fresh"). Only [`FreshnessTracker::list_stale`] reports this, for a
+    /// path it holds a record for.
     NotIndexed {
         /// Why the walk left it out, in the walk's own terms.
         skipped: SkipReason,
@@ -221,14 +271,15 @@ impl StaleReason {
                 skipped,
                 divergence: None,
             } => format!(
-                "not in the index, so its text could not be checked against the code: {skipped}"
+                "freshness unknown: not in the index, so its text could not be checked against \
+                 the code: {skipped}"
             ),
             Self::NotIndexed {
                 skipped,
                 divergence: Some((description, detected_at)),
             } => format!(
-                "{description} (drift audit, at {detected_at}); not in the index, so its text \
-                 could not be checked against the code: {skipped}"
+                "{description} (drift audit, at {detected_at}); freshness unknown: not in the \
+                 index, so its text could not be checked against the code: {skipped}"
             ),
         }
     }
@@ -413,23 +464,33 @@ impl FreshnessTracker {
     /// verified or filed, and the walk's own list names it.
     ///
     /// A document-scoped entry also says its file was read and is still in
-    /// the repository, so a divergence on record for that file's own path
-    /// is listed even when every document the file split into was left out
-    /// for its size, and so nothing of it is in `current`: as
-    /// [`StaleReason::NotIndexed`], carrying the first such entry's reason
-    /// (in path order) and the divergence. A review found round 9 dropping
-    /// it: a single-section file grown past the document cap left an entry
-    /// keyed `<file>#<anchor>`, which the record at the file's path never
-    /// matched.
+    /// the repository, and that part of its text was left out. So every
+    /// record on that file's own path, a verification alone, a divergence,
+    /// or a divergence a later verification cleared, is listed while any
+    /// document of the file is left out for its size, even when every one
+    /// was and nothing of the file is in `current`: as
+    /// [`StaleReason::NotIndexed`], freshness unknown, carrying the first
+    /// such entry's reason (in path order) and the divergence on record, if
+    /// any. The one exception is a divergence on a file `current` also
+    /// holds a document of, listed as [`StaleReason::Divergence`], above. A
+    /// review found round 9 dropping the divergence: a single-section file
+    /// grown past the document cap left an entry keyed `<file>#<anchor>`,
+    /// which the record at the file's path never matched. A review found
+    /// round 10 still dropping a verification alone there, and a divergence
+    /// a re-verification had cleared, so the stale list was empty over a
+    /// file whose text nothing had checked (the module doc's "Freshness
+    /// unknown is never fresh").
     ///
-    /// Only a record that no entry covers, whose file has nothing in
-    /// `current` and no document-scoped entry, is gone, and not reported at
-    /// all; so is a record for a document removed from a file the walk
-    /// read. That matches the indexer's own rule that a removed document
-    /// disappears rather than lingers. A review found round 9 pinning such a
-    /// record for good when the file's preamble was past the document cap,
-    /// by reading the preamble's entry, keyed at the file's bare path, as
-    /// the whole file.
+    /// A verification alone on the path of a file every document of which
+    /// is in `current` is not listed: those documents are each checked
+    /// against their own records. Only a record that no entry covers, whose
+    /// file has nothing in `current` and no document-scoped entry, is gone,
+    /// and not reported at all; so is a record for a document removed from
+    /// a file the walk read. That matches the indexer's own rule that a
+    /// removed document disappears rather than lingers. A review found
+    /// round 9 pinning such a record for good when the file's preamble was
+    /// past the document cap, by reading the preamble's entry, keyed at the
+    /// file's bare path, as the whole file.
     #[must_use]
     pub fn list_stale(
         &self,
@@ -468,26 +529,30 @@ impl FreshnessTracker {
                 });
                 continue;
             }
-            let Some((description, detected_at)) = &entry.divergence else {
-                continue;
-            };
-            if files.contains(path.as_str()) {
-                stale.push(StaleDocument {
-                    path: path.clone(),
-                    reason: StaleReason::Divergence {
-                        description: description.clone(),
-                        detected_at: *detected_at,
-                    },
-                });
-            } else if let Some(skipped) = split_files.get(path.as_str()) {
-                stale.push(StaleDocument {
-                    path: path.clone(),
-                    reason: StaleReason::NotIndexed {
+            let reason = match (&entry.divergence, files.contains(path.as_str())) {
+                // A divergence on a file the corpus holds documents of.
+                (Some((description, detected_at)), true) => StaleReason::Divergence {
+                    description: description.clone(),
+                    detected_at: *detected_at,
+                },
+                // Any record on a file part or all of whose text was left
+                // out for its size, a verification alone included:
+                // freshness unknown, never dropped (the module doc's
+                // "Freshness unknown is never fresh").
+                (divergence, _) => match split_files.get(path.as_str()) {
+                    Some(skipped) => StaleReason::NotIndexed {
                         skipped: (*skipped).clone(),
-                        divergence: Some((description.clone(), *detected_at)),
+                        divergence: divergence.clone(),
                     },
-                });
-            }
+                    // Checked document by document through the corpus, or
+                    // gone.
+                    None => continue,
+                },
+            };
+            stale.push(StaleDocument {
+                path: path.clone(),
+                reason,
+            });
         }
         stale.sort_by(|left, right| left.path.cmp(&right.path));
         StaleReport {
@@ -1115,7 +1180,9 @@ mod tests {
         );
 
         // A re-review of the single file ends its divergence while its one
-        // section is still past the cap; the section's record stays.
+        // section is still past the cap; the section's record stays, and so
+        // does the file's, its freshness unknown (round 10's review: the
+        // file's record was dropped here).
         tracker.record_verification(single.clone(), Timestamp::from_millis(3_000), "the file");
         let listed: Vec<String> = tracker
             .list_stale(&current, &not_indexed)
@@ -1123,6 +1190,143 @@ mod tests {
             .into_iter()
             .map(|document| document.path)
             .collect();
-        assert_eq!(listed, [preamble, single_section, split]);
+        assert_eq!(listed, [preamble, single, single_section, split]);
+    }
+
+    // -----------------------------------------------------------------
+    // Round 11: freshness unknown is never fresh. Every record on a file
+    // part or all of whose text the walk left out for its size is listed,
+    // a verification alone included.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_026_a_verification_alone_on_a_file_whose_documents_are_past_the_cap_is_listed_as_freshness_unknown()
+     {
+        let too_large = |path: &str| SkipReason::DocumentTooLarge {
+            path: path.to_owned(),
+            byte_len: 80_000,
+        };
+        // The round 10 check's three shapes, every document of each file
+        // left out for its size and keyed the way the walk keys it; a file
+        // with one section indexed and one left out; a file wholly indexed;
+        // and a file genuinely gone.
+        let risk = ["spec", "RISK_MAP.md"].join("/");
+        let risk_section = format!("{risk}#risk-map");
+        let runbook = ["spec", "runbooks", "recover-engine.md"].join("/");
+        let (one, two) = (format!("{runbook}#one"), format!("{runbook}#two"));
+        let criteria = ["spec", "criteria", "phase-1.md"].join("/");
+        let row = format!("{criteria}#ORI-P1-026");
+        let split = ["spec", "SPLIT.md"].join("/");
+        let (small, large, removed) = (
+            format!("{split}#small"),
+            format!("{split}#large"),
+            format!("{split}#removed"),
+        );
+        let whole = ["spec", "WHOLE.md"].join("/");
+        let whole_section = format!("{whole}#whole");
+        let gone = ["spec", "GONE.md"].join("/");
+
+        let current = corpus(&[
+            (small.as_str(), "small text"),
+            (whole_section.as_str(), "whole text"),
+        ]);
+        let not_indexed: BTreeMap<String, SkipReason> = [&risk_section, &one, &two, &row, &large]
+            .into_iter()
+            .map(|path| (path.clone(), too_large(path)))
+            .collect();
+
+        let verified = Timestamp::from_millis(1_000);
+        let found = Timestamp::from_millis(2_000);
+        let reviewed = Timestamp::from_millis(3_000);
+        let files = [&risk, &runbook, &criteria, &split, &whole, &gone];
+        let mut verification_alone = FreshnessTracker::new();
+        let mut divergence_cleared = FreshnessTracker::new();
+        for tracker in [&mut verification_alone, &mut divergence_cleared] {
+            tracker.record_verification(small.clone(), verified, "small text");
+            tracker.record_verification(whole_section.clone(), verified, "whole text");
+            tracker.record_verification(removed.clone(), verified, "removed text");
+        }
+        for file in files {
+            verification_alone.record_verification(file.clone(), reviewed, "the file");
+            divergence_cleared.record_divergence(file.clone(), "found drifting", found);
+            divergence_cleared.record_verification(file.clone(), reviewed, "the file");
+        }
+
+        let unknown = |file: &String, first: &String| StaleDocument {
+            path: file.clone(),
+            reason: StaleReason::NotIndexed {
+                skipped: too_large(first),
+                divergence: None,
+            },
+        };
+        let expected = vec![
+            unknown(&risk, &risk_section),
+            unknown(&split, &large),
+            unknown(&criteria, &row),
+            unknown(&runbook, &one),
+        ];
+        for (label, tracker) in [
+            ("a verification alone", &verification_alone),
+            (
+                "a divergence cleared by a re-verification",
+                &divergence_cleared,
+            ),
+        ] {
+            let report = tracker.list_stale(&current, &not_indexed);
+            assert_eq!(report.documents_covered, 2, "{label}");
+            assert_eq!(
+                report.stale, expected,
+                "{label}: each file with a document left out for its size is listed as \
+                 freshness unknown, with the first such document's reason; the file wholly \
+                 indexed, the file gone and the section removed are not"
+            );
+            assert!(
+                report.stale.iter().all(|document| document
+                    .reason
+                    .divergence()
+                    .starts_with("freshness unknown: ")),
+                "{label}: {report:?}"
+            );
+
+            // With nothing left out, the same files read as removed, the
+            // split and whole files' records as checked through their
+            // indexed documents: nothing listed. The walk's list is what
+            // tells the two apart.
+            assert!(
+                tracker
+                    .list_stale(&current, &nothing_left_out())
+                    .stale
+                    .is_empty(),
+                "{label}"
+            );
+        }
+
+        // A divergence still on record on the split file is the divergence
+        // it is, beside its indexed section; on the risk map, with nothing
+        // of it indexed, it is carried with the walk's reason.
+        verification_alone.record_divergence(split.clone(), "SPLIT-DIVERGENCE", found);
+        verification_alone.record_divergence(risk.clone(), "RISK-DIVERGENCE", found);
+        let report = verification_alone.list_stale(&current, &not_indexed);
+        let reason_of = |path: &String| {
+            report
+                .stale
+                .iter()
+                .find(|document| &document.path == path)
+                .map(|document| document.reason.clone())
+        };
+        assert_eq!(
+            reason_of(&split),
+            Some(StaleReason::Divergence {
+                description: "SPLIT-DIVERGENCE".to_owned(),
+                detected_at: found,
+            })
+        );
+        assert_eq!(
+            reason_of(&risk),
+            Some(StaleReason::NotIndexed {
+                skipped: too_large(&risk_section),
+                divergence: Some(("RISK-DIVERGENCE".to_owned(), found)),
+            })
+        );
     }
 }
