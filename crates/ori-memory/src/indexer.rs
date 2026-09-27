@@ -221,6 +221,9 @@
 //!   past that, and a document longer than 64 KiB of title and body
 //!   ([`SkipReason::DocumentTooLarge`]), which no writer stores: "Query
 //!   cost is bounded by bytes", below;
+//! - a `.md` file that would take the walk past its budget of documents
+//!   or of bytes ([`SkipReason::WalkDocumentLimit`],
+//!   [`SkipReason::WalkByteLimit`]): "What one walk costs", below;
 //! - `spec/design/`, as a whole ([`SkipReason::Excluded`]; above).
 //!
 //! Nothing else is left out. Every other line of every file the walk reads
@@ -244,6 +247,44 @@
 //! every document and returned `Ok`, and [`Indexer::collect_from_repo`]
 //! drops the skip list, so even the round 6 record of a linked `spec/` gave
 //! its caller nothing to notice.
+//!
+//! # What one walk costs
+//!
+//! A walk's memory is its result, every document it returns with its text,
+//! plus what it is reading at the moment. Round 6 bounded one file
+//! (`MAX_FILE_BYTES`, 1 MiB) and one document (`MAX_DOCUMENT_BYTES`, 64
+//! KiB) but not a walk, and a document costs a few hundred bytes beyond its
+//! text: a review measured one 1 MiB file of empty headings, two bytes
+//! each, split into 524,288 documents and about 200 MB of memory, five such
+//! files into 570 MB, with nothing bounding how many files a repository
+//! holds. A walk now splits at most `MAX_WALK_DOCUMENTS` (16,384)
+//! documents and reads at most `MAX_WALK_BYTES` (16 MiB) of file text into
+//! them, in all. A file that would take it past either is left out whole
+//! and recorded ([`SkipReason::WalkDocumentLimit`],
+//! [`SkipReason::WalkByteLimit`]); its split stops as soon as it passes
+//! what is left, so the file never costs more than that; and a later, smaller
+//! file that still fits is read. Files are reached in name order, so which
+//! ones are left out does not depend on the filesystem. This repository's
+//! own `spec/` is 213 documents and about 187 KB today.
+//!
+//! Measured on this build (release, macOS, peak resident memory of a
+//! process that only walks): one 1 MiB file of empty headings, 185 MB
+//! before and 3 MB now (recorded, not split past the budget); five such
+//! files, 517 to 593 MB before and 3 MB now; a tree at both budgets at
+//! once, 16,384 documents from sixteen files of about 1 MiB, 38 MB, the
+//! most measured within them. Not bounded, and growing with the tree
+//! rather than with any one file's contents: the skip list, one entry per
+//! entry left out, and the directory listings open at once, one per level
+//! of the directory being walked.
+//!
+//! Nor does a walk's stack grow with the tree: it keeps its place in an
+//! explicit list of directory listings on the heap, not in a recursion. A
+//! review found round 6's recursive walk, one call frame per directory
+//! level, aborting the whole process with a stack overflow on trees the
+//! path limit allows (250 one-letter levels on a 2 MiB thread in an
+//! unoptimized build; 442 on a 1,600 KiB thread optimized), where a walk
+//! must read or record, never crash
+//! (`tests::ori_t_0035_a_tree_as_deep_as_the_path_limit_allows_is_walked_on_a_small_stack`).
 //!
 //! # Text before the first heading is a document too
 //!
@@ -327,9 +368,9 @@
 //! match one query can still make that query slow, and its memory still
 //! grows by that slow step per matching document; what it can no longer
 //! do is make any one document cost memory without bound. The walk also
-//! reads no file past
-//! `MAX_FILE_BYTES`, 1 MiB, which bounds what one file costs the walk
-//! itself.
+//! reads no file past `MAX_FILE_BYTES`, 1 MiB, which bounds what one file
+//! costs the walk itself, and no more than its budget in all ("What one
+//! walk costs", above).
 //!
 //! Earlier rounds also capped a token count, computed by this module's own
 //! approximation of `unicode61`. Reviews found it wrong in both directions
@@ -956,6 +997,23 @@ pub enum SkipReason {
         path: String,
         /// Its `title` and `body` length together, in bytes.
         byte_len: usize,
+    },
+    /// A `.md` file left out whole because splitting it would have taken
+    /// the walk past `MAX_WALK_DOCUMENTS` (16,384) documents in all; the
+    /// split stopped as soon as it passed what was left (the module doc's
+    /// "What one walk costs").
+    WalkDocumentLimit {
+        /// How many documents the walk had left when it reached the file.
+        remaining: usize,
+    },
+    /// A `.md` file left out whole, unsplit, because its text would have
+    /// taken the walk past `MAX_WALK_BYTES` (16 MiB) read in all (the
+    /// module doc's "What one walk costs").
+    WalkByteLimit {
+        /// The file's length in bytes.
+        byte_len: u64,
+        /// How many bytes the walk had left when it reached the file.
+        remaining: u64,
     },
     /// A directory the walk never enters, by a decision recorded elsewhere;
     /// `reason` names it (the module doc's "`spec/design/` is excluded").
@@ -1598,6 +1656,22 @@ const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 /// a section file this long can still hold many documents under the
 /// per-document cap.
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+
+/// The most documents one [`Indexer::walk_repo`] splits out of the files it
+/// reads, in all: the module doc's "What one walk costs". A document costs
+/// the walk a few hundred bytes beyond its own text (its path twice, three
+/// strings, a set entry), so a file of empty headings, two bytes each,
+/// turned a 1 MiB file into 524,288 documents and about 200 MB of memory in
+/// a review. 16,384 is about 77 times the 213 documents this repository's
+/// own `spec/` produces today.
+const MAX_WALK_DOCUMENTS: usize = 16_384;
+
+/// The most bytes of file text one [`Indexer::walk_repo`] reads into
+/// documents, in all: 16 MiB, the module doc's "What one walk costs". The
+/// documents a walk returns hold their text, so this bounds that half of
+/// its memory as [`MAX_WALK_DOCUMENTS`] bounds the other. This repository's
+/// `spec/` is about 187 KB of Markdown today.
+const MAX_WALK_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Commits `tx`. In test builds only, it then runs the after-commit hook a
 /// test installed on this thread, which is how
@@ -2464,9 +2538,12 @@ impl Indexer<'_> {
     /// are read. `spec/design/` is never entered, and is listed in
     /// [`RepoWalk::skipped`] with the reason; see the module doc. Symbolic
     /// links, non-regular files, files not named `.md`, non-UTF-8 paths,
-    /// unreadable entries, repeated document paths, files over 1 MiB and
-    /// documents over 64 KiB are left out and listed there too; see the
-    /// module doc's "What the repository walk never reads". Entries are visited in name order, so
+    /// unreadable entries, repeated document paths, files over 1 MiB,
+    /// documents over 64 KiB and files past the walk's own budget (16,384
+    /// documents and 16 MiB of text in all) are left out and listed there
+    /// too; see the module doc's "What the repository walk never reads"
+    /// and "What one walk costs". The walk's stack use does not depend on
+    /// the tree's depth. Entries are visited in name order, so
     /// the result does not depend on the filesystem's own directory order.
     ///
     /// A walk that returns `Ok` walked a real `spec/` directory: when there
@@ -2519,12 +2596,9 @@ impl Indexer<'_> {
             }
             Ok(_) => {}
         }
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        walk_markdown(repo_root, &spec_dir, &mut walk, &mut seen).map_err(|source| {
-            IndexerError::Io {
-                path: spec_dir.clone(),
-                source,
-            }
+        walk_markdown(repo_root, &spec_dir, &mut walk).map_err(|source| IndexerError::Io {
+            path: spec_dir.clone(),
+            source,
         })?;
         Ok(walk)
     }
@@ -2822,26 +2896,38 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Recursively walks `dir` for `.md` files, skipping (and recording) the
-/// whole `spec/design` subtree by its exact repository-relative path, appending every document
-/// found to `walk.documents` (and every entry left out to `walk.skipped`),
-/// with `path` computed relative to `repo_root`, never to `dir` itself.
-/// Returns an error only when `dir` itself cannot be listed, which
-/// [`Indexer::walk_repo`] turns into [`IndexerError::Io`] for `spec/` and
-/// this function records as [`SkipReason::Unreadable`] for any directory
-/// below it.
+/// Walks `spec_dir` for `.md` files, depth first, entries in name order,
+/// skipping (and recording) the whole `spec/design` subtree by its exact
+/// repository-relative path, appending every document found to
+/// `walk.documents` (and every entry left out to `walk.skipped`), with
+/// `path` computed relative to `repo_root`, never to the directory being
+/// listed. Returns an error only when `spec_dir` itself cannot be listed,
+/// which [`Indexer::walk_repo`] turns into [`IndexerError::Io`]; any
+/// directory below it that cannot be listed is recorded as
+/// [`SkipReason::Unreadable`].
 ///
-/// An adversarial review found the previous version stripped each file's
+/// It is a loop over an explicit stack of directory listings, not a
+/// recursion: a review found round 6's recursive version, one call frame
+/// per directory level, aborting the whole process with a stack overflow
+/// on a tree whose depth the path limit allows (250 one-letter levels
+/// overflowed a 2 MiB thread in an unoptimized build, 442 levels a
+/// 1,600 KiB thread in an optimized one), where it should have walked or
+/// recorded it. Its stack use no longer depends on the tree's depth; the
+/// listings it holds are on the heap, one per directory level open at the
+/// time. The order is the recursion's own: a directory's entries are
+/// visited as soon as the directory itself is reached.
+///
+/// An adversarial review found an earlier version stripped each file's
 /// path relative to `dir.parent().parent()`, where `dir` is whichever
-/// directory the recursion is currently walking, not `repo_root`. That kept
+/// directory the recursion was currently walking, not `repo_root`. That kept
 /// only the file's last three path components, so a top-level `spec/*.md`
 /// file carried the checkout directory's own name as a prefix (identical
 /// content in two checkouts of the same repository, or in a worktree versus
 /// the main checkout, got two different identities), and a file three or
 /// more levels under `spec/` lost its leading `spec/` components entirely,
-/// so two unrelated files could collide on one path. Passing `repo_root`
-/// down through every recursive call and stripping against it, once, fixes
-/// this: `relative` is always exactly the path under `repo_root`.
+/// so two unrelated files could collide on one path. Stripping every path
+/// against `repo_root`, once, fixes this: `relative` is always exactly the
+/// path under `repo_root`.
 ///
 /// A second review found two narrower defects this rewrite did not reach.
 /// First, `is_adr`/`is_criteria` (below) still read `relative_path`'s
@@ -2863,7 +2949,7 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// which is a narrower rule than "the whole `spec/design` subtree, and
 /// nothing else". It now compares the directory's own repository-relative
 /// path to `spec/design` exactly, still skipping the whole subtree (this
-/// function never recurses past a match), and now the test
+/// function never descends past a match), and now the test
 /// `tests::ori_t_0035_collect_from_repo_excludes_a_nested_markdown_file_under_spec_design`
 /// plants a file two levels deep to prove that directly, not only at the
 /// top level.
@@ -2875,19 +2961,14 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
 /// link; the path is the components joined with `/`; and anything left out
 /// is recorded with a reason: the module doc's "What the repository walk
 /// never reads".
-fn walk_markdown(
-    repo_root: &Path,
-    dir: &Path,
-    walk: &mut RepoWalk,
-    seen: &mut BTreeSet<String>,
-) -> std::io::Result<()> {
-    let mut entries = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        entries.push(entry?);
-    }
-    entries.sort_by_key(std::fs::DirEntry::file_name);
-
-    for entry in entries {
+fn walk_markdown(repo_root: &Path, spec_dir: &Path, walk: &mut RepoWalk) -> std::io::Result<()> {
+    let mut budget = WalkBudget::new();
+    let mut listings: Vec<Vec<std::fs::DirEntry>> = vec![entries_in_reverse_name_order(spec_dir)?];
+    while let Some(listing) = listings.last_mut() {
+        let Some(entry) = listing.pop() else {
+            listings.pop();
+            continue;
+        };
         let path = entry.path();
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
@@ -2923,13 +3004,14 @@ fn walk_markdown(
                 });
                 continue;
             }
-            if let Err(error) = walk_markdown(repo_root, &path, walk, seen) {
-                walk.skipped.push(SkippedEntry {
+            match entries_in_reverse_name_order(&path) {
+                Ok(entries) => listings.push(entries),
+                Err(error) => walk.skipped.push(SkippedEntry {
                     path,
                     reason: SkipReason::Unreadable {
                         error: error.to_string(),
                     },
-                });
+                }),
             }
             continue;
         }
@@ -2947,15 +3029,50 @@ fn walk_markdown(
             });
             continue;
         }
-        collect_file(repo_root, path, walk, seen);
+        collect_file(repo_root, path, walk, &mut budget);
     }
     Ok(())
 }
 
+/// Every entry of the directory `dir`, sorted by name, last name first, so
+/// that popping from the end visits them in name order. Fails if the
+/// directory cannot be listed, or any entry of it cannot be read.
+fn entries_in_reverse_name_order(dir: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
+    Ok(entries)
+}
+
+/// What one walk has left to spend, and the document paths it has already
+/// given out: the module doc's "What one walk costs".
+struct WalkBudget {
+    /// Every document path already taken, so a repeat is left out.
+    seen: BTreeSet<String>,
+    /// Documents still to split, of [`MAX_WALK_DOCUMENTS`].
+    documents: usize,
+    /// Bytes of file text still to read into documents, of
+    /// [`MAX_WALK_BYTES`].
+    bytes: u64,
+}
+
+impl WalkBudget {
+    fn new() -> Self {
+        Self {
+            seen: BTreeSet::new(),
+            documents: MAX_WALK_DOCUMENTS,
+            bytes: MAX_WALK_BYTES,
+        }
+    }
+}
+
 /// Reads one regular `.md` file the walk reached and appends its documents
 /// to `walk`, or records why it was left out: [`walk_markdown`]'s per-file
-/// half.
-fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, seen: &mut BTreeSet<String>) {
+/// half. A file whose text would take the walk past what `budget` has left
+/// of [`MAX_WALK_BYTES`], or whose split would take it past what is left
+/// of [`MAX_WALK_DOCUMENTS`], is left out whole, and the split stops as
+/// soon as it passes that, so the file costs no more than the budget
+/// allows.
+fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, budget: &mut WalkBudget) {
     // Never defaulted to the absolute path: an identity that silently
     // became absolute the one time stripping failed would reintroduce
     // exactly the checkout-dependent-identity defect `walk_markdown`'s doc
@@ -3009,26 +3126,51 @@ fn collect_file(repo_root: &Path, path: PathBuf, walk: &mut RepoWalk, seen: &mut
             return;
         }
     };
+    let byte_len = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    if byte_len > budget.bytes {
+        walk.skipped.push(SkippedEntry {
+            path,
+            reason: SkipReason::WalkByteLimit {
+                byte_len,
+                remaining: budget.bytes,
+            },
+        });
+        return;
+    }
     let is_adr = components.len() == 3 && components[0] == "spec" && components[1] == "adr";
     let is_criteria =
         components.len() == 3 && components[0] == "spec" && components[1] == "criteria";
+    let limit = budget.documents;
     let documents = if is_adr {
-        let title = first_heading(&text).unwrap_or_else(|| relative.clone());
-        vec![IndexableDocument::new(
-            relative,
-            DocumentKind::Adr,
-            title,
-            text,
-        )]
+        (limit >= 1).then(|| {
+            let title = first_heading(&text).unwrap_or_else(|| relative.clone());
+            vec![IndexableDocument::new(
+                relative,
+                DocumentKind::Adr,
+                title,
+                text,
+            )]
+        })
     } else if is_criteria {
-        let (mut rows, rest) = criteria_documents(&relative, &text);
-        if !rest.trim().is_empty() {
-            rows.extend(section_documents(&relative, &rest));
-        }
-        rows
+        criteria_documents(&relative, &text, limit).and_then(|(mut rows, rest)| {
+            if !rest.trim().is_empty() {
+                rows.extend(section_documents(&relative, &rest, limit - rows.len())?);
+            }
+            Some(rows)
+        })
     } else {
-        section_documents(&relative, &text)
+        section_documents(&relative, &text, limit)
     };
+    let Some(documents) = documents else {
+        walk.skipped.push(SkippedEntry {
+            path,
+            reason: SkipReason::WalkDocumentLimit { remaining: limit },
+        });
+        return;
+    };
+    budget.bytes -= byte_len;
+    budget.documents -= documents.len();
+    let seen = &mut budget.seen;
     for document in documents {
         let byte_len = document.indexed_byte_len();
         if byte_len > MAX_DOCUMENT_BYTES {
@@ -3100,7 +3242,9 @@ fn first_heading(text: &str) -> Option<String> {
 /// file with no heading at all becomes that one document, holding the whole
 /// text. No non-blank line is ever dropped: the module doc's "Text before
 /// the first heading is a document too" records the review that found
-/// every line above a first heading discarded.
+/// every line above a first heading discarded. `None`, with the split
+/// stopped where it passed, if `text` holds more than `limit` documents:
+/// the walk's budget, "What one walk costs" in the module doc.
 ///
 /// Two defects an earlier adversarial review found are fixed here too.
 /// First, a line starting with `#` *inside a fenced code block* (three or
@@ -3132,7 +3276,11 @@ fn first_heading(text: &str) -> Option<String> {
 /// candidate anchor is tried at most once, so a file splits in time
 /// linear in its size
 /// (`tests::ori_t_0035_a_file_of_one_heading_repeated_to_the_file_cap_splits_within_a_stated_bound`).
-fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> {
+fn section_documents(
+    relative_path: &str,
+    text: &str,
+    limit: usize,
+) -> Option<Vec<IndexableDocument>> {
     let mut preamble = String::new();
     let mut sections: Vec<(String, String)> = Vec::new();
     let mut current_title: Option<String> = None;
@@ -3144,6 +3292,9 @@ fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> 
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
         } else if !in_fence && trimmed.starts_with('#') {
+            if sections.len() >= limit {
+                return None;
+            }
             if let Some(title) = current_title.take() {
                 sections.push((title, std::mem::take(&mut current_body)));
             }
@@ -3162,13 +3313,17 @@ fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> 
         sections.push((title, current_body));
     }
 
+    let preamble_documents = usize::from(sections.is_empty() || !preamble.trim().is_empty());
+    if sections.len() + preamble_documents > limit {
+        return None;
+    }
     if sections.is_empty() {
-        return vec![IndexableDocument::new(
+        return Some(vec![IndexableDocument::new(
             relative_path.to_owned(),
             DocumentKind::Section,
             relative_path.to_owned(),
             text.to_owned(),
-        )];
+        )]);
     }
 
     let mut out = Vec::with_capacity(sections.len() + 1);
@@ -3205,7 +3360,7 @@ fn section_documents(relative_path: &str, text: &str) -> Vec<IndexableDocument> 
             body,
         )
     }));
-    out
+    Some(out)
 }
 
 /// A simple, local heading-to-anchor mapping: lower-cased, non-alphanumeric
@@ -3243,8 +3398,14 @@ fn heading_anchor(title: &str) -> String {
 /// field name, not an identifier), and a whole criteria file of another
 /// shape, such as the personas file the specification schedules for that
 /// directory, which produced no document at all while every sync
-/// returned `Ok`. None of it is dropped now.
-fn criteria_documents(relative_path: &str, text: &str) -> (Vec<IndexableDocument>, String) {
+/// returned `Ok`. None of it is dropped now. `None`, with the split
+/// stopped where it passed, if `text` holds more than `limit` criteria
+/// rows (the walk's budget, as [`section_documents`] takes it).
+fn criteria_documents(
+    relative_path: &str,
+    text: &str,
+    limit: usize,
+) -> Option<(Vec<IndexableDocument>, String)> {
     let mut rows = Vec::new();
     let mut rest = String::new();
     let mut in_fence = false;
@@ -3253,6 +3414,9 @@ fn criteria_documents(relative_path: &str, text: &str) -> (Vec<IndexableDocument
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
         } else if !in_fence && let Some(id) = criterion_row_id(trimmed) {
+            if rows.len() >= limit {
+                return None;
+            }
             rows.push(IndexableDocument::new(
                 format!("{relative_path}#{id}"),
                 DocumentKind::Criterion,
@@ -3264,7 +3428,7 @@ fn criteria_documents(relative_path: &str, text: &str) -> (Vec<IndexableDocument
         rest.push_str(line);
         rest.push('\n');
     }
-    (rows, rest)
+    Some((rows, rest))
 }
 
 /// The identifier in `row`'s first cell, if `row` is a markdown table row
@@ -3740,7 +3904,7 @@ mod tests {
     #[test]
     fn ori_t_0035_section_documents_splits_flat_by_every_heading() {
         let text = "# Title\n\nintro\n\n## One\n\nfirst body\n\n## Two\n\nsecond body\n";
-        let sections = section_documents("docs/EXAMPLE.md", text);
+        let sections = section_documents("docs/EXAMPLE.md", text, usize::MAX).expect("no limit");
         assert_eq!(sections.len(), 3);
         assert_eq!(sections[0].title, "Title");
         assert!(sections[0].body.contains("intro"));
@@ -4218,7 +4382,8 @@ mod tests {
         // above).
         let text =
             "# Restore\n\n## Steps\n\nstop the engine\n\n# Verify\n\n## Steps\n\ncheck the chain\n";
-        let documents = section_documents("docs/runbooks/restore.md", text);
+        let documents =
+            section_documents("docs/runbooks/restore.md", text, usize::MAX).expect("no limit");
         let paths: Vec<&str> = documents.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -4241,7 +4406,8 @@ mod tests {
     fn ori_t_0035_section_documents_does_not_read_a_hash_comment_inside_a_fenced_code_block_as_a_heading()
      {
         let text = "# Setup\n\n```sh\n# install\nmake\n```\n\n# Install\n\nrun make install\n";
-        let documents = section_documents("docs/runbooks/code.md", text);
+        let documents =
+            section_documents("docs/runbooks/code.md", text, usize::MAX).expect("no limit");
         let paths: Vec<&str> = documents.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -5028,7 +5194,8 @@ mod tests {
     fn ori_t_0035_section_documents_disambiguates_a_heading_that_collides_with_a_suffix() {
         let text = "# Release\n\n## Phase 1\n\nprepare\n\n### Checks\n\nx\n\n## Phase 1.1\n\n\
                      hotfix\n\n## Phase 1\n\nrepeat\n";
-        let documents = section_documents("docs/runbooks/release.md", text);
+        let documents =
+            section_documents("docs/runbooks/release.md", text, usize::MAX).expect("no limit");
         let paths: Vec<&str> = documents.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(
             paths,
@@ -7199,45 +7366,66 @@ mod tests {
         // walk reads: exactly the file cap, one four-byte heading repeated
         // 262,144 times. The bound, 20 s in an unoptimized build on a loaded
         // machine, is far above what the linear search needs and far below
-        // what the quadratic one did; the walk runs on a thread, so a
+        // what the quadratic one did; each run is on a thread, so a
         // regression fails at the bound instead of running for minutes.
+        // Since round 7 a walk splits at most MAX_WALK_DOCUMENTS documents,
+        // so the whole file is split here by the splitter itself, and the
+        // walk, whose split stops at its budget, records the file instead.
         const BOUND: Duration = Duration::from_secs(20);
         let scratch = Scratch::new("repeated-headings");
         let runbooks = scratch.path.join("spec").join("runbooks");
         fs::create_dir_all(&runbooks).expect("create spec/runbooks");
         let file_cap = usize::try_from(MAX_FILE_BYTES).expect("fits");
         let headings = file_cap / 4;
-        fs::write(runbooks.join("repeat.md"), "# a\n".repeat(headings))
-            .expect("write a file of one repeated heading");
+        let text = "# a\n".repeat(headings);
+        fs::write(runbooks.join("repeat.md"), &text).expect("write a file of one repeated heading");
+
+        let prefix = concat!("spec/runbooks/", "repeat", ".md");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let _ = sender.send(section_documents(prefix, &text, usize::MAX));
+        });
+        let documents = receiver
+            .recv_timeout(BOUND)
+            .unwrap_or_else(|_| {
+                panic!("{headings} repeated headings did not split within {BOUND:?}")
+            })
+            .expect("no limit");
+        eprintln!(
+            "{headings} repeated headings split in {:?}",
+            started.elapsed()
+        );
+        assert_eq!(documents.len(), headings);
+        assert_eq!(documents[0].path, format!("{prefix}#a"));
+        assert_eq!(documents[1].path, format!("{prefix}#a-1"));
+        assert_eq!(
+            documents[headings - 1].path,
+            format!("{prefix}#a-{}", headings - 1)
+        );
+        let distinct: std::collections::HashSet<&str> =
+            documents.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(distinct.len(), headings, "every anchor is distinct");
 
         let root = scratch.path.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
-        let started = std::time::Instant::now();
         std::thread::spawn(move || {
             let _ = sender.send(Indexer::walk_repo(&root));
         });
         let walk = receiver
             .recv_timeout(BOUND)
-            .unwrap_or_else(|_| {
-                panic!("{headings} repeated headings did not split within {BOUND:?}")
-            })
+            .unwrap_or_else(|_| panic!("the walk did not finish within {BOUND:?}"))
             .expect("walk");
-        eprintln!(
-            "{headings} repeated headings split in {:?}",
-            started.elapsed()
-        );
-        assert!(walk.skipped.is_empty(), "{:?}", walk.skipped);
-        assert_eq!(walk.documents.len(), headings);
-        let prefix = concat!("spec/runbooks/", "repeat", ".md#");
-        assert_eq!(walk.documents[0].path, format!("{prefix}a"));
-        assert_eq!(walk.documents[1].path, format!("{prefix}a-1"));
+        assert!(walk.documents.is_empty(), "{}", walk.documents.len());
         assert_eq!(
-            walk.documents[headings - 1].path,
-            format!("{prefix}a-{}", headings - 1)
+            walk.skipped,
+            vec![SkippedEntry {
+                path: runbooks.join("repeat.md"),
+                reason: SkipReason::WalkDocumentLimit {
+                    remaining: MAX_WALK_DOCUMENTS
+                },
+            }]
         );
-        let distinct: std::collections::HashSet<&str> =
-            walk.documents.iter().map(|d| d.path.as_str()).collect();
-        assert_eq!(distinct.len(), headings, "every anchor is distinct");
     }
 
     // ---------------------------------------------------------------------
@@ -8187,6 +8375,138 @@ mod tests {
             assert_eq!(b.search("bravo", 10).expect("search").hits.len(), 1);
             assert_eq!(b.search("alpha", 10).expect("search").hits.len(), 0);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 2: the walk crashed on a deep tree, and nothing bounded a walk.
+    // ---------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_a_tree_as_deep_as_the_path_limit_allows_is_walked_on_a_small_stack() {
+        // The review: round 6's walk recursed once per directory level, and
+        // a tree of one-letter directories the path limit allows (250 levels
+        // in an unoptimized build on a 2 MiB thread, 442 on a 1,600 KiB
+        // thread optimized) aborted the whole process with a stack
+        // overflow. Here, 400 levels on a 256 KiB thread, where the
+        // recursion needs several MiB; a child process, since an overflow
+        // aborts every test in the process it happens in.
+        const CHILD: &str = "ORI_T_0035_DEEP_WALK_CHILD";
+        const ROOT: &str = "ORI_T_0035_DEEP_WALK_ROOT";
+        const DEPTH: usize = 400;
+        const STACK: usize = 256 * 1024;
+        let Some(root) = std::env::var_os(ROOT).filter(|_| std::env::var_os(CHILD).is_some())
+        else {
+            let scratch = Scratch::new("deep-walk");
+            let mut deepest = scratch.path.join("spec");
+            for _ in 0..DEPTH {
+                deepest.push("d");
+            }
+            fs::create_dir_all(&deepest).expect("create a deep tree");
+            fs::write(deepest.join("deep.md"), "# Deep\n\ndeepmarker\n").expect("write");
+            fs::write(scratch.path.join("spec").join("top.md"), "# Top\n\ntop\n").expect("write");
+            let root = scratch.path.to_str().expect("a UTF-8 scratch path");
+            run_in_child_process(
+                "indexer::tests::ori_t_0035_a_tree_as_deep_as_the_path_limit_allows_is_walked_on_a_small_stack",
+                CHILD,
+                &[(ROOT, root)],
+            );
+            return;
+        };
+
+        let root = PathBuf::from(root);
+        let walk = std::thread::Builder::new()
+            .stack_size(STACK)
+            .spawn(move || Indexer::walk_repo(&root))
+            .expect("spawn a thread with a small stack")
+            .join()
+            .expect("the walk never overflows the stack")
+            .expect("walk");
+        assert!(walk.skipped.is_empty(), "{:?}", walk.skipped);
+        let deep = format!("spec/{}deep.md#deep", "d/".repeat(DEPTH));
+        let paths: Vec<&str> = walk.documents.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [deep.as_str(), concat!("spec/top", ".md", "#top")],
+            "name order, depth first: spec/d sorts before spec/top.md"
+        );
+    }
+
+    #[test]
+    fn ori_t_0035_a_walk_splits_and_reads_no_more_than_its_budget_and_records_what_it_left_out() {
+        // The review: one 1 MiB file of empty headings made 524,288
+        // documents and about 200 MB of memory, five such files 570 MB, and
+        // nothing bounded the number of files. A walk now splits at most
+        // MAX_WALK_DOCUMENTS documents and reads at most MAX_WALK_BYTES of
+        // text into them; a file past either is left out whole, recorded,
+        // and a later file that still fits is read.
+
+        // The document budget: a file of all but one document, then a file
+        // of two (over by one), then a file of one (exactly the last).
+        let documents = Scratch::new("walk-document-budget");
+        let spec = documents.path.join("spec");
+        fs::create_dir_all(&spec).expect("create spec/");
+        fs::write(
+            spec.join("1-fill.md"),
+            "# a\n".repeat(MAX_WALK_DOCUMENTS - 1),
+        )
+        .expect("write a file of short sections");
+        fs::write(spec.join("2-over.md"), "# b\n\nover\n\n# c\n\nover\n")
+            .expect("write a file one document over what is left");
+        fs::write(spec.join("3-fits.md"), "# d\n\nfits\n").expect("write a file that fits");
+        let walk = Indexer::walk_repo(&documents.path).expect("walk");
+        assert_eq!(
+            walk.skipped,
+            vec![SkippedEntry {
+                path: spec.join("2-over.md"),
+                reason: SkipReason::WalkDocumentLimit { remaining: 1 },
+            }]
+        );
+        assert_eq!(walk.documents.len(), MAX_WALK_DOCUMENTS);
+        assert_eq!(
+            walk.documents.last().map(|d| d.path.as_str()),
+            Some(concat!("spec/3-fits", ".md", "#d"))
+        );
+        assert_eq!(
+            assert_every_entry_is_indexed_or_skipped(&documents.path, &walk),
+            3
+        );
+
+        // The byte budget: seventeen files of sixteen near-cap sections
+        // each, of which sixteen fit, then a small file that still fits.
+        let bytes = Scratch::new("walk-byte-budget");
+        let spec = bytes.path.join("spec");
+        fs::create_dir_all(&spec).expect("create spec/");
+        let section = format!("{}\n", "w ".repeat(31_990));
+        let big: String = (0..16).map(|n| format!("# Part {n}\n{section}")).collect();
+        let big_len = u64::try_from(big.len()).expect("fits");
+        assert!(big_len <= MAX_FILE_BYTES);
+        assert!(16 * big_len <= MAX_WALK_BYTES && 17 * big_len > MAX_WALK_BYTES);
+        for n in 0..17 {
+            fs::write(spec.join(format!("{n:02}.md")), &big).expect("write a large file");
+        }
+        fs::write(spec.join("99-small.md"), "# Small\n\nsmallmarker\n")
+            .expect("write a small file");
+        let walk = Indexer::walk_repo(&bytes.path).expect("walk");
+        assert_eq!(
+            walk.skipped,
+            vec![SkippedEntry {
+                path: spec.join("16.md"),
+                reason: SkipReason::WalkByteLimit {
+                    byte_len: big_len,
+                    remaining: MAX_WALK_BYTES - 16 * big_len,
+                },
+            }]
+        );
+        assert_eq!(walk.documents.len(), 16 * 16 + 1);
+        assert_eq!(
+            walk.documents.last().map(|d| d.path.as_str()),
+            Some(concat!("spec/99-small", ".md", "#small"))
+        );
+        assert_eq!(
+            assert_every_entry_is_indexed_or_skipped(&bytes.path, &walk),
+            18
+        );
     }
 
     // ---------------------------------------------------------------------
