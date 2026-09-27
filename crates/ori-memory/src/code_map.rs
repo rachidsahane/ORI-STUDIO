@@ -623,14 +623,23 @@ pub enum InterfaceKind {
     Module,
 }
 
-/// One public interface a module exposes.
+/// One public interface a module exposes: a top-level item its language
+/// makes visible outside the module. Rust, an item declared plain `pub`
+/// (a restricted `pub(crate)`, `pub(super)`, `pub(self)` or `pub(in ...)`
+/// item is visible inside its crate at most, and is not recorded);
+/// TypeScript, an `export`ed declaration; Python, a `def` or `class`,
+/// decorated or not, whose name does not start with `_`; Go, a
+/// declaration whose name starts with an uppercase letter. Only the
+/// file's top level is read: an item inside an inline Rust `mod`, a
+/// Python `if` block or a class body is not recorded here.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Interface {
     /// Its name, as written.
     pub name: String,
     /// What kind of item it is.
     pub kind: InterfaceKind,
-    /// The 1-based line it starts on.
+    /// The 1-based line it starts on: for a decorated Python definition,
+    /// the line of its `def` or `class`, not of its first decorator.
     pub line: usize,
 }
 
@@ -2223,10 +2232,31 @@ impl EdgeSink {
 // Rust
 // ---------------------------------------------------------------------------
 
-fn rust_has_pub(node: Node) -> bool {
+/// Whether `node` is declared plain `pub`: a public interface of its
+/// module. A restricted visibility (`pub(crate)`, `pub(super)`,
+/// `pub(self)`, `pub(in path)`) is not: the item is visible inside the
+/// crate at most, which is not what [`Interface`] records. Until round 7
+/// any visibility modifier counted, so `pub(crate)` items were reported as
+/// public. A restricted modifier is the one with a parenthesised part,
+/// which is what is checked, so a comment inside a plain `pub` changes
+/// nothing.
+fn rust_is_public(node: Node) -> bool {
     let mut cursor = node.walk();
     node.children(&mut cursor)
-        .any(|child| child.kind() == "visibility_modifier")
+        .filter(|child| child.kind() == "visibility_modifier")
+        .any(|modifier| {
+            let mut inner = modifier.walk();
+            let mut is_pub = false;
+            let mut restricted = false;
+            for part in modifier.children(&mut inner) {
+                match part.kind() {
+                    "pub" => is_pub = true,
+                    "(" => restricted = true,
+                    _ => {}
+                }
+            }
+            is_pub && !restricted
+        })
 }
 
 fn resolve_rust_mod<'k>(rel: &str, name: &str, known: &'k KnownPaths) -> Option<&'k Arc<str>> {
@@ -2808,7 +2838,7 @@ fn extract_rust(
                         None => out.edges.push_external(&format!("mod {name}")),
                     };
                 }
-                if rust_has_pub(child) {
+                if rust_is_public(child) {
                     out.interfaces.push(Interface {
                         name: name.to_owned(),
                         kind: InterfaceKind::Module,
@@ -2835,7 +2865,7 @@ fn extract_rust(
                         line: line_of(child),
                     });
                 }
-                if rust_has_pub(child) {
+                if rust_is_public(child) {
                     out.interfaces.push(Interface {
                         name: name.to_owned(),
                         kind: InterfaceKind::Function,
@@ -2847,7 +2877,7 @@ fn extract_rust(
                 let Some(name_node) = child.child_by_field_name("name") else {
                     continue;
                 };
-                if rust_has_pub(child) {
+                if rust_is_public(child) {
                     out.interfaces.push(Interface {
                         name: text(name_node, source).to_owned(),
                         kind: InterfaceKind::Type,
@@ -2859,7 +2889,7 @@ fn extract_rust(
                 let Some(name_node) = child.child_by_field_name("name") else {
                     continue;
                 };
-                if rust_has_pub(child) {
+                if rust_is_public(child) {
                     out.interfaces.push(Interface {
                         name: text(name_node, source).to_owned(),
                         kind: InterfaceKind::Constant,
@@ -3302,6 +3332,29 @@ fn python_import_edges(
     true
 }
 
+/// Pushes onto `interfaces` the interface one top-level Python `def` or
+/// `class` declares, decorated or not, unless its name starts with `_`.
+/// Its line is the line of the `def` or `class` keyword, not of a
+/// decorator above it, the same line an undecorated definition reports.
+fn python_definition_interface(definition: Node, source: &[u8], interfaces: &mut Vec<Interface>) {
+    let kind = match definition.kind() {
+        "function_definition" => InterfaceKind::Function,
+        "class_definition" => InterfaceKind::Type,
+        _ => return,
+    };
+    let Some(name) = definition.child_by_field_name("name") else {
+        return;
+    };
+    let name_text = text(name, source);
+    if !name_text.starts_with('_') {
+        interfaces.push(Interface {
+            name: name_text.to_owned(),
+            kind,
+            line: line_of(definition),
+        });
+    }
+}
+
 fn extract_python(
     root: Node,
     source: &[u8],
@@ -3326,28 +3379,17 @@ fn extract_python(
                     return (out, false);
                 }
             }
-            "function_definition" => {
-                if let Some(name) = child.child_by_field_name("name") {
-                    let name_text = text(name, source);
-                    if !name_text.starts_with('_') {
-                        out.interfaces.push(Interface {
-                            name: name_text.to_owned(),
-                            kind: InterfaceKind::Function,
-                            line: line_of(child),
-                        });
-                    }
-                }
+            "function_definition" | "class_definition" => {
+                python_definition_interface(child, source, &mut out.interfaces);
             }
-            "class_definition" => {
-                if let Some(name) = child.child_by_field_name("name") {
-                    let name_text = text(name, source);
-                    if !name_text.starts_with('_') {
-                        out.interfaces.push(Interface {
-                            name: name_text.to_owned(),
-                            kind: InterfaceKind::Type,
-                            line: line_of(child),
-                        });
-                    }
+            // `@dataclass class A`, `@router.get(...) def f`: tree-sitter
+            // wraps a decorated definition in this node, the definition
+            // itself under its `definition` field. Until round 7 it fell
+            // through to `_`, so every decorated public definition was
+            // missing while its module still counted as parsed clean.
+            "decorated_definition" => {
+                if let Some(definition) = child.child_by_field_name("definition") {
+                    python_definition_interface(definition, source, &mut out.interfaces);
                 }
             }
             "if_statement" => {
@@ -8507,6 +8549,89 @@ mod tests {
             ]
         );
         assert_eq!(map.coverage.spec_citation_scan, SpecScan::Partial);
+        drop(guard);
+    }
+
+    // -----------------------------------------------------------------
+    // ORI-T-0036, round 7 (2026-09-27), from the review of round 6. One
+    // test (at least) per item, each failing before its fix and passing
+    // after; the report's plant table says which test catches which plant.
+    // -----------------------------------------------------------------
+
+    /// `module`'s interfaces as `(name, kind, line)`, in the map's order.
+    fn interface_triples(map: &CodeMap, module: &str) -> Vec<(String, InterfaceKind, usize)> {
+        map.modules
+            .iter()
+            .find(|m| m.path == module)
+            .unwrap_or_else(|| panic!("{module} present: {:?}", map.coverage))
+            .interfaces
+            .iter()
+            .map(|i| (i.name.clone(), i.kind, i.line))
+            .collect()
+    }
+
+    /// Item 5 (HIGH): tree-sitter wraps a decorated Python definition in a
+    /// `decorated_definition` node, which the round-6 top-level scan did not
+    /// match, so `@dataclass class Match` and `@functools.lru_cache def
+    /// load_matches()` were missing while the module still counted as
+    /// parsed clean. The review's own file, plus stacked decorators, a
+    /// decorated private name (still not an interface) and a decorated
+    /// `async def`. Each is reported at its `def` or `class` line.
+    #[test]
+    fn ori_t_0036_decorated_python_definitions_are_interfaces() {
+        let dir = temp_dir("py-decorated");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "app/models.py",
+            "import functools\nfrom dataclasses import dataclass\n\n\
+             @dataclass\nclass Match:\n    home: str\n\n\
+             @functools.lru_cache\ndef load_matches():\n    return []\n\n\
+             @router.get(\"/x\")\n@auth.required(level=2)\ndef handler():\n    pass\n\n\
+             @dataclass\nclass _Hidden:\n    pass\n\n\
+             @app.task\nasync def job():\n    pass\n\n\
+             def plain():\n    pass\n\n\
+             class Plain:\n    pass\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(map.coverage.files_parsed_clean, 1, "{:?}", map.coverage);
+        assert_eq!(
+            interface_triples(&map, "app/models.py"),
+            vec![
+                ("Match".to_owned(), InterfaceKind::Type, 5),
+                ("load_matches".to_owned(), InterfaceKind::Function, 9),
+                ("handler".to_owned(), InterfaceKind::Function, 14),
+                ("job".to_owned(), InterfaceKind::Function, 22),
+                ("plain".to_owned(), InterfaceKind::Function, 25),
+                ("Plain".to_owned(), InterfaceKind::Type, 28),
+            ]
+        );
+        drop(guard);
+    }
+
+    /// Item 5 (HIGH), the review's secondary finding: any visibility
+    /// modifier counted as public, so `pub(crate) mod payload`,
+    /// `pub(crate) fn write_framed` and the other restricted forms were
+    /// reported as the module's public interfaces. Only plain `pub` is,
+    /// with or without a comment inside it.
+    #[test]
+    fn ori_t_0036_restricted_rust_visibility_is_not_a_public_interface() {
+        let dir = temp_dir("rust-restricted-pub");
+        let guard = DropGuard(dir.clone());
+        write(
+            &dir,
+            "m.rs",
+            "pub(crate) mod payload {}\npub(crate) fn write_framed() {}\npub(super) fn sup() {}\n\
+             pub(in crate::a) fn scoped() {}\npub(self) fn own() {}\npub(crate) struct Hidden;\n\
+             pub(crate) const LIMIT: u8 = 1;\npub fn open() {}\npub /* plain */ struct Shown;\n\
+             pub mod api {}\n",
+        );
+        let map = build_code_map(&dir).expect("maps");
+        let names: Vec<String> = interface_triples(&map, "m.rs")
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(names, vec!["open", "Shown", "api"]);
         drop(guard);
     }
 }
