@@ -3695,6 +3695,24 @@ fn section_documents(
     Some(out)
 }
 
+/// The repository file a document path the walk gives belongs to, the
+/// `path (under spec/)` of `spec/DATA_MODEL.md` section 2's `Document`: the
+/// path itself for a document holding a file's text (a file with no
+/// heading, the text above a first heading, an ADR), and the part before
+/// the anchor for a section or a criterion, `<file>#<anchor>`. An anchor
+/// never holds a `.` or a `/` ([`heading_anchor`] keeps only alphanumerics
+/// and `-`, a repeat adds `-<n>`, and a criterion identifier is
+/// `ORI-[A-Z0-9]+-[0-9]+`), while a walked file's name always ends in
+/// `.md`, so the last `#` of a path starts an anchor exactly when nothing
+/// after it holds either, a file whose own name holds a `#` included.
+/// `crate::freshness` reads the index's corpus by it.
+pub(crate) fn document_file(path: &str) -> &str {
+    match path.rsplit_once('#') {
+        Some((file, anchor)) if !anchor.contains(['.', '/']) => file,
+        _ => path,
+    }
+}
+
 /// A simple, local heading-to-anchor mapping: lower-cased, non-alphanumeric
 /// runs collapsed to one `-`. Deliberately not
 /// `ori-gates::spec_refs::heading_slug` (see [`Indexer::walk_repo`]'s
