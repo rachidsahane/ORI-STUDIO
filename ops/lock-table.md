@@ -372,3 +372,16 @@ Written by the lead on 2026-09-27 under [[R31]] rule 1.
 | ORI-T-0123 | Amend ADR-0002 to state [[R38]]: the lead session merges tier 0 and tier 1 once every check passes, and the operator merges every tier 2 change personally | `spec/adr/ADR-0002-single-operator.md`, and any other statement in `spec/` the decision makes false | 2, `spec/RISK_MAP.md` (ADRs) | dispatched to the documentation role, branch `docs/adr-0002-lead-merges-tier-0-and-1` | 2026-09-27 |
 
 **State after this section:** the claims held are 20, 60, 61 and 62. The next free identifier is ORI-T-0124.
+
+---
+
+## ORI-T-0124 and ORI-T-0125 allocated
+
+Written by the lead on 2026-09-27 under [[R31]] rule 1.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0124 | The paired regeneration `spec/README.md` requires after ORI-T-0123 changes `spec/agents/CLAUDE.md`, and the copy `.claude/agents/README.md` requires after it changes `spec/agents/lead.md`: the root `CLAUDE.md` body and `.claude/agents/lead.md` made byte-identical to their sources again | `CLAUDE.md`, `.claude/agents/lead.md` | 2, carried with ORI-T-0123 on one branch so the pairs never diverge across a merge | dispatched to the coder role, on `docs/adr-0002-lead-merges-tier-0-and-1` | 2026-09-27 |
+| ORI-T-0125 | Three code map deadline tests time out under machine load and fail `cargo test --workspace` locally, on `main` as well as on every branch: `ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings`, `ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded`, `ori_t_0036_the_rust_declaration_walk_checks_its_deadline`. Each passes alone in about a second; CI has passed them. Reported by the ORI-T-0038 coder and the ORI-T-0123 documentation agent on 2026-09-27 | `crates/ori-memory/src/code_map.rs` (its tests) | 1, `spec/RISK_MAP.md` (code map) | **waiting on the operator**: the fix changes existing tests, which is trigger `test_modified` | 2026-09-27 |
+
+**State after this section:** the claims held are 20, 60, 61 and 62. The next free identifier is ORI-T-0126.
