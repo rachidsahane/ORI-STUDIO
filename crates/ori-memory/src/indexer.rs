@@ -513,12 +513,36 @@
 //! resolves a link at or above it exactly as `ProductDb::open` did when it
 //! reached its lock file through the same path; both refuse an `index/`
 //! that is a link; and `open` refuses an `index/fts.sqlite`, `-wal`,
-//! `-journal` or `-shm` that is a link or not a regular file, then opens
-//! the file with `SQLITE_OPEN_NOFOLLOW`, so SQLite itself refuses a link
-//! anywhere in the path should one appear between that check and the open.
-//! `recover` does not refuse a linked index file: it is the repair for one,
-//! moving the link itself into quarantine and never touching what it
-//! points at.
+//! `-journal` or `-shm` that is a link, not a regular file, or a file with
+//! a second name, then opens the file with `SQLITE_OPEN_NOFOLLOW`, so
+//! SQLite itself refuses a link anywhere in the path should one appear
+//! between that check and the open. `recover` does not refuse a linked
+//! index file: it is the repair for one, moving the link itself into
+//! quarantine and never touching what it points at.
+//!
+//! The second name is round 7's: a review hard-linked one product's
+//! `fts.sqlite`, and then its `-wal`, to another product's, and round 6's
+//! `open`, which looked only for symbolic links, accepted both; the two
+//! products then read and erased each other's acknowledged writes, and
+//! `recover` on the other product ran while this product's `Indexer` still
+//! held the file it moved, the same failure the symbolic link above
+//! produced. `open` now refuses any index file whose link count is above one
+//! ([`IndexerError::OpenRefused`]), and `recover` moves such a name like
+//! any other, which moves only this product's name. The other product's
+//! file then still has a second name, in this product's quarantine, so its
+//! own `open` is refused by the same rule (its writes would change this
+//! product's evidence) until its own `recover` moves its name aside too.
+//! Two limits, stated: the
+//! link count is read on Unix only (on Windows the standard library exposes
+//! it only on a nightly toolchain, and this crate takes no platform
+//! dependency to read it), and a log whose other name was removed before
+//! `open` ran (the other product closed normally after the link was made)
+//! has one name, this product's, and is read as this product's own log:
+//! from then on nothing shares it, so the proof above holds, but its frames
+//! are the other product's content, exactly as if they had been copied
+//! into this product's `index/`. Content placed in a product's own `index/`
+//! is outside what any check here can tell apart from the product's own;
+//! the index is derived, and `recover` replaces it.
 //!
 //! Under that proof `recover` moves `fts.sqlite` and any `-wal`, `-journal`
 //! or `-shm` beside it into `index/quarantine/<recovered_at>-<n>/`, and
@@ -1027,8 +1051,9 @@ pub enum IndexerError {
     /// would open is not certainly the one under this product's own
     /// directory: the product directory is a relative path, or `index/`,
     /// `index/fts.sqlite` or one of the files SQLite keeps beside it is a
-    /// symbolic link or not the kind of entry it must be (the module doc's
-    /// "Recovery"). Nothing was opened or changed.
+    /// symbolic link, not the kind of entry it must be, or (on Unix) a file
+    /// with a second name, a hard link (the module doc's "Recovery").
+    /// Nothing was opened or changed.
     OpenRefused {
         /// The entry refused.
         path: PathBuf,
@@ -1608,14 +1633,15 @@ impl<'db> Indexer<'db> {
     /// file that belongs to another product (the module doc's "Recovery").
     /// So `db`'s directory must be absolute, and neither `index/` nor
     /// `index/fts.sqlite` nor any file SQLite keeps beside it may be a
-    /// symbolic link; the path is resolved once, here, and SQLite is told
-    /// to refuse a link anywhere in it as well.
+    /// symbolic link, nor (on Unix) a file with a second name; the path is
+    /// resolved once, here, and SQLite is told to refuse a link anywhere in
+    /// it as well.
     ///
     /// # Errors
     ///
     /// [`IndexerError::OpenRefused`] if `db`'s directory is a relative path,
     /// or `index/` or an index file is a symbolic link or the wrong kind of
-    /// entry; [`IndexerError::Directory`] if the product directory cannot be
+    /// entry, or an index file has a second name; [`IndexerError::Directory`] if the product directory cannot be
     /// resolved or `index/` cannot be created;
     /// [`IndexerError::Corrupt`] if the file exists and is damaged in a way
     /// opening it meets (a destroyed header, a damaged schema page, a
@@ -2316,9 +2342,11 @@ impl Indexer<'_> {
     /// target set the fresh index is rebuilt from, normally
     /// [`Indexer::collect_from_repo`]'s. The damaged file is never opened,
     /// so no damage can make this fail. An `index/fts.sqlite` (or side
-    /// file) that is a symbolic link, which [`Indexer::open`] refuses, is
-    /// moved like any other file: the link itself goes into quarantine and
-    /// whatever it pointed at is never touched. The files move as one unit:
+    /// file) that is a symbolic link or a file with a second name, which
+    /// [`Indexer::open`] refuses, is moved like any other file: the link, or
+    /// this product's name for the file, goes into quarantine, and whatever
+    /// it pointed at, or the file's other name, is never touched. The files
+    /// move as one unit:
     /// if one cannot be moved, every one already moved is moved back and
     /// nothing is rebuilt. If the rebuild itself fails after the move, the
     /// old files are already safe in quarantine and the product has a
@@ -2533,10 +2561,25 @@ fn owned_index_dir(
     }
 }
 
+/// Why a file with another name is refused: the other name may be another
+/// product's (the module doc's "Recovery").
+const HARD_LINK_REFUSAL: &str =
+    "it has another name (a hard link), so the file may be another product's";
+
 /// Refuses to open the index if any file of [`INDEX_FILE_SET`] in
-/// `index_dir` is a symbolic link or not a regular file: [`Indexer::open`]
-/// opens only files under its own product's directory. An absent file is
-/// fine; SQLite creates it.
+/// `index_dir` is a symbolic link, not a regular file, or (on Unix) a file
+/// with more than one name: [`Indexer::open`] opens only files under its
+/// own product's directory, and a hard link is the same file under another
+/// directory too. An absent file is fine; SQLite creates it.
+///
+/// A review found round 6 refusing only symbolic links: with this
+/// product's `fts.sqlite` or `-wal` a hard link to another product's, the
+/// open was accepted, the two products read and erased each other's
+/// acknowledged writes, and `recover` on the other product compiled and
+/// ran while this product's `Indexer` still held the file it moved. The
+/// link count is read from the same `symlink_metadata` call, so it
+/// describes the entry this function decided on; `SQLITE_OPEN_NOFOLLOW`
+/// says nothing about hard links.
 fn refuse_unowned_index_files(index_dir: &Path) -> Result<(), IndexerError> {
     for name in INDEX_FILE_SET {
         let live = index_dir.join(name);
@@ -2547,12 +2590,31 @@ fn refuse_unowned_index_files(index_dir: &Path) -> Result<(), IndexerError> {
             Ok(metadata) if !metadata.is_file() => {
                 return Err(open_refused(live, "it is not a regular file"));
             }
+            Ok(metadata) if link_count(&metadata).is_some_and(|links| links > 1) => {
+                return Err(open_refused(live, HARD_LINK_REFUSAL));
+            }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(IndexerError::Io { path: live, source }),
         }
     }
     Ok(())
+}
+
+/// How many names (hard links) the file `metadata` describes has, where
+/// the standard library can say: on Unix, `st_nlink`.
+#[cfg(unix)]
+fn link_count(metadata: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(metadata.nlink())
+}
+
+/// Elsewhere, unknown: on Windows the standard library exposes a file's
+/// link count only on a nightly toolchain, and this crate takes no platform
+/// dependency to read it (the module doc's "Recovery" states the gap).
+#[cfg(not(unix))]
+fn link_count(_metadata: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 /// Refuses `dir` if it is a symbolic link: [`Indexer::recover`] moves files
@@ -7930,6 +7992,124 @@ mod tests {
                 (corpus.len(), corpus.len()),
                 "{damage}"
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Item 3 (HIGH): a hard link let one product's Indexer hold another's
+    // file.
+    // ---------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0035_open_refuses_an_index_file_hard_linked_to_another_products() {
+        // The review's setup: product A's fts.sqlite, or its write-ahead
+        // log, is a hard link to product B's. Round 6 refused only symbolic
+        // links, so A's open was accepted, A read B's document, A's full
+        // rebuild erased B's acknowledged writes, and recover(&mut B) ran
+        // while A's Indexer held the file it moved. Now A's open is refused,
+        // and recover(&mut A) moves only A's name.
+        use std::os::unix::fs::MetadataExt;
+        let alpha_words = vec![doc("a.md", DocumentKind::Section, "A", "alpha words")];
+        let bravo = vec![doc("b.md", DocumentKind::Section, "B", "bravo words")];
+        for variant in ["index file", "write-ahead log"] {
+            let scratch = Scratch::new("open-hard-link");
+            let mut alpha = other_product(&scratch, "PRODUCT-T35-A");
+            let mut beta = other_product(&scratch, "PRODUCT-T35-B");
+            Indexer::open(&alpha)
+                .expect("A opens its own index")
+                .full_rebuild(&alpha_words)
+                .expect("A builds its index");
+            // B's writer stays open, so B's write-ahead log exists to link.
+            let mut writer = Indexer::open(&beta).expect("B opens its own index");
+            writer.full_rebuild(&bravo).expect("B builds its index");
+            let (theirs, ours) = match variant {
+                "index file" => (index_file(&beta), index_file(&alpha)),
+                _ => (
+                    index_dir(&beta).join("fts.sqlite-wal"),
+                    index_dir(&alpha).join("fts.sqlite-wal"),
+                ),
+            };
+            assert!(theirs.exists(), "{variant}: B's file exists to be linked");
+            let _ = fs::remove_file(&ours);
+            fs::hard_link(&theirs, &ours).expect("give B's file a second name in A's index/");
+            assert_eq!(fs::metadata(&theirs).expect("B's file").nlink(), 2);
+            let before = fs::read(&theirs).expect("read B's file");
+
+            match Indexer::open(&alpha) {
+                Err(IndexerError::OpenRefused { path, reason }) => {
+                    let ours_resolved = ours
+                        .parent()
+                        .expect("A's index/")
+                        .canonicalize()
+                        .expect("resolve A's index/")
+                        .join(ours.file_name().expect("a file name"));
+                    assert_eq!(
+                        path, ours_resolved,
+                        "{variant}: the refusal names A's entry"
+                    );
+                    assert_eq!(reason, HARD_LINK_REFUSAL, "{variant}");
+                }
+                Err(other) => panic!("{variant}: refused for the wrong reason: {other:?}"),
+                Ok(indexer) => panic!(
+                    "{variant}: A's Indexer must never open a file another product's name is \
+                     on; it reads {:?}",
+                    indexer.search("bravo", 10)
+                ),
+            }
+            assert_eq!(
+                fs::read(&theirs).expect("read B's file again"),
+                before,
+                "{variant}: B's file is untouched"
+            );
+
+            let report = Indexer::recover(&mut alpha, &alpha_words, Timestamp::from_millis(9))
+                .expect("recover moves A's name aside");
+            assert!(
+                report
+                    .quarantined_files
+                    .iter()
+                    .any(|moved| moved.file_name() == ours.file_name()),
+                "{variant}: A's name for the file is in A's quarantine: {report:?}"
+            );
+            assert_eq!(
+                fs::metadata(&theirs).expect("B's file").nlink(),
+                2,
+                "{variant}: moving A's name kept the file; A's quarantine holds the second name"
+            );
+            assert_eq!(
+                fs::read(&theirs).expect("read B's file once more"),
+                before,
+                "{variant}: recover never touched B's file"
+            );
+            let a = Indexer::open(&alpha).expect("A now opens a real index of its own");
+            assert_eq!(a.search("alpha", 10).expect("search").hits.len(), 1);
+            assert_eq!(a.search("bravo", 10).expect("search").hits.len(), 0);
+            drop(a);
+
+            // B's side: closing B's writer checkpoints its log and removes
+            // B's name for it, so a linked log leaves B one name per file.
+            // A linked database file keeps its second name in A's
+            // quarantine, so B's own open is refused by the same rule
+            // (B's writes would change A's evidence) until B recovers.
+            drop(writer);
+            let b_refused = matches!(
+                Indexer::open(&beta),
+                Err(IndexerError::OpenRefused { reason, .. }) if reason == HARD_LINK_REFUSAL
+            );
+            if variant == "index file" {
+                assert!(b_refused, "{variant}: B's file still has a second name");
+                Indexer::recover(&mut beta, &bravo, Timestamp::from_millis(10))
+                    .expect("B recovers its own index");
+            } else {
+                assert!(
+                    !b_refused,
+                    "{variant}: B's own files have one name each again"
+                );
+            }
+            let b = Indexer::open(&beta).expect("B opens");
+            assert_eq!(b.search("bravo", 10).expect("search").hits.len(), 1);
+            assert_eq!(b.search("alpha", 10).expect("search").hits.len(), 0);
         }
     }
 
