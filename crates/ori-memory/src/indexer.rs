@@ -166,7 +166,11 @@
 //! A file's encoding signature is not its content either: a leading
 //! byte-order mark is dropped when the file is read, so a file saved with
 //! one splits into exactly the documents, identities and titles it does
-//! without (`read_capped`'s doc has the review that found otherwise).
+//! without (`read_capped`'s doc has the review that found otherwise). Nor
+//! are its line endings: `\r\n` is folded to `\n` when the file is read,
+//! so a checkout made with either splits into the same documents, byte for
+//! byte, the text of a file with no heading included (the same doc has the
+//! review).
 //!
 //! # Duplicate paths: skipped by the walk, refused by the writers
 //!
@@ -3358,6 +3362,18 @@ const DESIGN_EXCLUSION: &str = "spec/design/ is excluded as a whole: escalation 
 /// the path, and an ADR's title became its first `##` heading, from a
 /// change of encoding signature alone. A U+FEFF anywhere else is text and
 /// is kept.
+///
+/// Line endings are folded to `\n` ([`lf_line_endings`]), for the same
+/// reason: a checkout's line endings are not the file's content. A review
+/// found round 7 keeping `\r\n` in the documents that hold a file's text
+/// whole (a file with no heading, an ADR) while every split section was
+/// rebuilt line by line with `\n`: the same content checked out with
+/// `\r\n` and with `\n` disagreed on 8 of this repository's 213 documents,
+/// and adding a first heading to a role file on a `\r\n` checkout rewrote
+/// the text above it, unchanged, from `\r\n` to `\n`, which the freshness
+/// tracker then reported as changed since its verification. This
+/// repository pins `\n` in `.gitattributes`, which says the parser folds
+/// `\r\n` itself; the product repositories this engine indexes need not.
 fn read_capped(path: &Path) -> std::io::Result<Result<String, u64>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
@@ -3376,7 +3392,30 @@ fn read_capped(path: &Path) -> std::io::Result<Result<String, u64>> {
     if text.starts_with(BYTE_ORDER_MARK) {
         text.drain(..BYTE_ORDER_MARK.len_utf8());
     }
-    Ok(Ok(text))
+    Ok(Ok(lf_line_endings(text)))
+}
+
+/// `text` with every carriage return that ends a line, directly before its
+/// `\n`, dropped, so `\r\n` becomes `\n` (and so does the rarer `\r\r\n`);
+/// a carriage return anywhere else is text and is kept. What is left holds
+/// no `\r\n` at all, so `str::lines`, which strips a `\r` only before a
+/// `\n`, removes nothing from it: a document holding a file's text whole
+/// and one rebuilt from its lines agree byte for byte.
+fn lf_line_endings(text: String) -> String {
+    if !text.contains("\r\n") {
+        return text;
+    }
+    let mut folded = String::with_capacity(text.len());
+    let mut lines = text.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        if lines.peek().is_some() {
+            folded.push_str(line.trim_end_matches('\r'));
+            folded.push('\n');
+        } else {
+            folded.push_str(line);
+        }
+    }
+    folded
 }
 
 /// U+FEFF, which at the very start of a file is a byte-order mark:
@@ -9384,6 +9423,118 @@ mod tests {
             rows,
             [concat!("spec/criteria/rows", ".md", "#ORI-P9-001")],
             "a file of rows and blank lines is its rows, with no empty document beside them"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Round 8, item 5 (LOW): documents holding a file whole kept \r\n.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0035_line_endings_change_no_document_and_a_first_heading_keeps_a_role_files_text_on_a_crlf_checkout()
+     {
+        // The review: the same spec/ checked out with \r\n and with \n
+        // disagreed on the ADRs and the heading-less role files, whose text
+        // was stored whole, \r\n included, while split sections were
+        // rebuilt with \n; and appending a first heading to a role file on
+        // the \r\n checkout rewrote the unchanged text above it.
+        let role = concat!("spec/agents/", "coder", ".md");
+        let files = [
+            (
+                role,
+                "---\nrole: coder\n---\n\nYou are a coder.\nKeep\rthis carriage return.\n",
+            ),
+            (
+                concat!("spec/adr/", "ADR-9002-endings", ".md"),
+                "# ADR-9002: Endings\n\nStatus: accepted\n\n## Context\n\nwhy\n",
+            ),
+            (
+                concat!("spec/", "NOTES", ".md"),
+                "Preamble words.\n\n# Notes\n\nnote words\r\r\n\n## More\n\nmore words\n",
+            ),
+            (
+                concat!("spec/criteria/", "phase-9", ".md"),
+                "# Criteria\n\n| ID | Expected |\n|---|---|\n| ORI-P9-001 | first |\n",
+            ),
+        ];
+        let crlf = |text: &str| text.replace('\n', "\r\n");
+        let lf_root = Scratch::new("endings-lf");
+        let crlf_root = Scratch::new("endings-crlf");
+        let write_all = |root: &Path, appended: &str| {
+            for (relative, text) in &files {
+                let file = root.join(relative);
+                fs::create_dir_all(file.parent().expect("a parent")).expect("create a directory");
+                let text = if *relative == role {
+                    format!("{text}{appended}")
+                } else {
+                    (*text).to_owned()
+                };
+                let text = if root == crlf_root.path {
+                    crlf(&text)
+                } else {
+                    text
+                };
+                fs::write(&file, text).expect("write");
+            }
+        };
+        write_all(&lf_root.path, "");
+        write_all(&crlf_root.path, "");
+        assert!(
+            fs::read(crlf_root.path.join(role))
+                .expect("read")
+                .windows(2)
+                .any(|pair| pair == b"\r\n"),
+            "the precondition: the second checkout really has \\r\\n endings"
+        );
+
+        let lf_walk = Indexer::walk_repo(&lf_root.path).expect("walk the \\n checkout");
+        let crlf_walk = Indexer::walk_repo(&crlf_root.path).expect("walk the \\r\\n checkout");
+        assert!(crlf_walk.skipped.is_empty(), "{:?}", crlf_walk.skipped);
+        assert_eq!(
+            crlf_walk.documents, lf_walk.documents,
+            "line endings change no path, kind, title or text"
+        );
+        let bare = |walk: &RepoWalk| -> IndexableDocument {
+            walk.documents
+                .iter()
+                .find(|document| document.path == role)
+                .expect("the role file's document")
+                .clone()
+        };
+        assert!(
+            bare(&crlf_walk).body.contains("Keep\rthis"),
+            "a carriage return inside a line is text, and is kept"
+        );
+        assert!(
+            crlf_walk
+                .documents
+                .iter()
+                .all(|document| !document.body.contains("\r\n")),
+            "no stored text holds a \\r\\n"
+        );
+
+        // Seed an index from the \r\n checkout, append a first heading to
+        // the role file (the review's edit), and sync: only the new section
+        // is written.
+        let db_scratch = Scratch::new("endings-index");
+        let db = product(&db_scratch);
+        let mut indexer = Indexer::open(&db).expect("open on-disk index");
+        indexer.full_rebuild(&crlf_walk.documents).expect("seed");
+        let before = bare(&crlf_walk);
+        write_all(&crlf_root.path, "## Notes\n\nzebrafish\n");
+        let after_walk = Indexer::walk_repo(&crlf_root.path).expect("walk again");
+        assert_eq!(
+            bare(&after_walk),
+            before,
+            "the text above a new first heading is the document it always was"
+        );
+        let report = indexer
+            .incremental_sync(&after_walk.documents)
+            .expect("sync the added heading");
+        assert_eq!(
+            (report.upserted, report.removed, report.replaced),
+            (1, 0, 0),
+            "only the new section is written: {report:?}"
         );
     }
 }
