@@ -211,7 +211,8 @@
 //!   which would follow a symlink or, on Windows, a junction, there too.
 //!   The `spec/` scan follows no symlink at all, and records each one it
 //!   declines that could stand for documents (`spec` itself, a link named
-//!   `*.md`, a link to a directory) as [`SkipReason::SymlinkNotFollowed`] in
+//!   `*.md`, a link to a directory, or to a target it cannot `stat`, whose
+//!   kind is then unknown) as [`SkipReason::SymlinkNotFollowed`] in
 //!   [`Coverage::spec_docs_skipped`], so the scan is then
 //!   [`SpecScan::Partial`], not complete. A
 //!   symlinked *file* is read only when [`std::fs::canonicalize`] resolves it
@@ -264,7 +265,10 @@
 //!   [`SkipReason::NonUtf8Name`], rather than silently absent from both
 //!   `files_seen` and `files_skipped`; this cannot be exercised on this
 //!   module's own development filesystem (APFS rejects such names outright),
-//!   so it is proven on Linux instead (see the report for how).
+//!   so it is proven on Linux instead (see the report for how). A `.git`
+//!   directory is recorded too, once, as [`SkipReason::GitMetadata`], like
+//!   a symlinked directory: an entry the walk saw and declined (until round
+//!   7 it was the one exclusion passed over with no record).
 //! - **Memory.** What the `spec/` citation scan holds while it runs, how
 //!   much of `spec/` it reads, and what the returned map keeps from it, each
 //!   bounded since round 5; what each module keeps from its own file,
@@ -303,10 +307,14 @@
 //!     [`SkipReason::Unreadable`]), a directory under `spec/` that cannot
 //!     be listed, and a symlink the scan declines are each recorded in
 //!     [`Coverage::spec_docs_skipped`], and the scan is then
-//!     [`SpecScan::Partial`]. [`SpecScan::Complete`] means every listed
-//!     document was read and scanned and that list is empty: the bounds
-//!     above never make a scan that passed over something look like one
-//!     that did not.
+//!     [`SpecScan::Partial`]; a document or directory the deadline stopped
+//!     the scan short of is recorded as [`SkipReason::TimedOut`], and a
+//!     document past the corpus budget as
+//!     [`SkipReason::SpecCorpusOverBudget`], with the scan's status saying
+//!     which. [`SpecScan::Complete`] means every listed document was read
+//!     and scanned and that list is empty, and the list is empty only then:
+//!     the bounds above never make a scan that passed over something look
+//!     like one that did not.
 //!   - *Kept in the returned map:* each cited document's path once
 //!     ([`CodeMap::spec_docs`]) and each distinct cited heading once
 //!     ([`CodeMap::spec_headings`]), a heading longer than 4096 bytes cut to
@@ -982,20 +990,23 @@ pub enum SkipReason {
     /// handle's own metadata, after an open that does not block and before
     /// anything is read; see the module doc's "File type" bound.
     NotARegularFile,
-    /// A symlink resolves inside a directory named `.git` (in any ASCII
-    /// case, as everywhere in this module), or, in
-    /// [`Coverage::spec_docs_skipped`], a directory named `.git` under
-    /// `spec/` that the citation scan did not descend. This module never
-    /// descends `.git` directly; in [`Coverage::files_skipped`] this reason
-    /// is what stops a symlink from reaching the same content by a side
-    /// door.
+    /// A directory named `.git` (in any ASCII case, as everywhere in this
+    /// module), which neither the walk nor the `spec/` citation scan
+    /// descends, recorded once for the directory, or a symlink that
+    /// resolves inside one, which is never opened: in
+    /// [`Coverage::files_skipped`] this reason is also what stops a symlink
+    /// from reaching the same content by a side door. Until round 7 the
+    /// walk passed over a `.git` directory with no record.
     GitMetadata,
     /// Its name, or an ancestor directory's name, is not valid UTF-8. The
     /// path recorded here is a lossy rendering (invalid bytes replaced), for
     /// display only; it is not a path this module can open.
     NonUtf8Name,
     /// This module did not finish parsing and extracting it within its
-    /// budget; see the module doc's "Time" bound.
+    /// budget, or, in [`Coverage::spec_docs_skipped`], the `spec/` citation
+    /// scan did not reach it (a document, or a directory it had not
+    /// finished listing) before its deadline; see the module doc's "Time"
+    /// bound.
     TimedOut,
     /// It is a symlink whose target is a directory. Never descended (see the
     /// module doc's cycle-safety note), and, unlike a plain directory,
@@ -1009,8 +1020,10 @@ pub enum SkipReason {
     /// A symlink under `spec/` (or `spec` itself) that the `spec/` citation
     /// scan does not follow, wherever it points: the scan reads no document
     /// through a link. Recorded only in [`Coverage::spec_docs_skipped`], and
-    /// only for a link that could stand for documents: one named `*.md`, or
-    /// one whose target is a directory.
+    /// only for a link that could stand for documents: one named `*.md`, one
+    /// whose target is a directory, or one whose target cannot be `stat`ed
+    /// for a reason other than not existing (so what it stands for is
+    /// unknown).
     SymlinkNotFollowed,
     /// A `spec/` document the citation scan did not scan because the whole
     /// corpus reached [`CodeMapOptions::max_spec_bytes`] first: the
@@ -1068,7 +1081,9 @@ pub struct SkippedFile {
 /// being visible here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Coverage {
-    /// Every file the walk visited, parsed or not.
+    /// Every entry the walk visited and decided about: each file, parsed
+    /// or not, and each directory it recorded instead of descending (a
+    /// symlinked directory, a `.git` directory, one it could not list).
     pub files_seen: usize,
     /// Files that parsed with no `ERROR` node in their tree.
     pub files_parsed_clean: usize,
@@ -1093,12 +1108,14 @@ pub struct Coverage {
     /// the reason for each, sorted by path: a document that could not be
     /// opened as a regular file or read, was over
     /// [`CodeMapOptions::max_file_bytes`], was not UTF-8, or was not reached
-    /// before the deadline or the corpus budget ran out; a directory that
-    /// could not be listed; a directory named `.git`, which the scan never
-    /// descends ([`SkipReason::GitMetadata`]); a symlink the scan does not
-    /// follow. Empty exactly
-    /// when [`Coverage::spec_citation_scan`] is [`SpecScan::Complete`], and
-    /// never empty when it is [`SpecScan::Partial`].
+    /// before the deadline or the corpus budget ran out; a `*.md` entry that
+    /// is not a regular file; a directory that could not be listed, or whose
+    /// listing the deadline cut short, and each directory not yet listed
+    /// then ([`SkipReason::TimedOut`], standing for what it holds); a
+    /// directory named `.git`, which the scan never descends
+    /// ([`SkipReason::GitMetadata`]); a symlink the scan does not follow.
+    /// Empty exactly when [`Coverage::spec_citation_scan`] is
+    /// [`SpecScan::Complete`]: never empty when it is anything else.
     pub spec_docs_skipped: Vec<SkippedFile>,
 }
 
@@ -1488,6 +1505,11 @@ fn walk_repository(root_canon: &Path) -> Walk {
                 }
             } else if file_type.is_dir() {
                 if is_git_directory_name(&name) {
+                    // Never descended, and recorded, like a symlinked
+                    // directory: an entry the walk saw and decided about.
+                    // Until round 7 it was passed over with no record, the
+                    // one exclusion `Coverage` did not show.
+                    admit_skip(root_canon, &abs, SkipReason::GitMetadata, &mut pre_skipped);
                     continue;
                 }
                 pending.push(abs);
@@ -1857,7 +1879,7 @@ fn open_regular_file(
     } else {
         open_regular_file_no_follow(path)
     }
-    .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
+    .map_err(|err| open_failure_reason(path, follow_final_symlink, &err))?;
     let meta = opened
         .metadata()
         .map_err(|err| SkipReason::Unreadable(err.to_string()))?;
@@ -1871,6 +1893,30 @@ fn open_regular_file(
         return Err(SkipReason::NotARegularFile);
     }
     Ok((opened, meta))
+}
+
+/// Why an open of `path` failed, as a [`SkipReason`]:
+/// [`SkipReason::NotARegularFile`] when a `stat` of the path (following a
+/// final symlink exactly when the open did) says it is neither a file, a
+/// directory nor a symlink (a FIFO, a socket, a device), since an open can
+/// refuse such an entry outright (a socket's `open(2)` fails, with
+/// `EOPNOTSUPP` on macOS and `ENXIO` on Linux) before any handle exists to
+/// decide by; [`SkipReason::Unreadable`] otherwise. So the same kind of
+/// entry gets the same reason whether a directory entry's type or an open
+/// met it first: until round 7 a socket named `*.md` under `spec/` was
+/// `Unreadable`, where the walk calls one `NotARegularFile`.
+fn open_failure_reason(path: &Path, follow_final_symlink: bool, err: &io::Error) -> SkipReason {
+    let meta = if follow_final_symlink {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    };
+    match meta {
+        Ok(meta) if !meta.is_file() && !meta.is_dir() && !meta.file_type().is_symlink() => {
+            SkipReason::NotARegularFile
+        }
+        _ => SkipReason::Unreadable(err.to_string()),
+    }
 }
 
 /// Reads at most `cap + 1` bytes from `opened`, through
@@ -4499,11 +4545,11 @@ fn scan_spec_directory(
     // if a platform ever reported `is_dir() == true` for one under
     // `symlink_metadata` (unverified here, no Windows machine to check on),
     // this is the independent guard against treating it as a real
-    // directory. A `spec` link to a directory is recorded, since it stands
-    // for documents the scan will not read; one to anything else is not a
-    // `spec/` directory at all.
+    // directory. A `spec` link that may stand for documents (see
+    // `link_may_stand_for_documents`) is recorded, since the scan will not
+    // read them; one to anything else is not a `spec/` directory at all.
     if file_type.is_symlink() {
-        if fs::metadata(&spec_dir).is_ok_and(|meta| meta.is_dir()) {
+        if link_may_stand_for_documents(&spec_dir) {
             admit_skip(root, &spec_dir, SkipReason::SymlinkNotFollowed, skipped);
             return SpecScan::Partial;
         }
@@ -4613,27 +4659,71 @@ struct SpecListing {
     completed: bool,
 }
 
+/// Whether a symlink under `spec/` (or `spec` itself) may stand for
+/// documents the scan will not read: its target is a directory, or cannot
+/// be `stat`ed for a reason other than there being nothing there (a
+/// directory that refuses access, say), in which case what it stands for
+/// is unknown and is recorded rather than assumed to be nothing. A `stat`,
+/// never an open. Until round 7 a failed `stat` counted as "not a
+/// directory", so `spec` linked into a directory nobody could `stat` was
+/// passed over with no record, and the scan reported itself complete.
+fn link_may_stand_for_documents(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(meta) => meta.is_dir(),
+        Err(err) => !matches!(
+            err.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        ),
+    }
+}
+
 /// Lists every `.md` file under `dir` (inside `root`), following no
 /// symlink: only paths, never contents, since [`scan_spec_directory`] reads
 /// each document in turn. What it passes over is recorded, the way the main
 /// walk records it (see [`walk_repository`]): a directory it cannot list,
 /// or an entry it cannot read the type of, as [`SkipReason::Unreadable`]; a
 /// document whose path is not UTF-8 as [`SkipReason::NonUtf8Name`]; a
-/// symlink that could stand for documents (named `*.md`, or whose target a
-/// `stat`, never an open, says is a directory) as
+/// `*.md` entry that is not a regular file (a FIFO, a socket, a device),
+/// by its directory entry's type and without opening it, as
+/// [`SkipReason::NotARegularFile`]; a symlink named `*.md`, or one that may
+/// stand for documents ([`link_may_stand_for_documents`]), as
 /// [`SkipReason::SymlinkNotFollowed`]; a directory named `.git`, never
 /// descended, by the same rule the main walk applies
 /// ([`is_git_directory_name`]), as [`SkipReason::GitMetadata`]. Round 5's
 /// version descended it, so a nested clone at `spec/` had git's own files
 /// read and cited (a branch named `*.md` is enough to make one) while the
-/// scan reported itself complete. Checks `deadline` once per entry: a
-/// `spec/` tree could itself hold enough entries that listing them is not
-/// free.
+/// scan reported itself complete.
+///
+/// Checks `deadline` before listing each directory and before each entry:
+/// a `spec/` tree could itself hold enough entries that listing them is
+/// not free. When it passes, the directory being listed and every
+/// directory not yet listed are recorded as [`SkipReason::TimedOut`], each
+/// standing for whatever it holds that was not reached, so a listing the
+/// deadline cut short never leaves the record empty (until round 7 it
+/// did: a deadline that passed before the first entry recorded nothing at
+/// all, and a `TimedOut` scan came back with nothing skipped).
 fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> SpecListing {
     let mut documents = Vec::new();
     let mut skipped = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
+    let interrupted = |current: &Path,
+                       pending: &[PathBuf],
+                       mut documents: Vec<(String, PathBuf)>,
+                       mut skipped: Vec<SkippedFile>| {
+        for unlisted in std::iter::once(current).chain(pending.iter().map(PathBuf::as_path)) {
+            admit_skip(root, unlisted, SkipReason::TimedOut, &mut skipped);
+        }
+        documents.sort_by(|a: &(String, PathBuf), b| a.0.cmp(&b.0));
+        SpecListing {
+            documents,
+            skipped,
+            completed: false,
+        }
+    };
     while let Some(current) = pending.pop() {
+        if Instant::now() >= deadline {
+            return interrupted(&current, &pending, documents, skipped);
+        }
         let read_dir = match fs::read_dir(&current) {
             Ok(read_dir) => read_dir,
             Err(err) => {
@@ -4661,12 +4751,7 @@ fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> SpecListing {
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
             if Instant::now() >= deadline {
-                documents.sort_by(|a: &(String, PathBuf), b| a.0.cmp(&b.0));
-                return SpecListing {
-                    documents,
-                    skipped,
-                    completed: false,
-                };
+                return interrupted(&current, &pending, documents, skipped);
             }
             let path = entry.path();
             let file_type = match entry.file_type() {
@@ -4683,7 +4768,7 @@ fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> SpecListing {
             };
             let is_markdown = path.extension().and_then(|ext| ext.to_str()) == Some("md");
             if file_type.is_symlink() {
-                if is_markdown || fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                if is_markdown || link_may_stand_for_documents(&path) {
                     admit_skip(root, &path, SkipReason::SymlinkNotFollowed, &mut skipped);
                 }
                 continue;
@@ -4697,6 +4782,10 @@ fn list_markdown(dir: &Path, root: &Path, deadline: Instant) -> SpecListing {
                 continue;
             }
             if !is_markdown {
+                continue;
+            }
+            if !file_type.is_file() {
+                admit_skip(root, &path, SkipReason::NotARegularFile, &mut skipped);
                 continue;
             }
             match rel_path_string(root, &path) {
@@ -6310,7 +6399,10 @@ mod tests {
 
     /// Defect 8 (MEDIUM), the `.git` exclusion: nothing previously asserted
     /// that descending `.git` is actually refused, only that it is
-    /// documented as refused.
+    /// documented as refused. Since round 7 each `.git` directory is also
+    /// recorded, the one entry of it that is seen, as `GitMetadata`: until
+    /// then it was passed over with no record at all, the one exclusion
+    /// `Coverage` did not show. Nothing inside one is seen, still.
     #[test]
     fn ori_t_0036_git_directory_contents_are_never_seen_at_all() {
         let dir = temp_dir("git-exclusion");
@@ -6320,11 +6412,25 @@ mod tests {
         write(&dir, "visible.rs", "pub fn visible() {}\n");
         let map = build_code_map(&dir).expect("maps");
         assert_eq!(
-            map.coverage.files_seen, 1,
-            "only visible.rs may be seen at all: {:?}",
-            map
+            map.coverage.files_skipped,
+            vec![
+                SkippedFile {
+                    path: ".git".to_owned(),
+                    reason: SkipReason::GitMetadata,
+                },
+                SkippedFile {
+                    path: "sub/.git".to_owned(),
+                    reason: SkipReason::GitMetadata,
+                },
+            ],
+            "each .git directory is recorded, and nothing inside one is seen: {map:?}"
         );
-        assert!(map.modules.iter().any(|m| m.path == "visible.rs"));
+        assert_eq!(
+            map.coverage.files_seen, 3,
+            "visible.rs and the two .git directories, nothing else: {map:?}"
+        );
+        let modules: Vec<&str> = map.modules.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(modules, vec!["visible.rs"]);
         drop(guard);
     }
 
@@ -7891,6 +7997,7 @@ mod tests {
             "the invariant must hold with every pre-skip nested: {c:?}"
         );
         let mut expected: Vec<(&str, SkipReason)> = vec![
+            (".git", SkipReason::GitMetadata),
             (
                 "deep/nested/dangling.rs",
                 SkipReason::Unreadable(String::new()),
@@ -7921,7 +8028,8 @@ mod tests {
         }
         // Two clean modules (`clean.rs`, `deep/nested/ok.rs`) and
         // `deep/target_dir/inside.rs`, a third, reached directly; plus every
-        // nested pre-skip above. `.git` is never walked.
+        // nested pre-skip above. `.git` is never walked, and since round 7
+        // is recorded (above).
         assert_eq!(c.files_seen, 3 + expected.len(), "{c:?}");
         drop(guard);
         drop(outside_guard);
@@ -9254,6 +9362,7 @@ mod tests {
                 .map(|f| f.reason.clone())
         };
         assert_eq!(reason_of("leak.py"), Some(SkipReason::GitMetadata));
+        assert_eq!(reason_of("sub/.GIT"), Some(SkipReason::GitMetadata));
         assert!(
             matches!(
                 reason_of("lower.py"),
@@ -9626,5 +9735,178 @@ mod tests {
             (true, 200_000),
             "with time left, every declaration is an edge"
         );
+    }
+
+    /// Item 2 (MEDIUM), (a): a symlink whose target cannot be `stat`ed was
+    /// treated as standing for nothing, so `spec` linked into a directory
+    /// that refuses access, or `spec/docs` linked into one, was dropped
+    /// with no record and the scan reported itself complete. Both are now
+    /// recorded as links the scan does not follow. A dangling link stands
+    /// for nothing and is still not recorded (the control).
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_spec_link_whose_target_cannot_be_statted_is_recorded() {
+        use std::os::unix::fs::PermissionsExt;
+        let lock = |path: &Path, mode: u32| {
+            let mut perms = fs::metadata(path).expect("stat").permissions();
+            perms.set_mode(mode);
+            fs::set_permissions(path, perms).expect("chmod");
+        };
+        // `spec` itself, linked into a locked vault.
+        let dir = temp_dir("spec-link-unstattable");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "ok.rs", "pub fn ok() {}\n");
+        write(
+            &dir,
+            &format!("vault/realspec/{}.md", "a"),
+            "# A\n\nok.rs\n",
+        );
+        std::os::unix::fs::symlink(dir.join("vault/realspec"), dir.join("spec")).expect("symlink");
+        lock(&dir.join("vault"), 0o000);
+        let refused = fs::metadata(dir.join("spec")).is_err();
+        let map = build_code_map(&dir);
+        lock(&dir.join("vault"), 0o755);
+        let map = map.expect("maps");
+        // `spec/docs`, linked into a locked vault, beside a clean document,
+        // and a dangling link that stands for nothing.
+        let second = temp_dir("spec-sublink-unstattable");
+        let second_guard = DropGuard(second.clone());
+        write(&second, "ok.rs", "pub fn ok() {}\n");
+        write(&second, &format!("spec/{}.md", "a"), "# A\n\nok.rs\n");
+        write(&second, &format!("vault/docs/{}.md", "b"), "# B\n\nok.rs\n");
+        std::os::unix::fs::symlink(second.join("vault/docs"), second.join("spec/docs"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(second.join("nowhere"), second.join("spec/gone"))
+            .expect("symlink");
+        lock(&second.join("vault"), 0o000);
+        let second_map = build_code_map(&second);
+        lock(&second.join("vault"), 0o755);
+        let second_map = second_map.expect("maps");
+        if !refused {
+            eprintln!(
+                "running with elevated privileges; chmod 000 did not refuse the stat, skipping"
+            );
+            drop(guard);
+            drop(second_guard);
+            return;
+        }
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Partial);
+        assert_eq!(
+            map.coverage.spec_docs_skipped,
+            vec![SkippedFile {
+                path: "spec".to_owned(),
+                reason: SkipReason::SymlinkNotFollowed,
+            }]
+        );
+        assert_eq!(second_map.coverage.spec_citation_scan, SpecScan::Partial);
+        assert_eq!(
+            second_map.coverage.spec_docs_skipped,
+            vec![SkippedFile {
+                path: "spec/docs".to_owned(),
+                reason: SkipReason::SymlinkNotFollowed,
+            }],
+            "the dangling spec/gone stands for nothing and is not recorded"
+        );
+        assert_eq!(second_map.spec_docs, vec![format!("spec/{}.md", "a")]);
+        drop(guard);
+        drop(second_guard);
+    }
+
+    /// Item 2 (MEDIUM), (b): when the deadline passed while `spec/` was
+    /// being listed, the entries not yet listed were recorded nowhere, so a
+    /// `TimedOut` scan could come back with nothing skipped (the review's
+    /// `--timeout-ms=0` run did, for a `spec/` of two documents), against
+    /// the rule that the record is empty exactly when the scan is complete.
+    /// The directory being listed and every directory not yet listed are
+    /// now recorded, each standing for what it holds that was not reached.
+    #[test]
+    fn ori_t_0036_a_listing_the_deadline_interrupted_is_recorded() {
+        let dir = temp_dir("spec-listing-deadline");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub fn f() {}\n");
+        write(&dir, &format!("spec/{}.md", "a"), "# A\n\nm.rs\n");
+        write(&dir, &format!("spec/{}.md", "b"), "# B\n\nm.rs\n");
+        write(&dir, &format!("spec/sub/{}.md", "c"), "# C\n\nm.rs\n");
+        let listing = list_markdown(
+            &dir.join("spec"),
+            &dir,
+            Instant::now() - Duration::from_secs(1),
+        );
+        assert!(!listing.completed);
+        assert!(listing.documents.is_empty());
+        assert_eq!(
+            listing.skipped,
+            vec![SkippedFile {
+                path: "spec".to_owned(),
+                reason: SkipReason::TimedOut,
+            }]
+        );
+        let options = CodeMapOptions {
+            file_timeout: Duration::ZERO,
+            ..CodeMapOptions::default()
+        };
+        let map = build_code_map_with_options(&dir, &options).expect("maps");
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::TimedOut);
+        assert!(
+            !map.coverage.spec_docs_skipped.is_empty(),
+            "a scan that did not complete records what it did not reach: {:?}",
+            map.coverage
+        );
+        drop(guard);
+    }
+
+    /// Item 2 (MEDIUM), (c): a socket named `*.md` under `spec/` was
+    /// listed as a document, then refused by its open (`EOPNOTSUPP`) and
+    /// recorded as `Unreadable`, while the walk calls the same kind of
+    /// entry `NotARegularFile`. It is now decided by its directory entry's
+    /// type, never opened, and recorded as the walk records it; a socket
+    /// named `*.rs` is the walk's own case, for comparison. The socket is
+    /// bound at a short path and moved into place, since a socket's path
+    /// is limited to about a hundred bytes.
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0036_a_socket_named_md_under_spec_is_not_a_regular_file() {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = temp_dir("spec-socket");
+        let guard = DropGuard(dir.clone());
+        write(&dir, "m.rs", "pub fn f() {}\n");
+        write(&dir, &format!("spec/{}.md", "good"), "# Good\n\nm.rs\n");
+        for target in [format!("spec/{}.md", "sock"), "sock.rs".to_owned()] {
+            let short = std::env::temp_dir().join(format!(
+                "o7s-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            if std::os::unix::net::UnixListener::bind(&short).is_err() {
+                eprintln!("cannot bind a unix socket here; skipping");
+                let _ = fs::remove_file(&short);
+                drop(guard);
+                return;
+            }
+            fs::rename(&short, dir.join(&target)).expect("move the socket into place");
+        }
+        let map = build_code_map(&dir).expect("maps");
+        assert_eq!(
+            map.coverage.spec_docs_skipped,
+            vec![SkippedFile {
+                path: format!("spec/{}.md", "sock"),
+                reason: SkipReason::NotARegularFile,
+            }]
+        );
+        assert_eq!(map.coverage.spec_citation_scan, SpecScan::Partial);
+        assert!(
+            map.coverage.files_skipped.contains(&SkippedFile {
+                path: "sock.rs".to_owned(),
+                reason: SkipReason::NotARegularFile,
+            }),
+            "{:?}",
+            map.coverage
+        );
+        assert_eq!(
+            open_regular_file(&dir.join("sock.rs"), false).map(|_| ()),
+            Err(SkipReason::NotARegularFile),
+            "an open the socket refuses gives the reason its type does"
+        );
+        drop(guard);
     }
 }
