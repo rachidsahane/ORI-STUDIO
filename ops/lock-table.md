@@ -918,3 +918,18 @@ Written by the lead on 2026-10-11 under [[R31]]. The operator answered all four 
 Claim 87 and claim 89 are disjoint, and both are disjoint from every held claim (20, 81, 86). No other claim holds `Cargo.lock` or any path under `crates/ori-mcp/`.
 
 **State after this section:** the claims held are 20, 81, 86, 87 and 89; claim 88 is reserved for ORI-T-0157. The next free identifier is ORI-T-0159.
+
+---
+
+## Claim 64 withdrawn from the session branch and held again
+
+Written by the lead on 2026-10-11. CI on 3e53283, the first run to carry ORI-T-0054, failed two checks. The lead reverted its seven commits in one commit (6d406e4: a revert, not a history rewrite), so the session branch's code is again identical to f3da68e, which CI passed in full.
+
+| Check | What failed | Whose |
+|---|---|---|
+| gate-7 (`cargo deny check bans`) | `windows-sys` locked at both 0.60.2 (through `keyring` 3.6.3, `notify` 8.2.0 itself, and `winapi-util`) and 0.61.2 (through `mio` 1.2.4 under `notify`). [[E-0009]] predicted this and set its terms: if gate 7 refuses, the question returns to the operator, and `deny.toml` is not relaxed to admit it. The lead read the manifests. `notify` pulls `mio` only on Linux, Android, macOS and the BSDs, and `mio` pulls `windows-sys` only on Windows, so the two versions never build together on any one target. `deny.toml` has no `[graph] targets` and judges the union of every target. Every `notify` release has the same pair (8.x on 0.60, its `mio` on 0.61; 9.0 release candidates on 0.61 against `keyring`'s 0.60) | this ticket's dependency; the operator decides |
+| test (macos-latest) | Four watcher tests fail under FSEvents: three wait for a modification and see `Created`, because FSEvents reports a later write to a recently created file as a creation; one sees the temporary of a rename-over reported beside its target, because FSEvents does not pair the two halves of the rename as inotify does | this ticket's code; repaired on its branch |
+
+**Claim 64 is held again** for the repair on `feat/ORI-T-0054-watch`. ORI-T-0155 (the follow-up from pass 3) is folded into the same repair, since it changes the same two files and nothing of ORI-T-0054 is integrated to follow up on.
+
+**State after this section:** the claims held are 20, 64, 81, 86, 87 and 89; claim 88 is reserved. The next free identifier is ORI-T-0159.
