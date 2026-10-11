@@ -1519,6 +1519,18 @@ mod tests {
         )
     }
 
+    /// A scratch directory removed when it goes out of scope, including when
+    /// the test panics first.
+    #[cfg(unix)]
+    struct ScratchDir(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// Runs `tail` after the writing descendant, checks the run is refused as
     /// a timeout (which also proves the descendant was alive and holding the
     /// pipe at the deadline), then waits, bounded, for the marker.
@@ -1531,6 +1543,7 @@ mod tests {
     ) {
         let dir = std::env::temp_dir().join(format!("ori-t-0140-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let _scratch = ScratchDir(dir.clone());
         let marker = dir.join("writer-stopped");
         let _ = std::fs::remove_file(&marker);
 
@@ -1549,7 +1562,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let let_go = marker.exists();
-        let _ = std::fs::remove_dir_all(&dir);
         let _ = adapter.kill(&handle);
         assert!(
             let_go,
