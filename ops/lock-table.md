@@ -784,3 +784,17 @@ The documentation agent's findings, recorded:
 Added to ORI-T-0132 (needs planning), from the same report: `spec/criteria/phase-1.md` ORI-P1-013 ends with "gate state Installed" after `gates.prove`. `spec/DATA_MODEL.md` section 3 draws `Defined → Proven → Installed` as one prose line, with no edge back to `Defined` and none out of `Inert`. Nothing in `spec/` says what moves a gate from `Proven` to `Installed`. The runbook's revocation ("state back to Defined") has no edge and no event kind.
 
 **State after this section:** the claims held are 20, 64, 79, 81 and 82. The next free identifier is ORI-T-0149.
+
+---
+
+## Claim 85: ORI-T-0147 dispatched
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 85 | ORI-T-0147, a legend for ARCHITECTURE's overview diagram | `spec/ARCHITECTURE.md` | 1 | `docs/ORI-T-0147-architecture-legend` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Claim 84 (ORI-T-0136), which also changed `spec/ARCHITECTURE.md`, is integrated, and the branch is cut after it, from 7bf0508. No other claim holds a path under `spec/`.
+
+**State after this section:** the claims held are 20, 64, 79, 81, 82 and 85. The next free identifier is ORI-T-0149.
