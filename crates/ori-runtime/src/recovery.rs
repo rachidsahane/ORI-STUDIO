@@ -133,11 +133,16 @@
 //!   defect (AICD §39) applied to a requeue that did not happen.
 //! - The edge starts at `InProgress` only: a requeue of a ticket in any other
 //!   state is still refused by the machine.
-//! - "Engine recovery only" is not enforced by the machine: the event is the
-//!   same one that serves the other two edges into `Queued`, and the module doc
-//!   of `crates/ori-core/src/ticket.rs` says what enforces it and what does
-//!   not. What [`recover_session`] contributes is the order: the session has
-//!   ended `Killed`, with every earlier step recorded, before the seam is
+//! - The machine refuses the requeue of an `InProgress` ticket to any actor
+//!   but the system (`Ticket::apply`, ruling R43), so a real
+//!   [`RestartActions::requeue_ticket`] must apply its event with the system as
+//!   the actor, which is also the actor `spec/DATA_MODEL.md` section 3 gives
+//!   the recovery's events (ORI-T-0130, commit 8f8a4cd on the integration
+//!   branch, not yet on every branch). The machine cannot tell that actor is
+//!   the recovery and not a scheduled trigger or a watcher; the module doc of
+//!   `crates/ori-core/src/ticket.rs` says what the guard enforces and what it
+//!   does not. What [`recover_session`] contributes is the order: the session
+//!   has ended `Killed`, with every earlier step recorded, before the seam is
 //!   asked to requeue, and `session.recovered` is appended after it.
 //!
 //! # The cadence this module does not run
@@ -280,9 +285,9 @@ pub trait RestartActions {
     ) -> Result<Disposition, RecoveryError>;
 
     /// `ori-core`'s `Ticket::apply` returns the ticket to `Queued`, along the
-    /// edge `InProgress --> Queued` of `spec/DATA_MODEL.md` section 3. See the
-    /// module doc's "The ticket move" for what this module does and does not
-    /// promise about it.
+    /// edge `InProgress --> Queued` of `spec/DATA_MODEL.md` section 3, which the
+    /// machine allows only to the system actor. See the module doc's "The
+    /// ticket move" for what this module does and does not promise about it.
     fn requeue_ticket(&mut self, session: &Session, at: Timestamp) -> Result<(), RecoveryError>;
 
     /// `ori-store` appends `session.recovered`.
