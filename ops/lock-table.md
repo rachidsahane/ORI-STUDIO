@@ -607,3 +607,11 @@ Written by the lead on 2026-10-11 under [[R31]].
 | ORI-T-0142 | `spec/DATA_MODEL.md` says `InProgress --> Queued` is "the engine's move and no one else's", and nothing enforces it: `Ticket::apply` accepts it from any actor, and `crates/ori-orchestrator/src/lifecycle.rs`'s `verb()` gates no AICD §17 verb on it. ORI-T-0129's coder proposes a guard on `Actor::System` in `Ticket::apply` (no new event kind, which the `ori-store` projector would ignore), at the cost of changing `ori_t_0020_apply_accepts_exactly_the_pairs_the_diagram_draws`; `system` is also the actor of triggers and watchers, so the guard is wider than the sentence | `crates/ori-core/src/ticket.rs`; possibly `lifecycle.rs` | 2 | **waiting on the operator**: `test_modified` | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 76 and 77. The next free identifier is ORI-T-0143.
+
+---
+
+## R43: ORI-T-0142 folded into ORI-T-0129
+
+Written by the lead on 2026-10-11. Under [[R43]] the actor guard ORI-T-0142 described is built in ORI-T-0129, under claim 70, which already holds `crates/ori-core/src/ticket.rs`. ORI-T-0142 is closed into ORI-T-0129 and keeps its identifier as a record. What stays open from its row: a role or verb check for the move in `crates/ori-orchestrator/src/lifecycle.rs` (tier 2), allocated when it is planned.
+
+**State after this section:** unchanged. The claims held are 20, 61, 62, 64, 67 to 70, 76 and 77. The next free identifier is ORI-T-0143.
