@@ -446,3 +446,18 @@ Written by the lead on 2026-10-11 under [[R31]] rule 1. The operator answered fo
 **Unblocked by these answers:** ORI-T-0029, the forbidden-action test harness (`crates/ori-broker/src/forbidden.rs`, tier 2), no longer waits on E-0007. ORI-T-0058, the adapter traits, now builds in `ori-core` rather than at `crates/ori-integrations/src/traits.rs` as `ops/phase-1-backlog.md` batch 11 declares, and waits on ORI-T-0127 so that the code follows the specification rather than the other way round. ORI-T-0125 and ORI-T-0126 no longer wait on the operator and run one at a time against `code_map.rs` and `indexer.rs` with the other follow-ups there.
 
 **State after this section:** the claims held are 20, 61, 62, 63 and 64. The next free identifier is ORI-T-0130.
+
+---
+
+## Claims 65 and 66
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. Both are documentation-role tickets and write only under `spec/`.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 65 | ORI-T-0127, E-0002 option A in the specification | `spec/LLD.md`, `spec/API_SPEC.md` | 1, `spec/RISK_MAP.md` (`spec/`) | `docs/ORI-T-0127-adapter-traits-in-core` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 66 | ORI-T-0128, the recovery edge `InProgress --> Queued` | `spec/DATA_MODEL.md` | 1, `spec/RISK_MAP.md` (`spec/`) | `docs/ORI-T-0128-recovery-edge` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from each other and from claims 20 and 61 to 64, none of which holds a path under `spec/`.
+
+**State after this section:** the claims held are 20 and 61 to 66. The next free identifier is ORI-T-0130.
