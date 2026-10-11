@@ -17,7 +17,7 @@
 //! | Trait | Declared | Implemented in |
 //! |---|---|---|
 //! | [`VcsHost`], [`ErrorTracking`], [`Analytics`], [`Notification`], [`Ci`] | here | `ori-integrations` (ORI-T-0059 and later) |
-//! | [`ModelProvider`] | here | `ori-integrations`; `spec/LLD.md` section 2 does not say where, see its doc |
+//! | [`ModelProvider`] | here | not chosen: `spec/LLD.md` section 2 names no implementer, see its doc |
 //! | `AgentRuntime` | **in progress**: staged as ORI-T-0141, see below | `ori-runtime` (`AcpClient`, `HeadlessAdapter`) |
 //!
 //! # `AgentRuntime`: the move is in progress, staged as ORI-T-0141
@@ -480,9 +480,28 @@ pub trait VcsHost {
     /// (AICD §17). The adapter obtains the credential from the broker; it is
     /// never read from configuration.
     ///
+    /// **An [`AgentIdentity`] value is not proof that the identity was
+    /// registered.** `AgentIdentity::create` is a pure constructor, and since
+    /// it is declared in `ori-core` it is reachable from every crate that
+    /// depends on `ori-core`. The step that checks a new identity against the
+    /// others the event log knows (ADR-0001's cross-model refusal, in
+    /// `ori-broker`'s `registration` module) is one a caller can skip, and
+    /// nothing enforces mechanically that it did not; `registration.rs` names
+    /// that seam in its own module doc. So an implementation must not issue a
+    /// token on this value's word alone. It gets the credential from the
+    /// broker (`ori-broker` issues credentials) and does not mint one from
+    /// the identity's fields, and it refuses ([`AdapterError::Rejected`]) an
+    /// identity whose [`IdentityState`] is not `Active`. Today the broker's
+    /// issuance path does not itself check that the identity was registered
+    /// either (`issuance.rs` does not mention registration), so this
+    /// declaration cannot promise that a registered identity is the only kind
+    /// that reaches here; closing that seam is the job of whoever wires the
+    /// end-to-end identity path, and it is not closed by this declaration.
+    ///
     /// # Errors
     ///
-    /// [`AdapterError`] when the host cannot issue one.
+    /// [`AdapterError`] when the host cannot issue one, or refuses the
+    /// identity.
     fn identity_token(&self, identity: &AgentIdentity) -> Result<ScopedToken, AdapterError>;
 
     /// Creates `branch` from `from` (a branch name or a commit the host
@@ -1283,15 +1302,100 @@ mod tests {
     }
 
     #[test]
-    fn ori_t_0058_a_trait_object_can_be_shared_across_threads_when_the_holder_says_so() {
-        // The traits carry no Send or Sync bound; a holder that shares one
-        // names `dyn VcsHost + Send + Sync`, which a plain implementer meets.
-        let host: std::sync::Arc<dyn VcsHost + Send + Sync> = std::sync::Arc::new(FakeVcs);
-        let other = std::sync::Arc::clone(&host);
-        let events = std::thread::spawn(move || other.webhooks().events)
-            .join()
-            .expect("the thread finishes");
-        assert_eq!(events, host.webhooks().events);
+    fn ori_t_0058_the_slot_traits_carry_no_send_or_sync_bound_and_a_holder_adds_them_itself() {
+        // The traits' docs say they carry no `Send` or `Sync` bound and that a
+        // holder who shares one names `dyn Trait + Send + Sync`. This pins
+        // that about the trait objects themselves, not about a fake: it
+        // fails if a supertrait is added later, which is then a deliberate
+        // contract change and not an accident. Probes as in the tests above:
+        // an inherent const that exists only under a bound shadows a trait
+        // const that says `false`, and the controls show both answers occur.
+        use core::marker::PhantomData;
+
+        trait Probe {
+            const IS_SEND: bool;
+            const IS_SYNC: bool;
+        }
+        struct Wrap<T: ?Sized>(PhantomData<T>);
+        impl<T: ?Sized> Probe for Wrap<T> {
+            const IS_SEND: bool = false;
+            const IS_SYNC: bool = false;
+        }
+        impl<T: ?Sized + Send> Wrap<T> {
+            const IS_SEND: bool = true;
+        }
+        impl<T: ?Sized + Sync> Wrap<T> {
+            const IS_SYNC: bool = true;
+        }
+
+        // Controls: a type that is both, and one that is neither.
+        assert_eq!(
+            [Wrap::<String>::IS_SEND, Wrap::<String>::IS_SYNC],
+            [true, true]
+        );
+        assert_eq!(
+            [
+                Wrap::<std::rc::Rc<u8>>::IS_SEND,
+                Wrap::<std::rc::Rc<u8>>::IS_SYNC
+            ],
+            [false, false]
+        );
+
+        // The six slot traits, as bare trait objects: neither.
+        let bare = [
+            [Wrap::<dyn VcsHost>::IS_SEND, Wrap::<dyn VcsHost>::IS_SYNC],
+            [
+                Wrap::<dyn ErrorTracking>::IS_SEND,
+                Wrap::<dyn ErrorTracking>::IS_SYNC,
+            ],
+            [
+                Wrap::<dyn Analytics>::IS_SEND,
+                Wrap::<dyn Analytics>::IS_SYNC,
+            ],
+            [
+                Wrap::<dyn Notification>::IS_SEND,
+                Wrap::<dyn Notification>::IS_SYNC,
+            ],
+            [Wrap::<dyn Ci>::IS_SEND, Wrap::<dyn Ci>::IS_SYNC],
+            [
+                Wrap::<dyn ModelProvider>::IS_SEND,
+                Wrap::<dyn ModelProvider>::IS_SYNC,
+            ],
+        ];
+        assert_eq!(
+            bare,
+            [[false, false]; 6],
+            "a trait grew a Send or Sync bound"
+        );
+
+        // With the markers a holder adds: both. This is the form the docs name.
+        let marked = [
+            [
+                Wrap::<dyn VcsHost + Send + Sync>::IS_SEND,
+                Wrap::<dyn VcsHost + Send + Sync>::IS_SYNC,
+            ],
+            [
+                Wrap::<dyn ErrorTracking + Send + Sync>::IS_SEND,
+                Wrap::<dyn ErrorTracking + Send + Sync>::IS_SYNC,
+            ],
+            [
+                Wrap::<dyn Analytics + Send + Sync>::IS_SEND,
+                Wrap::<dyn Analytics + Send + Sync>::IS_SYNC,
+            ],
+            [
+                Wrap::<dyn Notification + Send + Sync>::IS_SEND,
+                Wrap::<dyn Notification + Send + Sync>::IS_SYNC,
+            ],
+            [
+                Wrap::<dyn Ci + Send + Sync>::IS_SEND,
+                Wrap::<dyn Ci + Send + Sync>::IS_SYNC,
+            ],
+            [
+                Wrap::<dyn ModelProvider + Send + Sync>::IS_SEND,
+                Wrap::<dyn ModelProvider + Send + Sync>::IS_SYNC,
+            ],
+        ];
+        assert_eq!(marked, [[true, true]; 6]);
     }
 
     // -----------------------------------------------------------------------
@@ -1510,60 +1614,292 @@ mod tests {
     // -----------------------------------------------------------------------
     // No IO, no workspace crate
     // -----------------------------------------------------------------------
+    //
+    // The real guarantee that `ori-core` imports no workspace crate is its
+    // manifest: `[dependencies]` is empty, so the compiler refuses to resolve
+    // `ori_store::x` or any other crate. The manifest test below pins that.
+    //
+    // What a manifest cannot say is that the standard library's IO is not
+    // reached, since `std` comes with every crate. The scan below is a lexical
+    // check for that, and for a workspace crate named in the source; it reads
+    // this crate's own non-test lines and cannot see through a macro, a path
+    // attribute or a spelling it does not know. It is a tripwire, not a proof,
+    // and it is tested against samples it must catch (and one it must not) so
+    // that a scan which finds nothing cannot pass for one that works.
 
-    /// The lines of `source` before its test module, with comments dropped.
-    fn code_lines(source: &str) -> Vec<&str> {
+    /// Every workspace crate, by the name a `use` gives it. The `ori_` prefix
+    /// check below catches a new one; this list is what a reader can audit.
+    const WORKSPACE_CRATES: [&str; 17] = [
+        "ori_core",
+        "ori_store",
+        "ori_memory",
+        "ori_broker",
+        "ori_runtime",
+        "ori_gates",
+        "ori_orchestrator",
+        "ori_flows",
+        "ori_watch",
+        "ori_mcp",
+        "ori_integrations",
+        "ori_notify",
+        "ori_calibration",
+        "ori_rpc",
+        "ori_engine",
+        "ori_cli",
+        "ori_desktop",
+    ];
+
+    /// Standard-library paths that reach the outside world: files, sockets,
+    /// processes, the environment, threads, clocks. A path is refused when it
+    /// is, or lies under, one of these.
+    const IO_PATHS: [&str; 9] = [
+        "std::fs",
+        "std::io",
+        "std::net",
+        "std::process",
+        "std::env",
+        "std::thread",
+        "std::os",
+        "std::time::SystemTime",
+        "std::time::Instant",
+    ];
+
+    /// `source` before its test module, comments dropped: full-line comments,
+    /// and a trailing `//` comment on a line with no string literal.
+    fn code_of(source: &str) -> String {
         source
             .split("\n#[cfg(test)]\nmod ")
             .next()
             .unwrap_or_default()
             .lines()
-            .map(str::trim_start)
+            .map(str::trim)
             .filter(|line| !line.starts_with("//"))
-            .collect()
+            .map(|line| match line.split_once("//") {
+                Some((code, _)) if !line.contains('"') => code,
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Splits `text` at commas that are not inside braces.
+    fn split_top_level(text: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0_u32;
+        let mut start = 0;
+        for (index, ch) in text.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parts.push(&text[start..index]);
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&text[start..]);
+        parts
+    }
+
+    /// Adds every path `tree` names under `prefix` to `out`, braces expanded:
+    /// `std::{fs, io::Read}` is `std::fs` and `std::io::Read`.
+    fn expand_use(prefix: &str, tree: &str, out: &mut Vec<String>) {
+        let tree = tree.trim();
+        if tree.is_empty() {
+            return;
+        }
+        if let (Some(open), Some(close)) = (tree.find('{'), tree.rfind('}')) {
+            let head = format!("{prefix}{}", &tree[..open]);
+            for part in split_top_level(&tree[open + 1..close]) {
+                expand_use(&head, part, out);
+            }
+            return;
+        }
+        // `x as y` names `x`; `a::self` names `a`.
+        let name = tree.split(" as ").next().unwrap_or(tree).trim();
+        let path = format!("{prefix}{name}");
+        out.push(path.strip_suffix("::self").unwrap_or(&path).to_owned());
+    }
+
+    /// Every path any `use` or `extern crate` in `code` names.
+    fn used_paths(code: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        for statement in code.split(';') {
+            let statement = statement.trim();
+            let statement = statement
+                .strip_prefix("pub ")
+                .or_else(|| {
+                    statement
+                        .strip_prefix("pub(crate) ")
+                        .or_else(|| statement.strip_prefix("pub(super) "))
+                })
+                .unwrap_or(statement)
+                .trim();
+            if let Some(tree) = statement.strip_prefix("use ") {
+                expand_use("", tree, &mut paths);
+            } else if let Some(name) = statement.strip_prefix("extern crate ") {
+                paths.push(name.split(" as ").next().unwrap_or(name).trim().to_owned());
+            }
+        }
+        paths
+    }
+
+    /// Whether `path` is, or lies under, `root`.
+    fn is_under(path: &str, root: &str) -> bool {
+        path == root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with("::"))
+    }
+
+    /// What in `source` (before its test module) reaches IO or a workspace
+    /// crate, as human-readable findings. Empty means the scan found nothing.
+    fn violations(source: &str) -> Vec<String> {
+        let code = code_of(source);
+        let mut found = Vec::new();
+
+        for path in used_paths(&code) {
+            let path = path.trim_start_matches("::");
+            let first = path.split("::").next().unwrap_or_default();
+            if first.starts_with("ori_") || WORKSPACE_CRATES.contains(&first) {
+                found.push(format!("imports the workspace crate in `{path}`"));
+            }
+            // `std` itself, a glob of it, or `std::time` whole: each brings
+            // IO modules or clocks in under a shorter name.
+            if matches!(path, "std" | "std::*" | "std::time" | "std::time::*") {
+                found.push(format!("`{path}` brings IO or a clock in by a short name"));
+            }
+            if IO_PATHS.iter().any(|root| is_under(path, root)) {
+                found.push(format!("imports `{path}`"));
+            }
+        }
+
+        // Inline paths and names, with no `use`: `std::fs::read(..)`,
+        // `ori_store::x`. Whole identifiers, so a longer name that merely
+        // contains one of these is not a hit.
+        let tokens: Vec<&str> = code
+            .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == ':'))
+            .filter(|token| !token.is_empty())
+            .collect();
+        for token in tokens {
+            let token = token.trim_start_matches("::");
+            if IO_PATHS.iter().any(|root| is_under(token, root)) {
+                found.push(format!("names `{token}` inline"));
+            }
+            let first = token.split("::").next().unwrap_or_default();
+            if first.starts_with("ori_") && first != "ori_" {
+                found.push(format!("names the workspace item `{token}` inline"));
+            }
+        }
+
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    #[test]
+    fn ori_t_0058_the_scan_for_io_and_workspace_crates_catches_what_it_is_for() {
+        // Each of these must be caught: brace imports, nested braces,
+        // `self`, renames, a leading `::`, a glob, an inline path, and every
+        // workspace crate by name.
+        let must_catch = [
+            "use std::{fs, io};",
+            "use std::{collections::BTreeSet, fs::File};",
+            "use std::io::{self, Read};",
+            "use std::{process::Command, env};",
+            "use std::fs as files;",
+            "pub use std::net::TcpStream;",
+            "use std::time::{Duration, SystemTime};",
+            "use std::time::*;",
+            "use std::*;",
+            "use std::time;",
+            "fn f() { let _ = std::fs::read(\"x\"); }",
+            "fn f() { std::thread::sleep(d); }",
+            "use ::ori_store::x;",
+            "extern crate ori_broker;",
+            "fn f() { ori_gates::run(); }",
+            "use ori_new_crate_nobody_listed::x;",
+        ];
+        for name in WORKSPACE_CRATES {
+            let source = format!("use {name}::thing;");
+            assert!(
+                !violations(&source).is_empty(),
+                "the scan missed a use of {name}"
+            );
+        }
+        for sample in must_catch {
+            assert!(!violations(sample).is_empty(), "the scan missed: {sample}");
+        }
+
+        // And this must not be caught: what the declarations actually use,
+        // plus a name that only contains a forbidden one.
+        let clean = "use core::fmt;\nuse std::collections::BTreeSet;\nuse crate::types::Id;\n\
+                     use std::{fmt::Debug, string::String};\n\
+                     // use std::fs; in a comment is not an import\n\
+                     fn f() { let std_fs_like = 1; let _ = std_fs_like; }\n\
+                     \n#[cfg(test)]\nmod tests { use std::fs; }";
+        assert_eq!(violations(clean), Vec::<String>::new());
     }
 
     #[test]
     fn ori_t_0058_the_declarations_import_no_workspace_crate_and_do_no_io() {
-        // Needles are assembled so that this test's own text is not the
-        // thing it finds; the scan is also limited to lines before the first
-        // test module.
-        let forbidden: Vec<String> = [
-            "std::fs",
-            "std::net",
-            "std::process",
-            "std::env",
-            "std::time::SystemTime",
-            "std::time::Instant",
-            "std::io",
-            "ori_store",
-            "ori_broker",
-            "ori_runtime",
-            "ori_integrations",
-            "ori_memory",
-            "ori_orchestrator",
-        ]
-        .iter()
-        .map(|needle| (*needle).to_owned())
-        .collect();
         for (name, source) in [
             ("adapters.rs", include_str!("adapters.rs")),
             ("adapters/identity.rs", include_str!("adapters/identity.rs")),
         ] {
-            let lines = code_lines(source);
+            let code = code_of(source);
             assert!(
-                lines.len() > 100,
-                "{name}: the scan saw {} code lines; it is not reading the file",
-                lines.len()
+                code.len() > 2000,
+                "{name}: the scan saw {} bytes of code; it is not reading the file",
+                code.len()
             );
-            for line in lines {
-                for needle in &forbidden {
-                    assert!(
-                        !line.contains(needle.as_str()),
-                        "{name} touches {needle}: {line}"
-                    );
+            assert!(
+                !used_paths(&code).is_empty(),
+                "{name}: the scan found no `use` at all; it is not parsing the file"
+            );
+            assert_eq!(violations(source), Vec::<String>::new(), "{name}");
+        }
+    }
+
+    #[test]
+    fn ori_t_0058_ori_core_declares_no_dependency_so_no_workspace_crate_can_be_imported() {
+        // The real guarantee, as opposed to the tripwire above: with nothing
+        // under `[dependencies]` (or the build or target sections) the
+        // compiler cannot resolve any other crate. A dev-dependency does not
+        // reach the library, but one on a workspace crate would build a second
+        // copy of this crate for tests, so that is refused too.
+        let manifest = include_str!("../Cargo.toml");
+        let mut section = String::new();
+        let mut problems = Vec::new();
+        let mut entries_seen = 0;
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                section = line.to_owned();
+            } else if !line.is_empty() && !line.starts_with('#') {
+                entries_seen += 1;
+                if section.contains("dev-dependencies") {
+                    if line.starts_with("ori-") || line.starts_with("ori_") {
+                        problems.push(format!("{section}: {line}"));
+                    }
+                } else if section.contains("dependencies") {
+                    problems.push(format!("{section}: {line}"));
                 }
             }
         }
+        assert!(
+            entries_seen > 0,
+            "the manifest scan read no entries; it is not reading Cargo.toml"
+        );
+        assert!(
+            manifest.contains("[dependencies]"),
+            "the manifest has no [dependencies] section to check"
+        );
+        assert_eq!(
+            problems,
+            Vec::<String>::new(),
+            "ori-core must declare no dependency (spec/LLD.md section 2). A new \
+             dependency is an escalation (new_dependency), not an edit to this test"
+        );
     }
 }
