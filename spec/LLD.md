@@ -73,7 +73,7 @@ flowchart TB
 | ori-orchestrator | `Lifecycle` (validated transitions), `LockTable`, `MergeQueue`, `Escalation`, `ClosingRules` | Call adapters directly except `VcsHost::merge` through `MergeQueue` |
 | ori-flows | `NewProductFlow` (G0..G7), `MigrationFlow` (M0..M5), `DocumentGenerator` (templates + assistant session), `Readiness`, `PhaseControl` | Skip a approval |
 | ori-watch | `TreeWatcher` (notify crate), `GitHooks` installer, `Attribution`, `UnattributedChange` | Modify the tree |
-| ori-mcp | `Host` (client to user servers), `Server` (tools in API_SPEC section 3), `ToolScopes` | Expose a tool not in API_SPEC |
+| ori-mcp | `Host` (client to user servers), `Server` (tools in API_SPEC section 3, and proxied tools on the conditions stated there), `ToolScopes`, `Ports` (the traits `Server` calls to reach the lock table, escalations, tickets, specification operations and a source of identifiers; declared in `ori-mcp`, implemented by `ori-engine`) | Expose an Ori tool beyond API_SPEC section 3; expose a proxied tool except on the four conditions of API_SPEC section 3, "Proxied tools" |
 | ori-integrations | Implementations of the five slot traits declared in `ori-core` (API_SPEC section 4): `reference/` adapters, one per slot, and `Webhooks` | Read the store |
 | ori-notify | `Router` (interrupt, window, digest), `Desktop`, `Digest` | Bypass the router |
 | ori-calibration | `Set`, `Measurement`, `Threshold` | Hard-code any absolute number |
@@ -85,6 +85,8 @@ The broker issues a credential; the runtime injects it at spawn and holds it no 
 The adapter traits of API_SPEC section 4 (`VcsHost`, `ErrorTracking`, `Analytics`, `Notification`, `Ci`, `AgentRuntime`, `ModelProvider`) are declared in `ori-core`, so that the crate that implements a trait and the crate that holds it as a trait object both reach it from below and need no dependency on each other. A trait declared there can name only types `ori-core` declares, so the types in the signatures are declared there too. A declaration states a contract and performs no IO; the "Must not" of "Do IO" bars an implementation, which performs it, and not a declaration. The five slot traits (`VcsHost`, `ErrorTracking`, `Analytics`, `Notification`, `Ci`) are implemented in `ori-integrations`; `AgentRuntime` is implemented in `ori-runtime`, the only crate that spawns processes.
 
 `ori-orchestrator` names `dyn VcsHost` through `ori-core`, which is how the carve-out in its "Must not" is expressed. The graph above draws no edge from `ori-orchestrator` to `ori-integrations` and none is added, so "Dependencies point downward only" holds as written. A crate that names an `ori-core` item depends on `ori-core` in its own manifest; that is a dependency on a crate below it, which the rule allows, and the graph does not draw it separately. The engine, the composition root (section 1), gives the merge queue the adapter that `ori-integrations` implements.
+
+The ports of `ori-mcp` are not adapter traits of API_SPEC section 4. `Server` reaches the lock table, escalations, tickets and specification operations through them because the graph above draws no edge from `ori-mcp` to `ori-orchestrator`, `ori-flows` or `ori-broker`, and none is added. `ori-engine`, which the graph draws above `ori-mcp`, implements the ports with the operations it holds. They are declared in `ori-mcp` and not in `ori-core`, so they add no edge to the graph. `ori-mcp` names `ori-core` items in its own manifest, which the paragraph above allows, and never depends on `ori-broker`.
 
 ## 3. Desktop app
 
