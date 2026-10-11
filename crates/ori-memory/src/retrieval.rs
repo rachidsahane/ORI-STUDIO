@@ -241,6 +241,15 @@
 //! fresh. A follow-up should give the tracker an accessor and retire this
 //! probe; it is recorded in the pull request report.
 //!
+//! **A divergence filed against a file.** The drift audit files a divergence
+//! against a whole file, not a section, and the index is keyed by section.
+//! `FreshnessTracker::check` of a section reads only the section's own
+//! record, so a section verified on its own would read fresh while
+//! `FreshnessTracker::list_stale` lists its file as diverged. A document item
+//! is therefore stale, with the file's divergence as its reason, when either
+//! its own path or its file's path carries a divergence; its last
+//! verification date is its own, when it has one.
+//!
 //! [`ContextItem::untrusted`] is `true` for a record the barrier marked
 //! untrusted and for every code map module (its names come from source files,
 //! which may be a dependency's), and `false` for a document of the canonical
@@ -281,6 +290,7 @@ use crate::freshness::StaleReason;
 use crate::indexer::Indexer;
 use crate::indexer::IndexerError;
 use crate::indexer::SearchHit;
+use crate::indexer::document_file;
 use crate::oplog::OperationalLog;
 use crate::oplog::OplogError;
 use crate::scope::Admitted;
@@ -1321,6 +1331,15 @@ fn module_lines(module: &Module) -> Vec<String> {
 /// The freshness of the indexed document at `path`, whose text now in the
 /// index is `current`, as the tracker finds it: AICD §25. See the module doc,
 /// "The date of a fresh document".
+///
+/// The tracker is asked twice about where a divergence could be on record:
+/// at the document's own path, and at its file's path. The drift audit files
+/// a divergence against a file, the `Document` of `spec/DATA_MODEL.md`
+/// section 2, and `FreshnessTracker::list_stale` lists the file as diverged
+/// (and readiness as false) while each section's own record still reads
+/// fresh, so a section verified on its own is stale while its file diverges
+/// (`crate::freshness`'s module doc). A verification recorded at the file's
+/// path makes no section fresh, and is not read here.
 fn verification_of_document(
     tracker: &FreshnessTracker,
     path: &str,
@@ -1332,7 +1351,9 @@ fn verification_of_document(
                 .to_owned(),
         };
     };
-    match tracker.check(path, text) {
+    let own = tracker.check(path, text);
+    let own_divergence = matches!(&own, Freshness::Stale(StaleReason::Divergence { .. }));
+    let base = match own {
         Freshness::Fresh => {
             // A fresh document's verified text equals `text`, so `probe`
             // differs from it and the tracker names the verification date.
@@ -1360,6 +1381,19 @@ fn verification_of_document(
                 last_verified_at,
             }
         }
+    };
+    let file = document_file(path);
+    if own_divergence || file == path {
+        return base;
+    }
+    // `check` answers a divergence before it compares any text, so any text
+    // will do here; only a divergence is read from the answer.
+    match tracker.check(file, "") {
+        Freshness::Stale(reason @ StaleReason::Divergence { .. }) => Verification::Stale {
+            reason: reason.divergence(),
+            last_verified_at: base.date(),
+        },
+        Freshness::Fresh | Freshness::Stale(_) => base,
     }
 }
 
@@ -1646,7 +1680,6 @@ impl<'a> Retrieval<'a> {
         focus: &[ModulePath],
     ) -> Result<DocumentGather, RetrievalError> {
         let index = Indexer::open(db)?;
-        let corpus = index.freshness_corpus()?;
         let limit = self.config.hits_per_module;
         let mut documents_covered = 0;
         let mut best: BTreeMap<String, SearchHit> = BTreeMap::new();
@@ -1674,6 +1707,12 @@ impl<'a> Retrieval<'a> {
         if documents_covered == 0 {
             notes.push(Note::IndexEmpty);
         }
+        // Read after the searches, never before: the searches and this read
+        // are not one transaction, and a sync between them must find a hit
+        // compared against the newer text, which reads as changed since its
+        // verification (stale) or as no longer in the corpus (unknown), never
+        // as fresh over text it was not verified against.
+        let corpus = index.freshness_corpus()?;
         let gathered = best
             .into_values()
             .map(|hit| Gathered {
@@ -2037,6 +2076,7 @@ mod tests {
     use crate::code_map::SpecScan;
     use crate::indexer::DocumentKind;
     use crate::indexer::IndexableDocument;
+    use crate::indexer::NotIndexed;
     use crate::scope::MemoryRequest;
     use crate::scope::Principal;
     use crate::scope::ProductStage;
@@ -2828,6 +2868,69 @@ mod tests {
                 .items()
                 .iter()
                 .any(|item| item.source() == Source::CodeMap)
+        );
+    }
+
+    #[test]
+    fn ori_t_0039_a_divergence_filed_against_a_file_makes_its_sections_stale() {
+        let mut w = world("t0039-file-divergence");
+        let file = spec_path("FIXTURE.md");
+        // The section was verified on its own (at 301, by the fixture). The
+        // drift audit files against the whole file.
+        w.tracker
+            .record_divergence(file.clone(), "the file disagrees with the code", at(400));
+        let corpus = Indexer::open(&w.p.db)
+            .expect("the index opens")
+            .freshness_corpus()
+            .expect("the corpus reads");
+        let report = w.tracker.list_stale(&corpus, &NotIndexed::default());
+        assert!(!report.is_ready(), "readiness is false for the file");
+        assert!(
+            report.stale.iter().any(|stale| stale.path == file
+                && matches!(stale.reason, StaleReason::Divergence { .. })),
+            "the tracker lists the file as diverged: {:?}",
+            report.stale
+        );
+        // The tracker's own answer for the section alone is the trap.
+        assert_eq!(
+            w.tracker
+                .check(&w.docs.section_m.path, &w.docs.section_m.freshness_text()),
+            Freshness::Fresh
+        );
+
+        let (_, package) = coder_package(&mut w);
+        let item_of = |package: &ContextPackage, path: &str| {
+            package
+                .items()
+                .iter()
+                .find(|item| matches!(item.provenance().origin(), Origin::Index { path: p } if p == path))
+                .cloned()
+                .unwrap_or_else(|| panic!("{path} is in the package"))
+        };
+        let section = item_of(&package, &w.docs.section_m.path);
+        assert!(
+            matches!(
+                section.verification(),
+                Verification::Stale { reason, last_verified_at: Some(when) }
+                    if reason.contains("the file disagrees with the code") && *when == at(301)
+            ),
+            "{:?}",
+            section.verification()
+        );
+        // A document of another file is untouched.
+        assert_eq!(
+            item_of(&package, &w.docs.adr_m.path).verification(),
+            &Verification::Verified { at: at(302) }
+        );
+
+        // A verification of the file ends its divergence, as for the
+        // tracker, and the section reads as verified again.
+        w.tracker
+            .record_verification(file, at(500), "the file's text");
+        let (_, package) = coder_package(&mut w);
+        assert_eq!(
+            item_of(&package, &w.docs.section_m.path).verification(),
+            &Verification::Verified { at: at(301) }
         );
     }
 
