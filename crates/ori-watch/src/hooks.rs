@@ -53,18 +53,54 @@
 //! # What is installed, and what happens to a hook already there
 //!
 //! A hook this module wrote carries a marker on its second line. A hook
-//! without the marker belongs to someone else and is never overwritten:
-//! it is renamed to `<hook>.ori-original` and the installed script runs it
-//! after recording (same arguments, same standard input, and its exit status
-//! is the hook's, so a `pre-push` that refuses a push still refuses it). The
-//! report says so ([`InstallOutcome::InstalledPreserving`]). If
-//! `<hook>.ori-original` already exists the installer refuses
-//! ([`HooksError::PreservedNameTaken`]) rather than choose which of two hooks
-//! to lose. Every refusal is decided for all four hooks before any file is
-//! written, and each file is written to a temporary name and renamed into
-//! place. Installing again changes nothing ([`InstallOutcome::Unchanged`]); a
-//! marked hook whose text differs, a changed spool for example, is rewritten
+//! without the marker belongs to someone else and is never overwritten. It is
+//! kept at `hooks/ori-original/<hook>`, under **its own file name**, and the
+//! installed script runs it after recording (same arguments, same standard
+//! input, and its exit status is the hook's, so a `pre-push` that refuses a
+//! push still refuses it). The file name matters: a hook that decides what to
+//! do from the name it was run under (`basename "$0"`, as hook managers do)
+//! would find a different name and run nothing, and exit zero, which silently
+//! drops a veto. What changes for such a hook is the directory it runs from:
+//! one level below `hooks/`, so a hook that finds its files by `$0`-relative
+//! path (`$(dirname "$0")/..`) finds a different place. A hook that is a
+//! relative symbolic link is kept as a link whose target is adjusted for that
+//! one level, so it still reaches what it stood for. The report says so
+//! ([`InstallOutcome::InstalledPreserving`]). If the preserved name is taken
+//! the installer refuses ([`HooksError::PreservedNameTaken`]) rather than
+//! choose which of two hooks to lose.
+//!
+//! The installation is built so that a hook of someone else's is not lost
+//! to a failure or to a second installer running at the same time:
+//!
+//! - Every refusal is decided for all four hooks before any file is written.
+//! - The script is written first, to a uniquely named temporary file in the
+//!   hooks directory (`create_new`, so no two writers share one).
+//! - The existing hook is then given its second name by `link(2)`, which fails
+//!   with "exists" rather than replace what is there, and only then is the
+//!   temporary renamed over the hook's name. There is no moment with no hook,
+//!   and a failure before the rename leaves the original where it was (the
+//!   second name made for it is removed).
+//! - A hook that was absent at the decision is put in place by `link(2)` too,
+//!   and a hook of the engine's that is rewritten is looked at again just
+//!   before the rename; a hook that appeared or changed meanwhile is refused
+//!   ([`HooksError::HookAppeared`]), not replaced. The remaining window is the
+//!   instruction between that last look and the rename of a hook the engine
+//!   itself wrote.
+//! - The installer needs hard links: a file system without them (some network
+//!   and removable ones) makes installation fail loudly instead of falling
+//!   back to a rename that could replace.
+//!
+//! Installing again changes nothing ([`InstallOutcome::Unchanged`]); a marked
+//! hook whose text differs, a changed spool for example, is rewritten
 //! ([`InstallOutcome::Updated`]).
+//!
+//! Everything read from the repository here is read as a plain file: a hook,
+//! `.git/config`, the spool log. None is read through a link, none can make a
+//! read wait on a pipe, and the handle that was opened is the one checked
+//! (`crate::watcher`'s `open_plain_file`). A `.git/config` that is a link, not
+//! a regular file or too long to read in full is refused
+//! ([`HooksError::ConfigNotReadable`]): whether `core.hooksPath` is set could
+//! not be established.
 //!
 //! # A hook that cannot reach the engine says so (AICD §14)
 //!
@@ -124,19 +160,24 @@ use std::fs;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ori_core::error::MethodologyRef;
 use ori_core::types::Timestamp;
 
+use crate::watcher::{PlainReadError, open_plain_file, read_plain_file};
+
 /// The file in the spool directory the hooks append to.
 pub const SPOOL_LOG_NAME: &str = "hook-events.log";
 
-/// The marker on the second line of every script this module writes.
-const MARKER: &str = "# ori-studio-hook v1";
+/// The marker on the second line of every script this module writes. A line
+/// that starts with it, whatever version follows, is the engine's own.
+const MARKER: &str = "# ori-studio-hook v";
 
-/// The suffix a preserved hook gets.
-const PRESERVED_SUFFIX: &str = ".ori-original";
+/// The directory beside the hooks that holds the hooks that were here before,
+/// each under its own file name.
+const PRESERVED_DIR: &str = "ori-original";
 
 /// The most of an existing hook or of `.git/config` that is read.
 const READ_CAP: u64 = 1024 * 1024;
@@ -248,6 +289,19 @@ pub enum HooksError {
         /// The path of the existing preserved hook.
         path: PathBuf,
     },
+    /// A hook appeared, or changed, between deciding what to do and doing it.
+    /// Nothing was overwritten; running the installation again decides afresh.
+    HookAppeared {
+        /// The hook's path.
+        path: PathBuf,
+    },
+    /// `.git/config` is a link, not a regular file, or too long to be read in
+    /// full, so whether `core.hooksPath` is set cannot be established, and
+    /// hooks installed without knowing might never run.
+    ConfigNotReadable {
+        /// The path.
+        path: PathBuf,
+    },
     /// The spool log is a link or not a regular file, so it is not read.
     SpoolLogNotAFile {
         /// The path.
@@ -268,8 +322,9 @@ impl HooksError {
     /// - [`HooksError::SpoolInsideTree`] cites AICD §23: a write into the
     ///   tree that no session made is the manual edit its golden rule forbids,
     ///   and the engine's own hook would be doing it.
-    /// - [`HooksError::HooksPathConfigured`] cites AICD §14: hooks that git
-    ///   will never run are installed and reporting nothing.
+    /// - [`HooksError::HooksPathConfigured`] and
+    ///   [`HooksError::ConfigNotReadable`] cite AICD §14: hooks that git will
+    ///   never run are installed and reporting nothing.
     /// - The rest cite AICD §13: git is the audit trail, and the installer
     ///   will not write through a link, over another actor's hook or into a
     ///   repository other than the one it was pointed at.
@@ -280,12 +335,13 @@ impl HooksError {
     pub fn methodology_ref(&self) -> Option<MethodologyRef> {
         let section = match self {
             Self::SpoolInsideTree { .. } => 23,
-            Self::HooksPathConfigured { .. } => 14,
+            Self::HooksPathConfigured { .. } | Self::ConfigNotReadable { .. } => 14,
             Self::GitDirNotADirectory { .. }
             | Self::SpoolNotPlain { .. }
             | Self::HooksDirNotADirectory { .. }
             | Self::HookNotAFile { .. }
             | Self::PreservedNameTaken { .. }
+            | Self::HookAppeared { .. }
             | Self::SpoolLogNotAFile { .. } => 13,
             Self::Root { .. } | Self::Io { .. } => return None,
         };
@@ -358,6 +414,20 @@ impl fmt::Display for HooksError {
                 path.display()
             )
             .and_then(|()| cite(f, self)),
+            Self::HookAppeared { path } => write!(
+                f,
+                "refused: a hook appeared or changed at {} while installing; nothing was \
+                 overwritten, run the installation again",
+                path.display()
+            )
+            .and_then(|()| cite(f, self)),
+            Self::ConfigNotReadable { path } => write!(
+                f,
+                "refused: {} is a link, not a regular file, or too long to read in full, so \
+                 whether core.hooksPath is set cannot be established",
+                path.display()
+            )
+            .and_then(|()| cite(f, self)),
             Self::SpoolLogNotAFile { path } => write!(
                 f,
                 "refused: the spool log {} is a link or not a regular file and is not read",
@@ -383,8 +453,8 @@ impl Error for HooksError {
 pub enum InstallOutcome {
     /// Nothing was there; the hook was written.
     Installed,
-    /// Another actor's hook was there. It was moved to `preserved` and the
-    /// installed script runs it after recording.
+    /// Another actor's hook was there. It is kept at `preserved`, under its
+    /// own file name, and the installed script runs it after recording.
     InstalledPreserving {
         /// Where the hook that was there before now lives.
         preserved: PathBuf,
@@ -578,28 +648,7 @@ impl GitHooks {
         })?;
         let mut outcomes = Vec::new();
         for (hook, plan) in plans {
-            let path = hooks_dir.join(hook.file_name());
-            let outcome = match plan {
-                Plan::Keep => InstallOutcome::Unchanged,
-                Plan::Write => {
-                    self.write_script(hook, &path)?;
-                    InstallOutcome::Installed
-                }
-                Plan::Rewrite => {
-                    self.write_script(hook, &path)?;
-                    InstallOutcome::Updated
-                }
-                Plan::Preserve => {
-                    let preserved = preserved_path(&path);
-                    fs::rename(&path, &preserved).map_err(|source| HooksError::Io {
-                        path: path.clone(),
-                        source,
-                    })?;
-                    self.write_script(hook, &path)?;
-                    InstallOutcome::InstalledPreserving { preserved }
-                }
-            };
-            outcomes.push((hook, outcome));
+            outcomes.push((hook, self.apply(hook, plan)?));
         }
         Ok(InstallReport { outcomes })
     }
@@ -634,7 +683,7 @@ impl GitHooks {
                     return Err(HooksError::HookNotAFile { path });
                 }
             };
-            let chains_to_original = fs::symlink_metadata(preserved_path(&path)).is_ok();
+            let chains_to_original = fs::symlink_metadata(preserved_path(&hooks_dir, hook)).is_ok();
             statuses.push(HookStatus {
                 hook,
                 state,
@@ -645,7 +694,8 @@ impl GitHooks {
     }
 
     fn plan(&self, hook: GitHook) -> Result<Plan, HooksError> {
-        let path = self.hooks_dir().join(hook.file_name());
+        let hooks_dir = self.hooks_dir();
+        let path = hooks_dir.join(hook.file_name());
         match self.examine(hook, &path)? {
             Examined::Absent => Ok(Plan::Write),
             Examined::Ours {
@@ -659,7 +709,22 @@ impl GitHooks {
                 }
             }
             Examined::Foreign => {
-                let preserved = preserved_path(&path);
+                let directory = hooks_dir.join(PRESERVED_DIR);
+                match fs::symlink_metadata(&directory) {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                            return Err(HooksError::HooksDirNotADirectory { path: directory });
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(HooksError::Io {
+                            path: directory,
+                            source,
+                        });
+                    }
+                }
+                let preserved = preserved_path(&hooks_dir, hook);
                 if fs::symlink_metadata(&preserved).is_ok() {
                     Err(HooksError::PreservedNameTaken { path: preserved })
                 } else {
@@ -688,10 +753,19 @@ impl GitHooks {
         if !metadata.is_file() {
             return Ok(Examined::Foreign);
         }
-        let (text, truncated) = read_text(path, READ_CAP).map_err(|source| HooksError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let (text, truncated) = match read_plain_file(path, READ_CAP) {
+            Ok(read) => read,
+            // Swapped for a link or a pipe since the look above: not ours.
+            Err(PlainReadError::Symlink | PlainReadError::NotARegularFile) => {
+                return Ok(Examined::Foreign);
+            }
+            Err(PlainReadError::Io(source)) => {
+                return Err(HooksError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
         if truncated || !is_ours(&text) {
             return Ok(Examined::Foreign);
         }
@@ -701,28 +775,132 @@ impl GitHooks {
         })
     }
 
-    fn write_script(&self, hook: GitHook, path: &Path) -> Result<(), HooksError> {
-        let temporary = self.hooks_dir().join(format!(
-            ".{}.ori-tmp-{}",
-            hook.file_name(),
-            std::process::id()
-        ));
-        let script = self.script_for(hook);
-        write_atomically(&temporary, path, script.as_bytes()).map_err(|source| {
-            let _ = fs::remove_file(&temporary);
-            HooksError::Io {
-                path: path.to_path_buf(),
-                source,
+    /// Does one hook's part of the installation: AICD §13.
+    ///
+    /// The script is written to a uniquely named temporary file first. Then,
+    /// by the plan:
+    ///
+    /// - [`Plan::Write`]: the temporary is hard-linked to the hook's name,
+    ///   which fails if anything is there now, so a hook that appeared since
+    ///   the plan is never replaced.
+    /// - [`Plan::Rewrite`]: the hook is looked at again; if it is still the
+    ///   engine's, the temporary is renamed over it.
+    /// - [`Plan::Preserve`]: the existing hook is hard-linked (a link is
+    ///   re-pointed, see `preserve`) to its place under `ori-original/`, which
+    ///   fails if that name is taken, so a preserved hook is never replaced,
+    ///   and then the temporary is renamed over the hook's name. At no moment
+    ///   is there no hook, and if anything fails before the rename the
+    ///   original is still in place.
+    fn apply(&self, hook: GitHook, plan: Plan) -> Result<InstallOutcome, HooksError> {
+        if matches!(plan, Plan::Keep) {
+            return Ok(InstallOutcome::Unchanged);
+        }
+        let hooks_dir = self.hooks_dir();
+        let path = hooks_dir.join(hook.file_name());
+        let temporary = self.write_temporary(hook)?;
+        let outcome = self.place(hook, plan, &temporary, &path, &hooks_dir);
+        // After a rename the temporary is gone; after a link it is a second
+        // name for the hook; after a refusal it is litter.
+        let _ = fs::remove_file(&temporary);
+        outcome
+    }
+
+    fn place(
+        &self,
+        hook: GitHook,
+        plan: Plan,
+        temporary: &Path,
+        path: &Path,
+        hooks_dir: &Path,
+    ) -> Result<InstallOutcome, HooksError> {
+        let io_error = |source| HooksError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        match plan {
+            Plan::Keep => Ok(InstallOutcome::Unchanged),
+            Plan::Write => {
+                link_new(temporary, path)?;
+                Ok(InstallOutcome::Installed)
             }
+            Plan::Rewrite => match self.examine(hook, path)? {
+                Examined::Ours { .. } => {
+                    fs::rename(temporary, path).map_err(io_error)?;
+                    Ok(InstallOutcome::Updated)
+                }
+                Examined::Absent => {
+                    link_new(temporary, path)?;
+                    Ok(InstallOutcome::Updated)
+                }
+                Examined::Foreign | Examined::Directory => Err(HooksError::HookAppeared {
+                    path: path.to_path_buf(),
+                }),
+            },
+            Plan::Preserve => {
+                let directory = hooks_dir.join(PRESERVED_DIR);
+                fs::create_dir_all(&directory).map_err(|source| HooksError::Io {
+                    path: directory.clone(),
+                    source,
+                })?;
+                let preserved = preserved_path(hooks_dir, hook);
+                preserve(path, &preserved)?;
+                if let Err(source) = fs::rename(temporary, path) {
+                    // The original is still in place; do not leave a second
+                    // name for it that would make the next run refuse.
+                    let _ = fs::remove_file(&preserved);
+                    return Err(io_error(source));
+                }
+                Ok(InstallOutcome::InstalledPreserving { preserved })
+            }
+        }
+    }
+
+    /// Writes the script for `hook` to a new, uniquely named file in the hooks
+    /// directory and returns its path.
+    fn write_temporary(&self, hook: GitHook) -> Result<PathBuf, HooksError> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let script = self.script_for(hook);
+        let hooks_dir = self.hooks_dir();
+        for _ in 0..32 {
+            let temporary = hooks_dir.join(format!(
+                ".{}.ori-tmp-{}-{}",
+                hook.file_name(),
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::SeqCst)
+            ));
+            match write_new_executable(&temporary, script.as_bytes()) {
+                Ok(()) => return Ok(temporary),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(HooksError::Io {
+                        path: temporary,
+                        source,
+                    });
+                }
+            }
+        }
+        Err(HooksError::Io {
+            path: hooks_dir,
+            source: io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "no unused temporary name after 32 tries",
+            ),
         })
     }
 
     fn refuse_if_hooks_path_is_configured(&self) -> Result<(), HooksError> {
         let config = self.git_dir.join("config");
-        let text = match read_text(&config, READ_CAP) {
-            Ok((text, _)) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
+        let text = match read_plain_file(&config, READ_CAP) {
+            Ok((text, false)) => text,
+            // Past the cap, a `hooksPath` could be in the part not read.
+            Ok((_, true)) | Err(PlainReadError::Symlink | PlainReadError::NotARegularFile) => {
+                return Err(HooksError::ConfigNotReadable { path: config });
+            }
+            Err(PlainReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(PlainReadError::Io(source)) => {
                 return Err(HooksError::Io {
                     path: config,
                     source,
@@ -736,18 +914,78 @@ impl GitHooks {
     }
 }
 
-/// Writes `bytes` to `temporary` (which must not exist), makes it executable
-/// and renames it over `path`, so a reader never sees half a script.
-fn write_atomically(temporary: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Creates `path`, which must not exist, writes `bytes` and makes it
+/// executable.
+fn write_new_executable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(temporary)?;
+        .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    make_executable(temporary)?;
-    fs::rename(temporary, path)
+    make_executable(path)
+}
+
+/// Gives `temporary` the name `path` if nothing has that name: a hard link
+/// fails with `AlreadyExists` where a rename would silently replace.
+fn link_new(temporary: &Path, path: &Path) -> Result<(), HooksError> {
+    match fs::hard_link(temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(HooksError::HookAppeared {
+                path: path.to_path_buf(),
+            })
+        }
+        Err(source) => Err(HooksError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Keeps the hook at `path` at `preserved`, which must not exist, without
+/// removing it from `path`: AICD §13.
+///
+/// A regular file gets a hard link, so both names are the same file. A
+/// symbolic link (on Unix) gets a new link with the same target, written
+/// relative to the directory one level down that `preserved` is in, because a
+/// relative target is read from the link's own directory. Both fail with
+/// `AlreadyExists` if `preserved` is taken, so no preserved hook is replaced.
+fn preserve(path: &Path, preserved: &Path) -> Result<(), HooksError> {
+    let result = preserve_unchecked(path, preserved);
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(HooksError::PreservedNameTaken {
+                path: preserved.to_path_buf(),
+            })
+        }
+        Err(source) => Err(HooksError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn preserve_unchecked(path: &Path, preserved: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        let target = fs::read_link(path)?;
+        let target = if target.is_relative() {
+            Path::new("..").join(target)
+        } else {
+            target
+        };
+        std::os::unix::fs::symlink(target, preserved)
+    } else {
+        fs::hard_link(path, preserved)
+    }
+}
+
+#[cfg(not(unix))]
+fn preserve_unchecked(path: &Path, preserved: &Path) -> io::Result<()> {
+    fs::hard_link(path, preserved)
 }
 
 enum Plan {
@@ -764,10 +1002,11 @@ enum Examined {
     Ours { current: bool, executable: bool },
 }
 
-fn preserved_path(hook_path: &Path) -> PathBuf {
-    let mut name = hook_path.as_os_str().to_os_string();
-    name.push(PRESERVED_SUFFIX);
-    PathBuf::from(name)
+/// Where the hook that was in `hooks_dir` before the engine's is kept: under
+/// its own file name, so a hook that reads `$0` to learn which hook it is
+/// still learns it.
+fn preserved_path(hooks_dir: &Path, hook: GitHook) -> PathBuf {
+    hooks_dir.join(PRESERVED_DIR).join(hook.file_name())
 }
 
 /// Whether `text` is a script this module wrote: AICD §13.
@@ -836,17 +1075,6 @@ fn resolve_leniently(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-fn read_text(path: &Path, limit: u64) -> io::Result<(String, bool)> {
-    let file = fs::File::open(path)?;
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    let truncated = u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit;
-    if truncated {
-        bytes.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-    }
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
-}
-
 #[cfg(unix)]
 fn is_executable(metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -892,14 +1120,15 @@ fn shell_quote(text: &str) -> String {
 
 /// The constant template, with `@HOOK@` and `@SPOOL@` the only holes.
 const HEADER: &str = "#!/bin/sh
-# ori-studio-hook v1: written by Ori Studio (ori-watch). The engine rewrites this file.
+# ori-studio-hook v2: written by Ori Studio (ori-watch). The engine rewrites this file.
 # Reports this git event to the engine by appending one line to the spool below,
-# then runs the hook that was here before Ori Studio (\"<this file>.ori-original\"), if any.
+# then runs the hook that was here before Ori Studio, if any: it is kept as
+# ori-original/<this file's name> beside this file, so it runs under its own name.
 # If the spool cannot be written this prints an error on standard error.
 ori_hook=@HOOK@
 ori_spool=@SPOOL@
 ori_log=\"$ori_spool/hook-events.log\"
-ori_original=\"$0.ori-original\"
+ori_original=\"$(dirname \"$0\")/ori-original/$ori_hook\"
 
 ori_warn() {
     printf 'ori-studio: ERROR: the %s hook could not report to the Ori Studio engine: %s\\n' \"$ori_hook\" \"$1\" >&2
@@ -1037,10 +1266,33 @@ pub struct SpoolDrain {
 /// engine persists [`HookSpool::offset`] and reopens with
 /// [`HookSpool::open_at`]; a reader opened at zero reads the whole log, which
 /// is what an engine that was down while a commit was made wants.
+///
+/// The log is opened without following a link and without waiting on a pipe,
+/// and the opened handle (not the path) is what is checked and read. A log
+/// that was replaced is detected by its identity (device and inode) on Unix as
+/// well as by its length; where the platform offers no identity (Windows), by
+/// length alone, so a replacement at least as long as the offset is read from
+/// the offset. The identity is remembered by the reader, not by the saved
+/// offset: a reader reopened with [`HookSpool::open_at`] adopts the log it
+/// finds, so a log replaced while the engine was down is read from the saved
+/// offset when it is long enough.
 #[derive(Debug)]
 pub struct HookSpool {
     log: PathBuf,
     offset: u64,
+    identity: Option<(u64, u64)>,
+}
+
+/// The device and inode of a file, where the platform has them.
+#[cfg(unix)]
+fn identity_of(metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity_of(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 impl HookSpool {
@@ -1056,6 +1308,7 @@ impl HookSpool {
         Self {
             log: spool_dir.join(SPOOL_LOG_NAME),
             offset,
+            identity: None,
         }
     }
 
@@ -1079,24 +1332,26 @@ impl HookSpool {
             path: self.log.clone(),
             source,
         };
-        let metadata = match fs::symlink_metadata(&self.log) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        let (mut file, metadata) = match open_plain_file(&self.log) {
+            Ok(opened) => opened,
+            Err(PlainReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(SpoolDrain::default());
             }
-            Err(error) => return Err(io_error(error)),
+            Err(PlainReadError::Io(error)) => return Err(io_error(error)),
+            Err(PlainReadError::Symlink | PlainReadError::NotARegularFile) => {
+                return Err(HooksError::SpoolLogNotAFile {
+                    path: self.log.clone(),
+                });
+            }
         };
-        if !metadata.is_file() {
-            return Err(HooksError::SpoolLogNotAFile {
-                path: self.log.clone(),
-            });
-        }
         let mut drain = SpoolDrain::default();
-        if metadata.len() < self.offset {
+        let identity = identity_of(&metadata);
+        let replaced = self.identity.is_some() && identity != self.identity;
+        if metadata.len() < self.offset || replaced {
             self.offset = 0;
             drain.restarted = true;
         }
-        let mut file = fs::File::open(&self.log).map_err(io_error)?;
+        self.identity = identity;
         file.seek(SeekFrom::Start(self.offset)).map_err(io_error)?;
         let mut chunk = Vec::new();
         file.take(DRAIN_BYTES_CAP as u64)
@@ -1193,6 +1448,11 @@ mod tests {
         (repo, spool)
     }
 
+    /// Where the installer keeps the hook that was in `hook`'s place before.
+    fn preserved(repo: &Path, hook: GitHook) -> PathBuf {
+        preserved_path(&repo.join(".git").join("hooks"), hook)
+    }
+
     fn hook_path(repo: &Path, hook: GitHook) -> PathBuf {
         repo.join(".git").join("hooks").join(hook.file_name())
     }
@@ -1275,7 +1535,12 @@ mod tests {
         assert_eq!(status[0].state, HookState::Foreign);
 
         let report = hooks.install().unwrap();
-        let preserved = preserved_path(&existing);
+        let preserved = preserved(&repo, GitHook::PostCommit);
+        assert_eq!(preserved.file_name().unwrap(), "post-commit");
+        assert_eq!(
+            preserved.parent().unwrap().file_name().unwrap(),
+            "ori-original"
+        );
         assert_eq!(
             report.outcomes[0],
             (
@@ -1302,7 +1567,9 @@ mod tests {
         let existing = hook_path(&repo, GitHook::PrePush);
         fs::create_dir_all(existing.parent().unwrap()).unwrap();
         fs::write(&existing, "#!/bin/sh\necho theirs\n").unwrap();
-        fs::write(preserved_path(&existing), "#!/bin/sh\necho older\n").unwrap();
+        let older = preserved(&repo, GitHook::PrePush);
+        fs::create_dir_all(older.parent().unwrap()).unwrap();
+        fs::write(&older, "#!/bin/sh\necho older\n").unwrap();
         let hooks = GitHooks::new(&repo, &spool).unwrap();
         let error = hooks.install().unwrap_err();
         assert!(
@@ -1340,7 +1607,7 @@ mod tests {
                 .unwrap()
                 .contains(&shell_quote(other.to_str().unwrap()))
         );
-        assert!(!preserved_path(&hook_path(&repo, GitHook::PostCommit)).exists());
+        assert!(!preserved(&repo, GitHook::PostCommit).exists());
     }
 
     #[cfg(unix)]
@@ -1449,26 +1716,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ori_t_0054_a_hook_that_is_a_symlink_is_someone_elses_and_is_moved_not_written_through() {
+    fn ori_t_0054_a_hook_that_is_a_symlink_is_someone_elses_and_is_kept_not_written_through() {
         let scratch = Scratch::new("hooklink");
         let (repo, spool) = skeleton(&scratch);
-        let target = scratch.path.join("shared-hook.sh");
+        // A relative link, as a team's shared hooks directory is usually
+        // wired: it is read from the link's own directory, which the
+        // preserved copy sits one level below.
+        let target = repo.join(".git").join("shared-hook.sh");
         fs::write(&target, "#!/bin/sh\necho shared\n").unwrap();
         let path = hook_path(&repo, GitHook::PostCommit);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&target, &path).unwrap();
+        std::os::unix::fs::symlink("../shared-hook.sh", &path).unwrap();
         GitHooks::new(&repo, &spool).unwrap().install().unwrap();
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             "#!/bin/sh\necho shared\n",
             "the link's target was written through"
         );
-        let preserved = preserved_path(&path);
+        let kept = preserved(&repo, GitHook::PostCommit);
         assert!(
-            fs::symlink_metadata(&preserved)
+            fs::symlink_metadata(&kept)
                 .unwrap()
                 .file_type()
                 .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(&kept).unwrap(),
+            "#!/bin/sh\necho shared\n",
+            "the preserved link no longer reaches the hook it stood for"
         );
         assert!(is_ours(&fs::read_to_string(&path).unwrap()));
     }
@@ -1616,6 +1891,259 @@ mod tests {
             matches!(error, HooksError::SpoolLogNotAFile { .. }),
             "{error}"
         );
+    }
+
+    /// Runs `work` on its own thread and fails, rather than hangs, if it does
+    /// not finish: a call that blocks forever must be a failing test.
+    fn within<T: Send + 'static>(what: &str, work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(work());
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what} did not return within 5 s: it blocked"))
+    }
+
+    /// The names in the hooks directory, sorted.
+    fn hook_dir_names(repo: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(repo.join(".git").join("hooks"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn ori_t_0054_a_preserved_hook_that_appears_after_the_plan_is_never_overwritten() {
+        let scratch = Scratch::new("raceolder");
+        let (repo, spool) = skeleton(&scratch);
+        let existing = hook_path(&repo, GitHook::PrePush);
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, "#!/bin/sh\necho theirs\n").unwrap();
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        let plan = hooks.plan(GitHook::PrePush).unwrap();
+        assert!(matches!(plan, Plan::Preserve));
+
+        // Between the plan and the work, an older preserved hook appears.
+        let older = preserved(&repo, GitHook::PrePush);
+        fs::create_dir_all(older.parent().unwrap()).unwrap();
+        fs::write(&older, "#!/bin/sh\necho older\n").unwrap();
+        let error = hooks.apply(GitHook::PrePush, plan).unwrap_err();
+        assert!(
+            matches!(error, HooksError::PreservedNameTaken { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&older).unwrap(),
+            "#!/bin/sh\necho older\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&existing).unwrap(),
+            "#!/bin/sh\necho theirs\n"
+        );
+        assert_eq!(hook_dir_names(&repo), vec!["ori-original", "pre-push"]);
+    }
+
+    #[test]
+    fn ori_t_0054_a_hook_that_appears_or_changes_after_the_plan_is_not_replaced() {
+        let scratch = Scratch::new("raceappear");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        let path = hook_path(&repo, GitHook::PostMerge);
+
+        // Absent at the plan, theirs by the work.
+        let plan = hooks.plan(GitHook::PostMerge).unwrap();
+        assert!(matches!(plan, Plan::Write));
+        fs::write(&path, "#!/bin/sh\necho theirs\n").unwrap();
+        let error = hooks.apply(GitHook::PostMerge, plan).unwrap_err();
+        assert!(matches!(error, HooksError::HookAppeared { .. }), "{error}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\necho theirs\n"
+        );
+        assert_eq!(hook_dir_names(&repo), vec!["post-merge"]);
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+
+        // Ours at the plan, theirs by the work.
+        fs::remove_file(&path).unwrap();
+        hooks.install().unwrap();
+        let other = GitHooks::new(&repo, &scratch.path.join("other-spool")).unwrap();
+        let plan = other.plan(GitHook::PostMerge).unwrap();
+        assert!(matches!(plan, Plan::Rewrite));
+        fs::write(&path, "#!/bin/sh\necho theirs, later\n").unwrap();
+        let error = other.apply(GitHook::PostMerge, plan).unwrap_err();
+        assert!(matches!(error, HooksError::HookAppeared { .. }), "{error}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "#!/bin/sh\necho theirs, later\n"
+        );
+        assert!(
+            !hook_dir_names(&repo)
+                .iter()
+                .any(|name| name.contains("ori-tmp")),
+            "a temporary file was left behind: {:?}",
+            hook_dir_names(&repo)
+        );
+    }
+
+    #[test]
+    fn ori_t_0054_concurrent_installs_never_lose_the_hook_that_was_there() {
+        for round in 0..20 {
+            let scratch = Scratch::new(&format!("concurrent{round}"));
+            let (repo, spool) = skeleton(&scratch);
+            let theirs = [
+                (GitHook::PostCommit, "#!/bin/sh\necho their post-commit\n"),
+                (GitHook::PrePush, "#!/bin/sh\necho their pre-push\n"),
+            ];
+            for (hook, text) in theirs {
+                let path = hook_path(&repo, hook);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, text).unwrap();
+                make_executable(&path).unwrap();
+            }
+            let hooks = std::sync::Arc::new(GitHooks::new(&repo, &spool).unwrap());
+            let results: Vec<_> = (0..6)
+                .map(|_| {
+                    let hooks = std::sync::Arc::clone(&hooks);
+                    std::thread::spawn(move || hooks.install())
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect();
+            for result in &results {
+                match result {
+                    Ok(_)
+                    | Err(
+                        HooksError::PreservedNameTaken { .. } | HooksError::HookAppeared { .. },
+                    ) => {}
+                    Err(other) => panic!("round {round}: an unexpected failure: {other}"),
+                }
+            }
+            assert!(
+                results.iter().any(Result::is_ok),
+                "round {round}: no install won"
+            );
+            for (hook, text) in theirs {
+                assert_eq!(
+                    fs::read_to_string(preserved(&repo, hook)).unwrap_or_default(),
+                    text,
+                    "round {round}: the hook that was there is not preserved"
+                );
+            }
+            // A last install settles whatever the losers left undone.
+            hooks.install().unwrap();
+            for status in hooks.status().unwrap() {
+                assert_eq!(
+                    status.state,
+                    HookState::Installed,
+                    "round {round}: {status:?}"
+                );
+            }
+            assert!(
+                !hook_dir_names(&repo)
+                    .iter()
+                    .any(|name| name.contains("ori-tmp")),
+                "round {round}: {:?}",
+                hook_dir_names(&repo)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_git_config_that_is_a_pipe_a_link_or_huge_is_refused_without_blocking() {
+        let scratch = Scratch::new("config");
+        let (repo, spool) = skeleton(&scratch);
+        let config = repo.join(".git").join("config");
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        let refuse = |hooks: &GitHooks, what: &str| {
+            let hooks = hooks.clone();
+            let error = within(what, move || hooks.install()).unwrap_err();
+            assert!(
+                matches!(error, HooksError::ConfigNotReadable { .. }),
+                "{what}: {error}"
+            );
+            assert_eq!(error.methodology_ref().unwrap().section, 14, "{what}");
+        };
+
+        // A named pipe: open(2) on it with no writer would wait for ever.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&config)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        refuse(&hooks, "install over a .git/config that is a pipe");
+        fs::remove_file(&config).unwrap();
+
+        // A link to a file that says hooksPath is not followed or believed.
+        let elsewhere = scratch.path.join("elsewhere.cfg");
+        fs::write(&elsewhere, "[core]\n\thooksPath = x\n").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &config).unwrap();
+        refuse(&hooks, "install over a .git/config that is a link");
+        fs::remove_file(&config).unwrap();
+
+        // Too long to read in full: a hooksPath could be past the cap.
+        let line = "# padding padding padding padding padding padding padding\n";
+        fs::write(&config, line.repeat((READ_CAP as usize / line.len()) + 8)).unwrap();
+        refuse(&hooks, "install over a .git/config longer than the cap");
+        assert!(
+            !repo.join(".git").join("hooks").exists(),
+            "nothing was written"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_spool_log_that_is_a_pipe_is_refused_without_blocking() {
+        let scratch = Scratch::new("logpipe");
+        let spool = scratch.dir("spool");
+        let status = std::process::Command::new("mkfifo")
+            .arg(spool.join(SPOOL_LOG_NAME))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let error = within("draining a log that is a pipe", move || {
+            HookSpool::open(&spool).drain()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, HooksError::SpoolLogNotAFile { .. }),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_log_replaced_by_a_longer_file_is_read_again_from_the_start() {
+        let scratch = Scratch::new("logswap");
+        let spool = scratch.dir("spool");
+        let log = spool.join(SPOOL_LOG_NAME);
+        fs::write(&log, "1\tpost-commit\ta\tb\n2\tpost-commit\tc\td\n").unwrap();
+        let mut reader = HookSpool::open(&spool);
+        let first = reader.drain().unwrap();
+        assert_eq!(first.events.len(), 2);
+        assert!(!first.restarted);
+
+        // A different file, longer than the offset, takes the log's name.
+        let replacement = spool.join("replacement");
+        fs::write(
+            &replacement,
+            "3\tpost-commit\te\tf\n4\tpost-commit\tg\th\n5\tpost-commit\ti\tj\n6\tpost-merge\t0\tk\n",
+        )
+        .unwrap();
+        fs::rename(&replacement, &log).unwrap();
+        let second = reader.drain().unwrap();
+        assert!(
+            second.restarted,
+            "a replaced log must be said to be restarted"
+        );
+        assert_eq!(second.events.len(), 4, "{second:?}");
+        assert_eq!(second.events[0].fields, vec!["e", "f"]);
     }
 
     // ---- the scripts, run by a real shell and by real git ----
@@ -1782,7 +2310,7 @@ mod tests {
         }
 
         #[test]
-        fn ori_p1_015_a_commit_in_a_linked_worktree_reaches_the_main_repositorys_hooks_and_refs() {
+        fn ori_t_0054_a_commit_in_a_linked_worktree_reaches_the_main_repositorys_hooks_and_refs() {
             use crate::watcher::{RefClass, RefPoller};
             let scratch = Scratch::new("linked");
             let repo = real_repo(&scratch);
@@ -1870,6 +2398,59 @@ mod tests {
                 stderr.contains("could not append"),
                 "silent failure: {stderr:?}"
             );
+        }
+
+        /// A hook manager that decides what to do from the name it was run
+        /// under (`basename "$0"`), as the reviewer's probe does.
+        const DISPATCHES_ON_ITS_NAME: &str = "#!/bin/sh
+hookName=$(basename \"$0\")
+case \"$hookName\" in
+  pre-push) echo \"manager: pre-push checks failed, refusing the push\" >&2; exit 1 ;;
+  *) echo \"manager: no hook configured for '$hookName', nothing to run\" >&2; exit 0 ;;
+esac
+";
+
+        #[test]
+        fn ori_t_0054_a_preserved_hook_that_dispatches_on_its_own_name_still_runs_and_still_vetoes()
+        {
+            let scratch = Scratch::new("basename");
+            let repo = real_repo(&scratch);
+            let spool = scratch.path.join("spool");
+            let hooks_dir = repo.join(".git").join("hooks");
+            fs::create_dir_all(&hooks_dir).unwrap();
+            for name in ["pre-push", "post-commit"] {
+                let path = hooks_dir.join(name);
+                fs::write(&path, DISPATCHES_ON_ITS_NAME).unwrap();
+                make_executable(&path).unwrap();
+            }
+            GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+
+            // post-commit: the preserved hook must be told it is post-commit.
+            let commit = git(&scratch, &repo, &["commit", "-q", "-m", "first"]);
+            let stderr = String::from_utf8_lossy(&commit.stderr).into_owned();
+            assert!(commit.status.success(), "{stderr}");
+            assert!(
+                stderr.contains("no hook configured for 'post-commit'"),
+                "the preserved hook ran under another name: {stderr:?}"
+            );
+
+            // pre-push: its veto must still stop the push.
+            let bare = scratch.dir("bare.git");
+            git_ok(&scratch, &bare, &["init", "-q", "--bare"]);
+            git_ok(
+                &scratch,
+                &repo,
+                &["remote", "add", "origin", bare.to_str().unwrap()],
+            );
+            let push = git(&scratch, &repo, &["push", "-q", "origin", "main"]);
+            let stderr = String::from_utf8_lossy(&push.stderr).into_owned();
+            assert!(
+                !push.status.success(),
+                "the preserved veto was dropped: {stderr:?}"
+            );
+            assert!(stderr.contains("pre-push checks failed"), "{stderr:?}");
+            // Ours recorded the push attempt before handing over.
+            assert!(log_of(&spool).contains("pre-push"));
         }
 
         #[test]
