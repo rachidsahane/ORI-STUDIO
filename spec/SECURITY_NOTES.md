@@ -9,6 +9,17 @@ Who may do what, where input is validated, how failure is handled. Names the tie
 3. **Engine ↔ integrations and providers.** Outbound only, to user-configured endpoints, with credentials from the broker per call. Inbound webhooks are verified by signature and treated as untrusted data.
 4. **Engine ↔ repository.** The engine reads the whole tree; humans write `spec/` only; agents write their worktree only; the merge queue alone merges.
 
+### Boundary 2 in phase 1: binding an MCP connection to a session
+
+A session's MCP identity is the session that was handed the connection's endpoint. The engine opens a local endpoint for one session alone and delivers it to that session, so the connection is bound to the session by construction and no field of any message can change the binding. There is no secret behind the endpoint: delivering it is the binding. The residual risk is this: in worktree-only mode, a hostile process running as the same user that learns another session's endpoint could speak as that session. The operator accepted that risk for phase 1 on 2026-10-11, on six conditions:
+
+1. The endpoint sits in a per-session directory of mode 0700.
+2. No secret is in its path.
+3. Tier 2 tickets refuse to start in worktree-only mode. This is the rule of "Failure handling" below ("Container runtime unavailable"; ORI-P1-032), not a new one. The condition is that the rule is enforced where a session is launched, and until it is, this condition is a dependency and not a fact.
+4. Container mode mounts only that session's endpoint (phase 2).
+5. Once the engine has a cryptographic random source, which it needs for identifiers anyway, the endpoint's name becomes unguessable.
+6. A later `ori-memory` ticket adds a role lookup to the scope enforcer, so that tools other than the memory tools do not rest on the engine's role alone.
+
 ## Auto mode and where control lives
 
 Agents are launched in their runtime's non-interactive mode and never see a permission prompt. Control does not disappear; it moves from dialogs to structure:
@@ -35,6 +46,7 @@ Permissions are a function of (actor, role, resource, action) evaluated in `ori-
 
 - All RPC parameters validated against the API schema before dispatch.
 - All MCP tool inputs validated and length-capped; free text from agents passes the sanitization barrier before storage.
+- Agent free text reaches storage through one public entry of the sanitization barrier, which returns a sealed sanitized field. The ports of `ori-mcp` accept that type and no plain string, so a plan, the question, recommendation and evidence of an escalation, and the content of a report cannot reach storage without passing the barrier, and code that skips the barrier does not compile. The sanitizer of a single field stays private to the barrier, so nothing else can make the sealed type.
 - All integration payloads (webhooks, polled data) parsed into typed structures; unparseable fields are dropped and counted, never stored raw except as evidence blobs.
 - Paths from any caller are canonicalized and checked against the product root; no path escapes.
 - Terminal input is passed to the PTY unmodified but logged; the terminal is a human surface, not an agent one.
