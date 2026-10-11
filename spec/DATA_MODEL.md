@@ -83,6 +83,7 @@ stateDiagram-v2
   InProgress --> Blocked: budget exceeded
   InProgress --> Escalated: trigger
   Blocked --> Queued: re-planned
+  InProgress --> Queued: engine recovery only
   Escalated --> InProgress: answered
   InProgress --> InReview: PR ready
   InReview --> InProgress: changes requested
@@ -92,6 +93,8 @@ stateDiagram-v2
   Closed --> [*]
 ```
 Invariants: category may be raised by an agent, lowered only by a human; a ticket cannot enter `Closed` without a `spec_update` event (or `no_change_needed`) and, if `kind` is `defect`, an accepted criterion referencing it; a ticket whose PR modified an existing test has an open `Escalation` before `InReview` can proceed.
+
+Recovery edge: `InProgress --> Queued` is the engine's move and no one else's. It is made only by the engine's recovery after a restart (`spec/runbooks/recover-engine.md`), for a ticket whose session was found `Running`; it is not a way for an agent, the lead or a human to requeue a ticket at will. It happens only once that session has been set `Killed` with reason `engine_restart`, every credential issuance of the session has been revoked, and its lock entries have been released (ORI-P1-031), and `session.recovered` is appended after it. It does not pass through `Blocked`: a ticket interrupted by an engine failure did not exhaust a budget, and `Blocked --> Queued` stays the move for a ticket that did, taken only when it is re-planned.
 
 ### Document
 ```mermaid
