@@ -2543,21 +2543,21 @@ mod divergence_origin_tests {
     fn ori_t_0040_record_verification_clears_the_unattributed_and_audit_divergences_and_never_a_filed_finding()
      {
         let mut tracker = FreshnessTracker::new();
-        tracker.record_divergence("spec/A.md", "unattributed", at(1));
-        tracker.record_audit_divergence("spec/A.md", "audit", at(2));
-        tracker.file_finding("spec/A.md", "filed", at(3));
+        tracker.record_divergence("spec/PRD.md", "unattributed", at(1));
+        tracker.record_audit_divergence("spec/PRD.md", "audit", at(2));
+        tracker.file_finding("spec/PRD.md", "filed", at(3));
         assert_eq!(
-            origins(&tracker, "spec/A.md"),
+            origins(&tracker, "spec/PRD.md"),
             [
                 DivergenceOrigin::Unattributed,
                 DivergenceOrigin::Audit,
                 DivergenceOrigin::Filed
             ]
         );
-        tracker.record_verification("spec/A.md", at(4), "text");
-        assert_eq!(origins(&tracker, "spec/A.md"), [DivergenceOrigin::Filed]);
+        tracker.record_verification("spec/PRD.md", at(4), "text");
+        assert_eq!(origins(&tracker, "spec/PRD.md"), [DivergenceOrigin::Filed]);
         assert!(matches!(
-            tracker.check("spec/A.md", "text"),
+            tracker.check("spec/PRD.md", "text"),
             Freshness::Stale(StaleReason::Divergence { .. })
         ));
     }
@@ -2565,37 +2565,37 @@ mod divergence_origin_tests {
     #[test]
     fn ori_t_0040_record_audit_verification_clears_only_the_audits_own_divergence() {
         let mut tracker = FreshnessTracker::new();
-        tracker.record_divergence("spec/A.md", "unattributed", at(1));
-        tracker.record_audit_divergence("spec/A.md", "audit", at(2));
-        tracker.file_finding("spec/A.md", "filed", at(3));
-        tracker.record_audit_verification("spec/A.md", at(4), "text");
+        tracker.record_divergence("spec/PRD.md", "unattributed", at(1));
+        tracker.record_audit_divergence("spec/PRD.md", "audit", at(2));
+        tracker.file_finding("spec/PRD.md", "filed", at(3));
+        tracker.record_audit_verification("spec/PRD.md", at(4), "text");
         assert_eq!(
-            origins(&tracker, "spec/A.md"),
+            origins(&tracker, "spec/PRD.md"),
             [DivergenceOrigin::Unattributed, DivergenceOrigin::Filed]
         );
 
         // With only the audit's own finding standing, the verification makes the
         // document fresh.
-        tracker.record_audit_divergence("spec/B.md", "audit", at(5));
-        assert!(tracker.check("spec/B.md", "text").is_stale());
-        tracker.record_audit_verification("spec/B.md", at(6), "text");
-        assert_eq!(tracker.check("spec/B.md", "text"), Freshness::Fresh);
+        tracker.record_audit_divergence("spec/LLD.md", "audit", at(5));
+        assert!(tracker.check("spec/LLD.md", "text").is_stale());
+        tracker.record_audit_verification("spec/LLD.md", at(6), "text");
+        assert_eq!(tracker.check("spec/LLD.md", "text"), Freshness::Fresh);
     }
 
     #[test]
     fn ori_t_0040_record_divergence_still_holds_one_slot_replaced_by_the_next_call() {
         let mut tracker = FreshnessTracker::new();
-        tracker.record_divergence("spec/A.md", "first", at(1));
-        tracker.record_divergence("spec/A.md", "second", at(2));
-        let standing = tracker.divergences("spec/A.md");
+        tracker.record_divergence("spec/PRD.md", "first", at(1));
+        tracker.record_divergence("spec/PRD.md", "second", at(2));
+        let standing = tracker.divergences("spec/PRD.md");
         assert_eq!(standing.len(), 1);
         assert_eq!(standing[0].description, "second");
         assert_eq!(standing[0].origin, DivergenceOrigin::Unattributed);
         // And with one divergence standing the reason carries its text untagged.
-        tracker.record_verification("spec/A.md", at(0), "x");
-        tracker.record_divergence("spec/A.md", "second", at(2));
+        tracker.record_verification("spec/PRD.md", at(0), "x");
+        tracker.record_divergence("spec/PRD.md", "second", at(2));
         assert_eq!(
-            tracker.check("spec/A.md", "x"),
+            tracker.check("spec/PRD.md", "x"),
             Freshness::Stale(StaleReason::Divergence {
                 description: "second".to_owned(),
                 detected_at: at(2)
@@ -2606,10 +2606,10 @@ mod divergence_origin_tests {
     #[test]
     fn ori_t_0040_the_audit_divergence_is_replaced_by_the_audit_and_never_replaces_a_filed_one() {
         let mut tracker = FreshnessTracker::new();
-        tracker.file_finding("spec/A.md", "filed", at(1));
-        tracker.record_audit_divergence("spec/A.md", "audit one", at(2));
-        tracker.record_audit_divergence("spec/A.md", "audit two", at(3));
-        let standing = tracker.divergences("spec/A.md");
+        tracker.file_finding("spec/PRD.md", "filed", at(1));
+        tracker.record_audit_divergence("spec/PRD.md", "audit one", at(2));
+        tracker.record_audit_divergence("spec/PRD.md", "audit two", at(3));
+        let standing = tracker.divergences("spec/PRD.md");
         assert_eq!(
             standing
                 .iter()
@@ -2622,23 +2622,23 @@ mod divergence_origin_tests {
     #[test]
     fn ori_t_0040_withdrawing_an_audit_divergence_creates_nothing_and_touches_nothing_else() {
         let mut tracker = FreshnessTracker::new();
-        assert!(!tracker.withdraw_audit_divergence("spec/never-seen.md"));
+        assert!(!tracker.withdraw_audit_divergence("spec/ROADMAP.md"));
         assert_eq!(tracker.tracked_count(), 0, "withdrawing records no path");
-        tracker.file_finding("spec/A.md", "filed", at(1));
-        assert!(!tracker.withdraw_audit_divergence("spec/A.md"));
-        tracker.record_audit_divergence("spec/A.md", "audit", at(2));
-        assert!(tracker.withdraw_audit_divergence("spec/A.md"));
-        assert_eq!(origins(&tracker, "spec/A.md"), [DivergenceOrigin::Filed]);
+        tracker.file_finding("spec/PRD.md", "filed", at(1));
+        assert!(!tracker.withdraw_audit_divergence("spec/PRD.md"));
+        tracker.record_audit_divergence("spec/PRD.md", "audit", at(2));
+        assert!(tracker.withdraw_audit_divergence("spec/PRD.md"));
+        assert_eq!(origins(&tracker, "spec/PRD.md"), [DivergenceOrigin::Filed]);
     }
 
     #[test]
     fn ori_t_0040_a_finding_identity_is_never_reused() {
         let mut tracker = FreshnessTracker::new();
-        let first = tracker.file_finding("spec/A.md", "one", at(1));
+        let first = tracker.file_finding("spec/PRD.md", "one", at(1));
         tracker
-            .resolve_finding("spec/A.md", first, "done", &human(), at(2))
+            .resolve_finding("spec/PRD.md", first, "done", &human(), at(2))
             .expect("resolves");
-        let second = tracker.file_finding("spec/A.md", "two", at(3));
+        let second = tracker.file_finding("spec/PRD.md", "two", at(3));
         assert_ne!(first, second);
         assert!(second.get() > first.get());
         assert_eq!(second.to_string(), format!("finding-{}", second.get()));
@@ -2647,11 +2647,11 @@ mod divergence_origin_tests {
     #[test]
     fn ori_t_0040_several_standing_divergences_are_listed_tagged_at_the_earliest_time() {
         let mut tracker = FreshnessTracker::new();
-        tracker.record_verification("spec/A.md", at(0), "text");
-        tracker.file_finding("spec/A.md", "filed words", at(5));
-        tracker.record_audit_divergence("spec/A.md", "audit words", at(9));
+        tracker.record_verification("spec/PRD.md", at(0), "text");
+        tracker.file_finding("spec/PRD.md", "filed words", at(5));
+        tracker.record_audit_divergence("spec/PRD.md", "audit words", at(9));
         assert_eq!(
-            tracker.check("spec/A.md", "text"),
+            tracker.check("spec/PRD.md", "text"),
             Freshness::Stale(StaleReason::Divergence {
                 description: "[drift audit] audit words; [filed finding] filed words".to_owned(),
                 detected_at: at(5),
@@ -2662,8 +2662,12 @@ mod divergence_origin_tests {
     #[test]
     fn ori_t_0040_a_filed_finding_on_a_document_the_walk_left_out_stays_listed_with_its_text() {
         let mut tracker = FreshnessTracker::new();
-        tracker.file_finding("spec/A.md", "a finding on a file nobody could read", at(1));
-        let left_out: NotIndexed = [("spec/A.md".to_owned(), SkipReason::Symlink)]
+        tracker.file_finding(
+            "spec/PRD.md",
+            "a finding on a file nobody could read",
+            at(1),
+        );
+        let left_out: NotIndexed = [("spec/PRD.md".to_owned(), SkipReason::Symlink)]
             .into_iter()
             .collect();
         let report = tracker.list_stale(&BTreeMap::new(), &left_out);
@@ -2679,13 +2683,13 @@ mod divergence_origin_tests {
     #[test]
     fn ori_t_0040_a_filed_finding_on_a_file_path_is_listed_beside_its_indexed_sections() {
         let mut tracker = FreshnessTracker::new();
-        tracker.record_audit_verification("spec/A.md#one", at(1), "section text");
-        tracker.file_finding("spec/A.md", "the file as a whole disagrees", at(2));
-        let current = corpus("spec/A.md#one", "section text");
+        tracker.record_audit_verification("spec/PRD.md#4-function-catalog", at(1), "section text");
+        tracker.file_finding("spec/PRD.md", "the file as a whole disagrees", at(2));
+        let current = corpus("spec/PRD.md#4-function-catalog", "section text");
         let report = tracker.list_stale(&current, &NotIndexed::default());
         assert_eq!(report.documents_covered, 1);
         assert!(!report.is_ready());
-        assert_eq!(report.stale[0].path, "spec/A.md");
+        assert_eq!(report.stale[0].path, "spec/PRD.md");
         assert!(matches!(
             report.stale[0].reason,
             StaleReason::Divergence { .. }
