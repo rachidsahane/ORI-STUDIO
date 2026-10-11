@@ -162,17 +162,20 @@
 //! only if nothing was recorded after the token was taken: a loss during the
 //! comparison is not covered by it.
 //!
-//! **A backend that stops is reported.** When the backend's thread ends (notify
-//! panics in it, for one), the queue disconnects, [`TreeWatcher::next_batch`]
+//! **On Linux, a backend that stops is reported.** There the handler is the
+//! only owner of the queue's sender, so when the backend's thread ends (notify
+//! panics in it, for one) the queue disconnects, [`TreeWatcher::next_batch`]
 //! returns [`WatchError::Stopped`] and [`TreeWatcher::health`] reads
 //! [`Health::Stopped`]; a stopped watcher is replaced, not reconciled. That
 //! holds only because the watcher keeps no sender of its own in a production
 //! build; a held sender would keep the queue connected for ever and a dead
 //! backend would read as a quiet tree. Dropping a watcher whose backend is dead
-//! cannot panic the caller either: notify's drop `unwrap`s a send to the dead
-//! thread, and [`TreeWatcher`]'s own drop catches that panic (the panic hook
-//! still prints it). That holds under `panic = "unwind"`, the default, which
-//! this workspace does not change.
+//! cannot panic the caller either: notify's `INotifyWatcher::drop` `unwrap`s a
+//! send to the dead thread, and [`TreeWatcher`]'s own drop catches that panic
+//! (the panic hook still prints it). That holds under `panic = "unwind"`, the
+//! default, which this crate refuses to be built without (a `compile_error!`
+//! beside the drop says why). **This is a Linux guarantee only**: see the next
+//! section for macOS and Windows.
 //!
 //! # What `Health::Watching` does not vouch for
 //!
@@ -192,6 +195,19 @@
 //! - On Windows, notify does not flag a `ReadDirectoryChangesW` buffer
 //!   overflow, and a directory whose watch hits an unidentified error is
 //!   unwatched and only logged (`windows.rs`, `handle_event`).
+//! - On macOS and Windows, a backend that stops is **not** reported. notify
+//!   runs the handler inside an `extern "C"` callback on macOS
+//!   (`fsevent.rs`, `callback`) and an `extern "system"` completion routine on
+//!   Windows (`windows.rs`, `handle_event`); since Rust 1.81 a panic that
+//!   crosses such a boundary aborts the process, so a panic in the backend
+//!   there ends the engine rather than reaching [`WatchError::Stopped`]. And
+//!   both backends keep a second owner of the handler (an
+//!   `Arc<Mutex<dyn EventHandler>>` in `fsevent.rs` and `windows.rs`, cloned
+//!   per request on Windows), so a backend that ends without a panic does not
+//!   disconnect the queue: [`TreeWatcher::next_batch`] keeps answering as for a
+//!   quiet tree, and [`Health::Stopped`] and [`WatchError::Stopped`] are never
+//!   reached. The only check there is the periodic comparison of the tree with
+//!   git.
 //! - A file created in a new directory after this module's scan of it and
 //!   before the backend's watch on it is registered. The settle delay before
 //!   the scan narrows that window; it does not close it.
@@ -407,7 +423,10 @@ pub enum Health {
     MayHaveMissedChanges(MissedChanges),
     /// The backend's thread has ended and no further event will ever arrive.
     /// Set when [`TreeWatcher::next_batch`] sees it, and for good: a stopped
-    /// watcher is replaced, not reconciled.
+    /// watcher is replaced, not reconciled. **Reachable on Linux only**: on
+    /// macOS and Windows notify keeps a second owner of the handler, so the
+    /// queue does not disconnect (see the module doc's "What
+    /// `Health::Watching` does not vouch for").
     Stopped,
 }
 
@@ -505,8 +524,10 @@ pub enum WatchError {
         /// What the backend said.
         message: String,
     },
-    /// The backend thread ended; no further event will ever arrive. Never
-    /// silent: the consumer is told here.
+    /// The backend thread ended; no further event will ever arrive. On Linux
+    /// the consumer is told here and never left to read it as a quiet tree.
+    /// On macOS and Windows this is not returned: see the module doc's "What
+    /// `Health::Watching` does not vouch for".
     Stopped,
     /// Reading the repository's metadata failed.
     Io {
@@ -635,8 +656,9 @@ struct Shared {
     /// Events the queue had no room for.
     dropped: AtomicU32,
     /// Makes the backend's thread die at its next event, so a test can watch
-    /// the consumer find out.
-    #[cfg(test)]
+    /// the consumer find out. Linux only: on macOS and Windows a panic in the
+    /// handler aborts the process (the module doc says why).
+    #[cfg(all(test, target_os = "linux"))]
     panic_in_backend: std::sync::atomic::AtomicBool,
 }
 
@@ -663,9 +685,10 @@ pub struct TreeWatcher {
     generation: u64,
     /// A second sender, so a test can put a notice on the queue as the backend
     /// would. It exists only in test builds: in a production build the
-    /// backend's handler holds the only sender, so the queue disconnects, and
-    /// [`WatchError::Stopped`] is returned, the moment the backend's thread
-    /// ends. A sender held here would keep it connected for ever.
+    /// backend's handler holds the only sender, so on Linux the queue
+    /// disconnects, and [`WatchError::Stopped`] is returned, the moment the
+    /// backend's thread ends. A sender held here would keep it connected for
+    /// ever.
     #[cfg(test)]
     injector: Option<SyncSender<Raw>>,
     /// Held for its `Drop`: dropping it stops the backend thread. Taken in
@@ -673,8 +696,19 @@ pub struct TreeWatcher {
     backend: Option<RecommendedWatcher>,
 }
 
+// `TreeWatcher`'s drop relies on unwinding to survive notify's own panicking
+// drop (below). Under `panic = "abort"` that panic would abort the engine, so
+// the build is refused rather than left to do it.
+#[cfg(panic = "abort")]
+compile_error!(
+    "ori-watch needs panic = \"unwind\": TreeWatcher's Drop catches the panic that notify's \
+     INotifyWatcher::drop raises when its thread is dead, and under panic = \"abort\" that \
+     panic would abort the engine"
+);
+
 impl Drop for TreeWatcher {
-    /// Stops the backend, and survives a backend that is already dead.
+    /// Stops the backend, and survives a backend that is already dead (on
+    /// Linux; the other backends' drops do not unwrap a send).
     ///
     /// notify's `INotifyWatcher::drop` does `self.channel.send(Shutdown).unwrap()`
     /// ("we expect the event loop to live"). If the event loop's thread has
@@ -730,7 +764,7 @@ impl TreeWatcher {
         let handler_shared = Arc::clone(&shared);
         let mut renames = RenameTracking::default();
         let handler = move |result: notify::Result<Event>| {
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             if handler_shared.panic_in_backend.load(Ordering::SeqCst) {
                 panic!("test: the backend's thread dies here");
             }
@@ -823,7 +857,8 @@ impl TreeWatcher {
     ///
     /// # Errors
     ///
-    /// [`WatchError::Stopped`] when the backend thread has ended.
+    /// [`WatchError::Stopped`] when the backend thread has ended (Linux only;
+    /// see the module doc).
     pub fn next_batch(&mut self, wait: Duration) -> Result<Option<Batch>, WatchError> {
         let first = match self.receiver.recv_timeout(wait) {
             Ok(raw) => Some(raw),
@@ -889,7 +924,7 @@ impl TreeWatcher {
     /// handler (the only other sender) is dropped with the backend, and so is
     /// the injector, which leaves the production path to find the queue
     /// disconnected.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     fn kill_backend_thread(&mut self) {
         self.shared.panic_in_backend.store(true, Ordering::SeqCst);
         self.injector = None;
@@ -1469,20 +1504,8 @@ impl RefPoller {
     /// a pipe, [`WatchError::UnsupportedRefStorage`] when the repository uses
     /// the reftable format, [`WatchError::Io`] when the refs cannot be read.
     pub fn open(repo_root: &Path) -> Result<Self, WatchError> {
-        let git_dir = repo_root.join(".git");
-        let metadata = fs::symlink_metadata(&git_dir).map_err(|source| WatchError::Io {
-            path: git_dir.clone(),
-            source,
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(WatchError::GitDirNotADirectory { path: git_dir });
-        }
-        let reftable = git_dir.join("reftable");
-        if fs::symlink_metadata(&reftable).is_ok() {
-            return Err(WatchError::UnsupportedRefStorage { path: reftable });
-        }
         let mut poller = Self {
-            git_dir,
+            git_dir: repo_root.join(".git"),
             last: BTreeMap::new(),
         };
         poller.last = poller.snapshot()?.refs;
@@ -1553,18 +1576,16 @@ impl RefPoller {
     /// the prune or not at all, and `packed-refs`, read after, then holds
     /// them. `between` is where a test packs refs.
     fn snapshot_with(&self, between: &mut dyn FnMut()) -> Result<Snapshot, WatchError> {
+        // Every snapshot, not only the first: `.git` replaced by a link after
+        // `open` would otherwise be read through on every later poll.
+        check_git_dir(&self.git_dir)?;
         let mut skipped = Vec::new();
         let mut incomplete = false;
 
         let head = self.git_dir.join("HEAD");
         let (text, too_long) = match read_plain_file(&head, REF_FILE_BYTES_CAP) {
             Ok(read) => read,
-            Err(PlainReadError::Symlink | PlainReadError::NotARegularFile) => {
-                return Err(WatchError::RefStorageNotPlain { path: head });
-            }
-            Err(PlainReadError::Io(source)) => {
-                return Err(WatchError::Io { path: head, source });
-            }
+            Err(error) => return Err(head_error(head, error)),
         };
         if too_long {
             return Err(WatchError::Io {
@@ -1735,6 +1756,39 @@ impl RefPoller {
     }
 }
 
+/// Whether `git_dir` is still the repository's own directory: a real
+/// directory, not a link and not a file, in the ref format this poller reads.
+///
+/// Called on every snapshot, because the directory can be replaced after the
+/// poller was opened.
+fn check_git_dir(git_dir: &Path) -> Result<(), WatchError> {
+    let metadata = fs::symlink_metadata(git_dir).map_err(|source| WatchError::Io {
+        path: git_dir.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(WatchError::GitDirNotADirectory {
+            path: git_dir.to_path_buf(),
+        });
+    }
+    let reftable = git_dir.join("reftable");
+    if fs::symlink_metadata(&reftable).is_ok() {
+        return Err(WatchError::UnsupportedRefStorage { path: reftable });
+    }
+    Ok(())
+}
+
+/// What a failed read of `HEAD` is: a refusal if `HEAD` is not a plain file
+/// (AICD §13), an I/O error otherwise.
+fn head_error(head: PathBuf, error: PlainReadError) -> WatchError {
+    match error {
+        PlainReadError::Symlink | PlainReadError::NotARegularFile => {
+            WatchError::RefStorageNotPlain { path: head }
+        }
+        PlainReadError::Io(source) => WatchError::Io { path: head, source },
+    }
+}
+
 /// Keeps at most [`REF_VALUE_CAP`] bytes of `value`, on a character boundary.
 fn cap_value(value: &str) -> String {
     let value = value.trim();
@@ -1784,6 +1838,33 @@ mod raw_open_flags {
     pub(super) const O_NOFOLLOW: i32 = 0o100_000;
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     pub(super) const O_NONBLOCK: i32 = 0o4_000;
+    /// What `open(2)` with `O_NOFOLLOW` fails with on a symbolic link.
+    #[cfg(target_os = "macos")]
+    pub(super) const ELOOP: i32 = 62;
+    #[cfg(target_os = "linux")]
+    pub(super) const ELOOP: i32 = 40;
+}
+
+/// Whether `error` is `open(2)` refusing a symbolic link under `O_NOFOLLOW`.
+/// (`io::ErrorKind::FilesystemLoop` would say it, but is unstable.)
+fn refused_a_link(error: &io::Error) -> bool {
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    ))]
+    {
+        error.raw_os_error() == Some(raw_open_flags::ELOOP)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 /// Opens `path` for reading without following a final link and without
@@ -1844,7 +1925,26 @@ pub(crate) fn open_plain_file(path: &Path) -> Result<(fs::File, fs::Metadata), P
         Ok(_) => {}
         Err(error) => return Err(PlainReadError::Io(error)),
     }
-    let file = open_without_following(path).map_err(PlainReadError::Io)?;
+    open_handle(path)
+}
+
+/// The open and the check of the opened handle, without the look at the path
+/// that [`open_plain_file`] makes first.
+///
+/// The look at the path refuses every link and pipe that is already in place,
+/// so on its own it would pass every static test whatever flags the open
+/// carries. This is what stands between a path swapped for a link or a pipe
+/// *after* that look and the read, and it is a function of its own so a test
+/// can call it with nothing in front of it. A refused link is
+/// [`PlainReadError::Symlink`] (`O_NOFOLLOW` fails with `ELOOP`); a pipe opens at once, because of
+/// `O_NONBLOCK`, and the handle's own metadata refuses it as
+/// [`PlainReadError::NotARegularFile`].
+fn open_handle(path: &Path) -> Result<(fs::File, fs::Metadata), PlainReadError> {
+    let file = match open_without_following(path) {
+        Ok(file) => file,
+        Err(error) if refused_a_link(&error) => return Err(PlainReadError::Symlink),
+        Err(error) => return Err(PlainReadError::Io(error)),
+    };
     let metadata = file.metadata().map_err(PlainReadError::Io)?;
     if metadata.file_type().is_symlink() {
         return Err(PlainReadError::Symlink);
@@ -2640,6 +2740,12 @@ mod tests {
         assert_eq!(watcher.health(), Health::Watching);
     }
 
+    // Linux only. The test kills the backend by panicking in notify's handler
+    // call; on macOS and Windows that call is inside an `extern "C"` or
+    // `extern "system"` function, a panic across which aborts the whole test
+    // binary, and the queue would not disconnect anyway (the module doc says
+    // why).
+    #[cfg(target_os = "linux")]
     #[test]
     fn ori_t_0054_a_dead_backend_is_reported_as_stopped_never_as_a_quiet_tree() {
         let scratch = Scratch::new("dead");
@@ -3038,7 +3144,9 @@ mod tests {
     // ---- the review round: links, pipes, renames, ordering ----
 
     /// Runs `work` on its own thread and fails, rather than hangs, if it does
-    /// not finish: a call that blocks for ever must be a failing test.
+    /// not finish: a call that blocks for ever must be a failing test. Used by
+    /// the tests that make a pipe, so Unix only.
+    #[cfg(unix)]
     fn within<T: Send + 'static>(what: &str, work: impl FnOnce() -> T + Send + 'static) -> T {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -3059,7 +3167,10 @@ mod tests {
     }
 
     /// A file with something a user would not want in an event, standing in
-    /// for a `.env` line.
+    /// for a `.env` line. Used by the tests that make a link, so Unix only.
+    /// The value is short on purpose: `scripts/secret-scan.sh` flags twenty or
+    /// more characters after an `=`.
+    #[cfg(unix)]
     const SECRET: &str = "API_KEY=hunter2";
 
     #[cfg(unix)]
@@ -3326,5 +3437,99 @@ mod tests {
             "the temporary was reported although it never outlived the save: {paths:?}"
         );
         assert!(seen.transient >= 1, "{seen:?}");
+    }
+    /// The tests of the open's own flags, on the platforms they are verified
+    /// for (`raw_open_flags`). Elsewhere the open is a plain one and these
+    /// would fail by design.
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    ))]
+    mod open_flags {
+        use super::*;
+
+        #[test]
+        fn ori_t_0054_the_open_flags_alone_refuse_a_link_and_do_not_wait_on_a_pipe() {
+            let scratch = Scratch::new("flags");
+            let target = scratch.path.join("target.txt");
+            fs::write(&target, format!("{SECRET}\n")).unwrap();
+            let link = scratch.path.join("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+
+            // The path look in front of the open is not made here, so these
+            // are `O_NOFOLLOW` and `O_NONBLOCK` and nothing else.
+            assert!(open_handle(&target).is_ok(), "a plain file must still open");
+            let refused_link = open_handle(&link).unwrap_err();
+            assert!(
+                matches!(refused_link, PlainReadError::Symlink),
+                "the open followed a link: {refused_link:?}"
+            );
+
+            // A pipe with no writer: without `O_NONBLOCK` this open waits for
+            // ever. With it the open returns, and the handle is refused.
+            let fifo = scratch.path.join("fifo");
+            mkfifo(&fifo);
+            let fifo_for_open = fifo.clone();
+            let refused_pipe = within("opening a pipe with the path look left out", move || {
+                open_handle(&fifo_for_open)
+            })
+            .unwrap_err();
+            assert!(
+                matches!(refused_pipe, PlainReadError::NotARegularFile),
+                "{refused_pipe:?}"
+            );
+
+            // A link to a pipe is refused as a link, before the pipe is opened.
+            let fifo_link = scratch.path.join("fifo-link");
+            std::os::unix::fs::symlink(&fifo, &fifo_link).unwrap();
+            let link_to_pipe =
+                within("opening a link to a pipe", move || open_handle(&fifo_link)).unwrap_err();
+            assert!(
+                matches!(link_to_pipe, PlainReadError::Symlink),
+                "{link_to_pipe:?}"
+            );
+
+            // And what a caller makes of those refusals carries its reason.
+            for error in [refused_link, refused_pipe, link_to_pipe] {
+                let refusal = head_error(scratch.path.join("HEAD"), error);
+                assert!(matches!(refusal, WatchError::RefStorageNotPlain { .. }));
+                assert_eq!(refusal.methodology_ref().unwrap().section, 13);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_git_dir_replaced_by_a_link_after_open_is_refused_by_every_later_poll() {
+        let scratch = Scratch::new("gitswap");
+        let repo = fake_repo(&scratch);
+        let mut poller = RefPoller::open(&repo).unwrap();
+        assert!(poller.poll().unwrap().changes.is_empty());
+
+        // The repository's `.git` is moved away and a link to it put back.
+        let moved = scratch.path.join("moved-git");
+        fs::rename(repo.join(".git"), &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, repo.join(".git")).unwrap();
+        let error = poller.poll().unwrap_err();
+        assert!(
+            matches!(error, WatchError::GitDirNotADirectory { .. }),
+            "{error}"
+        );
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+    }
+
+    #[test]
+    fn ori_t_0054_a_repository_converted_to_reftable_after_open_is_refused_not_polled_as_empty() {
+        let scratch = Scratch::new("reftableswap");
+        let repo = fake_repo(&scratch);
+        let mut poller = RefPoller::open(&repo).unwrap();
+        fs::create_dir_all(repo.join(".git").join("reftable")).unwrap();
+        let error = poller.poll().unwrap_err();
+        assert!(
+            matches!(error, WatchError::UnsupportedRefStorage { .. }),
+            "{error}"
+        );
+        assert_eq!(error.methodology_ref().unwrap().section, 14);
     }
 }
