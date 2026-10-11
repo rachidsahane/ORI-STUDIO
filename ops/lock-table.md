@@ -798,3 +798,23 @@ Written by the lead at dispatch, 2026-10-11, under [[R31]].
 Claim 84 (ORI-T-0136), which also changed `spec/ARCHITECTURE.md`, is integrated, and the branch is cut after it, from 7bf0508. No other claim holds a path under `spec/`.
 
 **State after this section:** the claims held are 20, 64, 79, 81, 82 and 85. The next free identifier is ORI-T-0149.
+
+---
+
+## Claim 79 integrated; ORI-T-0149 to ORI-T-0151 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review, and what was decided | Verified by the lead on the session branch |
+|---|---|---|---|
+| 79 | ORI-T-0143, the ACP client's reads and writes bounded by `IO_TIMEOUT` | Independent review (Opus): nothing blocking. Every wait on a pipe is a `recv_timeout` on the remaining time. On a timeout the child is killed and reaped and the session is spent. No existing test changed: the test module at base is a byte-identical prefix of the new one. The reviewer overlaid ORI-T-0140's `headless.rs` and ran `ori-runtime` green. Two should-fix findings are carried into ORI-T-0149 below, because nothing in the engine calls `AcpClient::prompt` yet (`grep` over `crates/`: the only other user of the trait is `headless.rs`'s own implementation). Decisions the lead accepts and records: a prompt that times out kills the child and spends the session, and no launch defect is recorded for an ACP timeout. On that path the process ends before the supervisor revokes the session's credentials. `spec/LLD.md` section 5's order (revoke, then terminate, then release locks) is the supervisor's kill sequence, and the supervisor must still run it on a `Timeout`; that is a constraint on whichever ticket builds the session supervisor. Integrated as d2a9b0b | `cargo test -p ori-runtime`: 183 passed, 8 ignored; workspace clippy and fmt: clean |
+
+The review's findings and the coder's, recorded. All three tickets change files that ORI-T-0141 also changes (`acp.rs`, `headless.rs`, `transcript.rs`), so all three wait on ORI-T-0141:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0149 | Make `AcpClient` fit to drive a real agent. **This must land before any production caller drives `AcpClient`.** Four parts. (1) `session/prompt` runs under `IO_TIMEOUT` (20 s) for the whole turn, and an agent that thinks or runs a tool silently for longer is killed. In ACP the response to `session/prompt` arrives only when the turn ends. Bound the turn by the session's budget (`budget.rs`) and an inactivity bound instead, and keep `IO_TIMEOUT` for the handshake round trips. (2) `MAX_LINE_BYTES` (1 MiB) refuses, and spends the session on, any longer frame. A tool-call `diff` carrying a large file's old and new text, or an image block, can exceed it. Check the cap against the ACP specification; raise it, or bound the queue by bytes rather than by line count, or record with a source why 1 MiB is enough. (3) A timeout drops up to 16 queued lines, which can include a `session/request_permission` that would otherwise be recorded as a launch defect (ORI-P1-039). Drain the queue before retiring. (4) `retire` calls `kill_child`, whose `wait()` after the kill has no bound, and `let _ =` discards a kill or wait failure while the docs say "killed and reaped" | `crates/ori-runtime/src/acp.rs` | 1 (`spec/RISK_MAP.md`: `ori-runtime` acp) | ready after ORI-T-0141 | 2026-10-11 |
+| ORI-T-0150 | `headless.rs` drains standard error with `drain_stderr`, which stops only at end of file. ORI-T-0143 added `drain_stderr_until(stderr, stop)`; switch the headless adapter to it so a descendant holding standard error open is not drained at full speed after the deadline | `crates/ori-runtime/src/headless.rs` | 1 | ready after ORI-T-0141 | 2026-10-11 |
+| ORI-T-0151 | `Transcript::record` clones the whole entry list on every append (`transcript.rs`, around line 242), so each pass of `AcpClient::call` costs time proportional to the transcript, and a chatty agent grows the transcript without limit over a session. Cap it, and say what a capped transcript records about what it dropped | `crates/ori-runtime/src/transcript.rs` | 1 | ready after ORI-T-0141 | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 64, 81, 82 and 85. The next free identifier is ORI-T-0152.
