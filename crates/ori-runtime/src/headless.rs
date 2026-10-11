@@ -87,14 +87,30 @@
 //!
 //! - The child this module spawned is killed and reaped at the deadline, on
 //!   every platform (`crate::acp::kill_child`).
-//! - The reader thread is *abandoned*, not stopped: `std` has no portable way
-//!   to interrupt a blocked read, and this crate takes no dependency to get
-//!   one. It owns only the read end of the pipe and a small buffer, never a
-//!   session, a lock or a credential, and it ends by itself when the last
-//!   holder of the write end exits or closes it. What it keeps is bounded
-//!   (`STDOUT_RETAIN` bytes; the rest is read and discarded so a chatty
-//!   child never blocks on a full pipe), so an abandoned reader cannot grow
-//!   without limit while it waits.
+//! - The reader thread is *abandoned*, and told to stop as soon as it can
+//!   hear it. `std` has no portable way to interrupt a read that is already
+//!   blocked, and this crate takes no dependency to get one, so a reader
+//!   blocked on a **silent** holder of the pipe stays blocked, using no CPU,
+//!   until that holder writes a byte or closes the pipe. A shared flag,
+//!   which `send` sets on every outcome except a finished run, is checked
+//!   after each read: the first read that returns after the deadline ends
+//!   the thread and drops its end of the pipe. A descendant that is still
+//!   **writing** therefore stops being drained at once, and its next write
+//!   fails (`SIGPIPE` or `EPIPE` on unix, a broken-pipe error on Windows)
+//!   instead of being read and thrown away for as long as it cares to
+//!   write. Without that flag, `sh -c 'yes & exit 0'` would leave an orphan
+//!   and an engine thread each spinning a core for ever. The thread owns
+//!   only the read end of the pipe and a small buffer, never a session, a
+//!   lock or a credential. What it keeps is bounded (`STDOUT_RETAIN` bytes;
+//!   the rest is read and discarded so a chatty child never blocks on a full
+//!   pipe during the run), so even before it hears the flag it cannot grow
+//!   without limit.
+//! - Standard **error** is not covered by any of this. It is drained by
+//!   `crate::acp::drain_stderr`, which this module calls at `spawn` and does
+//!   not control, and which reads until end-of-file with no stop signal. A
+//!   descendant that writes to standard error continuously keeps that
+//!   drain thread reading at full speed until the descendant exits.
+//!   `crate::acp` owns the helper; this module only names the limit.
 //! - A **descendant** of the child (a grandchild the child started and did
 //!   not wait for) is *not* killed by this module: `std` can kill only the
 //!   process it spawned, and a process-group kill needs a platform call this
@@ -105,13 +121,16 @@
 //!   ordering (`crate::session::Teardown`). In the worktree-only
 //!   downgrade (`spec/SECURITY_NOTES.md`, "Failure handling") there is no
 //!   container to remove, and nothing in this crate reaches a descendant
-//!   there today; that gap is named, not closed, here. What this module does
-//!   guarantee is the narrower, load-bearing thing: such an orphan cannot
-//!   keep `send` blocked past the deadline.
+//!   there today; that gap is named, not closed, here. Breaking the pipe
+//!   ends an orphan that stops at a failed write, the common case; one that
+//!   ignores the failure, or never writes again, is an orphan like any other.
+//!   What this module does guarantee is the narrower, load-bearing thing:
+//!   such an orphan cannot keep `send` blocked past the deadline, and cannot
+//!   keep this module's reader draining it afterwards.
 //!
 //! Windows: the deadline logic is `std` only and behaves the same, with the
-//! same two limits (only the spawned child is terminated; a descendant that
-//! holds the pipe makes the reader linger until it exits). The tests that
+//! same limits (only the spawned child is terminated; a silent descendant that
+//! holds the pipe makes the reader linger until it writes or exits). The tests that
 //! need a shell to leave a descendant behind are unix-only; the test that
 //! needs only the test binary itself to hold the pipe is not.
 //!
@@ -164,6 +183,9 @@ use std::process::ChildStdout;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
@@ -434,8 +456,11 @@ impl AgentRuntime for HeadlessAdapter {
     /// the process does not exit or because its output never ends: from
     /// outside this module that is indistinguishable from a runtime blocked
     /// on a prompt it should never have been able to raise, so it is
-    /// recorded the same way, over the same [`RuntimeError::methodology_ref`],
-    /// AICD §17.
+    /// recorded the same way, as a [`LaunchDefect`] whose
+    /// [`LaunchDefect::reason`] carries AICD §17. The returned
+    /// [`RuntimeError::Timeout`] has no methodology reference of its own
+    /// ([`RuntimeError::methodology_ref`] is `None` for it); the reference
+    /// travels on the recorded defect.
     fn send(&mut self, handle: &SessionHandle, prompt: &str) -> Result<StopReason, RuntimeError> {
         self.send_within(handle, prompt, RUN_TIMEOUT)
     }
@@ -497,6 +522,12 @@ enum RunEnd {
 /// reader to report end-of-file, all against the one deadline `timeout` after
 /// this call begins. AICD §12 (an agent that hangs is stopped) and §17.
 ///
+/// Whenever the result is not [`RunEnd::Finished`] (a timeout, or an error),
+/// the reader is told to stop: it returns at its next read and drops its end
+/// of the pipe, so a descendant still writing gets a broken-pipe error rather
+/// than being drained forever. See the module doc comment, "What is cleaned
+/// up, and what is not".
+///
 /// # Errors
 ///
 /// [`RuntimeError::Io`] when the reader thread cannot be started (the child
@@ -510,13 +541,32 @@ fn run_to_end(
     timeout: Duration,
 ) -> Result<RunEnd, RuntimeError> {
     let deadline = Instant::now() + timeout;
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let end = run_until(child, stdout, deadline, &abandoned);
+    if !matches!(end, Ok(RunEnd::Finished { .. })) {
+        // A flag and nothing else crosses to the reader: no data depends on
+        // it, so no ordering stronger than relaxed is needed.
+        abandoned.store(true, Ordering::Relaxed);
+    }
+    end
+}
+
+/// The body of `run_to_end`: everything up to the point where the caller
+/// decides, from the result alone, whether to abandon the reader.
+fn run_until(
+    child: &mut Child,
+    stdout: ChildStdout,
+    deadline: Instant,
+    abandoned: &Arc<AtomicBool>,
+) -> Result<RunEnd, RuntimeError> {
     let (sender, receiver) = mpsc::channel();
+    let reader_abandoned = Arc::clone(abandoned);
     let spawned = std::thread::Builder::new()
         .name("ori-headless-stdout".to_owned())
         .spawn(move || {
             // The receiver is gone when the run was abandoned; there is
             // nobody left to tell.
-            let _ = sender.send(collect_bounded(stdout, STDOUT_RETAIN));
+            let _ = sender.send(collect_bounded(stdout, STDOUT_RETAIN, &reader_abandoned));
         });
     if let Err(error) = spawned {
         let _ = kill_child(child);
@@ -525,7 +575,10 @@ fn run_to_end(
         });
     }
 
-    let status = match wait_with_timeout(child, timeout) {
+    // Both waits draw on the one deadline: the child gets what is left of it
+    // now, not a fresh full timeout started after the thread came up.
+    let status = match wait_with_timeout(child, deadline.saturating_duration_since(Instant::now()))
+    {
         Ok(status) => status,
         Err(RuntimeError::Timeout { .. }) => return Ok(RunEnd::ChildStillRunning),
         Err(error) => return Err(error),
@@ -547,11 +600,27 @@ fn run_to_end(
 /// discarding the rest. Discarding is reading: the pipe is drained either
 /// way, so a child that writes more than `retain` never blocks on a full
 /// pipe. `Interrupted` is retried, as `Read::read_to_end` does.
-fn collect_bounded(mut source: impl Read, retain: usize) -> std::io::Result<Vec<u8>> {
+///
+/// `abandoned` is checked after every read. Once it is set the function
+/// returns what it has and drops `source`, which closes this end of the pipe:
+/// a writer still holding the other end then fails its next write (`SIGPIPE`
+/// or `EPIPE` on unix, a broken-pipe error on Windows) instead of being
+/// drained at full speed for as long as it cares to write. A read that is
+/// blocked on a silent writer cannot be interrupted, so the flag takes effect
+/// on that writer's next byte or when it closes.
+fn collect_bounded(
+    mut source: impl Read,
+    retain: usize,
+    abandoned: &AtomicBool,
+) -> std::io::Result<Vec<u8>> {
     let mut kept = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {
-        match source.read(&mut chunk) {
+        let read = source.read(&mut chunk);
+        if abandoned.load(Ordering::Relaxed) {
+            return Ok(kept);
+        }
+        match read {
             Ok(0) => return Ok(kept),
             Ok(read) => {
                 let room = retain.saturating_sub(kept.len());
@@ -964,9 +1033,9 @@ mod tests {
     // lived and the clock never started. These tests run real children and
     // bound every wait. The deadline is passed to `send_within` as one
     // second, not `RUN_TIMEOUT`'s twenty; the misbehaving children hold the
-    // pipe for `T0140_HOLD`, far longer than the deadline plus its margin, so
-    // a `send` that waited on the holder instead of the deadline fails the
-    // elapsed-time assertions rather than passing slowly.
+    // pipe for `T0140_HOLD_SECONDS`, far longer than the deadline plus its
+    // margin, so a `send` that waited on the holder instead of the deadline
+    // fails the elapsed-time assertions rather than passing slowly.
     // -----------------------------------------------------------------------
 
     use std::cell::RefCell;
@@ -1295,6 +1364,10 @@ mod tests {
     // have kept, and nothing more. No process involved.
     // -----------------------------------------------------------------------
 
+    /// An abandonment flag that is never set: the collector as it runs while
+    /// the run is still live.
+    static NEVER: AtomicBool = AtomicBool::new(false);
+
     /// A reader that hands out `data` in pieces of at most `step` bytes.
     struct Chunked<'a> {
         data: &'a [u8],
@@ -1330,8 +1403,9 @@ mod tests {
                     data.extend_from_slice(tail);
                 }
                 for step in [1, 7, 8192] {
-                    let kept = collect_bounded(Chunked { data: &data, step }, STDOUT_RETAIN)
-                        .expect("an in-memory reader does not fail");
+                    let kept =
+                        collect_bounded(Chunked { data: &data, step }, STDOUT_RETAIN, &NEVER)
+                            .expect("an in-memory reader does not fail");
                     assert!(kept.len() <= STDOUT_RETAIN);
                     assert_eq!(
                         transcript_text(&kept),
@@ -1344,6 +1418,167 @@ mod tests {
     }
 
     #[test]
+    fn ori_t_0140_the_bounded_collector_agrees_with_the_cap_at_every_length_around_it_and_up_to_the_retain_limit()
+     {
+        // Every total length from two under the cap to two past the retain
+        // limit, so that the input is shorter than, exactly at, one past, and
+        // up to and beyond what the collector keeps. The bytes cycle through
+        // a pattern that has a multi-byte character, an incomplete sequence
+        // and invalid bytes, so the last kept byte can fall inside any of
+        // them.
+        let patterns: [&[u8]; 4] = [
+            b"a",
+            "\u{20ac}\u{1f600}\u{e9}a".as_bytes(),
+            &[0xE2, 0x82, 0xFF, 0xF0, 0x9F, 0x98, 0x20, 0xC3],
+            "\u{1f600}".as_bytes(),
+        ];
+        for pattern in patterns {
+            for total in (STDOUT_CAP - 2)..=(STDOUT_RETAIN + 2) {
+                let data: Vec<u8> = pattern.iter().copied().cycle().take(total).collect();
+                for step in [1, 7, 8192] {
+                    let kept =
+                        collect_bounded(Chunked { data: &data, step }, STDOUT_RETAIN, &NEVER)
+                            .expect("an in-memory reader does not fail");
+                    assert_eq!(kept.len(), total.min(STDOUT_RETAIN));
+                    assert_eq!(
+                        transcript_text(&kept),
+                        transcript_text(&data),
+                        "total {total}, step {step}, pattern {pattern:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ori_t_0140_the_bounded_collector_stops_reading_and_releases_the_pipe_once_abandoned() {
+        // A source that never reaches end-of-file and sets the abandonment
+        // flag itself after `STOP_AFTER` reads, as `run_to_end` does from
+        // another thread once the deadline has passed. It reports a failure
+        // instead of looping if it is read `GIVE_UP_AFTER` times, so a
+        // collector that ignored the flag fails this test rather than
+        // hanging it.
+        const STOP_AFTER: u32 = 3;
+        const GIVE_UP_AFTER: u32 = 10_000;
+        struct Endless {
+            reads: u32,
+            abandoned: Arc<AtomicBool>,
+            released: Rc<std::cell::Cell<bool>>,
+        }
+        impl Read for Endless {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads > GIVE_UP_AFTER {
+                    return Err(std::io::Error::other("the collector never stopped reading"));
+                }
+                if self.reads == STOP_AFTER {
+                    self.abandoned.store(true, Ordering::Relaxed);
+                }
+                buffer.fill(b'x');
+                Ok(buffer.len())
+            }
+        }
+        impl Drop for Endless {
+            fn drop(&mut self) {
+                self.released.set(true);
+            }
+        }
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let released = Rc::new(std::cell::Cell::new(false));
+        let source = Endless {
+            reads: 0,
+            abandoned: Arc::clone(&abandoned),
+            released: Rc::clone(&released),
+        };
+        let kept = collect_bounded(source, STDOUT_RETAIN, &abandoned)
+            .expect("an abandoned collection ends cleanly, not with the source's failure");
+        assert_eq!(
+            kept.len(),
+            STDOUT_RETAIN,
+            "what it had read is still bounded"
+        );
+        assert!(
+            released.get(),
+            "the source (the read end of the pipe) is dropped when the collector returns"
+        );
+    }
+
+    /// A unix child that leaves a descendant writing without pause, then
+    /// either exits at once or keeps running as `tail` says. The descendant
+    /// ignores `SIGPIPE`, so that once nobody reads its pipe any more its
+    /// `printf` fails with a write error instead of killing it silently, and
+    /// the loop then creates the file named by `ORI_T_0140_MARKER`. The marker
+    /// is the observable for "the reader let go of the pipe": it can appear
+    /// only if the read end was closed, which a reader that went on draining
+    /// until the writer stopped would never do.
+    #[cfg(unix)]
+    fn writing_descendant_script(tail: &str) -> String {
+        format!(
+            "( trap '' PIPE; while printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; do :; done; \
+             : > \"$ORI_T_0140_MARKER\" ) & {tail}"
+        )
+    }
+
+    /// Runs `tail` after the writing descendant, checks the run is refused as
+    /// a timeout (which also proves the descendant was alive and holding the
+    /// pipe at the deadline), then waits, bounded, for the marker.
+    #[cfg(unix)]
+    fn assert_a_writing_descendant_is_let_go(
+        tag: &str,
+        id_tail: &str,
+        tail: &str,
+        detail_fragment: &str,
+    ) {
+        let dir = std::env::temp_dir().join(format!("ori-t-0140-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let marker = dir.join("writer-stopped");
+        let _ = std::fs::remove_file(&marker);
+
+        let (mut adapter, defects) = recording_adapter();
+        let mut spec = shell_spec(id_tail, &writing_descendant_script(tail));
+        spec.envs = vec![(
+            "ORI_T_0140_MARKER".to_owned(),
+            marker.to_string_lossy().into_owned(),
+        )];
+        let handle = adapter.spawn(spec).expect("sh spawns");
+        let outcome = adapter.send_within(&handle, "unused", T0140_DEADLINE);
+        assert_refused_as_timeout(&mut adapter, &handle, &defects, outcome, detail_fragment);
+
+        let waited = Instant::now();
+        while !marker.exists() && waited.elapsed() < T0140_MARGIN {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let let_go = marker.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = adapter.kill(&handle);
+        assert!(
+            let_go,
+            "after the deadline the reader should drop its end of the pipe so the descendant's \
+             next write fails; it was still being drained {:?} later",
+            waited.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0140_a_descendant_writing_continuously_is_no_longer_drained_after_the_child_exited_and_the_deadline_passed()
+     {
+        assert_a_writing_descendant_is_let_go("exited", "TH140", "exit 0", "still held open");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0140_a_descendant_writing_continuously_is_no_longer_drained_after_the_child_was_killed()
+     {
+        assert_a_writing_descendant_is_let_go(
+            "killed",
+            "TJ140",
+            &format!("sleep {T0140_HOLD_SECONDS}"),
+            "did not exit within",
+        );
+    }
+
+    #[test]
     fn ori_t_0140_the_bounded_collector_drains_far_more_than_it_keeps() {
         let data = vec![b'z'; 1_000_000];
         let kept = collect_bounded(
@@ -1352,6 +1587,7 @@ mod tests {
                 step: 8192,
             },
             STDOUT_RETAIN,
+            &NEVER,
         )
         .expect("an in-memory reader does not fail");
         assert_eq!(kept.len(), STDOUT_RETAIN);
@@ -1361,6 +1597,7 @@ mod tests {
                 step: 2,
             },
             STDOUT_RETAIN,
+            &NEVER,
         )
         .expect("an in-memory reader does not fail");
         assert_eq!(short, b"short");
@@ -1392,6 +1629,7 @@ mod tests {
                 fail_for_good: false,
             },
             STDOUT_RETAIN,
+            &NEVER,
         )
         .expect("an interrupted read is retried");
         assert_eq!(kept, b"k");
@@ -1401,6 +1639,7 @@ mod tests {
                 fail_for_good: true,
             },
             STDOUT_RETAIN,
+            &NEVER,
         )
         .expect_err("any other error ends the collection");
         assert_eq!(failure.to_string(), "the pipe broke");
