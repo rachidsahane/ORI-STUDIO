@@ -11,3 +11,5 @@
 //! AICD §23 forbids, because it puts the system outside what the agents know.
 //!
 //! Must not: modify the tree (`spec/LLD.md` section 2).
+
+pub mod watcher;
