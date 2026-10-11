@@ -12,4 +12,5 @@
 //!
 //! Must not: modify the tree (`spec/LLD.md` section 2).
 
+pub mod hooks;
 pub mod watcher;
