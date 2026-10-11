@@ -1,0 +1,15 @@
+name: ci
+
+# Run the test suite on pull requests and on pushes to the main line.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked
