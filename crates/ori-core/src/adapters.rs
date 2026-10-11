@@ -508,7 +508,14 @@ pub trait VcsHost {
         expected_head: &CommitId,
     ) -> Result<(), AdapterError>;
 
-    /// Sets a named check on `pr`'s head.
+    /// Sets a named check on the commit `head` of `pr`.
+    ///
+    /// `head` is the commit the gates ran on, named by the caller for the same
+    /// reason [`VcsHost::merge`] names the head to expect: a result reported
+    /// against "whatever the head is now" could mark a commit the gates never
+    /// ran on as passed, and a host's branch protection would then let it
+    /// through. The check attaches to exactly `head`; an implementation must
+    /// not attach it to a different commit because the pull request moved.
     ///
     /// # Errors
     ///
@@ -517,6 +524,7 @@ pub trait VcsHost {
         &self,
         token: &ScopedToken,
         pr: &PullRequestRef,
+        head: &CommitId,
         check: &CheckReport,
     ) -> Result<(), AdapterError>;
 
@@ -872,6 +880,7 @@ mod tests {
             &self,
             _: &ScopedToken,
             _: &PullRequestRef,
+            _: &CommitId,
             _: &CheckReport,
         ) -> Result<(), AdapterError> {
             Ok(())
@@ -992,6 +1001,7 @@ mod tests {
         host.set_check(
             &token,
             &pr,
+            &status.head,
             &CheckReport {
                 name: "gate 2".to_owned(),
                 outcome: CheckOutcome::Failed,
@@ -1081,6 +1091,7 @@ mod tests {
             &self,
             _: &ScopedToken,
             _: &PullRequestRef,
+            _: &CommitId,
             _: &CheckReport,
         ) -> Result<(), AdapterError> {
             Ok(())
