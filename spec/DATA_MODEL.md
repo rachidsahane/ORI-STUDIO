@@ -94,7 +94,7 @@ stateDiagram-v2
 ```
 Invariants: category may be raised by an agent, lowered only by a human; a ticket cannot enter `Closed` without a `spec_update` event (or `no_change_needed`) and, if `kind` is `defect`, an accepted criterion referencing it; a ticket whose PR modified an existing test has an open `Escalation` before `InReview` can proceed.
 
-Recovery edge: `InProgress --> Queued` is the engine's move and no one else's. It is made only by the engine's recovery after a restart (`spec/runbooks/recover-engine.md`), for a ticket whose session was found `Running`; it is not a way for an agent, the lead or a human to requeue a ticket at will. It happens only once that session has been set `Killed` with reason `engine_restart`, every credential issuance of the session has been revoked, and its lock entries have been released (ORI-P1-031), and `session.recovered` is appended after it. It does not pass through `Blocked`: a ticket interrupted by an engine failure did not exhaust a budget, and `Blocked --> Queued` stays the move for a ticket that did, taken only when it is re-planned.
+Recovery edge: `InProgress --> Queued` is the engine's move and no one else's. It is made only by the engine's recovery after a restart (`spec/runbooks/recover-engine.md`), for a ticket whose session was found `Running`; it is not a way for an agent, the lead or a human to requeue a ticket at will. It happens only once that session has been set `Killed` with reason `engine_restart`, every credential issuance of the session has been revoked, and its lock entries have been released (ORI-P1-031), and `session.recovered` is appended after it. The requeue, and every event that step 1 of that runbook appends around it (`credential.revoked` and `session.recovered` are the two it names), are recorded with actor `system`, the recovery that section 4 admits. It does not pass through `Blocked`: a ticket interrupted by an engine failure did not exhaust a budget, and `Blocked --> Queued` stays the move for a ticket that did, taken only when it is re-planned.
 
 ### Document
 ```mermaid
@@ -120,7 +120,7 @@ Invariants: only the owning seat may sign; a foundation document in any state bu
 
 ## 4. Invariants across entities
 
-- Every `Event` has an actor; `system` is allowed only for scheduled triggers and watchers.
+- Every `Event` has an actor; `system` is allowed only for scheduled triggers, watchers, and the engine's recovery after a restart (`spec/runbooks/recover-engine.md`).
 - Every `PullRequest` merge event references the approvals that satisfied its tier, and for tier 2, two distinct approvers (or the single-operator profile's substitutes, recorded).
 - Every `CredentialIssuance` is bound to one session and expires with it.
 - `MemoryRecord.structured` never contains a field longer than the configured cap, and every record derived from an integration has `untrusted = true` provenance.
