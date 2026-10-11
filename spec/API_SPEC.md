@@ -90,7 +90,7 @@ Naming: `domain.verb`. Every request carries `product_id` unless global. Every m
 
 ## 2. Event stream
 
-`events.subscribe({product_id?, kinds?})` streams `Event` rows as they are appended. Clients render from events; there is no polling API for state that events carry. Kinds include: `ticket.*`, `escalation.opened`, `escalation.answered`, `report.*`, `session.*`, `gate.run`, `gate.inert`, `pr.*`, `change.unattributed`, `document.*`, `phase.*`, `notification.*`, `card.*` (confirmation and report cards addressed to the chat), `terminal.io`.
+`events.subscribe({product_id?, kinds?})` streams `Event` rows as they are appended. Clients render from events; there is no polling API for state that events carry. Kinds include: `ticket.*`, `escalation.opened`, `escalation.answered`, `report.*`, `session.*`, `gate.run`, `gate.inert`, `gate.proven`, `pr.*`, `change.unattributed`, `document.*`, `phase.*`, `notification.*`, `card.*` (confirmation and report cards addressed to the chat), `terminal.io`.
 
 Cards: `card.confirmation` carries `{card_id, kind, question, recommendation, evidence_refs, actions: [{id, label, rpc}]}`; answering a card is calling the referenced RPC, which produces `card.answered`.
 
