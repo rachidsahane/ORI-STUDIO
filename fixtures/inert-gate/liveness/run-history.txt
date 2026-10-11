@@ -1,0 +1,20 @@
+# run-history.txt: what ran. The observation half of the liveness record. The
+# other half is expected-runs.txt. README.md at the repository root gives the
+# grammar and says what a gate does with both.
+#
+# One record per line. Blank lines and lines starting with # are ignored.
+#
+#   history as_of=<epoch> covers_from=<epoch> complete=<true|false>
+#   run workflow=<path> started_at=<epoch> conclusion=<word>
+#
+# Times are Unix seconds, UTC. There is exactly one `history` line, and it says
+# what the run lines below it are a complete list of: every run of every
+# workflow that started in [covers_from, as_of]. A `run` line is one execution.
+#
+# THIS FILE HAS NO `run` LINE. That is the statement it makes. It is written as
+# an empty list under a header that says the list is complete, so that "nothing
+# ran" cannot be confused with "nobody collected the history".
+#
+# as_of       1791676800   2026-10-11T00:00:00Z
+# covers_from 1789084800   2026-09-11T00:00:00Z, thirty days before as_of
+history as_of=1791676800 covers_from=1789084800 complete=true

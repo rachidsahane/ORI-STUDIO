@@ -1,0 +1,12 @@
+# expected-runs.txt: what must have run, and how recently. The declaration half
+# of the liveness record. The other half is run-history.txt. README.md at the
+# repository root gives the grammar and says what a gate does with both.
+#
+# One record per line. Blank lines and lines starting with # are ignored.
+#
+#   expected workflow=<path> required=<true|false> window_seconds=<integer>
+#
+# Read plainly: the workflow at <path>, relative to the repository root, is
+# required to have executed at least once inside every window of
+# <window_seconds> seconds. 604800 seconds is seven days.
+expected workflow=.github/workflows/ci.yml required=true window_seconds=604800
