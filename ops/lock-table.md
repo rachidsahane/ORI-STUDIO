@@ -565,3 +565,28 @@ Written by the lead on 2026-10-11 under [[R31]] rule 3. "Integrated" means on `c
 **ORI-P1-013 is not satisfied by ORI-T-0045.** "Proof stored with evidence refs" has no owner: ORI-T-0132.
 
 **State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 72, 73, 75 and 76. The next free identifier is ORI-T-0140.
+
+---
+
+## Claims 72 and 75 integrated; ORI-T-0140 allocated and claimed (77)
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+| # | Ticket | Integrated as | Verified by the lead on the session branch |
+|---|---|---|---|
+| 72 | ORI-T-0073, `fixtures/new-product` | cherry-picked from 3a9cf82 | `cargo test -p ori-gates`: 161 passed; `scripts/secret-scan.sh`: no finding |
+| 75 | ORI-T-0076, `fixtures/looping-agent` | cherry-picked from bb5be9c | `cargo test -p ori-gates`: 161 passed; `scripts/secret-scan.sh`: no finding; the fixture's own `selftest.sh`: 41 passed |
+
+**A defect in merged code, found by ORI-T-0076's coder and confirmed by the lead by reading.** `crates/ori-runtime/src/headless.rs`, `send`: `session.stdout.read_to_end(&mut output)` (line 276) runs before `wait_with_timeout(&mut session.child, RUN_TIMEOUT)` (line 277). `read_to_end` returns only when every holder of the pipe's write end has closed it, so a child that keeps its stdout open, or leaves a descendant holding it, blocks `send` indefinitely and the 20 second kill never starts. The coder measured it with a scratch crate against the real adapter: `sh -c 'sleep 23'` returned `Ok(EndTurn)` after 23.0 s with no `Timeout` and no defect recorded. The module doc promises the bound. A looping or hung agent is exactly what budgets and the liveness of the engine exist for, so this is a defect in a control, not a performance note.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0140 | The headless run's `RUN_TIMEOUT` does not bound a child that holds its stdout open: `send` reads to end before it starts the clock | `crates/ori-runtime/src/headless.rs` | 1, `spec/RISK_MAP.md` (`ori-runtime` headless) | dispatched, claim 77 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 77 | ORI-T-0140 | `crates/ori-runtime/src/headless.rs` | 1 | `fix/ORI-T-0140-headless-timeout` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from claim 69 (`acp.rs`, `identity.rs`, `ori-core`) and claim 70 (`ticket.rs`, `recovery.rs`). If the same pattern exists in `crates/ori-runtime/src/acp.rs`, claim 69 holds that file, so ORI-T-0140 reports it and does not change it.
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 73, 76 and 77. The next free identifier is ORI-T-0141.
