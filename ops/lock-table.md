@@ -524,3 +524,27 @@ Written by the lead at dispatch, 2026-10-11, under [[R31]].
 Checked against every claim held: 20, 61 to 64, 67 and 68. Claims 69 and 70 share only `crates/ori-core/src/lib.rs`, a queue file neither holds; 69's `acp.rs` and 70's `recovery.rs` are different files of `ori-runtime`, and nothing else holds either. Claim 71 is the only claim under `spec/`. Claims 72 to 75 are four disjoint new directories, and none is under `fixtures/planted/`. Claim 76 shares only the queue file `crates/ori-gates/src/lib.rs` with claim 63.
 
 **State after this section:** the claims held are 20, 61 to 64 and 67 to 76. The next free identifier is ORI-T-0131.
+
+---
+
+## Claim 71 released; follow-ups ORI-T-0131 to ORI-T-0139 allocated
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+**Claim 71 released.** ORI-T-0130 is on `claude/sweet-maxwell-jkaiie` as 8f8a4cd, reviewed by the lead: `spec/DATA_MODEL.md` section 4 admits `system` for "the engine's recovery after a restart (`spec/runbooks/recover-engine.md`)", and section 3's recovery paragraph records the requeue and the events around it with actor `system`. `cargo test -p ori-gates` passed (138). This closes item 3 of "what ORI-T-0129 inherits".
+
+**Follow-ups**, each stated as the defect, from the reports and reviews of ORI-T-0045, ORI-T-0127 and ORI-T-0130. None is claimed; each claim is written at dispatch.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0131 | A `GateProof` is not sealed: `GateProof::new` and `GateDef::with_proof` are public and a proof carries no gate number, so code that never ran the prover can make `Registry::list` report `Installed`. `runner.rs`'s own tests do so. "Only `Registry` produces `Installed`" holds; "`Installed` implies a demonstration ran" is a convention. Found by ORI-T-0045's coder, confirmed by its reviewer | `crates/ori-gates/src/gate.rs` | `spec/RISK_MAP.md` does not name `gate.rs`; the lead recommends 2, because it decides what may be called installed; the operator sets it | ready | 2026-10-11 |
+| ORI-T-0132 | ORI-P1-013's "proof stored with evidence refs" has no owner: no ticket in `ops/phase-1-backlog.md` builds the gate projection, the `gates.prove` method's wiring, or a durable proof and revocation event, and `Registry` has no replace or remove for the runbook's rollback. ORI-P1-013 is not satisfied by ORI-T-0045 alone | backlog gap: `ori-store` projections, `ori-rpc`, `ori-gates` | to be set when planned | **needs planning** | 2026-10-11 |
+| ORI-T-0133 | `gate.proven` is named in `spec/LLD.md` section 4 and `spec/design/DESIGN.md`, and by ORI-T-0045's constant, but not in `spec/API_SPEC.md` section 2's event list; no event kind exists for revoking a proof | `spec/API_SPEC.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0134 | `crates/ori-gates/src/lib.rs` has misattached `///` docs: `modified_tests` carries two stacked docs, one describing `sections`; `significance` carries the `spec_refs` doc; `sections` and `spec_refs` carry none | `crates/ori-gates/src/lib.rs` | 1 | ready, after claims 63 and 76 release the queue file | 2026-10-11 |
+| ORI-T-0135 | Two more `code_map` timing tests fail under machine load and pass alone: `ori_t_0036_a_spec_document_of_long_lines_cannot_overrun_the_scan_deadline`, `ori_t_0036_python_relative_import_work_is_linear_in_dots_plus_names`. Seen by ORI-T-0045's coder at load average about 5 | `crates/ori-memory/src/code_map.rs` (its tests) | 1 | **waiting on the operator**: `test_modified`, not covered by [[R40]] | 2026-10-11 |
+| ORI-T-0136 | After [[E-0002]], `spec/ARCHITECTURE.md`'s `integrations` row and `spec/ROADMAP.md` (lines 9 and 72) still put the adapter traits in `ori-integrations` | `spec/ARCHITECTURE.md`, `spec/ROADMAP.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0137 | After [[E-0002]], `spec/RISK_MAP.md` has no row for the `ori-core` file that declares `VcsHost::merge`, so the merge signature moved from a tier 2 path to an untiered one; `spec/SECURITY_NOTES.md` and `spec/adr/ADR-0002-single-operator.md` name only `ori-integrations::*::merge` | `spec/RISK_MAP.md`, `spec/SECURITY_NOTES.md`, `spec/adr/ADR-0002-single-operator.md` | 2 | ready; documentation role; the operator merges | 2026-10-11 |
+| ORI-T-0138 | Nothing mechanical enforces `CLAUDE.md`'s "Only `ori-orchestrator::merge_queue` calls `VcsHost::merge`", and since [[E-0002]] every crate can name the trait | a test or gate, location to be decided | to be set; the lead recommends 2 (merge path) | **needs planning** | 2026-10-11 |
+| ORI-T-0139 | Code docs still quote the old rule "`system` only for scheduled triggers and watchers", some arguing from it: `crates/ori-core/src/types.rs`, `crates/ori-core/src/ticket.rs` (`by_human`), `crates/ori-store/src/event_log.rs`, `crates/ori-memory/src/barrier.rs`, `crates/ori-memory/src/scope.rs`. No behaviour changes; each conclusion was checked by ORI-T-0130's agent and still holds | those five files, docs only | 2: four of the five are tier 2 paths | ready, after claims 61 and 70 release `barrier.rs` and `ticket.rs` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61 to 64, 67 to 70 and 72 to 76. The next free identifier is ORI-T-0140.
