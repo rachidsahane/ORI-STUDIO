@@ -59,7 +59,7 @@ The engine is a library crate. The desktop app links it and calls it in-process.
 | **broker** | Agent identities, credential issuance, keychain access, the forbidden-action test, audit of every issuance | 17, 27 |
 | **runtime** | Agent sessions: spawn in worktree or container, credential injection at spawn, ACP client, headless adapters, model routing per role, budgets enforcement, session transcripts | 7, 12 |
 | **mcp** | MCP host toward the user's servers; MCP server toward agents exposing memory retrieval, ticket operations and evidence access under scopes | 25 |
-| **integrations** | Adapter traits and reference adapters for the five slots; webhook receiver; polling | 16, brief principle 12 |
+| **integrations** | Reference adapters for the five slots, which implement the slot traits declared in `ori-core` (API_SPEC section 4); webhook receiver; polling | 16, brief principle 12 |
 | **notify** | Routing rules (interrupt versus review window), desktop notifications, notification slot, digest | 28, PRD N-01 |
 | **calibration** | Calibration sets, measurements, thresholds as multiples, re-run prompts | 21, 30 |
 
