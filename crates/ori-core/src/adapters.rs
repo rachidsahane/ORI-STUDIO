@@ -298,6 +298,16 @@ opaque_text!(
 );
 
 opaque_text!(
+    /// A commit, named the way its host names it: `spec/API_SPEC.md` section 4,
+    /// AICD §13. What [`PullRequestStatus::head`] reports and what
+    /// [`VcsHost::merge`] is told to expect: the commit the gates passed on.
+    /// Compared by the adapter, as text, against the host's answer; not
+    /// parsed by a caller.
+    CommitId,
+    "commit id"
+);
+
+opaque_text!(
     /// Where a notification goes, by name: a channel key or a recipient key
     /// the adapter resolves (`spec/API_SPEC.md` section 4, `Notification`).
     ///
@@ -354,7 +364,14 @@ pub struct CheckReport {
 pub struct PullRequestStatus {
     /// Where the pull request stands.
     pub state: PullRequestState,
-    /// The checks the host holds for its head, in the host's order.
+    /// The commit the pull request's head is at, as the host reports it at
+    /// the moment of this answer. A caller that gates a pull request records
+    /// this, runs the gates on exactly this commit, and passes it back to
+    /// [`VcsHost::merge`] as the head to expect (CI_CD section 2: the merge
+    /// queue re-runs the gates on the rebased head, then merges).
+    pub head: CommitId,
+    /// The checks the host holds for `head`, in the host's order. See
+    /// [`VcsHost::pr_status`] for what an implementer owes here.
     pub checks: Vec<CheckReport>,
 }
 
@@ -455,15 +472,41 @@ pub trait VcsHost {
         pr: &PullRequestRef,
     ) -> Result<PullRequestStatus, AdapterError>;
 
-    /// Merges `pr`. **Called from `ori-orchestrator::merge_queue` only**; see
-    /// the trait's doc for where that is enforced and that nothing checks it
-    /// mechanically yet.
+    /// Merges `pr`, **only if its head is `expected_head`**. Called from
+    /// `ori-orchestrator::merge_queue` only; see the trait's doc for where
+    /// that is enforced and that nothing checks it mechanically yet.
+    ///
+    /// `expected_head` is the commit the gates passed on. `spec/CI_CD.md`
+    /// section 2: the merge queue rebases, re-runs the gates on the rebased
+    /// head, then merges. A push between the gate run and the merge would
+    /// otherwise merge a head the gates never saw, so the head is part of the
+    /// request, not something the host is trusted to resolve.
+    ///
+    /// An implementation **must refuse** ([`AdapterError::Rejected`]) and
+    /// merge nothing when the pull request's head at the time of the merge is
+    /// not `expected_head`. It should hand `expected_head` to the host's own
+    /// compare-and-set where the host has one, so that the check and the
+    /// merge are one host operation; where the host has none, the
+    /// implementation says in its own docs what window remains between its
+    /// check and its merge. Passing the check to a host that ignores the
+    /// parameter does not meet this rule.
     ///
     /// # Errors
     ///
-    /// [`AdapterError`] when the host declines (a required check failed, a
-    /// conflict) or is unavailable.
-    fn merge(&self, token: &ScopedToken, pr: &PullRequestRef) -> Result<(), AdapterError>;
+    /// [`AdapterError::Rejected`] when the head differs, a required check
+    /// failed, or there is a conflict; [`AdapterError`] otherwise when the
+    /// host declines or is unavailable.
+    ///
+    /// **After [`AdapterError::Unavailable`] the outcome is unknown**: the
+    /// host may have merged before the connection dropped. The caller reads
+    /// [`VcsHost::pr_status`] (state and head) and decides from that; it does
+    /// not call `merge` again blindly.
+    fn merge(
+        &self,
+        token: &ScopedToken,
+        pr: &PullRequestRef,
+        expected_head: &CommitId,
+    ) -> Result<(), AdapterError>;
 
     /// Sets a named check on `pr`'s head.
     ///
@@ -808,13 +851,19 @@ mod tests {
         ) -> Result<PullRequestStatus, AdapterError> {
             Ok(PullRequestStatus {
                 state: PullRequestState::Open,
+                head: CommitId::new("aaa111")?,
                 checks: vec![CheckReport {
                     name: "gate 2".to_owned(),
                     outcome: CheckOutcome::Passed,
                 }],
             })
         }
-        fn merge(&self, _: &ScopedToken, _: &PullRequestRef) -> Result<(), AdapterError> {
+        fn merge(
+            &self,
+            _: &ScopedToken,
+            _: &PullRequestRef,
+            _: &CommitId,
+        ) -> Result<(), AdapterError> {
             Err(AdapterError::Rejected {
                 message: "a required check is pending".to_owned(),
             })
@@ -954,8 +1003,123 @@ mod tests {
         // The method is nameable on the object, which is the point of
         // declaring it here; that only the merge queue calls it is not
         // something this test, or any test yet, can say (see the trait doc).
-        let refusal = host.merge(&token, &pr).expect_err("the fake declines");
+        let refusal = host
+            .merge(&token, &pr, &status.head)
+            .expect_err("the fake declines");
         assert!(matches!(refusal, AdapterError::Rejected { .. }));
+    }
+
+    /// A reference host that keeps the merge rule: it merges only the head it
+    /// was told to expect. It shows what an implementer owes; the trait cannot
+    /// make it so, and the test below is about the contract's shape, not
+    /// about any real host.
+    struct PinningVcs {
+        head: std::sync::Mutex<CommitId>,
+        state: std::sync::Mutex<PullRequestState>,
+    }
+
+    impl PinningVcs {
+        fn at(head: &str) -> Self {
+            Self {
+                head: std::sync::Mutex::new(CommitId::new(head).expect("a commit")),
+                state: std::sync::Mutex::new(PullRequestState::Open),
+            }
+        }
+
+        /// Someone pushes to the pull request's branch.
+        fn push(&self, head: &str) {
+            *self.head.lock().expect("not poisoned") = CommitId::new(head).expect("a commit");
+        }
+    }
+
+    impl VcsHost for PinningVcs {
+        fn identity_token(&self, _: &AgentIdentity) -> Result<ScopedToken, AdapterError> {
+            Err(AdapterError::Unsupported {
+                operation: "identity_token",
+            })
+        }
+        fn create_branch(&self, _: &ScopedToken, _: &str, _: &str) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        fn open_pr(
+            &self,
+            _: &ScopedToken,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<PullRequestRef, AdapterError> {
+            PullRequestRef::new("pr-7")
+        }
+        fn pr_status(
+            &self,
+            _: &ScopedToken,
+            _: &PullRequestRef,
+        ) -> Result<PullRequestStatus, AdapterError> {
+            Ok(PullRequestStatus {
+                state: *self.state.lock().expect("not poisoned"),
+                head: self.head.lock().expect("not poisoned").clone(),
+                checks: Vec::new(),
+            })
+        }
+        fn merge(
+            &self,
+            _: &ScopedToken,
+            _: &PullRequestRef,
+            expected_head: &CommitId,
+        ) -> Result<(), AdapterError> {
+            let head = self.head.lock().expect("not poisoned");
+            if &*head != expected_head {
+                return Err(AdapterError::Rejected {
+                    message: "the head is not the one the gates passed on".to_owned(),
+                });
+            }
+            *self.state.lock().expect("not poisoned") = PullRequestState::Merged;
+            Ok(())
+        }
+        fn set_check(
+            &self,
+            _: &ScopedToken,
+            _: &PullRequestRef,
+            _: &CheckReport,
+        ) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        fn webhooks(&self) -> WebhookSpec {
+            WebhookSpec::default()
+        }
+    }
+
+    #[test]
+    fn ori_t_0058_merge_is_pinned_to_the_head_the_gates_passed_on() {
+        let pinning = PinningVcs::at("aaa111");
+        let host: &dyn VcsHost = &pinning;
+        let token = token();
+        let pr = PullRequestRef::new("pr-7").expect("a reference");
+
+        // The gates run on the head the status reports.
+        let gated = host.pr_status(&token, &pr).expect("a status").head;
+        assert_eq!(gated.as_str(), "aaa111");
+
+        // A push lands between the gate run and the merge. The merge names
+        // the commit the gates passed on, so it is refused and nothing merges.
+        pinning.push("bbb222");
+        let refusal = host
+            .merge(&token, &pr, &gated)
+            .expect_err("the head moved after the gates ran");
+        assert!(matches!(refusal, AdapterError::Rejected { .. }));
+        let after = host.pr_status(&token, &pr).expect("a status");
+        assert_eq!(after.state, PullRequestState::Open);
+        assert_eq!(after.head.as_str(), "bbb222");
+
+        // After a refusal the caller re-reads, gates the new head, and pins
+        // the merge to that one.
+        host.merge(&token, &pr, &after.head)
+            .expect("the head is the one named");
+        assert_eq!(
+            host.pr_status(&token, &pr).expect("a status").state,
+            PullRequestState::Merged
+        );
     }
 
     #[test]
