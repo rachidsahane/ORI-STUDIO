@@ -736,3 +736,28 @@ Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`. All three
 `AgentRuntime` stays staged as ORI-T-0141, now **tier 2** by the new row (it changes `crates/ori-core/src/adapters.rs`), and waits on claim 79 (ORI-T-0143) releasing `acp.rs`.
 
 **State after this section:** the claims held are 20, 64 and 79. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 81 to 84 dispatched; batch 10 planning started
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. Every branch below is cut from a962bd9.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 81 | ORI-T-0144, an evidence blob's `content_ref` resolved under the product's evidence directory | `crates/ori-memory/src/barrier.rs` | 2 | `fix/ORI-T-0144-evidence-ref` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 82 | ORI-T-0134, `ori-gates`' module docs attached to the right modules | `crates/ori-gates/src/lib.rs` (doc comments only) | 1 | `fix/ORI-T-0134-gates-lib-docs` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 83 | ORI-T-0133, `gate.proven` named in the event stream | `spec/API_SPEC.md` | 1 | `docs/ORI-T-0133-gate-events` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 84 | ORI-T-0136, the adapter traits' home stated in the architecture and the roadmap | `spec/ARCHITECTURE.md`, `spec/ROADMAP.md` | 1 | `docs/ORI-T-0136-adapter-home` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from each other and from every held claim. Claim 20 holds `.github/workflows/ci.yml`, `scripts/gates.sh` and `fixtures/planted/gate-13/**`; claim 64 holds `ori-watch`; claim 79 holds `acp.rs`. ORI-T-0139, which also changes `barrier.rs` (docs only), waits on claim 81's release. ORI-T-0134 was ready once claims 63 and 76 released `lib.rs`, and both have.
+
+**Batch 10 (`ori-mcp`) is being planned, and nothing is claimed for it.** ORI-T-0056 and ORI-T-0057 share design questions the backlog row does not settle:
+- how `Server` reaches the lock table and escalations without a sideways dependency (`spec/LLD.md` section 2);
+- what carries MCP to an agent session, and how a connection is bound to one identity;
+- how the host reaches a user's server when only `ori-runtime` spawns processes;
+- which tools make up the phase 1 subset (`spec/ROADMAP.md`).
+
+One coder writes the plan for both, reading only, with no worktree and no branch. The lead reviews it and takes any spec conflict to the operator before claims are granted. This is the "before each batch" control point of `ops/phase-1-backlog.md`.
+
+**State after this section:** the claims held are 20, 64, 79 and 81 to 84. The next free identifier is ORI-T-0146.
