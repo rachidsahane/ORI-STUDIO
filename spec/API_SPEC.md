@@ -118,6 +118,8 @@ Agents never receive file write tools to `spec/` or `ops/`, never receive the me
 
 Sketches; exact signatures live in LLD and code. Every adapter is a crate implementing one trait and registered by name.
 
+All seven traits are declared in `ori-core`, together with the types in their signatures: a trait declared there can name only types `ori-core` declares, since it imports no other workspace crate. The declaration is a contract and performs no IO (`spec/LLD.md` section 2). The traits are implemented outside `ori-core`: the five slot traits (`VcsHost`, `ErrorTracking`, `Analytics`, `Notification`, `Ci`) in `ori-integrations`, which keeps the reference adapters and the webhook receiver, and `AgentRuntime` in `ori-runtime`. A crate that holds an adapter as a trait object names the trait through `ori-core`, so `ori-orchestrator` names `dyn VcsHost` without depending on `ori-integrations`.
+
 ```rust
 trait VcsHost { fn identity_token(&self, identity: &AgentIdentity) -> ScopedToken; fn create_branch(...); fn open_pr(...); fn pr_status(...); fn merge(...) /* callable by merge queue only */; fn set_check(...); fn webhooks(&self) -> WebhookSpec; }
 trait ErrorTracking { fn recent_issues(...); fn issue_events(...); }
@@ -128,11 +130,11 @@ trait AgentRuntime { fn spawn(&self, session: SessionSpec) -> SessionHandle; fn 
 trait ModelProvider { fn complete(...); fn embed(...); }
 ```
 
-Rules: adapters receive credentials from the broker per call or per session, never from configuration; adapters have no access to the store; the `merge` method exists only on the `VcsHost` trait object held by the merge queue.
+Rules: adapters receive credentials from the broker per call or per session, never from configuration; adapters have no access to the store; the `merge` method exists only on the `VcsHost` trait object held by the merge queue. The rule concerns the trait object the merge queue holds, not where the trait is declared: `merge` is called from `ori-orchestrator::merge_queue` only, on the adapter `ori-engine` gives it, which is the call the carve-out in `spec/LLD.md` section 2 allows.
 
 ## 5. Versioning and compatibility
 
-The Client API carries `api_version` in the handshake; the engine serves the current and previous minor. MCP tool names are stable; new tools are additive. Adapter traits are versioned by crate; a breaking change is a decisional ticket.
+The Client API carries `api_version` in the handshake; the engine serves the current and previous minor. MCP tool names are stable; new tools are additive. Adapter traits are versioned by the crate that declares them, `ori-core`; a breaking change is a decisional ticket.
 
 ### API schema artifact
 
