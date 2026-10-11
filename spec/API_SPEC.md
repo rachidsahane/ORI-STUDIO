@@ -90,29 +90,72 @@ Naming: `domain.verb`. Every request carries `product_id` unless global. Every m
 
 ## 2. Event stream
 
-`events.subscribe({product_id?, kinds?})` streams `Event` rows as they are appended. Clients render from events; there is no polling API for state that events carry. Kinds include: `ticket.*`, `escalation.opened`, `escalation.answered`, `report.*`, `session.*`, `gate.run`, `gate.inert`, `gate.proven`, `pr.*`, `change.unattributed`, `document.*`, `phase.*`, `notification.*`, `card.*` (confirmation and report cards addressed to the chat), `terminal.io`.
+`events.subscribe({product_id?, kinds?})` streams `Event` rows as they are appended. Clients render from events; there is no polling API for state that events carry. Kinds include: `ticket.*`, `escalation.opened`, `escalation.answered`, `report.*`, `session.*`, `mcp.server_added`, `mcp.server_removed`, `mcp.tool_called`, `mcp.tool_refused`, `mcp.tool_failed`, `gate.run`, `gate.inert`, `gate.proven`, `pr.*`, `change.unattributed`, `document.*`, `phase.*`, `notification.*`, `card.*` (confirmation and report cards addressed to the chat), `terminal.io`.
 
 Cards: `card.confirmation` carries `{card_id, kind, question, recommendation, evidence_refs, actions: [{id, label, rpc}]}`; answering a card is calling the referenced RPC, which produces `card.answered`.
 
 ## 3. Agent-facing MCP server
 
-Exposed to each agent session under its identity's scopes. Every call is an `Event` with the identity as actor. Tools:
+Exposed to each agent session under its identity's scopes. Every call is an `Event` with the identity as actor (`mcp.tool_called`, `mcp.tool_refused` or `mcp.tool_failed`; section 2). Tools:
 
-| Tool | Roles | Effect |
-|---|---|---|
-| `aicd_context(ticket_id)` | all | The bounded context package (methodology 25) |
-| `aicd_search(query)` | all | Scoped search over allowed layers |
-| `aicd_evidence(record_id)` | lead, qa, operations | Raw evidence, returned labeled untrusted, logged |
-| `aicd_plan_submit(ticket_id, plan, declared_scope)` | coder | Stores the plan; lock check; may return `E_SCOPE_LOCKED` |
-| `aicd_report(ticket_id, kind, content)` | coder, qa, operations, documentation | Closing, blocked, run and audit reports through the sanitization barrier |
-| `aicd_escalate(ticket_id, trigger, question, recommendation)` | lead, coder | Opens an escalation; suspends the session if configured |
-| `aicd_ticket_create(title, category, kind, spec_anchor, evidence)` | qa, operations, product_signal | Files a ticket; category and kind proposals only |
-| `aicd_ticket_upgrade(ticket_id, category)` | lead | Upgrade only |
-| `aicd_criterion_propose(...)` | qa | Enters `proposed` state only |
-| `aicd_spec_propose(document_id, content)` | documentation | Opens a specification PR |
-| `aicd_gate_result(gate_id, pr_id, status, output)` | qa (test env), system | Records a run |
+| Tool | Roles | Effect | Phase 1 |
+|---|---|---|---|
+| `aicd_context(ticket_id)` | all | The bounded context package (methodology 25) | Yes |
+| `aicd_search(query)` | all | Scoped search over allowed layers | Yes |
+| `aicd_evidence(record_id)` | lead, qa, operations | Raw evidence, returned labeled untrusted, logged | Yes |
+| `aicd_plan_submit(ticket_id, plan, declared_scope)` | coder | Stores the plan; lock check; may return `E_SCOPE_LOCKED` | Yes |
+| `aicd_report(ticket_id, kind, content)` | coder, qa, operations, documentation | Closing, blocked, QA run and drift audit reports through the sanitization barrier; `kind` and `content` as under "Report kinds" below | Yes |
+| `aicd_escalate(ticket_id, trigger, question, recommendation, evidence)` | lead, coder | Opens an escalation; suspends the session if configured; `evidence` as under "Escalation evidence" below | Yes |
+| `aicd_ticket_create(title, category, kind, spec_anchor, evidence)` | qa, operations, product_signal | Files a ticket; category and kind proposals only | No |
+| `aicd_ticket_upgrade(ticket_id, category)` | lead | Upgrade only | Yes |
+| `aicd_criterion_propose(...)` | qa | Enters `proposed` state only | No |
+| `aicd_spec_propose(document_id, content)` | documentation | Opens a specification PR | Yes |
+| `aicd_gate_result(gate_id, pr_id, status, output)` | qa (test env), system | Records a run | No |
 
 Agents never receive file write tools to `spec/` or `ops/`, never receive the merge operation, and never receive credentials through MCP.
+
+### Phase 1
+
+Phase 1 implements eight of the eleven tools. The three marked No are not built in phase 1, and no row is removed, because tool names are stable (section 5). `aicd_ticket_create` is held only by roles that run unattended, which arrive in phase 4 (PRD F-10). `aicd_criterion_propose` is qa's, and proposed criteria arrive in phase 2 (PRD Q-07). `aicd_gate_result` is not built because one of its two roles, `system`, is an actor and not a role; gate runs are written by `ori-gates` and the CI slot.
+
+### Escalation evidence
+
+`aicd_escalate` carries `evidence`, a list of 1 to 16 entries, each `{what, found_at}`: what was found, and where it was found. An escalation with no entry is refused. `ori-orchestrator`'s `Escalation` raises a trigger only when a finding stands behind it, and `question` and `recommendation` are the agent's own words, which are not a finding, so the server builds none from them. An entry follows the Context field of `templates/escalation.md`: what was found, where, with the evidence a human needs to judge it.
+
+### Report kinds
+
+`aicd_report` takes `kind`, one of `closing`, `blocked`, `qa_run` and `drift_audit`, and `content`, an object of named string fields. `incident` and `post_mortem`, which `Report.kind` in DATA_MODEL section 2 also lists, are not kinds of this tool. Each role may write only the kinds in this table:
+
+| Role | Kinds it may write |
+|---|---|
+| coder | `closing`, `blocked` |
+| documentation | `closing`, `drift_audit`, `blocked` |
+| qa | `qa_run`, `blocked` |
+| operations | `blocked`, until phase 4 |
+
+Each kind is stored as one operational-memory record kind (`MemoryRecord.kind`, DATA_MODEL section 2):
+
+| Kind | Stored as | Fields of `content` |
+|---|---|---|
+| `closing` | `closing_report` | `modules_touched`, `criteria_covered`, `outcome`, `approaches_tried_and_rejected`, `deviations_from_the_plan`, `escalation_decisions`, `specification_update`, `new_criteria`, `what_the_next_agent_should_know`, `provenance` |
+| `blocked` | `blocked_report` | `budget_consumed`, `approaches_tried`, `hypothesis`, `what_it_would_try_next`, `what_it_needs_from_a_human` |
+| `qa_run` | `finding` | Not yet defined |
+| `drift_audit` | `finding` | Not yet defined |
+
+The names of `closing` and `blocked` are the field names of `templates/closing-report.md` and `templates/blocked-report.md`, lower case with underscores. Each template's Fields table says which fields are required and where `none` is a valid value; a field the template draws as a table is one string here. The template's `Agent identity`, `Ticket`, `Product` and `Timestamp` (for the blocked report, `Ticket`) are not fields of `content`. Every operational-memory record carries the agent identity, the ticket, the product and the timestamp (AICD §25), and the server sets them from the session and from `ticket_id`, so an agent does not assert them. Every field of `content` passes the sanitization barrier before storage (SECURITY_NOTES, "Input validation").
+
+The field names of `qa_run` and `drift_audit` are not defined anywhere yet. No file in `templates/` is a form for either, and AICD appendix A has no entry for either, so they are to be defined by a template; changing `templates/` follows the rule in `templates/README.md`. Until a template defines them, the server has no list of names to hold the `content` of these two kinds to.
+
+### Proxied tools
+
+The eleven tools above are Ori's own, and the table is the whole of them. The operator may also expose tools of the operator's own MCP servers to roles, and the server proxies them to the session. Four conditions bound this:
+
+1. Only servers the operator added to the project (`project.mcp.add`) are proxied, and each only to the roles in its `exposed_to_roles`. A call from a role that is not listed, or from a session of another project, is refused (ORI-P1-038).
+2. A proxied tool is named `<server>__<tool>`: `<server>` is the `name` given when the server was added, and `<tool>` is the name the server gives the tool.
+3. A proxied tool returns text blocks only, and every block is untrusted (SECURITY_NOTES, "Injection").
+4. A proxied tool never carries a credential of Ori's. A server's own secret (`MCP_<SERVER>_*`, ENV_SETUP section 4) stays with the engine, which connects to the server itself, and an agent is never given a server's configuration.
+
+The first of the three rules above, that agents never receive file write tools to `spec/` or `ops/`, binds Ori's own tools. It cannot bind a proxied tool, because Ori cannot tell what a tool of the operator's server writes, and what a server says about its own tools (that one is read-only, say) is a hint from an untrusted party that Ori does not rely on. A proxied tool's reach is therefore the operator's decision, taken when the server is added and exposed to roles, and recorded as an event: `mcp.server_added` records the roles the server is exposed to (section 2). ENV_SETUP section 5 states what that means for the permission manifest.
 
 ## 4. Adapter traits (Rust)
 
