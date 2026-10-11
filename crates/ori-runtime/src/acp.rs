@@ -1,5 +1,18 @@
-//! The ACP client and the `AgentRuntime` trait: AICD §17, ADR-0001 "Agent
+//! The ACP client, which implements `AgentRuntime`: AICD §17, ADR-0001 "Agent
 //! protocol", PRD I-04 and P-02, `spec/API_SPEC.md` §4, criterion ORI-P1-039.
+//!
+//! # Where `AgentRuntime` and the types in its signatures are declared
+//!
+//! Not here, since ORI-T-0141. `spec/API_SPEC.md` §4 and `spec/LLD.md`
+//! section 2 declare all seven adapter traits in `ori-core`, together with
+//! the types in their signatures, so this module re-exports `AgentRuntime`,
+//! [`SessionSpec`], [`SessionHandle`], [`LaunchConfig`], [`LaunchConfigError`],
+//! [`StdioMode`], [`StopReason`], [`RuntimeCaps`], [`RuntimeCapsError`] and
+//! [`RuntimeError`] from `ori_core::adapters` at the paths they always had,
+//! and `crate::transcript` does the same for `Entry` and `TranscriptError`.
+//! What stays here is everything that performs IO or is not in the trait's
+//! signatures: [`AcpClient`], [`LaunchDefect`] with its recorder and clock
+//! types, and the process helpers.
 //!
 //! # What ORI-P1-039 asks, and what answers it here
 //!
@@ -328,12 +341,12 @@
 //! record an environment value; spawn a process outside this crate's own
 //! functions (CLAUDE.md: "Only `ori-runtime` spawns processes").
 
-use core::fmt;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
+#[cfg(test)]
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::ChildStderr;
@@ -350,6 +363,7 @@ use std::time::Instant;
 
 use ori_core::error::MethodologyRef;
 use ori_core::types::Id;
+#[cfg(test)]
 use ori_core::types::ModelFamily;
 use ori_core::types::Timestamp;
 use serde::Deserialize;
@@ -359,7 +373,20 @@ use serde_json::json;
 
 use crate::transcript::Entry;
 use crate::transcript::Transcript;
-use crate::transcript::TranscriptError;
+
+// The trait and the types in its signatures are declared in `ori-core` since
+// ORI-T-0141 (`spec/API_SPEC.md` §4, `spec/LLD.md` section 2), and re-exported
+// here at the paths they always had, so that no caller changed.
+pub use ori_core::adapters::AgentRuntime;
+pub use ori_core::adapters::LaunchConfig;
+pub use ori_core::adapters::LaunchConfigError;
+pub use ori_core::adapters::RuntimeCaps;
+pub use ori_core::adapters::RuntimeCapsError;
+pub use ori_core::adapters::RuntimeError;
+pub use ori_core::adapters::SessionHandle;
+pub use ori_core::adapters::SessionSpec;
+pub use ori_core::adapters::StdioMode;
+pub use ori_core::adapters::StopReason;
 
 /// How much of a subprocess's captured standard error is kept in an error
 /// value or reported: the same bound `crate::worktree::STDERR_CAP` uses, for
@@ -409,307 +436,7 @@ const INBOUND_DEPTH: usize = 16;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 // ---------------------------------------------------------------------------
-// RuntimeCaps
-// ---------------------------------------------------------------------------
-
-/// What a runtime adapter declares about itself: `spec/API_SPEC.md` §4's
-/// `AgentRuntime::capabilities`, ADR-0001 "Model family".
-///
-/// # How the family is guaranteed
-///
-/// The operator's ruling on escalation 6 (carried by `crates/ori-broker/src/family.rs`'s
-/// own doc comment and by ADR-0001's decision row): "the runtime adapter
-/// declares the family through `RuntimeCaps`... and the engine passes it to
-/// `broker.identity.create`". [`RuntimeCaps::new`] is the only way to build
-/// one, and its first parameter is an [`ori_core::types::ModelFamily`], not
-/// an `Option<ModelFamily>` and not a `String` a caller could leave blank:
-/// [`ModelFamily::parse`] already refuses an empty or whitespace-only value
-/// (`crates/ori-core/src/types.rs`), so a value of that type reaching this
-/// constructor already passed that check once. There is no [`Default`] impl,
-/// no public field, and no second constructor, so a `RuntimeCaps` cannot be
-/// built by any path that does not supply a family: an adapter with no
-/// declared family is not constructible, the same fail-closed shape
-/// `crates/ori-broker/src/family.rs`'s own `ModelFamily::declare` uses for
-/// itself.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeCaps {
-    family: ModelFamily,
-    adapter_name: String,
-}
-
-impl RuntimeCaps {
-    /// Declares an adapter's capabilities, refusing an empty or
-    /// whitespace-only `adapter_name`. `family` cannot be empty by
-    /// construction: see this type's own doc comment.
-    ///
-    /// # Errors
-    ///
-    /// [`RuntimeCapsError::EmptyAdapterName`] when `adapter_name` is empty or
-    /// only whitespace.
-    pub fn new(
-        family: ModelFamily,
-        adapter_name: impl Into<String>,
-    ) -> Result<Self, RuntimeCapsError> {
-        let adapter_name = adapter_name.into();
-        if adapter_name.trim().is_empty() {
-            return Err(RuntimeCapsError::EmptyAdapterName);
-        }
-        Ok(Self {
-            family,
-            adapter_name,
-        })
-    }
-
-    /// The declared model family. Always present: see this type's own doc
-    /// comment, "How the family is guaranteed".
-    #[must_use]
-    pub const fn family(&self) -> &ModelFamily {
-        &self.family
-    }
-
-    /// The adapter's own name, for a launch record or a log line to say which
-    /// adapter ran, never a secret.
-    #[must_use]
-    pub fn adapter_name(&self) -> &str {
-        &self.adapter_name
-    }
-}
-
-/// Why building a [`RuntimeCaps`] was refused: ADR-0001 "Model family".
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RuntimeCapsError {
-    /// `adapter_name` was empty or only whitespace.
-    EmptyAdapterName,
-}
-
-impl fmt::Display for RuntimeCapsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyAdapterName => f.write_str("an adapter name is not empty"),
-        }
-    }
-}
-
-impl std::error::Error for RuntimeCapsError {}
-
-// ---------------------------------------------------------------------------
-// LaunchConfig: the inspectable half of ORI-P1-039
-// ---------------------------------------------------------------------------
-
-/// What standard input a launched runtime is given: PRD P-02, ORI-P1-039.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StdioMode {
-    /// The platform's null device (`/dev/null` on unix, `NUL` on Windows): a
-    /// read against it returns end-of-file immediately, on every platform.
-    Null,
-    /// A pipe this process reads and writes: what the ACP client needs, since
-    /// it *is* the protocol channel.
-    Piped,
-    /// The parent's own standard input. Never chosen by this module's own
-    /// constructors; a [`SessionSpec`] built with this is what plant 4 of
-    /// this ticket's own table exercises, and `HeadlessAdapter::spawn` (`crate::headless`)
-    /// (`crate::headless`) refuses it.
-    Inherit,
-}
-
-impl fmt::Display for StdioMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Null => "null",
-            Self::Piped => "piped",
-            Self::Inherit => "inherit",
-        })
-    }
-}
-
-/// The runtime launch configuration ORI-P1-039 says must be inspectable:
-/// "Inspect the runtime launch configuration and the session transcript".
-///
-/// Deliberately excludes the process environment. `spec/API_SPEC.md` §4:
-/// "adapters receive credentials from the broker per call or per session,
-/// never from configuration"; this type is what a test, and later an
-/// operator, reads to answer "was this launched non-interactively", and an
-/// environment variable is never part of that answer, so there is no field
-/// here that could hold one. See the module doc comment, "The seam with
-/// `injector.rs`".
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LaunchConfig {
-    program: String,
-    args: Vec<String>,
-    stdin: StdioMode,
-    non_interactive: bool,
-}
-
-impl LaunchConfig {
-    /// The launch configuration [`AcpClient::spawn`] uses: standard input
-    /// piped (the client writes JSON-RPC requests to it), which is what makes
-    /// the whole exchange the protocol substitute for a terminal prompt in
-    /// the first place, so `non_interactive` is `true` unconditionally: an
-    /// agent given a pipe instead of a pseudo-terminal has no terminal to
-    /// prompt on at all, whatever it does with the pipe.
-    ///
-    /// # Errors
-    ///
-    /// [`LaunchConfigError::EmptyProgram`] when `program` is empty or only
-    /// whitespace.
-    pub fn acp(program: impl Into<String>, args: Vec<String>) -> Result<Self, LaunchConfigError> {
-        Self::new(program, args, StdioMode::Piped)
-    }
-
-    /// The general constructor both [`LaunchConfig::acp`] and
-    /// `crate::headless::LaunchConfig::headless` (which calls this with
-    /// [`StdioMode::Null`]) share.
-    pub(crate) fn new(
-        program: impl Into<String>,
-        args: Vec<String>,
-        stdin: StdioMode,
-    ) -> Result<Self, LaunchConfigError> {
-        let program = program.into();
-        if program.trim().is_empty() {
-            return Err(LaunchConfigError::EmptyProgram);
-        }
-        Ok(Self {
-            program,
-            args,
-            stdin,
-            non_interactive: true,
-        })
-    }
-
-    /// A launch configuration built directly from its parts, without
-    /// [`LaunchConfig::new`]'s validation. Used only where a test must build
-    /// the one shape this module's own constructors refuse to build (plant
-    /// 4: standard input inherited rather than closed), so that the refusal
-    /// under test is `HeadlessAdapter::spawn`'s (`crate::headless`), not
-    /// this function's. `#[cfg(test)]` because production code never needs
-    /// the shape this deliberately skips validating.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) const fn assemble(
-        program: String,
-        args: Vec<String>,
-        stdin: StdioMode,
-        non_interactive: bool,
-    ) -> Self {
-        Self {
-            program,
-            args,
-            stdin,
-            non_interactive,
-        }
-    }
-
-    /// The program to execute. Never a path this module resolved itself:
-    /// the caller names it, the same way `crate::worktree::SystemGit` never
-    /// resolves `git`'s own path.
-    #[must_use]
-    pub fn program(&self) -> &str {
-        &self.program
-    }
-
-    /// The argv, without the program name. Never holds a credential: see the
-    /// module doc comment, "The seam with `injector.rs`".
-    #[must_use]
-    pub fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    /// What standard input the child is given.
-    #[must_use]
-    pub const fn stdin(&self) -> StdioMode {
-        self.stdin
-    }
-
-    /// Whether this launch is the runtime's non-interactive mode: PRD P-02.
-    #[must_use]
-    pub const fn non_interactive(&self) -> bool {
-        self.non_interactive
-    }
-}
-
-impl fmt::Display for LaunchConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} (stdin={}, non_interactive={})",
-            self.program,
-            self.args.join(" "),
-            self.stdin,
-            self.non_interactive
-        )
-    }
-}
-
-/// Why building a [`LaunchConfig`] was refused.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum LaunchConfigError {
-    /// `program` was empty or only whitespace.
-    EmptyProgram,
-}
-
-impl fmt::Display for LaunchConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyProgram => f.write_str("a launch program is not empty"),
-        }
-    }
-}
-
-impl std::error::Error for LaunchConfigError {}
-
-// ---------------------------------------------------------------------------
-// SessionSpec, SessionHandle
-// ---------------------------------------------------------------------------
-
-/// What the engine gives an adapter to start a session: `spec/API_SPEC.md`
-/// §4's `AgentRuntime::spawn(session: SessionSpec)`. See the module doc
-/// comment, "`SessionSpec` and `SessionHandle`, and what was chosen for
-/// them".
-#[derive(Clone, Debug)]
-pub struct SessionSpec {
-    /// The engine's own session identifier (`crate::session::Session::id`).
-    pub id: Id,
-    /// The launch configuration.
-    pub launch: LaunchConfig,
-    /// The working directory the child is spawned in: the session's
-    /// `crate::worktree::Worktree` path, in the engine's real use.
-    pub cwd: PathBuf,
-    /// The child's environment, prepared entirely by the caller. Never read
-    /// by this module for anything but passing to
-    /// [`std::process::Command::envs`]; see the module doc comment, "The
-    /// seam with `injector.rs`".
-    pub envs: Vec<(String, String)>,
-}
-
-/// An opaque handle to a spawned session: `spec/API_SPEC.md` §4's
-/// `SessionHandle`. Carries the same [`Id`] the [`SessionSpec`] it was
-/// spawned from carried; see the module doc comment for why that is also
-/// the check every later call makes.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct SessionHandle {
-    id: Id,
-}
-
-impl SessionHandle {
-    /// Wraps a session identifier a [`SessionSpec`] was built with. Public so
-    /// `crate::headless` (a sibling module, not a descendant, so it cannot
-    /// reach this type's private field directly) can build one too.
-    #[must_use]
-    pub const fn new(id: Id) -> Self {
-        Self { id }
-    }
-
-    /// The session identifier this handle names.
-    #[must_use]
-    pub const fn id(&self) -> &Id {
-        &self.id
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The AgentRuntime trait
+// Launch defects, and the recorder and the clock that go with them
 // ---------------------------------------------------------------------------
 
 /// A launch defect: a permission prompt a runtime should never have raised,
@@ -766,265 +493,6 @@ pub type DefectRecorder = Box<dyn FnMut(LaunchDefect) -> Result<(), String>>;
 /// that has a real clock (or, in a test, a fixed one) supplies it, the same
 /// pattern `ori_store::event_log::EventLog::append` already uses for `at`.
 pub type ClockFn = Box<dyn FnMut() -> Timestamp>;
-
-/// Where a turn ended: ACP's `stopReason`, or this adapter's own mapping of
-/// a headless run's exit.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StopReason {
-    /// The agent finished the turn normally.
-    EndTurn,
-    /// The agent declined to continue (for instance, after this client
-    /// refused a permission request).
-    Refusal,
-    /// The turn was cancelled.
-    Cancelled,
-    /// A value this module does not otherwise recognize, carried as data
-    /// rather than dropped: `spec/API_SPEC.md` §5, "Adapter traits are
-    /// versioned by crate", which is exactly what lets an agent report a stop
-    /// reason a fixed enum here does not yet name without this client
-    /// refusing to compile against it.
-    Other(String),
-}
-
-impl StopReason {
-    /// Reads a `stopReason` string into this type.
-    #[must_use]
-    pub fn parse(text: &str) -> Self {
-        match text {
-            "end_turn" => Self::EndTurn,
-            "refusal" => Self::Refusal,
-            "cancelled" => Self::Cancelled,
-            other => Self::Other(other.to_owned()),
-        }
-    }
-}
-
-impl fmt::Display for StopReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EndTurn => f.write_str("end_turn"),
-            Self::Refusal => f.write_str("refusal"),
-            Self::Cancelled => f.write_str("cancelled"),
-            Self::Other(text) => write!(f, "{text}"),
-        }
-    }
-}
-
-/// One runtime adapter: `spec/API_SPEC.md` §4, ADR-0001 "Agent protocol".
-///
-/// Matches `spec/API_SPEC.md` §4's sketch closely now: `record_defect` and
-/// the clock used to be parameters of `spawn`/`send` themselves (this
-/// trait's own divergence from the sketch, in an earlier version of this
-/// file), which let the trait path silently drop ORI-P1-039's "recorded as a
-/// launch defect" clause; see the module doc comment, "Why the recorder and
-/// the clock are constructor parameters, not per-call ones". Both are
-/// supplied once, to each implementation's own constructor
-/// ([`AcpClient::new`], `crate::headless::HeadlessAdapter::new`), instead.
-pub trait AgentRuntime {
-    /// Starts the runtime in its non-interactive mode, inside the isolation
-    /// boundary the caller already built (`crate::worktree`,
-    /// `crate::container` once ORI-T-0031 lands): PRD P-02, PRD I-04.
-    ///
-    /// # Errors
-    ///
-    /// See each implementation's own `Error` type.
-    fn spawn(&mut self, spec: SessionSpec) -> Result<SessionHandle, RuntimeError>;
-
-    /// Sends one prompt to the session, running until the turn ends,
-    /// answering any permission prompt the agent raises with a refusal
-    /// (never a grant) and recording it through the recorder and clock this
-    /// adapter was constructed with, and this adapter's own transcript.
-    ///
-    /// # Errors
-    ///
-    /// See each implementation's own `Error` type.
-    fn send(&mut self, handle: &SessionHandle, prompt: &str) -> Result<StopReason, RuntimeError>;
-
-    /// The transcript entries recorded for this session so far.
-    ///
-    /// # Errors
-    ///
-    /// [`RuntimeError::UnknownSession`] when `handle` does not name the
-    /// session this adapter holds.
-    fn recv(&self, handle: &SessionHandle) -> Result<&[Entry], RuntimeError>;
-
-    /// Ends the session and the process backing it.
-    ///
-    /// # Errors
-    ///
-    /// See each implementation's own `Error` type.
-    fn kill(&mut self, handle: &SessionHandle) -> Result<(), RuntimeError>;
-
-    /// What this adapter declares about itself. Always carries a
-    /// [`ModelFamily`], through [`RuntimeCaps`]: see that type's own doc
-    /// comment.
-    fn capabilities(&self) -> RuntimeCaps;
-}
-
-/// Everything this module refuses or cannot do: AICD §17 for the refusals,
-/// `spec/CONVENTIONS.md`'s ruling R20 (hand-written `Display` and
-/// `std::error::Error`, deferring `thiserror`) for the shape.
-#[derive(Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RuntimeError {
-    /// The child process could not be spawned, or an I/O operation on its
-    /// stdio failed.
-    Io {
-        /// What the operating system reported.
-        message: String,
-    },
-    /// A line read from the child was not valid JSON, or not a JSON-RPC 2.0
-    /// frame this module recognizes, or was longer than the line cap (1 MiB),
-    /// in which case the session is spent as after a [`RuntimeError::Timeout`].
-    Protocol {
-        /// What was wrong.
-        message: String,
-    },
-    /// The agent answered one of this client's own requests with a JSON-RPC
-    /// error.
-    Rpc {
-        /// The error code the agent reported.
-        code: i64,
-        /// The error message the agent reported, carried as data.
-        message: String,
-    },
-    /// The child closed its output before answering a request this client
-    /// was waiting on.
-    UnexpectedEof,
-    /// A JSON-RPC round trip (the request's write, every read, and every reply
-    /// the client writes, together) or a process teardown did not complete
-    /// within the call's deadline, `IO_TIMEOUT` outside tests. For
-    /// [`AcpClient`] the child has been killed and reaped and the session is
-    /// spent: every later `prompt` is refused as [`RuntimeError::Io`], while
-    /// the transcript stays readable and `kill` still works.
-    ///
-    /// # Where the methodology reference is, and is not
-    ///
-    /// [`RuntimeError::methodology_ref`] is `None` for this variant and
-    /// [`RuntimeError::is_refusal`] is `false`: a timeout is a failure of the
-    /// channel (AICD §12, an agent that gets stuck is stopped, not waited on),
-    /// not a refusal by a control, and those two methods describe refusals
-    /// only. The AICD §17 reference is carried by [`LaunchDefect::reason`],
-    /// on the launch defect a caller's recorder is handed, and the two
-    /// adapters differ in whether a timeout produces one. `AcpClient` records
-    /// no launch defect for a timeout: its only defect is a
-    /// `session/request_permission`, which a silent agent never sends.
-    /// `crate::headless`'s adapter records one (method `headless.run`, reason
-    /// AICD §17) when its run does not finish in time, because there silence is
-    /// indistinguishable from a runtime blocked on a prompt it was given no
-    /// way to answer. Neither path puts the reference on this error value.
-    Timeout {
-        /// How long this call waited before giving up.
-        after: Duration,
-    },
-    /// The caller-supplied `record_defect` closure refused or failed.
-    DefectSink {
-        /// What it reported.
-        message: String,
-    },
-    /// Appending to this adapter's own transcript was refused.
-    Transcript(TranscriptError),
-    /// A [`SessionHandle`] that does not name the session this adapter
-    /// currently holds.
-    UnknownSession {
-        /// The identifier the handle carried.
-        id: Id,
-    },
-    /// [`AgentRuntime::spawn`] was called while a session is already active.
-    AlreadySpawned,
-    /// A call other than `spawn` was made before any session was spawned.
-    NotSpawned,
-    /// A [`SessionSpec`] whose [`LaunchConfig::stdin`] is not the mode this
-    /// adapter requires: AICD §17. ORI-P1-039's own launch-configuration
-    /// clause is a refusal here, not a silent correction, so that a caller
-    /// that built the wrong `LaunchConfig` learns that at `spawn`, not from a
-    /// runtime that turns out to prompt.
-    WrongStdinMode {
-        /// What this adapter requires.
-        required: StdioMode,
-        /// What the caller supplied.
-        found: StdioMode,
-    },
-    /// `crate::headless::HeadlessAdapter::send` was called a second time. A
-    /// one-shot, non-interactive run has exactly one turn: see
-    /// `crate::headless`'s own module doc comment.
-    AlreadyCompleted,
-}
-
-impl RuntimeError {
-    /// The methodology section a refusal is made under, for the refusals and
-    /// for nothing else. In particular [`RuntimeError::Timeout`] is `None`:
-    /// see that variant's documentation for where AICD §12 and AICD §17 sit
-    /// for a timeout.
-    #[must_use]
-    pub const fn methodology_ref(&self) -> Option<MethodologyRef> {
-        match self {
-            Self::WrongStdinMode { .. } => Some(MethodologyRef {
-                section: 17,
-                subsection: None,
-            }),
-            Self::Io { .. }
-            | Self::Protocol { .. }
-            | Self::Rpc { .. }
-            | Self::UnexpectedEof
-            | Self::Timeout { .. }
-            | Self::DefectSink { .. }
-            | Self::Transcript(_)
-            | Self::UnknownSession { .. }
-            | Self::AlreadySpawned
-            | Self::NotSpawned
-            | Self::AlreadyCompleted => None,
-        }
-    }
-
-    /// Whether a control refused the action, as opposed to an I/O or protocol
-    /// failure.
-    #[must_use]
-    pub const fn is_refusal(&self) -> bool {
-        matches!(self, Self::WrongStdinMode { .. })
-    }
-}
-
-impl fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { message } => write!(f, "an I/O operation on the runtime failed: {message}"),
-            Self::Protocol { message } => {
-                write!(f, "not a JSON-RPC 2.0 frame this client reads: {message}")
-            }
-            Self::Rpc { code, message } => write!(f, "the agent returned error {code}: {message}"),
-            Self::UnexpectedEof => f.write_str("the agent closed its output before answering"),
-            Self::Timeout { after } => write!(f, "no answer within {after:?}"),
-            Self::DefectSink { message } => {
-                write!(f, "recording the launch defect failed: {message}")
-            }
-            Self::Transcript(inner) => write!(f, "the transcript refused this entry: {inner}"),
-            Self::UnknownSession { id } => write!(f, "no active session named {id}"),
-            Self::AlreadySpawned => f.write_str("this adapter already holds an active session"),
-            Self::NotSpawned => f.write_str("no session has been spawned yet"),
-            Self::WrongStdinMode { required, found } => write!(
-                f,
-                "refused: this adapter requires stdin={required}, and the launch configuration \
-                 gave it stdin={found} ({})",
-                MethodologyRef {
-                    section: 17,
-                    subsection: None,
-                }
-            ),
-            Self::AlreadyCompleted => {
-                f.write_str("this one-shot session already ran its single turn")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RuntimeError {}
-
-impl From<TranscriptError> for RuntimeError {
-    fn from(inner: TranscriptError) -> Self {
-        Self::Transcript(inner)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The JSON-RPC 2.0 wire frame
@@ -1667,7 +1135,7 @@ impl AcpClient {
         };
         session.acp_session_id = acp_session_id;
 
-        let handle = SessionHandle { id: spec.id };
+        let handle = SessionHandle::new(spec.id);
         self.session = Some(session);
         Ok(handle)
     }
@@ -2618,12 +2086,12 @@ mod tests {
     fn ori_t_0033_spawn_refuses_a_launch_configuration_whose_stdin_is_not_piped() {
         let mut client = client(|_| Ok(()));
         let mut spec = spawn_fixture("well_behaved");
-        spec.launch = LaunchConfig::assemble(
+        spec.launch = LaunchConfig::new(
             spec.launch.program().to_owned(),
             spec.launch.args().to_vec(),
             StdioMode::Inherit,
-            true,
-        );
+        )
+        .expect("a non-empty program");
         let refusal = client
             .spawn(spec)
             .expect_err("stdin must be piped for the ACP client");
@@ -2657,7 +2125,7 @@ mod tests {
     #[test]
     fn ori_t_0033_a_call_against_an_unknown_handle_is_refused() {
         let mut client = client(|_| Ok(()));
-        let stranger = SessionHandle { id: id("STRNG") };
+        let stranger = SessionHandle::new(id("STRNG"));
         let refusal = client
             .prompt(&stranger, "hi")
             .expect_err("no session spawned yet");

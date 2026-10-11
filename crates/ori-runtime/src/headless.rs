@@ -137,18 +137,22 @@
 //! # Why this file shares its types with `crate::acp`
 //!
 //! `LaunchConfig`, `StdioMode`, `SessionSpec`, `SessionHandle`,
-//! `AgentRuntime`, `RuntimeError`, `LaunchDefect`, `StopReason`,
-//! `RuntimeCaps` and the process helpers (`crate::acp::wait_with_timeout`,
-//! `crate::acp::kill_child`, `crate::acp::drain_stderr`) are declared in
-//! `crate::acp` and reused here rather than duplicated: `spec/API_SPEC.md`
-//! §4 gives both adapters one trait, and a second, incompatible
-//! `LaunchConfig` in this file would make "inspect the runtime launch
-//! configuration" (ORI-P1-039) mean two different things depending on which
-//! adapter answered. [`LaunchConfig::headless`] is this file's own addition
-//! to that shared type, an inherent-impl block in a different module from
-//! the type's definition, legal because both live in this one crate; it is
-//! the only constructor in the whole crate that builds a [`StdioMode::Null`]
-//! launch configuration.
+//! `AgentRuntime`, `RuntimeError`, `StopReason` and `RuntimeCaps` are
+//! declared in `ori-core` (`ori_core::adapters`, since ORI-T-0141) and
+//! reached here through `crate::acp`, which re-exports them at the paths they
+//! always had; `LaunchDefect` and the process helpers
+//! (`crate::acp::wait_with_timeout`, `crate::acp::kill_child`,
+//! `crate::acp::drain_stderr`) are declared in `crate::acp`. All are reused
+//! here rather than duplicated: `spec/API_SPEC.md` §4 gives both adapters one
+//! trait, and a second, incompatible `LaunchConfig` in this file would make
+//! "inspect the runtime launch configuration" (ORI-P1-039) mean two different
+//! things depending on which adapter answered.
+//! [`LaunchConfig::headless`](crate::acp::LaunchConfig::headless) is the one
+//! constructor that chooses [`StdioMode::Null`] for its caller
+//! ([`LaunchConfig::new`](crate::acp::LaunchConfig::new) takes any mode). It
+//! began as an inherent-impl block in this file; it is declared in `ori-core`
+//! beside [`LaunchConfig::acp`](crate::acp::LaunchConfig::acp) now, because
+//! an inherent `impl` for a type declared in another crate is not allowed.
 //!
 //! # The seam with `injector.rs` (ORI-T-0032, in flight)
 //!
@@ -196,8 +200,8 @@ use ori_core::types::Timestamp;
 use crate::acp::AgentRuntime;
 use crate::acp::ClockFn;
 use crate::acp::DefectRecorder;
+#[cfg(test)]
 use crate::acp::LaunchConfig;
-use crate::acp::LaunchConfigError;
 use crate::acp::LaunchDefect;
 use crate::acp::RuntimeCaps;
 use crate::acp::RuntimeError;
@@ -234,23 +238,6 @@ const STDOUT_CAP: usize = 4000;
 /// leaves the first `STDOUT_CAP` bytes of the text exactly what they would
 /// have been had every byte been kept.
 const STDOUT_RETAIN: usize = STDOUT_CAP + 8;
-
-impl LaunchConfig {
-    /// The launch configuration [`HeadlessAdapter::spawn`] requires:
-    /// standard input closed. See this module's own doc comment, "What
-    /// 'prompting' can mean with stdin closed".
-    ///
-    /// # Errors
-    ///
-    /// [`LaunchConfigError::EmptyProgram`] when `program` is empty or only
-    /// whitespace.
-    pub fn headless(
-        program: impl Into<String>,
-        args: Vec<String>,
-    ) -> Result<Self, LaunchConfigError> {
-        Self::new(program, args, StdioMode::Null)
-    }
-}
 
 /// One headless session's process and transcript state.
 struct ActiveHeadlessSession {
@@ -784,12 +771,12 @@ mod tests {
         let mut adapter = adapter(|_| Ok(()));
         let mut spec = spawn_fixture_spec("RFSE1");
         // The wrong shape plant 4 names: stdin inherited rather than closed.
-        spec.launch = LaunchConfig::assemble(
+        spec.launch = LaunchConfig::new(
             spec.launch.program().to_owned(),
             spec.launch.args().to_vec(),
             StdioMode::Inherit,
-            true,
-        );
+        )
+        .expect("a non-empty program");
         let refusal = adapter
             .spawn(spec)
             .expect_err("stdin must be null for a headless adapter");
