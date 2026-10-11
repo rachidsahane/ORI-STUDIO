@@ -19,6 +19,10 @@ pub mod gate;
 /// The detector that makes CLAUDE.md's never-modify-a-test rule real (AICD §14).
 pub mod modified_tests;
 
+/// The prover: a gate is proven only by a clean pass and a failure on its
+/// planted defect, and every other pair of outcomes is a refusal (AICD §14).
+pub mod prover;
+
 /// The [`crate::runner::Runner`] trait and [`crate::runner::Registry`], which
 /// pairs a [`crate::gate::GateDef`] with an optional runner and is the only
 /// place [`crate::runner::GateState::Installed`] is produced
