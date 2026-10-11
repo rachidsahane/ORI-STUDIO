@@ -72,10 +72,15 @@
 //!    keep a dead workflow green until the clock caught up, or for ever. It is
 //!    set aside, and [`crate::liveness::Judgement::future_ignored`] says how
 //!    many were, so a human can see why. A caller that wants to tolerate skew
-//!    passes a later `now`; this module adds no tolerance of its own.
+//!    passes a later `now`; this module adds no tolerance of its own. Only a
+//!    record that claims an execution is counted there: a future-dated record
+//!    of status `missing` claims nothing was run, so it is not "a run set
+//!    aside" and does not raise the count. It is still a record under that
+//!    name, and it still makes the reason "only records of absence" rather
+//!    than "no record at all".
 //! 7. **An installed gate with a missing run is inert.** `spec/DATA_MODEL.md`
-//!    section 3: "A `GateRun` with status `missing` on an installed gate flips
-//!    it to `Inert`, which is an incident." An expectation may be bound to a
+//!    section 3: "A GateRun with status `missing` on an installed gate flips it
+//!    to `Inert`, which is an incident." An expectation may be bound to a
 //!    gate with [`crate::liveness::ExpectedRun::for_gate`]; if the bound
 //!    [`crate::runner::GateState`] is `Installed` and the run is missing, the
 //!    verdict is [`crate::liveness::Verdict::Inert`] rather than
@@ -299,9 +304,19 @@ pub struct GateBinding {
 impl GateBinding {
     /// Whether a missing run on this gate is an incident: only for
     /// `Installed`, per `spec/DATA_MODEL.md` section 3.
+    ///
+    /// An exhaustive `match` on purpose, with no wildcard arm. When a fourth
+    /// [`crate::runner::GateState`] value (`Inert`, which this module's head
+    /// comment says is owed) is added, this stops compiling until its author
+    /// decides what a missing run means for a gate already in that state. A
+    /// `matches!` here would have kept compiling and silently answered
+    /// "not installed" for it.
     #[must_use]
     pub const fn is_installed(&self) -> bool {
-        matches!(self.state, GateState::Installed)
+        match self.state {
+            GateState::Installed => true,
+            GateState::Defined | GateState::Proven => false,
+        }
     }
 }
 
@@ -577,8 +592,10 @@ impl Judgement {
         &self.verdict
     }
 
-    /// How many records under this name that executed were dated after "now"
-    /// and so were not counted: this module's head comment, decision 6.
+    /// How many records under this name that claim an execution were dated
+    /// after "now" and so were not counted: this module's head comment,
+    /// decision 6. A future-dated record of status `missing` claims no
+    /// execution and is not counted here.
     #[must_use]
     pub const fn future_ignored(&self) -> usize {
         self.future_ignored
@@ -1252,6 +1269,187 @@ mod tests {
             lines[2]
         );
         assert!(lines.iter().all(|line| !line.contains('\n')));
+    }
+
+    #[test]
+    fn ori_t_0046_an_installed_gate_whose_last_run_is_older_than_the_window_is_inert() {
+        // The realistic inert gate: it ran once, and then stopped firing. Not
+        // "no record" and not "a record of absence": a real, stale run.
+        let expected = wf("gate-4.yml").for_gate(gate(4), GateState::Installed);
+        let stale = [
+            ran("gate-4.yml", NOW - 9 * DAY),
+            ran("gate-4.yml", NOW - 3 * DAY),
+        ];
+        let judged = judge(&expected, &stale, NOW);
+        assert_eq!(
+            judged.verdict(),
+            &Verdict::Inert(MissingReason::TooOld {
+                newest: NOW - 3 * DAY,
+                window_opens_at: NOW - DAY,
+            })
+        );
+        assert!(judged.is_incident());
+        assert!(!judged.is_live());
+        assert!(
+            judged
+                .line()
+                .starts_with("INERT, an incident: installed gate 4 "),
+            "{}",
+            judged.line()
+        );
+
+        // One second past the edge is enough, and the same stale run on a gate
+        // that is not installed is only missing.
+        let just_late = [ran("gate-4.yml", NOW - DAY - 1)];
+        assert!(judge(&expected, &just_late, NOW).is_incident());
+        for state in [GateState::Defined, GateState::Proven] {
+            let not_installed = wf("gate-4.yml").for_gate(gate(4), state);
+            let judged = judge(&not_installed, &stale, NOW);
+            assert_eq!(
+                judged.verdict(),
+                &Verdict::Missing(MissingReason::TooOld {
+                    newest: NOW - 3 * DAY,
+                    window_opens_at: NOW - DAY,
+                }),
+                "state {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0046_an_installed_gate_with_only_future_dated_runs_is_inert() {
+        let expected = wf("gate-4.yml").for_gate(gate(4), GateState::Installed);
+        let ahead = [ran("gate-4.yml", NOW + 60), ran("gate-4.yml", NOW + DAY)];
+        let judged = judge(&expected, &ahead, NOW);
+        assert_eq!(
+            judged.verdict(),
+            &Verdict::Inert(MissingReason::OnlyAfterNow { earliest: NOW + 60 })
+        );
+        assert!(judged.is_incident());
+        assert_eq!(judged.future_ignored(), 2);
+        assert!(
+            judged
+                .line()
+                .contains("2 record(s) dated after now were not counted"),
+            "{}",
+            judged.line()
+        );
+
+        let not_installed = wf("gate-4.yml").for_gate(gate(4), GateState::Proven);
+        assert_eq!(
+            judge(&not_installed, &ahead, NOW).verdict(),
+            &Verdict::Missing(MissingReason::OnlyAfterNow { earliest: NOW + 60 })
+        );
+    }
+
+    #[test]
+    fn ori_t_0046_a_future_dated_record_of_absence_is_not_a_run_set_aside() {
+        // Decision, documented on `Judgement::future_ignored`: only a record
+        // that claims an execution is counted there. A future-dated `missing`
+        // record claims nothing ran, so it is a record of absence like any
+        // other, whatever its date.
+        let only_absence = [ObservedRun::new(
+            "ci.yml",
+            NOW + 60,
+            ObservedStatus::Missing,
+        )];
+        let judged = judge(&wf("ci.yml"), &only_absence, NOW);
+        assert_eq!(
+            judged.verdict(),
+            &Verdict::Missing(MissingReason::OnlyRecordsOfAbsence { records: 1 })
+        );
+        assert_eq!(judged.future_ignored(), 0);
+        assert!(
+            !judged.line().contains("dated after now"),
+            "nothing was set aside as a run: {}",
+            judged.line()
+        );
+
+        // Beside a future-dated run that does claim an execution, only that
+        // one is counted, and the reason is the future run's.
+        let mixed = [
+            ObservedRun::new("ci.yml", NOW + 60, ObservedStatus::Missing),
+            ObservedRun::new("ci.yml", NOW + 120, ObservedStatus::Pass),
+        ];
+        let judged = judge(&wf("ci.yml"), &mixed, NOW);
+        assert_eq!(
+            judged.verdict(),
+            &Verdict::Missing(MissingReason::OnlyAfterNow {
+                earliest: NOW + 120
+            })
+        );
+        assert_eq!(judged.future_ignored(), 1);
+    }
+
+    #[test]
+    fn ori_t_0046_every_refusal_text_names_aicd_14_not_only_its_reason() {
+        let refusals = [
+            LivenessError::NonPositiveWindow { secs: 0 },
+            LivenessError::BlankName,
+            LivenessError::NothingExpected,
+        ];
+        for error in refusals {
+            assert!(
+                error.to_string().contains("AICD §14"),
+                "the text a human reads must name the section too: {error}"
+            );
+            assert_eq!(error.reason(), MethodologyRef::at(14).expect("AICD §14"));
+        }
+        let from_constructors = [
+            Window::new(0).expect_err("zero window"),
+            ExpectedRun::workflow("  ", day()).expect_err("blank name"),
+            assess(&[], &[], NOW).expect_err("nothing expected"),
+        ];
+        for error in from_constructors {
+            assert!(error.to_string().contains("AICD §14"), "{error}");
+        }
+    }
+
+    #[test]
+    fn ori_t_0046_a_name_with_a_carriage_return_or_a_bidi_override_is_printed_escaped() {
+        // A line break is not the only way a name can rewrite what a reader
+        // sees: a carriage return overwrites the start of the line in a
+        // terminal, an escape starts a control sequence, and U+202E reverses
+        // the display order of what follows it.
+        let names = [
+            "ci.yml\rINERT, an incident: nothing is wrong",
+            "ci.yml\u{202e}lmy.ic",
+            "ci.yml\u{1b}[2K\u{1b}[1Aall clear",
+            "ci.yml\u{2028}second line\u{2029}third line",
+        ];
+        for name in names {
+            let live = ran(name, NOW - 30);
+            let expected = [
+                // Live, through a run recorded under that very name.
+                ExpectedRun::workflow(name, day()).expect("not blank"),
+                // Missing: nothing is recorded under the next name.
+                ExpectedRun::workflow(format!("{name}-b"), day()).expect("not blank"),
+                // Inert: an installed gate that went silent.
+                ExpectedRun::workflow(format!("{name}-c"), day())
+                    .expect("not blank")
+                    .for_gate(gate(4), GateState::Installed),
+            ];
+            let report = assess(&expected, &[live], NOW).expect("three expectations");
+            let lines = report.lines();
+            assert_eq!(lines.len(), 3);
+            assert!(lines[0].starts_with("live: "), "{}", lines[0]);
+            assert!(lines[1].starts_with("MISSING: "), "{}", lines[1]);
+            assert!(lines[2].starts_with("INERT, an incident: "), "{}", lines[2]);
+            for line in &lines {
+                for raw in ['\r', '\n', '\u{202e}', '\u{1b}', '\u{2028}', '\u{2029}'] {
+                    assert!(
+                        !line.contains(raw),
+                        "{:?} reached the output raw in: {line:?}",
+                        raw
+                    );
+                }
+            }
+        }
+        // And the escaped spellings are the ones that appear.
+        let expected = ExpectedRun::workflow("a\rb\u{202e}c", day()).expect("not blank");
+        let line = judge(&expected, &[], NOW).line();
+        assert!(line.contains("a\\rb"), "{line}");
+        assert!(line.contains("\\u{202e}"), "{line}");
     }
 
     #[test]
