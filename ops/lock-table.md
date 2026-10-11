@@ -668,3 +668,17 @@ ORI-T-0137 already held the half of this about `VcsHost::merge`. It is widened t
 No other claim holds a path under `spec/`. Claim 69 is noted to include `crates/ori-core/src/adapters/identity.rs`, which ORI-T-0058's split clause allowed and the review asked to be recorded (its note N8).
 
 **State after this section:** the claims held are 20, 62, 64, 67 to 70, 77 and 78. The next free identifier is ORI-T-0145.
+
+---
+
+## Claim 79: ORI-T-0143 dispatched
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. ORI-T-0140's independent review approved its shape (a reader thread feeding a channel, one deadline over the whole run) and confirmed the ACP defect by reading: `AcpClient::call` checks its deadline only between lines around a blocking `read_line`, and `write_frame` can also block on a full stdin pipe.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 79 | ORI-T-0143, ACP read and write bounded by `IO_TIMEOUT` | `crates/ori-runtime/src/acp.rs` | 1 | `fix/ORI-T-0143-acp-timeout` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from claim 77 (`headless.rs`). Claim 69 no longer holds `acp.rs` (narrowed above). ORI-T-0141, which also changes `acp.rs`, waits on this claim's release.
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 69, 77, 78 and 79. The next free identifier is ORI-T-0145.
