@@ -81,8 +81,8 @@
 //! blank, or at the end of its line) cites gate `n` as protection when it
 //! contains the words `gate n` (a blank between, so `gate-7` in a path is not
 //! one), carries a protection word (a word that starts `protect`, `guard`,
-//! `catch`, `caught`, `prevent`, `enforc`, `refus`, `block` or `cover`), and carries no
-//! hedge word (`not`, `never`, `cannot`, `until`, `unless`, `once`, `will`,
+//! `catch`, `caught`, `prevent`, `enforc`, `refus`, `block` or `cover`), and
+//! carries no hedge word (`not`, `never`, `cannot`, `until`, `unless`, `once`, `will`,
 //! `would`, `if`, `whether`, `yet`, `without`, `before`, `should`, `could`,
 //! `may`, `might`, or a word ending `n't`). A hedged sentence says the gate is
 //! not protecting yet, and flagging it would flag the sentences that tell the
@@ -90,11 +90,12 @@
 //!
 //! It does not catch: a gate named by something other than `gate n` (its name, a
 //! range such as "gates 7 and 9", a number in a list), a protection claim in a
-//! word this list lacks, a sentence whose hedge word is incidental (so a
-//! false claim can hide behind an unrelated "not"), a claim spread over two
-//! sentences, or a claim in a fenced code block that is read as the prose it is
-//! (a fenced block is not special here). It flags a description of what a gate
-//! is going to do when the sentence is not hedged. These are the limits of a
+//! word this list lacks, a sentence whose hedge word is incidental (so a false
+//! claim can hide behind an unrelated "not"), or a claim spread over two
+//! sentences. It reads a fenced code block as the prose it would be, since a
+//! fenced block is not special here. And it flags a description of what a gate is
+//! going to do when the sentence is not hedged, which is the rule of AICD §14
+//! read strictly: no document cites a gate as protection before its proof exists. These are the limits of a
 //! phase 1 reader; the gate that wraps this checker can tighten the lists, and
 //! the lists are small on purpose so that a tightening is a visible diff.
 //!
@@ -102,13 +103,13 @@
 //!
 //! The operator answered escalation E-0006 on 2026-09-27: the check covers
 //! everything under `spec/`, HTML included, and excludes the design mockup
-//! `spec/design/Ori Studio.html` by name. The file is a 342 KB blob of sample
-//! data about a fictional product, Ledgerline, with citations that are props, one
-//! of them a picture of this very check refusing a bad citation. The exclusion
-//! is one [`crate::citation::Exclusion`] carrying the file, the reason, and a
-//! marker that must still be in the file: the fictional product's name. **On
-//! every run**, before anything is judged, the checker looks for the marker in
-//! the excluded document and refuses the run if it is gone
+//! `spec/design/Ori Studio.html` by name. Its line 405 is a 342 KB blob of mock
+//! interface data about a fictional product, Ledgerline, with citations that are
+//! props, one of them a picture of this very check refusing a bad citation. The
+//! exclusion is one [`crate::citation::Exclusion`] carrying the file, the
+//! reason, and a marker that must still be in the file: the fictional product's
+//! name. **On every run**, before anything is judged, the checker looks for the
+//! marker in the excluded document and refuses the run if it is gone
 //! ([`crate::citation::CitationError::ExclusionMarkerGone`]), so the exemption
 //! cannot outlive its subject. For this repository the exclusion is also
 //! required to exist ([`crate::citation::Exclusion::required`]); a product that
