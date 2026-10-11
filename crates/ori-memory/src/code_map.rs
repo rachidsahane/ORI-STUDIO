@@ -10217,7 +10217,10 @@ mod tests {
     /// else, and at least one attempt must be the document, which is what
     /// this test is for. Code that never records the document it was in fails the
     /// first attempt; a deadline that never falls on the document fails
-    /// them all.
+    /// them all, and the failure message names both causes of that, a
+    /// loaded host and a regression that spends the budget before the
+    /// listing, so that it is not read as load without a rerun on an idle
+    /// machine.
     #[test]
     fn ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded() {
         const ATTEMPTS: usize = 5;
@@ -10246,7 +10249,12 @@ mod tests {
         assert!(
             landed_on_the_directory < ATTEMPTS,
             "in {ATTEMPTS} attempts the 50 ms deadline never fell on the document, always on the \
-             directory before it: this host is too loaded to arrange the case"
+             directory before it. Two causes give exactly this outcome: a host loaded enough to \
+             spend 50 ms before the listing finished, and a code regression that spends the \
+             scan's budget before the listing (a deadline reused from an earlier stage rather \
+             than the scan's own, fresh one). Rerun this test alone on an idle machine before \
+             calling it load: on an idle one the first attempt records the document, and \
+             failing there is the regression"
         );
         drop(guard);
     }
