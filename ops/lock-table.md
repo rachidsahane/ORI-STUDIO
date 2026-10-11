@@ -405,3 +405,21 @@ Checked against every claim held once this section is read: 20 (`.github/workflo
 **Where the work lands.** This session runs in a cloud container whose standing instruction is to develop on one branch, `claude/sweet-maxwell-jkaiie`, and to open no pull request unless the operator asks. Each ticket is still built on its own branch, in its own worktree, by its own coder; those branches stay local. The lead reviews each one and brings it onto `claude/sweet-maxwell-jkaiie` as rebased commits that keep the coder's `Ticket:` and `Spec:` trailers. Nothing reaches `main` from this session without a pull request the operator asks for, so a tier 2 change on that branch is merged by the operator, as [[R38]] requires.
 
 **State after this section:** the claims held are 20, 61, 62 and 63. The next free identifier is ORI-T-0126.
+
+---
+
+## Claim 64, and ORI-T-0126 allocated
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 64 | ORI-T-0054, the tree watcher and the git hooks installer | `crates/ori-watch/src/watcher.rs`, `crates/ori-watch/src/hooks.rs`, `crates/ori-watch/Cargo.toml` (`notify`, approved in [[E-0009]], and the workspace crates the two modules need), `crates/ori-watch/src/lib.rs` (queue), `Cargo.lock` (queue) | 1, `spec/RISK_MAP.md` (`ori-watch` watcher, hooks) | `feat/ORI-T-0054-watch` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from claims 20, 61, 62 and 63: nothing else has claimed a path under `crates/ori-watch/`. `Cargo.lock` is a queue file, as in claims 32 to 59.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0126 | Five tests fail whenever the suite runs as root, because each makes a path mode 000 and asserts the process can no longer read it: `code_map::tests::ori_t_0036_the_files_seen_invariant_holds_with_every_pre_skip_reason_nested`, and in `indexer::tests` `ori_p1_026_a_divergence_on_a_file_the_walk_leaves_out_stays_listed_with_the_reason`, `ori_p1_026_entries_that_share_a_key_list_every_file_and_every_reason`, `ori_p1_026_with_no_record_an_unreadable_file_is_freshness_unknown_and_not_ready`, `ori_t_0035_a_walk_splits_and_reads_no_more_than_its_budget_and_records_what_it_left_out`. Seen by the lead on 2026-10-11 in a container that runs as root; CI does not run as root and passed all five on `main` at 7bed207. A root-run suite is red for a reason that is not a defect in the code under test, and the cure is a test that recognises it cannot exercise the unreadable case and says so | `crates/ori-memory/src/code_map.rs`, `crates/ori-memory/src/indexer.rs` (their tests) | 1, `spec/RISK_MAP.md` (code map, indexer) | **waiting on the operator**: the fix changes existing tests, trigger `test_modified` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61, 62, 63 and 64. The next free identifier is ORI-T-0127.
