@@ -704,3 +704,19 @@ No other claim holds `significance.rs`; claim 42 (ORI-T-0044) released when pull
 Two records corrected now, both found by ORI-T-0137's agent: `ops/phase-1-backlog.md` batch 11's row for ORI-T-0058 still declared `crates/ori-integrations/src/traits.rs` at tier 1 (corrected in place, struck through, to the paths and tier E-0002's answer gave it); and ORI-T-0141, recorded above as tier 1, becomes **tier 2** once ORI-T-0137 merges, because it changes `crates/ori-core/src/adapters.rs`.
 
 **State after this section:** the claims held are 20, 62, 64, 67 to 69, 77 to 80. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 62, 67, 68 and 77 integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1 unless stated.
+
+| # | Ticket | Review, and what was repaired | Verified by the lead on the session branch |
+|---|---|---|---|
+| 62 | ORI-T-0040, the citation checker and the drift audit | Changes requested, one blocking, **reproduced** by the reviewer: the audit's routine verification erased a divergence filed by someone else, and a path divergence overwrote it, so readiness turned true without a human seeing the finding. Repaired by giving every divergence an origin (audit, filed, unattributed) in `freshness.rs` (additively, claim 62 widened), the audit clearing only its own, and only a human resolving a filed finding. Should-fix: vacuous verification of documents with no path claim (now `NothingChecked`, freshness left as it was); readers that followed links outside the root; a check over only excluded documents read as clean; gate-reader evasions (a non-breaking space, a trigger word); directories not counted against the walk limit. All repaired; the lead confirmed the blocking repair by reading `record_audit_verification` and the audit's calls | `cargo test -p ori-memory`: 466 passed; `cargo test -p ori-gates`: 190 passed; workspace clippy, strict doc, fmt: clean |
+| 67, 68 | ORI-T-0126 then ORI-T-0125, eight tests under [[R40]] | R40's condition holds for all eight on an ordinary non-root runner (the reviewer emulated one with `setpriv` and, for the capability case, ran as uid 65534 with `CAP_DAC_OVERRIDE`). Two should-fix, repaired: the code-map test took its "mode does not apply" branch without checking for root; a regression would have failed under a message blaming load. **Deviation from the ticket, accepted by the lead and recorded here:** `ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings` now runs with a 3600 s scan budget. The ticket said to stop if the only fix was a wider bound; the review established the test never asserted a deadline (its five seconds were an incidental precondition of a complete scan, and the deadline is proven by other tests), so R40's "never widen a bound until it bounds nothing" is not engaged | `cargo test -p ori-memory` **as root: 466 passed, 0 failed**, the five root-only failures gone |
+| 77 | ORI-T-0140, the headless deadline | Approved, no blocking. One should-fix repaired: the abandoned reader drained a continuously writing descendant at full speed after the deadline; now a shared flag stops it and the writer gets EPIPE. The two waits share one deadline | `cargo test -p ori-runtime`: 163 passed |
+
+ORI-T-0140's coder found that `acp.rs`'s `drain_stderr` has the same unbounded drain for standard error. It is added to ORI-T-0143 (claim 79), which holds `acp.rs`.
+
+**State after this section:** the claims held are 20, 64, 69, 78, 79 and 80. The next free identifier is ORI-T-0146.
