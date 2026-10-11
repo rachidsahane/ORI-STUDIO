@@ -174,13 +174,51 @@ impl std::error::Error for AdapterError {}
 /// Who makes one: the broker issues the credential, and the adapter's
 /// `VcsHost::identity_token` (or the engine, for the other slots) wraps it;
 /// this module declares the type and issues nothing (`CLAUDE.md`: "Only
-/// `ori-broker` issues credentials"). The `scope` is a description of what the
-/// token may do, written for a human ("repo ori/studio, contents write"); it
-/// is not a secret and is printed. A scope string must never contain the
-/// credential.
+/// `ori-broker` issues credentials").
+///
+/// # The scope is a different type from the value
+///
+/// The scope is a [`TokenScope`]: a description of what the token may do,
+/// written for a human ("repo ori/studio, contents write"). It is not a secret
+/// and `Debug` prints it. Had the constructor taken the value and the scope as
+/// two strings, swapping them would be an argument-order slip that compiles,
+/// and it would put the credential in every `{:?}`. As two types, the slip
+/// does not compile, in either direction:
+///
+/// ```
+/// use ori_core::adapters::{ScopedToken, TokenScope};
+///
+/// let scope = TokenScope::new("repo ori/studio, contents write").expect("a scope");
+/// let token = ScopedToken::new("not-a-real-credential", scope).expect("a token");
+/// assert_eq!(token.scope().as_str(), "repo ori/studio, contents write");
+/// ```
+///
+/// The scope where the credential goes:
+///
+/// ```compile_fail
+/// use ori_core::adapters::{ScopedToken, TokenScope};
+///
+/// let scope = TokenScope::new("repo ori/studio, contents write").expect("a scope");
+/// let _ = ScopedToken::new(scope, "not-a-real-credential");
+/// ```
+///
+/// A plain string where the scope goes:
+///
+/// ```compile_fail
+/// use ori_core::adapters::ScopedToken;
+///
+/// let _ = ScopedToken::new("not-a-real-credential", "repo ori/studio, contents write");
+/// ```
+///
+/// (The first example compiles, so the other two are not failing for an
+/// unrelated reason. `tests::ori_t_0058_a_scope_and_a_token_value_cannot_be_swapped`
+/// checks the same at the type level.)
+///
+/// What this does not stop: a caller who writes `TokenScope::new(secret)` on
+/// purpose. It makes that a visible act at the call site, not a slip.
 pub struct ScopedToken {
     value: Box<str>,
-    scope: String,
+    scope: TokenScope,
 }
 
 impl ScopedToken {
@@ -188,20 +226,13 @@ impl ScopedToken {
     ///
     /// # Errors
     ///
-    /// [`AdapterError::Malformed`] when `value` or `scope` is empty or only
-    /// whitespace. The error names `"token value"` or `"token scope"` and
-    /// never the text.
-    pub fn new(value: impl Into<Box<str>>, scope: impl Into<String>) -> Result<Self, AdapterError> {
+    /// [`AdapterError::Malformed`] when `value` is empty or only whitespace.
+    /// The error names `"token value"` and never the text.
+    pub fn new(value: impl Into<Box<str>>, scope: TokenScope) -> Result<Self, AdapterError> {
         let value = value.into();
-        let scope = scope.into();
         if value.trim().is_empty() {
             return Err(AdapterError::Malformed {
                 what: "token value",
-            });
-        }
-        if scope.trim().is_empty() {
-            return Err(AdapterError::Malformed {
-                what: "token scope",
             });
         }
         Ok(Self { value, scope })
@@ -209,7 +240,7 @@ impl ScopedToken {
 
     /// What this token may do, in words. Not a secret.
     #[must_use]
-    pub fn scope(&self) -> &str {
+    pub const fn scope(&self) -> &TokenScope {
         &self.scope
     }
 
@@ -295,6 +326,15 @@ opaque_text!(
     /// ([`Ci::trigger`]).
     CiRunRef,
     "CI run reference"
+);
+
+opaque_text!(
+    /// What a [`ScopedToken`] may do, in words written for a human: `spec/API_SPEC.md`
+    /// section 4. **Not a credential and must never hold one**: it is printed by
+    /// `Debug` and `Display`, and it is a type of its own so that it cannot be
+    /// passed where a [`ScopedToken`]'s value goes (see that type's doc).
+    TokenScope,
+    "token scope"
 );
 
 opaque_text!(
@@ -853,8 +893,12 @@ mod tests {
     /// A value that must never appear in any printed form of a token.
     const CANARY: &str = "canary-credential-8f3a91";
 
+    fn scope(text: &str) -> TokenScope {
+        TokenScope::new(text).expect("a scope")
+    }
+
     fn token() -> ScopedToken {
-        ScopedToken::new(CANARY, "repo ori/studio, contents write").expect("a real token")
+        ScopedToken::new(CANARY, scope("repo ori/studio, contents write")).expect("a real token")
     }
 
     fn identity() -> AgentIdentity {
@@ -878,7 +922,10 @@ mod tests {
 
     impl VcsHost for FakeVcs {
         fn identity_token(&self, identity: &AgentIdentity) -> Result<ScopedToken, AdapterError> {
-            ScopedToken::new(CANARY, format!("role {}", identity.role()))
+            ScopedToken::new(
+                CANARY,
+                TokenScope::new(&format!("role {}", identity.role()))?,
+            )
         }
         fn create_branch(&self, _: &ScopedToken, _: &str, _: &str) -> Result<(), AdapterError> {
             Ok(())
@@ -1029,7 +1076,7 @@ mod tests {
         let host: Box<dyn VcsHost> = Box::new(FakeVcs);
         let identity = identity();
         let token = host.identity_token(&identity).expect("a token");
-        assert_eq!(token.scope(), "role coder");
+        assert_eq!(token.scope().as_str(), "role coder");
 
         let pr = host
             .open_pr(&token, "feat/x", "main", "title", "body")
@@ -1295,16 +1342,66 @@ mod tests {
 
     #[test]
     fn ori_t_0058_a_blank_token_or_scope_is_refused_without_echoing_either() {
-        for (value, scope, what) in [
-            ("", "scope", "token value"),
-            ("  \t", "scope", "token value"),
-            (CANARY, "", "token scope"),
-            (CANARY, "   ", "token scope"),
-        ] {
-            let refusal = ScopedToken::new(value, scope).expect_err("a blank part is refused");
-            assert_eq!(refusal, AdapterError::Malformed { what });
+        for value in ["", "  \t"] {
+            let refusal =
+                ScopedToken::new(value, scope("a scope")).expect_err("a blank value is refused");
+            assert_eq!(
+                refusal,
+                AdapterError::Malformed {
+                    what: "token value"
+                }
+            );
+        }
+        for blank in ["", "   "] {
+            let refusal = TokenScope::new(blank).expect_err("a blank scope is refused");
+            assert_eq!(
+                refusal,
+                AdapterError::Malformed {
+                    what: "token scope"
+                }
+            );
             assert!(!format!("{refusal:?}{refusal}").contains(CANARY));
         }
+    }
+
+    #[test]
+    fn ori_t_0058_a_scope_and_a_token_value_cannot_be_swapped() {
+        // Type level, with a control for each probe so that "false" means
+        // "not implemented" and not "the probe is broken". An inherent
+        // associated const that exists only under a bound shadows a trait
+        // const that says `false`.
+        trait Probe {
+            const OK: bool;
+        }
+        struct AsValue<T>(core::marker::PhantomData<T>);
+        impl<T> Probe for AsValue<T> {
+            const OK: bool = false;
+        }
+        impl<T: Into<Box<str>>> AsValue<T> {
+            const OK: bool = true;
+        }
+        struct AsScope<T>(core::marker::PhantomData<T>);
+        impl<T> Probe for AsScope<T> {
+            const OK: bool = false;
+        }
+        impl<T: Into<TokenScope>> AsScope<T> {
+            const OK: bool = true;
+        }
+        let observed = [
+            // Controls: what the value parameter accepts, and what the scope
+            // parameter accepts.
+            AsValue::<String>::OK,
+            AsScope::<TokenScope>::OK,
+            // The swaps: a scope as the value, and a plain string as the scope.
+            AsValue::<TokenScope>::OK,
+            AsScope::<&str>::OK,
+            AsScope::<String>::OK,
+        ];
+        assert_eq!(
+            observed,
+            [true, true, false, false, false],
+            "controls first, then the swaps: a scope is not a value, and a string is not a scope"
+        );
     }
 
     #[test]
