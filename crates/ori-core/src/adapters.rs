@@ -18,21 +18,25 @@
 //! |---|---|---|
 //! | [`VcsHost`], [`ErrorTracking`], [`Analytics`], [`Notification`], [`Ci`] | here | `ori-integrations` (ORI-T-0059 and later) |
 //! | [`ModelProvider`] | here | `ori-integrations`; `spec/LLD.md` section 2 does not say where, see its doc |
-//! | `AgentRuntime` | **not here yet**, see below | `ori-runtime` (`AcpClient`, `HeadlessAdapter`) |
+//! | `AgentRuntime` | **in progress**: staged as ORI-T-0141, see below | `ori-runtime` (`AcpClient`, `HeadlessAdapter`) |
 //!
-//! # `AgentRuntime` is not declared here yet, and why
+//! # `AgentRuntime`: the move is in progress, staged as ORI-T-0141
 //!
-//! ORI-T-0058 was told to move it, "not redesign it, so its implementations
-//! keep compiling unchanged through the re-export". That cannot be done
-//! within the ticket's declared scope: the trait's signatures name
-//! `SessionSpec` (which holds a `LaunchConfig`), `Entry` and `RuntimeError`
-//! (which holds a `TranscriptError`), and those types are declared in
-//! `ori-runtime`'s `acp.rs`, `transcript.rs` and used in `headless.rs`, in
-//! ways a re-export cannot preserve (an inherent `impl LaunchConfig` block in
-//! `headless.rs`, a `#[cfg(test)]` constructor that an existing test calls,
-//! direct field reads in `transcript.rs`). The ticket's report says exactly
-//! what, and the escalation it raises. Nothing in `acp.rs` was changed, so
-//! `AcpClient` and `HeadlessAdapter` and their tests are untouched.
+//! `spec/API_SPEC.md` section 4 and `spec/LLD.md` section 2 say all seven
+//! traits are declared in `ori-core`, and `AgentRuntime` will be; it is not
+//! here yet. By the operator's decision (ruling R42, 2026-10-11) its move is
+//! staged as ORI-T-0141, after ORI-T-0140, and this ticket (ORI-T-0058) lands
+//! the six slot traits and `AgentIdentity`. Nothing is rejected: the trait
+//! stays where it is, declared in `ori-runtime`'s `acp.rs`, implemented by
+//! `AcpClient` and `HeadlessAdapter`, and untouched, until then.
+//!
+//! The move is a ticket of its own because the types in the trait's
+//! signatures come with it: `SessionSpec` (which holds a `LaunchConfig`),
+//! `SessionHandle`, `StopReason`, `RuntimeCaps`, `RuntimeError` (which holds a
+//! `TranscriptError`) and the transcript `Entry` that `recv` returns. Some are
+//! declared in `ori-runtime`'s `transcript.rs` and used in `headless.rs`,
+//! outside this ticket's scope, and moving them changes a few existing tests,
+//! which the operator has authorized for ORI-T-0141 and not for this ticket.
 //!
 //! # What this module does not do
 //!
