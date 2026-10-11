@@ -871,3 +871,21 @@ The coder's finding, recorded:
 | ORI-T-0154 | Nothing in CI or `scripts/gates.sh` runs `RUSTDOCFLAGS="-D warnings" cargo doc`, and no crate sets `missing_docs`. `CLAUDE.md` rule 9 requires a doc comment on every public item, and INC-0003's second half broke rustdoc on a branch. Today the check exists only as a standing instruction in each ticket. Two modules here carried no doc at all, and every gate was green | `.github/workflows/ci.yml`, `scripts/gates.sh`, possibly the workspace `Cargo.toml` lints | 2 (`.github/workflows`, supply chain) | **needs planning**: a change to the gate set; the operator decides, and claim 20 holds `ci.yml` and `scripts/gates.sh` | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 64, 81 and 86. The next free identifier is ORI-T-0155.
+
+---
+
+## Claim 64 integrated; ORI-T-0155 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review, and what was repaired | Verified by the lead on the session branch |
+|---|---|---|---|
+| 64 | ORI-T-0054, the tree watcher and the git hooks installer, on `notify` 8.2.0 exactly pinned ([[E-0009]]) | Three review passes, all independent (Opus). **Pass 1** found blocking defects; repaired in 679eb47 and 1000df3: a dead backend reported as a quiet tree; refs read through links; a preserved hook overwritten. **Pass 2** found two defects that fail only on CI's other legs: the dead-backend test panicked inside notify's `extern "C"` and `extern "system"` callbacks, which aborts the test binary on macOS and Windows; and three test helpers were dead code on Windows, which fails `clippy -D warnings` there. Both repaired in eae39cc, along with five should-fix items: open-flag tests (mutation-checked), `.git` re-checked on every poll and install, a hook linked to a managed hook refused, the third-tool window documented, and an absolute-link test. Pass 2 also found a secret-shaped test string. The scanner reads every blob any ref reaches, so the coder folded the fix into the commit that introduced it, on its own unpushed branch, and the string never reached this branch. **Pass 3** found nothing blocking. It checked the cfg gating line by line against notify 8.2.0 and libc 0.2.189, and simulated the Windows and macOS clippy runs in copies; both were clean. Its should-fix items go to ORI-T-0155 | workspace `cargo test`: **1342 passed, 0 failed**, as root; workspace clippy, strict doc, fmt: clean; secret scan: no finding in 784 history blobs |
+
+Gate 7 judges `notify`'s dependency graph in CI on the push that carries this section.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0155 | The hook installer's link refusal does only one `read_link` with an exact name match, and only for the four managed hooks. Pass 3 reproduced two misses in a copy. (a) A chain, `pre-push -> relay -> post-commit`, installs, and the user's pre-push veto is silently lost. (b) An unmanaged hook linked to a managed one, `post-checkout -> post-merge`, makes every checkout record a false `post-merge` event into the spool the engine reads. Compare canonical paths, and scan every entry of the hooks directory for a link that resolves to a managed hook. Also, all from pass 3: `RefPoller::poll`'s `# Errors` omits `GitDirNotADirectory` and `UnsupportedRefStorage`; the hooks module doc does not state that a `.git` swapped during an install is still written through; two doc sentences are stale (hooks.rs around 66 to 73; the `Drop` doc's "this workspace does not set it", which the new `compile_error!` makes moot); a case-insensitive file system misses `Post-Commit`. **Must land before anything installs the hooks or reads the spool** (ORI-T-0055 and the engine) | `crates/ori-watch/src/hooks.rs`, `watcher.rs` | 1 | ready | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 81 and 86. The next free identifier is ORI-T-0156.
