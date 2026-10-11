@@ -461,3 +461,29 @@ Written by the lead at dispatch, 2026-10-11, under [[R31]]. Both are documentati
 Disjoint from each other and from claims 20 and 61 to 64, none of which holds a path under `spec/`.
 
 **State after this section:** the claims held are 20 and 61 to 66. The next free identifier is ORI-T-0130.
+
+---
+
+## Claim 66 released; claims 67 and 68; what ORI-T-0129 inherits
+
+Written by the lead on 2026-10-11 under [[R31]] rules 2 and 3.
+
+**Claim 66 released.** ORI-T-0128 is on `claude/sweet-maxwell-jkaiie` as 3298433, reviewed by the lead: three lines added to `spec/DATA_MODEL.md` section 3, the edge and one paragraph saying it is the engine's recovery move only, in the order of `spec/runbooks/recover-engine.md` step 1. `cargo test -p ori-gates` passed (138), so every reference it adds resolves. It is not on `main`.
+
+**What ORI-T-0129 inherits from ORI-T-0128's report**, so its ticket is written from this rather than rediscovered:
+
+1. `crates/ori-core/src/ticket.rs`'s test module hard-codes the diagram: fourteen lines in `DIAGRAM`, `DIAGRAM_EDGES = 14`, and `ALL_PAIRS - permitted == 130`. The new edge makes them fifteen and 129. **That is a change to an existing test**, so ORI-T-0129 needs the operator's `test_modified` answer before it starts, the shape of [[R37]] and [[R40]].
+2. "The engine's move and no one else's" has no code behind it yet. `TicketEventKind::Queued` serves both existing edges into `Queued`, and `crates/ori-orchestrator/src/lifecycle.rs` gates no verb on the new edge, so nothing distinguishes a recovery requeue from any other `Queued` event. If distinguishing it needs a new event kind, that is `contract_change`.
+3. Which `Event.actor` the recovery requeue carries is unspecified: `spec/DATA_MODEL.md` section 4 allows `system` "only for scheduled triggers and watchers", and engine recovery is neither. A specification gap, not decided here.
+4. Out of ORI-T-0129's file but in its path: `crates/ori-runtime/src/recovery.rs` describes the edge as missing (its module doc, and a test fixture string), and says `Queued --> InProgress` is the only edge into `InProgress`, which is false: three edges enter it.
+
+ORI-T-0129 stays waiting: on the operator for item 1, and on a decision for items 2 and 3.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 67 | ORI-T-0126, the five root-only tests | the `#[cfg(test)]` modules of `crates/ori-memory/src/code_map.rs` and `crates/ori-memory/src/indexer.rs`: the five tests [[R40]] names and test-only helpers | 1 | `fix/ORI-T-0126-0125-tests` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 68 | ORI-T-0125, the three load-sensitive deadline tests | the `#[cfg(test)]` module of `crates/ori-memory/src/code_map.rs`: the three tests [[R40]] names and test-only helpers | 1 | the same branch, after claim 67's commits | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Claims 67 and 68 share a file with each other, so one coder runs them in order on one branch, each commit carrying only its own `Ticket:` trailer. Neither overlaps claim 61 or 62: those hold `oplog.rs`, `retrieval.rs`, `citation.rs`, `drift.rs`, and `barrier.rs` and `freshness.rs` additively, never `code_map.rs` or `indexer.rs`.
+
+**State after this section:** the claims held are 20, 61 to 65, 67 and 68. The next free identifier is ORI-T-0130.
