@@ -423,3 +423,26 @@ Disjoint from claims 20, 61, 62 and 63: nothing else has claimed a path under `c
 | ORI-T-0126 | Five tests fail whenever the suite runs as root, because each makes a path mode 000 and asserts the process can no longer read it: `code_map::tests::ori_t_0036_the_files_seen_invariant_holds_with_every_pre_skip_reason_nested`, and in `indexer::tests` `ori_p1_026_a_divergence_on_a_file_the_walk_leaves_out_stays_listed_with_the_reason`, `ori_p1_026_entries_that_share_a_key_list_every_file_and_every_reason`, `ori_p1_026_with_no_record_an_unreadable_file_is_freshness_unknown_and_not_ready`, `ori_t_0035_a_walk_splits_and_reads_no_more_than_its_budget_and_records_what_it_left_out`. Seen by the lead on 2026-10-11 in a container that runs as root; CI does not run as root and passed all five on `main` at 7bed207. A root-run suite is red for a reason that is not a defect in the code under test, and the cure is a test that recognises it cannot exercise the unreadable case and says so | `crates/ori-memory/src/code_map.rs`, `crates/ori-memory/src/indexer.rs` (their tests) | 1, `spec/RISK_MAP.md` (code map, indexer) | **waiting on the operator**: the fix changes existing tests, trigger `test_modified` | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 61, 62, 63 and 64. The next free identifier is ORI-T-0127.
+
+---
+
+## Session of 2026-10-11: the operator's answers, and ORI-T-0127 to ORI-T-0129 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 1. The operator answered four open questions in session the same day, each with the option the lead recommended:
+
+| Question | Answer | Recorded in |
+|---|---|---|
+| [[E-0002]], where the adapter traits live | Option A: in `ori-core` | E-0002's State line |
+| [[E-0007]], what the lead's "merge tier 0" means | Reading 1: authority; the lead holds no merge credential | E-0007's State line |
+| `test_modified` for ORI-T-0125 and ORI-T-0126 | Both authorized, on a condition | [[R40]] |
+| ORI-P1-031 asks for a ticket move the machine refuses (recorded under E-0007) | Add the edge `InProgress --> Queued` to `spec/DATA_MODEL.md` section 3 | E-0007's State line |
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0127 | State E-0002 option A in the specification: the adapter traits of `spec/API_SPEC.md` section 4 are declared in `ori-core` and implemented in `ori-integrations`, and `ori-orchestrator` names `dyn VcsHost` without a new edge | `spec/LLD.md` section 2, `spec/API_SPEC.md` section 4 | 1, `spec/RISK_MAP.md` (`spec/`) | ready; documentation role | 2026-10-11 |
+| ORI-T-0128 | Draw `InProgress --> Queued` in the Ticket state machine, labelled for engine recovery, so ORI-P1-031's "ticket Queued" is a move the machine allows | `spec/DATA_MODEL.md` section 3 | 1, `spec/RISK_MAP.md` (`spec/`) | ready; documentation role | 2026-10-11 |
+| ORI-T-0129 | Add that edge to `crates/ori-core/src/ticket.rs`'s transition table, after ORI-T-0128 merges | `crates/ori-core/src/ticket.rs` | 2, `spec/RISK_MAP.md` (`ori-core` state machines) | waits on ORI-T-0128 | 2026-10-11 |
+
+**Unblocked by these answers:** ORI-T-0029, the forbidden-action test harness (`crates/ori-broker/src/forbidden.rs`, tier 2), no longer waits on E-0007. ORI-T-0058, the adapter traits, now builds in `ori-core` rather than at `crates/ori-integrations/src/traits.rs` as `ops/phase-1-backlog.md` batch 11 declares, and waits on ORI-T-0127 so that the code follows the specification rather than the other way round. ORI-T-0125 and ORI-T-0126 no longer wait on the operator and run one at a time against `code_map.rs` and `indexer.rs` with the other follow-ups there.
+
+**State after this section:** the claims held are 20, 61, 62, 63 and 64. The next free identifier is ORI-T-0130.

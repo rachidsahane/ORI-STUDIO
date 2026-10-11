@@ -8,7 +8,7 @@ Format: AICD §12. Raised by the coder on ORI-T-0001, confirmed by the lead.
 | Raised by | Coder, ORI-T-0001; lead confirms it is a real contradiction and does not resolve it |
 | Blocks | Nothing yet. Empty skeletons do not force the question |
 | Will block | ORI-T-0053 (merge queue) and ORI-T-0059 (vcs host reference adapter), batches 8 and 11 |
-| State | Open, with the operator |
+| State | Answered by the operator in session on 2026-10-11: **Option A**, the adapter traits of `spec/API_SPEC.md` section 4 are declared in `ori-core`; `ori-integrations` implements them; `ori-orchestrator` names `dyn VcsHost` with no new edge. The specification follow-through is ORI-T-0127 (documentation role: `spec/LLD.md` section 2 and `spec/API_SPEC.md` section 4), and ORI-T-0058 builds the traits in `ori-core` after it. Recorded in `ops/lock-table.md`, section "Session of 2026-10-11: the operator's answers" |
 
 ## The contradiction
 
