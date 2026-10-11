@@ -590,3 +590,20 @@ Written by the lead on 2026-10-11 under [[R31]].
 Disjoint from claim 69 (`acp.rs`, `identity.rs`, `ori-core`) and claim 70 (`ticket.rs`, `recovery.rs`). If the same pattern exists in `crates/ori-runtime/src/acp.rs`, claim 69 holds that file, so ORI-T-0140 reports it and does not change it.
 
 **State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 73, 76 and 77. The next free identifier is ORI-T-0141.
+
+---
+
+## Claim 73 integrated; claim 69 extended; ORI-T-0141 and ORI-T-0142 allocated
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+**Claim 73 integrated.** ORI-T-0074, `fixtures/migrated-with-drift`, cherry-picked from 300dce5. Verified on the session branch: not a member of this workspace (`cargo metadata`: 17 packages, no `parceltrack`), `cargo build --workspace --locked` passes, `cargo test -p ori-gates` 161 passed, `scripts/secret-scan.sh` no finding with its 16 new declared fakes. The lead did not read the fixture's `.env` (`CLAUDE.md` rule 4); the scanner did.
+
+**Claim 69 extended**, under [[R42]]: `crates/ori-memory/src/scope.rs`, the one line of `ori_t_0038_identity_payload_layout_and_rules_match_ori_broker_registration` that names the file it reads. Nothing else in that file. No other claim holds `scope.rs`: claim 60 was released when pull request 77 merged.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0141 | Move `AgentRuntime` and the types its signatures need (`SessionSpec`, `SessionHandle`, `RuntimeCaps`, `StopReason`, `LaunchConfig`, `StdioMode`, `RuntimeError`, `transcript::Entry`, `TranscriptError`) into `ori-core`, re-exported at their old paths, completing [[E-0002]]'s answer. ORI-T-0058's report section 1 lists what a re-export cannot preserve | `crates/ori-core/src/adapters.rs`, `crates/ori-runtime/src/acp.rs`, `transcript.rs`, `headless.rs` | 1 by `spec/RISK_MAP.md` (`ori-core` other types; `ori-runtime` acp, headless, transcript) | waits on claim 77 (ORI-T-0140) releasing `headless.rs`, and on claim 69 releasing `adapters.rs`; its two test changes are authorized by [[R42]] | 2026-10-11 |
+| ORI-T-0142 | `spec/DATA_MODEL.md` says `InProgress --> Queued` is "the engine's move and no one else's", and nothing enforces it: `Ticket::apply` accepts it from any actor, and `crates/ori-orchestrator/src/lifecycle.rs`'s `verb()` gates no AICD §17 verb on it. ORI-T-0129's coder proposes a guard on `Actor::System` in `Ticket::apply` (no new event kind, which the `ori-store` projector would ignore), at the cost of changing `ori_t_0020_apply_accepts_exactly_the_pairs_the_diagram_draws`; `system` is also the actor of triggers and watchers, so the guard is wider than the sentence | `crates/ori-core/src/ticket.rs`; possibly `lifecycle.rs` | 2 | **waiting on the operator**: `test_modified` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 76 and 77. The next free identifier is ORI-T-0143.
