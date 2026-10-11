@@ -818,3 +818,17 @@ The review's findings and the coder's, recorded. All three tickets change files 
 | ORI-T-0151 | `Transcript::record` clones the whole entry list on every append (`transcript.rs`, around line 242), so each pass of `AcpClient::call` costs time proportional to the transcript, and a chatty agent grows the transcript without limit over a session. Cap it, and say what a capped transcript records about what it dropped | `crates/ori-runtime/src/transcript.rs` | 1 | ready after ORI-T-0141 | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 64, 81, 82 and 85. The next free identifier is ORI-T-0152.
+
+---
+
+## Claim 86: ORI-T-0141 dispatched
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. Claim 79 is released (ORI-T-0143 integrated), and claim 77 released earlier (ORI-T-0140). The branch is cut from 56dc155, which carries both.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 86 | ORI-T-0141, `AgentRuntime` and the types in its signatures moved into `ori-core` | `crates/ori-core/src/adapters.rs`, `crates/ori-runtime/src/acp.rs`, `transcript.rs`, `headless.rs` | 2 (`spec/RISK_MAP.md`: `crates/ori-core/src/adapters.rs`) | `feat/ORI-T-0141-agent-runtime-core` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from every held claim (20, 64, 81, 82, 85). Its test changes are the two [[R42]] authorizes, and no others. The ticket forbids a new file under `crates/ori-core/src/adapters/`: `spec/RISK_MAP.md` tiers only `adapters.rs` and `adapters/identity.rs`, and ORI-T-0058's review found that kind of move landing types on an untiered path. ORI-T-0149, ORI-T-0150 and ORI-T-0151 wait on this claim.
+
+**State after this section:** the claims held are 20, 64, 81, 82, 85 and 86. The next free identifier is ORI-T-0152.
