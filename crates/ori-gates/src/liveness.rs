@@ -47,12 +47,15 @@
 //!    A run that failed or errored **did execute**, and is live; whether it
 //!    passed is the gate's own verdict, not this one's. A record of status
 //!    `missing` is a record of **absence** and is never evidence of execution.
-//!    That last rule is load-bearing: `spec/DATA_MODEL.md` has the liveness
-//!    sweep itself write a `missing` run when it finds nothing, and a definition
-//!    that counted any record would be satisfied by its own previous finding, so
-//!    that the second sweep would call the dead workflow live. A caller whose
-//!    source has statuses outside the four maps them first, and maps anything
-//!    that did not actually start to `missing`.
+//!    That last rule is load-bearing: `spec/DATA_MODEL.md` records the inert
+//!    case as a `GateRun` with status `missing`, and the likeliest writer of
+//!    such a record is the sweep that found the absence. A definition that
+//!    counted any record would be satisfied by its own previous finding, and
+//!    the second sweep would call the dead workflow live. (That the sweep
+//!    writes the record is this module's inference, not the data model's
+//!    words; the rule holds whoever writes it.) A caller whose source has
+//!    statuses outside the four maps them first, and maps anything that did
+//!    not actually start to `missing`.
 //! 5. **No record at all is missing, never live.** An empty list of observed
 //!    runs, or a list holding only runs under other names, is the case AICD §14
 //!    calls "present but reporting nothing", and the one this module most needs
@@ -77,9 +80,9 @@
 //!    [`crate::runner::GateState`] is `Installed` and the run is missing, the
 //!    verdict is [`crate::liveness::Verdict::Inert`] rather than
 //!    [`crate::liveness::Verdict::Missing`]. A gate that is only `Defined` or
-//!    `Proven` is not installed, so nothing is expected of it and its missing
-//!    run is a plain `Missing`: still a failure of this check, not an incident
-//!    about a gate that never took service.
+//!    `Proven` is not installed, so the data model's transition to `Inert` does
+//!    not apply to it: its missing run is a plain `Missing`, still a failure of
+//!    this check, and not an incident about a gate that never took service.
 //! 8. **Every failure carries AICD §14.** [`crate::liveness::Verdict::reason`]
 //!    and [`crate::liveness::LivenessError::reason`] give the
 //!    [`ori_core::error::MethodologyRef`] (`CLAUDE.md` absolute rule 9), and
@@ -644,8 +647,8 @@ impl Judgement {
 /// only source of time; see this module's head comment, decision 3.
 ///
 /// A run counts when its name equals the expectation's, its status shows it
-/// executed, and its start time is in `[now - window, now]`. The first match in
-/// that sense makes the verdict [`Verdict::Live`], reporting the newest one.
+/// executed, and its start time is in `[now - window, now]`. Any run that counts
+/// in that sense makes the verdict [`Verdict::Live`], reporting the newest one.
 /// Otherwise the verdict is [`Verdict::Missing`], or [`Verdict::Inert`] when the
 /// expectation is bound to an installed gate, and the [`MissingReason`] says
 /// which way it was missing.
@@ -1000,8 +1003,37 @@ mod tests {
     }
 
     #[test]
+    fn ori_t_0046_a_stale_reason_names_the_newest_old_run_and_a_future_reason_the_earliest() {
+        let stale = [
+            ran("ci.yml", NOW - 5 * DAY),
+            ran("ci.yml", NOW - 2 * DAY),
+            ran("ci.yml", NOW - 9 * DAY),
+        ];
+        assert_eq!(
+            judge(&wf("ci.yml"), &stale, NOW).verdict(),
+            &Verdict::Missing(MissingReason::TooOld {
+                newest: NOW - 2 * DAY,
+                window_opens_at: NOW - DAY,
+            }),
+            "the reason must name how recently it last ran, not how long ago it first did"
+        );
+
+        let ahead = [
+            ran("ci.yml", NOW + 7 * DAY),
+            ran("ci.yml", NOW + 60),
+            ran("ci.yml", NOW + DAY),
+        ];
+        let judged = judge(&wf("ci.yml"), &ahead, NOW);
+        assert_eq!(
+            judged.verdict(),
+            &Verdict::Missing(MissingReason::OnlyAfterNow { earliest: NOW + 60 })
+        );
+        assert_eq!(judged.future_ignored(), 3);
+    }
+
+    #[test]
     fn ori_t_0046_a_record_of_absence_is_not_a_run() {
-        // The liveness sweep writes a `missing` run when it finds nothing. The
+        // A sweep that finds nothing may itself write a `missing` run. The
         // next sweep must not take that record as proof the thing ran.
         let observed = [ObservedRun::new(
             "ci.yml",
