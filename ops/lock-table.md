@@ -761,3 +761,26 @@ Disjoint from each other and from every held claim. Claim 20 holds `.github/work
 One coder writes the plan for both, reading only, with no worktree and no branch. The lead reviews it and takes any spec conflict to the operator before claims are granted. This is the "before each batch" control point of `ops/phase-1-backlog.md`.
 
 **State after this section:** the claims held are 20, 64, 79 and 81 to 84. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 83 and 84 integrated; ORI-T-0146 to ORI-T-0148 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; both tier 1.
+
+| # | Ticket | Review | Verified by the lead on the session branch |
+|---|---|---|---|
+| 83 | ORI-T-0133, `gate.proven` in `spec/API_SPEC.md` section 2 | The lead read the diff: one bare kind added after `gate.inert`, in the list's own form, with no payload, projection or revocation kind invented. Its agent confirmed the three places that already named the kind | its agent: `cargo test -p ori-gates` 191 passed, gate 13 clean; the lead re-ran gate 13 on the integrated commits |
+| 84 | ORI-T-0136, the adapter traits' home in `spec/ARCHITECTURE.md` and `spec/ROADMAP.md` | The lead read the diff: the `integrations` row and two roadmap lines now place the declarations in `ori-core`. The diagram label "adapter slots" was rightly left as it is (PROJECT_BRIEF principle 12 names the integration categories that way). Its agent corrected the lead's ticket: the specification now says all seven traits are in `ori-core`, but at a962bd9 `AgentRuntime` is still declared in `crates/ori-runtime/src/acp.rs`; ORI-T-0141 closes that, and until it lands a drift audit would flag it | as for 83 |
+
+The documentation agent's findings, recorded:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0146 | `crates/ori-gates/src/prover.rs`'s module doc (around lines 103 to 106) says `spec/API_SPEC.md` section 2 does not list `gate.proven`, and calls that a gap. Claim 83 closed the gap, so the sentence is now false. Docs only | `crates/ori-gates/src/prover.rs` | 2 (`spec/RISK_MAP.md`: `prover.rs`) | ready | 2026-10-11 |
+| ORI-T-0147 | `spec/ARCHITECTURE.md` section 1's diagram never says what its arrows mean. Read as crate dependencies, it contradicts `spec/LLD.md` section 2 on four edges (`RPC --> ORC`, `RPC --> FLOW`, `WATCH --> ORC`, `RT --> MCP`); read as runtime interaction, which is what the document says it describes, it agrees. Add a legend that points to LLD section 2 for dependencies | `spec/ARCHITECTURE.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0148 | `ModelProvider` is declared in `ori-core` by the specification, but no document names the crate that implements it. `spec/API_SPEC.md` section 4 and `spec/LLD.md` section 2 name implementers only for the five slot traits and `AgentRuntime`. A model provider makes network calls, which `spec/ARCHITECTURE.md` section 9 allows only in integrations, runtime and mcp | `spec/API_SPEC.md`, `spec/LLD.md` | 1 | **needs planning**: the implementing crate is a decision | 2026-10-11 |
+
+Added to ORI-T-0132 (needs planning), from the same report: `spec/criteria/phase-1.md` ORI-P1-013 ends with "gate state Installed" after `gates.prove`. `spec/DATA_MODEL.md` section 3 draws `Defined → Proven → Installed` as one prose line, with no edge back to `Defined` and none out of `Inert`. Nothing in `spec/` says what moves a gate from `Proven` to `Installed`. The runbook's revocation ("state back to Defined") has no edge and no event kind.
+
+**State after this section:** the claims held are 20, 64, 79, 81 and 82. The next free identifier is ORI-T-0149.
