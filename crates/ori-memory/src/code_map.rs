@@ -9808,9 +9808,19 @@ mod tests {
         // in this file.
         write(&dir, &format!("spec/{}.md", "x"), &doc);
         // The document is about 2.1 MB, over the 1 MiB default cap since
-        // round 7; the cap is raised so that it is read.
+        // round 7; the cap is raised so that it is read. This test measures
+        // what the map retains, not how long the scan takes, and it can
+        // only measure a scan that ran to the end: so the scan's budget is
+        // an hour, which a loaded host cannot spend (the default 5 seconds
+        // was spent, on a loaded host, reading 2.1 MB: the scan came back
+        // `TimedOut` and the first assertion below failed with the
+        // retained text never measured). The scan's deadline is proved to
+        // be checked and honoured by the tests that arrange one:
+        // `tests::ori_t_0036_a_spec_document_of_long_lines_cannot_overrun_the_scan_deadline`
+        // and the others that set `file_timeout`.
         let options = CodeMapOptions {
             max_file_bytes: 8 * 1024 * 1024,
+            file_timeout: Duration::from_secs(3600),
             ..CodeMapOptions::default()
         };
         let map = build_code_map_with_options(&dir, &options).expect("maps");
@@ -10175,19 +10185,50 @@ mod tests {
     /// A scan the deadline cut short records the document it was in, not
     /// only its own status (on the slowest document the tests know of,
     /// `write_slowest_spec_repo`, since round 7).
+    ///
+    /// The 50 ms budget starts before the scan lists `spec/`, so on a host
+    /// loaded enough to spend it before the listing is done the deadline
+    /// falls on the directory, not on the document, and `spec` alone is
+    /// recorded (the other legitimate outcome, which
+    /// `tests::ori_t_0036_a_listing_the_deadline_interrupted_is_recorded`
+    /// proves on its own with a deadline already past). The test cannot choose
+    /// where on the clock a wall-clock deadline falls, so it makes the
+    /// attempt up to `ATTEMPTS` times and holds every one to one of the
+    /// two outcomes exactly: the scan must always say `TimedOut`, and the
+    /// record must be either the document or the `spec` directory, nothing
+    /// else, and at least one attempt must be the document, which is what
+    /// this test is for. Code that never records the document it was in fails the
+    /// first attempt; a deadline that never falls on the document fails
+    /// them all.
     #[test]
     fn ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded() {
+        const ATTEMPTS: usize = 5;
         let dir = temp_dir("spec-skip-deadline");
         let guard = DropGuard(dir.clone());
         let options = write_slowest_spec_repo(&dir, "long");
-        let map = build_code_map_with_options(&dir, &options).expect("maps");
-        assert_eq!(map.coverage.spec_citation_scan, SpecScan::TimedOut);
-        assert_eq!(
-            map.coverage.spec_docs_skipped,
-            vec![SkippedFile {
-                path: format!("spec/{}.md", "long"),
-                reason: SkipReason::TimedOut,
-            }]
+        let document = vec![SkippedFile {
+            path: format!("spec/{}.md", "long"),
+            reason: SkipReason::TimedOut,
+        }];
+        let directory = vec![SkippedFile {
+            path: "spec".to_owned(),
+            reason: SkipReason::TimedOut,
+        }];
+        let mut landed_on_the_directory = 0;
+        for _ in 0..ATTEMPTS {
+            let map = build_code_map_with_options(&dir, &options).expect("maps");
+            assert_eq!(map.coverage.spec_citation_scan, SpecScan::TimedOut);
+            if map.coverage.spec_docs_skipped == directory {
+                landed_on_the_directory += 1;
+                continue;
+            }
+            assert_eq!(map.coverage.spec_docs_skipped, document);
+            break;
+        }
+        assert!(
+            landed_on_the_directory < ATTEMPTS,
+            "in {ATTEMPTS} attempts the 50 ms deadline never fell on the document, always on the \
+             directory before it: this host is too loaded to arrange the case"
         );
         drop(guard);
     }
@@ -11255,8 +11296,22 @@ mod tests {
     /// it gathers. With an expired deadline it records nothing and says it
     /// did not finish; with 20 ms left it stops within 250 ms. Timed on
     /// the walk alone, after the parse.
+    ///
+    /// A wall-clock time is the work plus whatever the host spent on
+    /// something else, and the second part is never negative: on a host
+    /// under load a walk that stops at once can still be measured at
+    /// hundreds of milliseconds by a thread that was descheduled for them.
+    /// So each of the two timed claims is judged on the fastest of
+    /// `ATTEMPTS` runs of the same walk, which converges on the work. The
+    /// bounds are the ones this test always had, 100 ms and 250 ms. A walk
+    /// that really does too much work does it in every attempt and fails
+    /// them all; what the repetition removes is a stall that hits one or
+    /// two attempts, not all of them. What does not depend on the clock is
+    /// asserted on every attempt: the walk says it did not finish, and
+    /// with a deadline already past it recorded nothing.
     #[test]
     fn ori_t_0036_the_rust_declaration_walk_checks_its_deadline() {
+        const ATTEMPTS: usize = 5;
         let source = format!("fn f() {{\n{}}}\n", "    use a::b;\n".repeat(200_000));
         let tree = parse_bounded(
             Language::Rust,
@@ -11283,20 +11338,34 @@ mod tests {
             );
             (completed, sink.edges.len())
         };
-        let start = Instant::now();
-        assert_eq!(run(Instant::now() - Duration::from_secs(1)), (false, 0));
+        let mut expired = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            assert_eq!(run(Instant::now() - Duration::from_secs(1)), (false, 0));
+            expired.push(start.elapsed());
+        }
+        let fastest = expired.iter().min().copied().expect("attempts were made");
         assert!(
-            start.elapsed() < Duration::from_millis(100),
-            "{:?}",
-            start.elapsed()
+            fastest < Duration::from_millis(100),
+            "a walk past its deadline must do no work, but the fastest of {ATTEMPTS} took \
+             {fastest:?}: {expired:?}"
         );
-        let start = Instant::now();
-        let (completed, _) = run(start + Duration::from_millis(20));
-        let elapsed = start.elapsed();
+        let mut mid_walk = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            let (completed, _) = run(start + Duration::from_millis(20));
+            mid_walk.push(start.elapsed());
+            assert!(
+                !completed,
+                "a deadline 20 ms away must stop the walk, but it completed after {:?}",
+                start.elapsed()
+            );
+        }
+        let fastest = mid_walk.iter().min().copied().expect("attempts were made");
         assert!(
-            !completed && elapsed < Duration::from_millis(250),
-            "a deadline 20 ms away must stop the walk, but it ran {elapsed:?} (completed: \
-             {completed})"
+            fastest < Duration::from_millis(250),
+            "a deadline 20 ms away must stop the walk, but the fastest of {ATTEMPTS} ran \
+             {fastest:?}: {mid_walk:?}"
         );
         assert_eq!(
             run(Instant::now() + Duration::from_secs(600)),
