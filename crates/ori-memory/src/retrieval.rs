@@ -36,8 +36,15 @@
 //!   [`crate::scope::Admitted`] value that came back, and `admit` refuses the
 //!   whole assembly ([`RetrievalError::SeamBroken`]) unless
 //!   `Admitted::was_filtered_by` the package's own `Authorization` answers
-//!   yes. An item's text is built from the admitted candidate and from
-//!   nothing gathered beside it.
+//!   yes. An item's body is built from the admitted candidate and from
+//!   nothing gathered beside it: the code map's per-module citation list,
+//!   which lies beside a `Module` and not in it, is deliberately left out
+//!   (an item says how many sections cite its module, a count the module
+//!   itself holds). Two labels are looked up beside the candidate, keyed by
+//!   the admitted candidate's own path and by nothing else: a document's
+//!   verdict from the freshness tracker (its text is compared, never shown;
+//!   the drift audit's description of a divergence is shown), and the build
+//!   time the composition root gave for the code map.
 //! - **The retrieval's word is kept where it is checkable.** A
 //!   [`crate::scope::Candidate::Document`], `Module` and `Unproduced` are
 //!   built from fields the filter cannot check, so each is built from the
@@ -130,7 +137,11 @@
 //!    index search returns none, and the agent reads the document itself.
 //! 3. **The code map** (`CodeMap`): every module of the map whose path lies
 //!    within a declared module, with its interfaces, entry points, covering
-//!    tests, dependency edges and the specification sections that cite it.
+//!    tests, dependency edges and how many specification sections cite it.
+//!    The citations themselves (the document paths and heading texts the map
+//!    holds beside a module) are not shown: they are not part of the
+//!    admitted `Candidate::Module`, so showing them would put text in the
+//!    package that never passed the filter.
 //!
 //! Items are ranked, then fitted under the cap: the context ticket's own
 //! records first (a retry needs its own history), then documents by score,
@@ -1206,7 +1217,7 @@ fn capped_list(entries: &[String]) -> String {
     out
 }
 
-fn module_lines(module: &Module, code_map: &CodeMap) -> Vec<String> {
+fn module_lines(module: &Module) -> Vec<String> {
     let mut lines = vec![format!(
         "module {} ({})",
         short(&module.path, SHORT_CHARS),
@@ -1275,33 +1286,21 @@ fn module_lines(module: &Module, code_map: &CodeMap) -> Vec<String> {
             lines.push(format!("depends on: {}", capped_list(&resolved)));
         }
     }
+    // A count only. The document paths and headings a citation names are
+    // read from the code map beside the module, not from the admitted
+    // candidate, so they would reach the package without passing
+    // `Authorization::filter`; the module carries only how many sections
+    // cite it, and the agent finds which by the index (the same search finds
+    // them: a document citing the module's path is a hit for it).
     if !module.spec_sections.is_empty() {
-        let entries: Vec<String> = module
-            .spec_sections
-            .iter()
-            .map(|citation| {
-                let document = code_map.spec_doc(citation).unwrap_or("an unknown document");
-                match code_map.spec_heading(citation) {
-                    Some(heading) => {
-                        format!(
-                            "{} under \"{}\"",
-                            short(document, 120),
-                            short(&heading.text, 120)
-                        )
-                    }
-                    None => short(document, 120),
-                }
-            })
-            .collect();
         let more = if module.spec_sections_truncated {
             "; the map stopped looking for more"
         } else {
             ""
         };
         lines.push(format!(
-            "cited by ({}): {}{more}",
-            entries.len(),
-            capped_list(&entries)
+            "cited by {} specification section(s){more}",
+            module.spec_sections.len()
         ));
     }
     lines
@@ -1834,7 +1833,7 @@ impl<'a> Retrieval<'a> {
                     },
                 },
                 true,
-                module_lines(module, self.code_map),
+                module_lines(module),
                 None,
                 None,
             ),
@@ -2228,9 +2227,9 @@ mod tests {
         CodeMap {
             modules,
             coverage: clean_coverage(),
-            spec_docs: vec![spec_path("FIXTURE.md")],
+            spec_docs: vec![spec_path("CITED-ONLY-BY-THE-MAP.md")],
             spec_headings: vec![SpecHeading {
-                text: "M design".to_owned(),
+                text: "A heading only the code map holds".to_owned(),
                 truncated: false,
             }],
         }
@@ -3699,11 +3698,18 @@ mod tests {
         assert!(text.contains("(+18 more)"), "{text}");
         assert!(text.contains("entry points: main:1"));
         assert!(text.contains("covering tests (30)"));
-        assert!(text.contains(&format!(
-            "cited by (1): {} under \"M design\"",
-            spec_path("FIXTURE.md")
-        )));
+        assert!(text.contains("cited by 1 specification section(s)"));
         assert!(text.contains("parsed with errors"));
+        // The citation's document path and heading are read from the code
+        // map beside the module, not from the admitted candidate: neither
+        // reaches the package, in an item or anywhere else in the text.
+        let rendered = package.render();
+        for beside in ["CITED-ONLY-BY-THE-MAP", "A heading only the code map holds"] {
+            assert!(
+                !rendered.contains(beside),
+                "text read beside the admitted module reached the package: {beside}"
+            );
+        }
     }
 
     #[test]
