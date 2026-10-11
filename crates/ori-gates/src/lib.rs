@@ -15,6 +15,11 @@ pub mod coverage;
 /// honestly report (`spec/DATA_MODEL.md` section 2).
 pub mod gate;
 
+/// The liveness definition: whether an expected workflow or agent run happened
+/// inside its window, and when a missing run makes an installed gate inert
+/// (AICD §14, `spec/PRD.md` section 4.11, O-06).
+pub mod liveness;
+
 /// The methodology's machine-readable section index and its generator (AICD §39).
 /// The detector that makes CLAUDE.md's never-modify-a-test rule real (AICD §14).
 pub mod modified_tests;
