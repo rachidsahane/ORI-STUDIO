@@ -385,3 +385,23 @@ Written by the lead on 2026-09-27 under [[R31]] rule 1.
 | ORI-T-0125 | Three code map deadline tests time out under machine load and fail `cargo test --workspace` locally, on `main` as well as on every branch: `ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings`, `ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded`, `ori_t_0036_the_rust_declaration_walk_checks_its_deadline`. Each passes alone in about a second; CI has passed them. Reported by the ORI-T-0038 coder and the ORI-T-0123 documentation agent on 2026-09-27 | `crates/ori-memory/src/code_map.rs` (its tests) | 1, `spec/RISK_MAP.md` (code map) | **waiting on the operator**: the fix changes existing tests, which is trigger `test_modified` | 2026-09-27 |
 
 **State after this section:** the claims held are 20, 60, 61 and 62. The next free identifier is ORI-T-0126.
+
+---
+
+## Session of 2026-10-11: claim 60 released, claims 61 and 62 re-dispatched, claim 63
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]] rules 2 and 3. Coders in this session run on Sonnet 5.5 ([[R39]]).
+
+**Claim 60 released.** ORI-T-0038 merged as pull request 77 on 2026-09-27; its commits are on `main` (1f5328f to 9c661e1). Verified from the merge history, not from memory.
+
+**Claims 61 and 62 are still held, and their work is not in the repository.** Both were dispatched on 2026-09-27 to `feat/ORI-T-0039-memory` and `feat/ORI-T-0040-memory`. Neither branch exists on the remote today, no pull request names either ticket, and the only remote commits whose `Ticket:` trailer names either one are two lead records under `ops/` (27b8833 and e12e31e, both `ORI-T-0040`), neither of which changes a file under `crates/`. Whatever was built under them, including the targeted repair round that extended claim 61 to `barrier.rs`, was never pushed. Both tickets are dispatched again from `main` at 7bed207, under the same claims and the same modules. Claim 61's extension to `barrier.rs` stands, additively only: a coder that needs it says so in its report and that change is tier 2 ([[R38]] point 3).
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 63 | ORI-T-0045, the prover: the planted-defect demonstration | `crates/ori-gates/src/prover.rs`, `crates/ori-gates/src/lib.rs` (queue) | 2, `ops/phase-1-backlog.md` batch 7 | `feat/ORI-T-0045-prover` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Checked against every claim held once this section is read: 20 (`.github/workflows/ci.yml`, `scripts/gates.sh`, `fixtures/planted/gate-13/**`), 61 (`oplog.rs`, `retrieval.rs`, `barrier.rs` additively) and 62 (`citation.rs`, `drift.rs`, `freshness.rs` additively). Claim 63 is in `crates/ori-gates/` and is disjoint from all three. Claims 61 and 62 share only the queue file `crates/ori-memory/src/lib.rs`, which neither holds.
+
+**Where the work lands.** This session runs in a cloud container whose standing instruction is to develop on one branch, `claude/sweet-maxwell-jkaiie`, and to open no pull request unless the operator asks. Each ticket is still built on its own branch, in its own worktree, by its own coder; those branches stay local. The lead reviews each one and brings it onto `claude/sweet-maxwell-jkaiie` as rebased commits that keep the coder's `Ticket:` and `Spec:` trailers. Nothing reaches `main` from this session without a pull request the operator asks for, so a tier 2 change on that branch is merged by the operator, as [[R38]] requires.
+
+**State after this section:** the claims held are 20, 61, 62 and 63. The next free identifier is ORI-T-0126.
