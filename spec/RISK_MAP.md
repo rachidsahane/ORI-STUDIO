@@ -22,7 +22,9 @@ Every module of the repository with its tier and the reason. Maintained with the
 | crates/ori-watch/src/attribution.rs | 2 | Unattributed change detection |
 | crates/ori-watch (watcher, hooks) | 1 | |
 | crates/ori-mcp (server tool scopes) | 2 | What agents can do |
+| crates/ori-mcp/src/scopes.rs, ports.rs, server.rs, tools/ | 2 | What agents can do |
 | crates/ori-mcp (host) | 1 | |
+| crates/ori-mcp/src/protocol.rs | 1 | The shared MCP wire |
 | crates/ori-integrations (merge exposure, webhook verification) | 2 | |
 | crates/ori-integrations (adapters otherwise) | 1 | |
 | crates/ori-notify, ori-calibration | 1 | |
