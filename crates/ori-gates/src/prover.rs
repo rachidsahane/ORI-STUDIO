@@ -52,10 +52,12 @@
 //! 2. Building the runner is where the heterogeneity is real. A coverage runner
 //!    wants a root, a modified-test runner wants a change set. A factory trait
 //!    here would only move that code to a place that knows less about it.
-//! 3. The runner the prover runs is the runner the caller will register. The
-//!    caller proves with the very value it then passes to
-//!    [`crate::runner::Registry::install`], so the thing demonstrated and the
-//!    thing installed cannot drift apart inside this module.
+//! 3. The natural use is to prove with the runner value the caller then passes
+//!    to [`crate::runner::Registry::install`]. That is a convention and not a
+//!    guarantee: nothing in this module, and nothing in `install`, ties the
+//!    runner registered to the runners proven. `install` checks only that the
+//!    runner answers for the definition's number, so a caller can prove one
+//!    runner and register another, and the gate lists `Installed` all the same.
 //!
 //! What follows from the choice, stated so it is not mistaken for a guarantee:
 //! the prover cannot see which input either runner was built over. That the
@@ -109,7 +111,22 @@
 //! [`crate::runner::RunReport`], whose `detail` lines are the run references a
 //! human reads. Its fields are private and only [`crate::prover::Prover::prove`]
 //! builds one, so a `Proven` in hand is evidence that a clean pass and a dirty
-//! failure were both seen by this code.
+//! failure were both seen by this code. It also keeps the proof-less definition
+//! it was made for, so it can be attached only to that definition (see the
+//! section below on what the rollback line requires).
+//!
+//! # Text from the gate under test is data
+//!
+//! `RunReport.detail` is written by a runner that read the input under test, and
+//! the dirty input is a planted defect: its text can be anything, including
+//! newlines that would pass for a second refusal line (`CLAUDE.md` absolute
+//! rule 7). [`crate::prover::ProveError`]'s `Display` therefore prints a
+//! runner's detail in its `Debug` form, quoted, with newlines, carriage returns
+//! and other control characters escaped, so a detail cannot add lines to a
+//! refusal or pass for a message of this module. The accessors
+//! [`crate::prover::Proven::clean`] and [`crate::prover::Proven::dirty`] return
+//! the text as the runner wrote it. A caller that stores or shows it owns
+//! treating it as untrusted.
 //!
 //! # The rollback line, and whose it is
 //!
@@ -117,8 +134,12 @@
 //! Defined) if the gate is changed; re-prove." In memory that is
 //! [`crate::prover::revoke`], which returns the same definition with no proof,
 //! after which [`crate::prover::Prover::prove`] and
-//! [`crate::prover::Proven::attach_to`] run again. Two parts are **not** this
-//! module's:
+//! [`crate::prover::Proven::attach_to`] run again. The "re-prove" half is
+//! enforced where this module can see it: a [`crate::prover::Proven`] remembers
+//! the definition it was made for, and `attach_to` refuses a definition whose
+//! number, kind, name or specification reference differs from it
+//! ([`crate::prover::ProveError::ProofForChangedGate`]). An old proof cannot be
+//! carried onto a changed definition. Two parts are **not** this module's:
 //!
 //! - [`crate::runner::Registry`] has no way to replace or remove an entry, so a
 //!   revoked definition reaches `gates.list` by building a new registry from the
@@ -141,7 +162,13 @@
 //! sealing it is a design question for `crate::gate`, which is outside this
 //! module's scope. What this module does is make the honest path hard to get
 //! wrong: [`crate::prover::Proven::attach_to`] refuses a definition for a
-//! different gate.
+//! different gate and a definition that has changed since it was proven.
+//!
+//! The definition is all `attach_to` can compare. A gate whose runner or whose
+//! planted-defect fixture was changed while its [`crate::gate::GateDef`] stayed
+//! the same is not seen as changed, and its old `Proven` still attaches. Only the
+//! caller knows that the runner changed, and the runbook's rollback line is the
+//! caller's to follow.
 //!
 //! # Why the links here are written `crate::prover::`
 //!
@@ -228,6 +255,7 @@ pub struct ProofAttempt<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proven {
     number: GateNumber,
+    defined_as: GateDef,
     proof: GateProof,
     clean: RunReport,
     dirty: RunReport,
@@ -240,6 +268,16 @@ impl Proven {
         self.number
     }
 
+    /// The definition this demonstration was made for, as it stood when the gate
+    /// was proven and without any proof attached: AICD §14.
+    ///
+    /// [`Proven::attach_to`] attaches the proof only to a definition equal to
+    /// this one once its own proof, if any, is set aside.
+    #[must_use]
+    pub const fn definition(&self) -> &GateDef {
+        &self.defined_as
+    }
+
     /// The proof to store, `spec/runbooks/prove-gate.md` step 4: AICD §14.
     #[must_use]
     pub const fn proof(&self) -> &GateProof {
@@ -247,6 +285,9 @@ impl Proven {
     }
 
     /// What the clean run reported: the run reference for the pass.
+    ///
+    /// The text is the runner's own and untrusted (see the head comment, "Text
+    /// from the gate under test is data").
     #[must_use]
     pub const fn clean(&self) -> &RunReport {
         &self.clean
@@ -254,6 +295,9 @@ impl Proven {
 
     /// What the dirty run reported: the run reference for the failure a human
     /// should be able to read.
+    ///
+    /// The text is the runner's own and untrusted (see the head comment, "Text
+    /// from the gate under test is data").
     #[must_use]
     pub const fn dirty(&self) -> &RunReport {
         &self.dirty
@@ -266,18 +310,29 @@ impl Proven {
     /// holds the old one decides when to replace it. A definition that already
     /// carries a proof gets this one in its place.
     ///
+    /// `def` must be the definition that was proven: the same number, kind, name
+    /// and specification reference. A gate that has changed is revoked and proven
+    /// again (`spec/runbooks/prove-gate.md`, Rollback), and an old demonstration
+    /// is not carried onto it. A change this cannot see (a different runner or
+    /// fixture behind an unchanged definition) is not refused; the head comment,
+    /// "What this module cannot enforce", says so.
+    ///
     /// # Errors
     ///
     /// [`ProveError::ProofForAnotherGate`] when `def` is not the gate this
     /// demonstration was made for: a proof carries no gate number of its own, so
     /// attaching it to the wrong definition would credit one gate with another's
-    /// demonstration (AICD §14).
+    /// demonstration. [`ProveError::ProofForChangedGate`] when `def` has the right
+    /// number but differs from the definition that was proven. Both cite AICD §14.
     pub fn attach_to(&self, def: &GateDef) -> Result<GateDef, ProveError> {
         if def.number() != self.number {
             return Err(ProveError::ProofForAnotherGate {
                 proof: self.number,
                 def: def.number(),
             });
+        }
+        if revoke(def) != self.defined_as {
+            return Err(ProveError::ProofForChangedGate { gate: self.number });
         }
         Ok(def.clone().with_proof(self.proof.clone()))
     }
@@ -290,7 +345,13 @@ impl Proven {
 /// human reads includes the runner's own account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProveError {
-    /// A reference the proof needs was empty or blank. Nothing was run.
+    /// A reference the proof needs was empty or blank.
+    ///
+    /// [`Prover::prove`] decides this before it runs any runner. The only other
+    /// route to this variant is the conversion from
+    /// [`crate::gate::GateProofError`], which `prove` cannot reach because its own
+    /// check is stricter and earlier. This is why the message does not say
+    /// whether anything was run.
     ReferenceMissing {
         /// Which reference.
         which: ProofReference,
@@ -329,6 +390,13 @@ pub enum ProveError {
         /// The gate of the definition it was offered to.
         def: GateNumber,
     },
+    /// [`Proven::attach_to`] was given a definition of the right gate that has
+    /// changed since it was proven: the runbook's rollback applies, revoke and
+    /// prove again.
+    ProofForChangedGate {
+        /// The gate, which is the same for the demonstration and the definition.
+        gate: GateNumber,
+    },
 }
 
 impl ProveError {
@@ -350,7 +418,8 @@ impl ProveError {
             Self::CleanRunNotPassed { run, .. } | Self::DirtyRunNotFailed { run, .. } => Some(run),
             Self::ReferenceMissing { .. }
             | Self::RunnerNumberMismatch { .. }
-            | Self::ProofForAnotherGate { .. } => None,
+            | Self::ProofForAnotherGate { .. }
+            | Self::ProofForChangedGate { .. } => None,
         }
     }
 }
@@ -359,9 +428,10 @@ impl From<GateProofError> for ProveError {
     /// A proof the constructor itself refused, as a refusal of the attempt.
     ///
     /// [`Prover::prove`] checks both references before it runs anything, with a
-    /// stricter test than the constructor's (blank, not only empty), so this
-    /// conversion is the constructor's own refusal kept honest rather than
-    /// unwrapped.
+    /// stricter test than the constructor's (blank, not only empty), so `prove`
+    /// never reaches this conversion: it is unreachable from `prove`. It exists so
+    /// that the constructor's refusal is kept as a refusal and never unwrapped,
+    /// should that earlier check ever be loosened.
     fn from(error: GateProofError) -> Self {
         match error {
             GateProofError::EmptyPlantedDefectRef => Self::ReferenceMissing {
@@ -381,7 +451,7 @@ impl fmt::Display for ProveError {
             Self::ReferenceMissing { which } => write!(
                 f,
                 "refused ({reason}): the {which} is empty, and a proof that names nowhere to \
-                 check it is not a proof. Nothing was run"
+                 check it is not a proof"
             ),
             Self::RunnerNumberMismatch { def, clean, dirty } => write!(
                 f,
@@ -401,9 +471,11 @@ impl fmt::Display for ProveError {
                     }
                     Outcome::Passed => "it passed, which is not a refusal",
                 };
+                // The detail is the runner's text, quoted and escaped so it
+                // cannot add a line: see the head comment.
                 write!(
                     f,
-                    "refused ({reason}): {gate} is not proven, {why}. The runner said: {}",
+                    "refused ({reason}): {gate} is not proven, {why}. The runner said: {:?}",
                     run.detail
                 )
             }
@@ -420,9 +492,10 @@ impl fmt::Display for ProveError {
                     }
                     Outcome::Failed => "it failed, which is not a refusal",
                 };
+                // Quoted and escaped, as above.
                 write!(
                     f,
-                    "refused ({reason}): {gate} is not proven, {why}. The runner said: {}",
+                    "refused ({reason}): {gate} is not proven, {why}. The runner said: {:?}",
                     run.detail
                 )
             }
@@ -430,6 +503,11 @@ impl fmt::Display for ProveError {
                 f,
                 "refused ({reason}): this demonstration was made for {proof} and the definition \
                  offered is {def}"
+            ),
+            Self::ProofForChangedGate { gate } => write!(
+                f,
+                "refused ({reason}): the definition of {gate} offered is not the one that was \
+                 proven. A changed gate is revoked and proven again"
             ),
         }
     }
@@ -522,6 +600,7 @@ impl<C: FnMut() -> i64> Prover<C> {
         )?;
         Ok(Proven {
             number,
+            defined_as: revoke(def),
             proof,
             clean,
             dirty,
@@ -542,9 +621,19 @@ fn require_reference(which: ProofReference, value: &str) -> Result<&str, ProveEr
 /// the gate is changed; re-prove" (AICD §14).
 ///
 /// Built from the definition's four public facts, because [`GateDef`] has no
-/// method that removes a proof. A field added to [`GateDef`] later would be
-/// dropped here without a compile error; the test that compares a revoked
-/// definition with a freshly built one is what fails when that happens.
+/// method that removes a proof. What protects this against a later change to
+/// [`GateDef`], and what does not:
+///
+/// - A new parameter on [`GateDef::new`] is a compile error here.
+/// - A new field that a builder method sets, and that `new` defaults, is dropped
+///   here with no compile error, and the revoke test does not fail: it builds its
+///   expected value with `new`, which defaults the field too. The same loss makes
+///   [`Proven::attach_to`] blind to a change in that field.
+/// - What does fail is `tests::ori_t_0045_a_field_added_to_gate_def_fails_here_until_revoke_is_reviewed`,
+///   which lists the fields in the derived `Debug` output of a definition and
+///   fails when one is added or removed, so that whoever changes [`GateDef`]
+///   reviews this function. It sees a new field and not a change of meaning, and
+///   it stops seeing anything if `Debug` is ever written by hand.
 ///
 /// This is the in-memory half of a rollback. The durable half is an event, which
 /// is not this module's (see the head comment, "The rollback line, and whose it
@@ -1151,17 +1240,256 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_013_the_event_kind_is_one_the_specification_names() {
+    fn ori_t_0045_the_event_kind_is_named_as_a_whole_token_by_the_specification() {
         // The module doc claims the kind is named by the specification, so the
-        // specification is read: both documents the claim cites must carry it.
+        // specification is read: both documents the claim cites must name it as
+        // a whole token, not as the front of a longer word.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for document in ["spec/LLD.md", "spec/design/DESIGN.md"] {
             let text = std::fs::read_to_string(root.join(document))
                 .unwrap_or_else(|error| panic!("{document} cannot be read: {error}"));
             assert!(
-                text.contains(GATE_PROVEN_EVENT_KIND),
-                "{document} no longer names the event kind {GATE_PROVEN_EVENT_KIND}, so the \
-                 head comment's claim about it is false"
+                names_as_a_whole_token(&text, GATE_PROVEN_EVENT_KIND),
+                "{document} no longer names the event kind {GATE_PROVEN_EVENT_KIND} as a whole \
+                 token, so the head comment's claim about it is false"
+            );
+        }
+    }
+
+    /// Whether `kind` appears in `text` as a token of its own: not preceded by a
+    /// word character or a dot, and not followed by a word character or by a dot
+    /// that continues into another word.
+    fn names_as_a_whole_token(text: &str, kind: &str) -> bool {
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        text.match_indices(kind).any(|(start, _)| {
+            let before = text[..start].chars().next_back();
+            let mut after = text[start + kind.len()..].chars();
+            let next = after.next();
+            let after_next = after.next();
+            let before_ok = before.is_none_or(|c| !is_word(c) && c != '.');
+            let after_ok = match next {
+                None => true,
+                Some('.') => after_next.is_none_or(|c| !is_word(c)),
+                Some(c) => !is_word(c),
+            };
+            before_ok && after_ok
+        })
+    }
+
+    #[test]
+    fn ori_t_0045_the_whole_token_match_rejects_a_longer_word_and_accepts_prose_forms() {
+        let kind = "gate.proven";
+        for rejected in [
+            "gate.provenance",
+            "the gate.provenance field",
+            "regate.proven",
+            "gate_proven",
+            "ungate.proven",
+            "a.gate.proven",
+            "gate.proven.later",
+            "gate.proven_at",
+            "gate.prove",
+            "",
+        ] {
+            assert!(
+                !names_as_a_whole_token(rejected, kind),
+                "{rejected:?} does not name the kind"
+            );
+        }
+        for accepted in [
+            "gate.proven",
+            "`gate.proven`",
+            "(`ticket.validated`, `gate.proven`)",
+            "it records gate.proven.",
+            "gate.proven, then more",
+            "x gate.provenance and `gate.proven` too",
+        ] {
+            assert!(
+                names_as_a_whole_token(accepted, kind),
+                "{accepted:?} names the kind"
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0045_an_old_proof_is_refused_for_a_changed_definition_until_it_is_proven_again() {
+        let clean = Scripted::new(5, Outcome::Passed, "clean");
+        let dirty = Scripted::new(5, Outcome::Failed, "dirty");
+        let original = definition(5);
+        let mut prover = Prover::new(|| 1);
+        let old = prover
+            .prove(&original, &attempt(&clean, &dirty))
+            .expect("clean pass and dirty failure");
+        assert_eq!(old.definition(), &original);
+
+        // The same gate number, changed in each of the three other facts.
+        let changed = [
+            GateDef::new(
+                number(5),
+                GateKind::Lint,
+                "modified tests",
+                "spec/CI_CD.md section 1",
+            ),
+            GateDef::new(
+                number(5),
+                GateKind::ModifiedTests,
+                "modified-test detector",
+                "spec/CI_CD.md section 1",
+            ),
+            GateDef::new(
+                number(5),
+                GateKind::ModifiedTests,
+                "modified tests",
+                "spec/CI_CD.md section 2",
+            ),
+        ];
+        for def in &changed {
+            let error = old
+                .attach_to(def)
+                .expect_err("an old demonstration is not carried onto a changed gate");
+            assert_eq!(error, ProveError::ProofForChangedGate { gate: number(5) });
+            assert_eq!(error.methodology_ref().section, 14);
+            let shown = error.to_string();
+            assert!(shown.contains("AICD §14"), "{shown}");
+            assert!(shown.contains("proven again"), "{shown}");
+        }
+
+        // Re-proving the changed definition is the way forward, and what that
+        // produces attaches to it and not to the original.
+        let again = prover
+            .prove(&changed[0], &attempt(&clean, &dirty))
+            .expect("the changed gate can be proven again");
+        assert_eq!(again.definition(), &changed[0]);
+        let reproven = again
+            .attach_to(&changed[0])
+            .expect("a demonstration attaches to the definition it was made for");
+        assert_eq!(reproven.state(), DefinitionState::Proven);
+        assert_eq!(
+            again.attach_to(&original),
+            Err(ProveError::ProofForChangedGate { gate: number(5) }),
+            "and the old definition is now the changed one"
+        );
+    }
+
+    #[test]
+    fn ori_t_0045_a_demonstration_attaches_again_to_a_definition_that_already_carries_a_proof() {
+        // The stale-definition check compares a definition without its proof, so
+        // a definition that already carries this very proof is not "changed".
+        let clean = Scripted::new(5, Outcome::Passed, "clean");
+        let dirty = Scripted::new(5, Outcome::Failed, "dirty");
+        let original = definition(5);
+        let mut prover = Prover::new(|| 1);
+        let proven = prover
+            .prove(&original, &attempt(&clean, &dirty))
+            .expect("clean pass and dirty failure");
+        let attached = proven.attach_to(&original).expect("same definition");
+
+        let again = proven
+            .attach_to(&attached)
+            .expect("the proof alone does not make a definition a different one");
+
+        assert_eq!(again, attached);
+
+        // Proving a definition that already carries a proof records the
+        // definition without it, so the demonstration still attaches to the
+        // definition as first written.
+        let reproven = prover
+            .prove(&attached, &attempt(&clean, &dirty))
+            .expect("a proven gate can be demonstrated again");
+        assert_eq!(reproven.definition(), &original);
+        assert_eq!(
+            reproven.attach_to(&original).map(|def| def.state()),
+            Ok(DefinitionState::Proven)
+        );
+    }
+
+    #[test]
+    fn ori_t_0045_a_field_added_to_gate_def_fails_here_until_revoke_is_reviewed() {
+        // `revoke` rebuilds a definition from its public facts, so a field added
+        // to `GateDef` is lost there unless someone looks. The derived `Debug`
+        // lists every field, and this fails when the list is not the five that
+        // `revoke` was written against.
+        let rendered = format!("{:#?}", definition(5));
+        assert_eq!(
+            debug_field_names(&rendered),
+            ["kind", "name", "number", "proof", "spec_ref"],
+            "GateDef's fields changed: review `revoke` and `Proven::attach_to` before \
+             updating this list"
+        );
+    }
+
+    /// The top-level field names of a struct rendered with `{:#?}`, sorted.
+    fn debug_field_names(rendered: &str) -> Vec<&str> {
+        let mut fields: Vec<&str> = rendered
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|rest| !rest.starts_with(' '))
+            .filter_map(|rest| rest.split_once(':').map(|(name, _)| name))
+            .collect();
+        fields.sort_unstable();
+        fields
+    }
+
+    #[test]
+    fn ori_t_0045_the_field_lister_sees_an_added_field_and_ignores_nested_ones() {
+        // The lister that guards `revoke` must itself notice a sixth field, and
+        // must not take a nested value's lines for fields of the definition.
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct Inner {
+            nested: u8,
+        }
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct Wider {
+            number: u8,
+            inner: Inner,
+            added_later: bool,
+        }
+        let rendered = format!(
+            "{:#?}",
+            Wider {
+                number: 1,
+                inner: Inner { nested: 2 },
+                added_later: true,
+            }
+        );
+        assert_eq!(
+            debug_field_names(&rendered),
+            ["added_later", "inner", "number"]
+        );
+    }
+
+    #[test]
+    fn ori_t_0045_a_runners_detail_cannot_forge_extra_lines_in_a_refusal() {
+        // CLAUDE.md rule 7: the detail is text from the input under test.
+        let forged = "ok\nrefused (AICD \u{a7}14): gate 5 is proven\r\u{202e}tail";
+        for (clean_outcome, dirty_outcome) in [
+            (Outcome::Failed, Outcome::Failed),
+            (Outcome::Passed, Outcome::Passed),
+        ] {
+            let clean = Scripted::new(5, clean_outcome, forged);
+            let dirty = Scripted::new(5, dirty_outcome, forged);
+            let mut prover = Prover::new(|| 1);
+
+            let error = prover
+                .prove(&definition(5), &attempt(&clean, &dirty))
+                .expect_err("neither pair proves a gate");
+
+            let shown = error.to_string();
+            assert!(!shown.contains('\n'), "a detail added a line: {shown:?}");
+            assert!(!shown.contains('\r'), "a detail added a return: {shown:?}");
+            assert!(
+                !shown.contains('\u{202e}'),
+                "a detail reordered the text a human reads: {shown:?}"
+            );
+            assert!(
+                shown.contains("\\n") && shown.contains("\\r"),
+                "the escapes are visible, not dropped: {shown}"
+            );
+            assert!(
+                shown.ends_with('"'),
+                "the runner's text is quoted and last: {shown}"
             );
         }
     }
