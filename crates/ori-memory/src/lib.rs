@@ -12,4 +12,5 @@ pub mod code_map;
 pub mod freshness;
 pub mod indexer;
 pub mod oplog;
+pub mod retrieval;
 pub mod scope;
