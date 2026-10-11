@@ -6,27 +6,4 @@ license.workspace = true
 description = "Working tree and git watcher, attribution of changes and unattributed-change incidents."
 
 [dependencies]
-# Already a workspace member and already in this crate's graph through
-# ori-store; named here because `watcher.rs` stamps every change with
-# `ori_core::types::Timestamp`, and Rust does not let a crate name a
-# transitive dependency's items. Not a new crate (the same catch-up
-# `crates/ori-memory/Cargo.toml` documents for itself).
-ori-core = { workspace = true }
 ori-store = { workspace = true }
-# ORI-T-0054: the file-system notification library `spec/LLD.md` section 2
-# names in `ori-watch`'s row ("`TreeWatcher` (notify crate)"). Approved by the
-# operator on 2026-10-11 in escalation E-0009, on the terms of E-0004: exact
-# pin, `Cargo.lock` committed, gate 7 decides.
-#
-# `default-features = false` plus `macos_fsevent`, which is the crate's own
-# default feature set written out, for one reason: on macOS notify 8.2.0
-# builds `FsEventWatcher` unless `macos_kqueue` is on, and that module does
-# `use fsevent_sys`, a crate only the `macos_fsevent` feature brings in. With
-# no macOS feature at all the macOS leg of the CI matrix would not compile, and
-# the only other choice, `macos_kqueue`, opens one file descriptor per watched
-# file against macOS's default limit of 256, which a product repository's tree
-# exceeds. Nothing is enabled for any other platform: Linux uses inotify,
-# Windows uses ReadDirectoryChangesW, and neither reads a feature. The
-# crate's optional `serde`, `crossbeam-channel` and `flume` features stay off
-# (this crate hands events across `std::sync::mpsc`).
-notify = { version = "=8.2.0", default-features = false, features = ["macos_fsevent"] }
