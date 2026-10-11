@@ -12,9 +12,9 @@
 //!
 //! `spec/DATA_MODEL.md` section 2: "**AgentIdentity** | id, product_id, role
 //! (coder, lead, qa, operations, documentation, product_signal, assistant),
-//! model, runtime (acp, headless), scopes (memory), permissions (json), state
-//! (active, suspended) |". Seven fields there; eight below, `family` being
-//! the one the row does not yet name.
+//! model, family, runtime (acp, headless), scopes (memory), permissions
+//! (json), state (active, suspended) |". Nine fields there and nine in the
+//! struct; the struct lists `family` last, the row lists it after `model`.
 //!
 //! - `id`, `product_id`: [`ori_core::types::Id`], the same identifier type
 //!   every other entity in this workspace uses. This module never generates
@@ -25,8 +25,9 @@
 //!   seven agent roles and `ori_core::permission` already carries AICD §17's
 //!   permission matrix over exactly that type; a second `Role` in this crate
 //!   would be a second copy of a seven-way enumeration with no way to keep
-//!   the two in step, and `permissions_snapshot` below would have to guess
-//!   which one AICD §17 was talking about.
+//!   the two in step, and `permissions_snapshot` (a private function beside
+//!   `AgentIdentity::create`, now in `ori-core`) would have to guess which
+//!   one AICD §17 was talking about.
 //! - `model`: a plain string naming the model this identity runs on. Refused
 //!   here only if empty, which no cross-model rule needs to know about.
 //! - `family`: [`ori_core::types::ModelFamily`], required, never optional.
@@ -56,7 +57,7 @@
 //!   `ori-memory` in `spec/LLD.md` section 2's dependency diagram either way.
 //! - `permissions`: a snapshot of what AICD §17's matrix grants this role,
 //!   over every [`ori_core::permission::Resource`], rendered as text by
-//!   `permissions_snapshot`. Computed from
+//!   `permissions_snapshot` (private, in `ori-core`). Computed from
 //!   [`ori_core::permission::grants`], never hand-written, which is what
 //!   makes "must not duplicate or contradict" true structurally rather than
 //!   by care: there is only one place in this workspace that says what AICD
@@ -96,8 +97,17 @@
 //! always had, so the type is the same type at both paths and no caller
 //! changed. Nothing about them was redesigned: `create` does no IO and never
 //! called the keychain, so the whole identity moved and nothing had to be
-//! split off. Everything above this section describes them as they were
-//! declared here and is still true of them.
+//! split off.
+//!
+//! The text above this section was written when they were declared in this
+//! file. It describes their behaviour, which did not change, and it is still
+//! true of the types, with this reading: where it says "here", "this module"
+//! or "this function" about `create`, `MemoryScopes` or the private
+//! `permissions_snapshot`, those are now declared in `ori-core`'s
+//! `adapters/identity.rs`, which carries the matching documentation. What
+//! this file still owns is the re-export, the registration seam pointed to above
+//! (`registration.rs`), and the tests of the types' behaviour, which live
+//! below and ran unchanged through the move.
 //!
 //! Must not: persist secrets anywhere but the keychain (`spec/LLD.md`
 //! section 2, inherited from the crate). Nothing here reads or writes a

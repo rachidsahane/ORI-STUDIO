@@ -26,9 +26,9 @@
 //!
 //! `spec/DATA_MODEL.md` section 2: "**AgentIdentity** | id, product_id, role
 //! (coder, lead, qa, operations, documentation, product_signal, assistant),
-//! model, runtime (acp, headless), scopes (memory), permissions (json), state
-//! (active, suspended) |". Eight fields there; nine below, `family` being
-//! the one the row does not yet name.
+//! model, family, runtime (acp, headless), scopes (memory), permissions
+//! (json), state (active, suspended) |". Nine fields there and nine below;
+//! the struct lists `family` last, the row lists it after `model`.
 //!
 //! - `id`, `product_id`: [`crate::types::Id`], the same identifier type every
 //!   other entity in this workspace uses. This module never generates one.
@@ -162,9 +162,9 @@ impl FromStr for IdentityRuntime {
 ///
 /// The transition between the two (a human, per `spec/ENV_SETUP.md` section 5
 /// "Any deviation is a decisional ticket", suspending an identity) is not a
-/// function this module provides; this ticket's declared scope is the
-/// identity and its creation path, not a suspend/resume state machine, and
-/// [`AgentIdentity::create`] only ever produces [`IdentityState::Active`].
+/// function this module provides; no ticket has built a suspend/resume
+/// state machine, and [`AgentIdentity::create`] only ever produces
+/// [`IdentityState::Active`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum IdentityState {
     /// May be assigned sessions.
@@ -360,8 +360,8 @@ impl AgentIdentity {
     /// `permissions_snapshot` of `role`, always, so it can never disagree
     /// with `role`. The identity this returns always holds
     /// [`IdentityState::Active`]; there is no parameter to start one
-    /// suspended, matching this module's doc comment, "What 'the creation
-    /// path' is, here".
+    /// suspended: a suspend or resume transition is not built (see
+    /// [`IdentityState`]).
     pub fn create(
         id: Id,
         product_id: Id,
