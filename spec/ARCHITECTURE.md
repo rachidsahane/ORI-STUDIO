@@ -43,6 +43,8 @@ flowchart TB
   RT --> Iso[worktrees and containers]
 ```
 
+The arrows are runtime and data-flow interactions: who calls or talks to whom while the engine runs. They are not crate dependencies, and an arrow from one component to another does not mean the first crate depends on the second; the direction in which crates depend on one another is the graph in LLD section 2.
+
 The engine is a library crate. The desktop app links it and calls it in-process. The CLI and the headless daemon run the same library behind a socket. Every capability exists in the engine; the clients render and forward.
 
 ## 2. Components
