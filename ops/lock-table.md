@@ -720,3 +720,19 @@ Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1 un
 ORI-T-0140's coder found that `acp.rs`'s `drain_stderr` has the same unbounded drain for standard error. It is added to ORI-T-0143 (claim 79), which holds `acp.rs`.
 
 **State after this section:** the claims held are 20, 64, 69, 78, 79 and 80. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 69, 78 and 80 integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`. All three are tier 2 by their paths and go to the operator with the pull request.
+
+| # | Ticket | Review, and what was repaired | Verified by the lead on the session branch |
+|---|---|---|---|
+| 78 | ORI-T-0137, the `ori-core` adapter files tiered 2 | The lead read the diff: one `spec/RISK_MAP.md` row, one `spec/SECURITY_NOTES.md` row, two rows of `spec/adr/ADR-0002-single-operator.md`'s surface table brought up to date. It adds tier 2 coverage and removes none. Its agent corrected the lead's ticket: only `AgentIdentity` came from `ori-broker`; `ScopedToken` and the six traits are new declarations | with claim 80 below |
+| 80 | ORI-T-0145, gate 12 restates the new row | The lead read it: a thirteenth `RiskMapRow` with the Path cell verbatim, the count in the doc corrected, one new test that the identity adapter is significant and a tier 1 core file is not; the failing test reproduced first, the new test shown to fail on a wrong path | `cargo test -p ori-gates`: 191 passed |
+| 69 | ORI-T-0058, six adapter traits and `AgentIdentity` in `ori-core` | Three attempts. Attempt 1 stopped correctly on two escalations ([[R42]]). The independent review found no code defect; its blocker was governance (the moved files fell off every tier 2 path), answered by claims 78 and 80, which are integrated first so the files are never untiered on this branch. Its four should-fix were repaired in attempt 3: `merge` and `set_check` are pinned to the head the gates passed on; status is fail-closed and all-or-error; a token's scope is a type of its own so it cannot be swapped with the secret; `identity_token` says an identity is not proof of registration. Integrated after claims 78 and 80. Commit ee92886 alone is red on the [[R42]] test, which 6cd1cdd fixes; a squash merge keeps `main` bisectable | `cargo test -p ori-core`: 118 passed; `-p ori-broker`: 66; `-p ori-memory ori_t_0038`: passed; workspace clippy, strict doc, fmt: clean |
+
+`AgentRuntime` stays staged as ORI-T-0141, now **tier 2** by the new row (it changes `crates/ori-core/src/adapters.rs`), and waits on claim 79 (ORI-T-0143) releasing `acp.rs`.
+
+**State after this section:** the claims held are 20, 64 and 79. The next free identifier is ORI-T-0146.
