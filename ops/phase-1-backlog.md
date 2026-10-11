@@ -250,7 +250,7 @@ Whole crate is tier 2 (`RISK_MAP`: `crates/ori-broker | 2 | Credentials`).
 
 | Ticket | Title | Tier | Declared scope | Spec anchor | Criteria |
 |---|---|---|---|---|---|
-| ORI-T-0058 | Adapter traits | 1 | `crates/ori-integrations/src/traits.rs` | API_SPEC §4 | none |
+| ORI-T-0058 | Adapter traits | ~~1~~ **2** | ~~`crates/ori-integrations/src/traits.rs`~~ **`crates/ori-core/src/adapters.rs`, `adapters/identity.rs`, `crates/ori-broker/src/identity.rs`** | API_SPEC §4 | none |
 | ORI-T-0059 | **Version control host reference adapter: installation tokens, webhook verification, merge exposure** | **2** | `crates/ori-integrations/src/reference/vcs/**` | API_SPEC §4; SECURITY_NOTES trust boundary 3 | ORI-P1-017 |
 
 **Order.** ORI-T-0058 then ORI-T-0059.

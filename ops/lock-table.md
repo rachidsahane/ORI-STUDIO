@@ -682,3 +682,25 @@ Written by the lead at dispatch, 2026-10-11, under [[R31]]. ORI-T-0140's indepen
 Disjoint from claim 77 (`headless.rs`). Claim 69 no longer holds `acp.rs` (narrowed above). ORI-T-0141, which also changes `acp.rs`, waits on this claim's release.
 
 **State after this section:** the claims held are 20, 62, 64, 67 to 69, 77, 78 and 79. The next free identifier is ORI-T-0145.
+
+---
+
+## ORI-T-0145 allocated and claimed (80), paired with ORI-T-0137
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+ORI-T-0137's documentation agent found that its new `spec/RISK_MAP.md` row turns `cargo test -p ori-gates` red: `crates/ori-gates/src/significance.rs` (gate 12) restates RISK_MAP's tier 2 rows in `RISK_MAP_TIER_TWO`, and `significance::tests::ori_t_0044_the_restated_risk_map_rows_agree_with_a_fresh_read_of_the_file` compares the restatement with the file. The two must land together, so the code half is ORI-T-0145, built on ORI-T-0137's branch, the shape of ORI-T-0123 and ORI-T-0124. It adds a row to a constant, not to a test, so no `test_modified` arises. Until it lands, gate 12 would not count the adapter files as tier 2.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0145 | Restate the new tier 2 row (`crates/ori-core/src/adapters.rs, adapters/identity.rs`) in `RISK_MAP_TIER_TWO` | `crates/ori-gates/src/significance.rs` | 1 by `spec/RISK_MAP.md` (`ori-gates` runners); carried with ORI-T-0137, so the pull request is tier 2 | dispatched, claim 80 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 80 | ORI-T-0145 | `crates/ori-gates/src/significance.rs` | 1 | `docs/ORI-T-0137-adapters-tier-2` (with claim 78) | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+No other claim holds `significance.rs`; claim 42 (ORI-T-0044) released when pull request 52 merged.
+
+Two records corrected now, both found by ORI-T-0137's agent: `ops/phase-1-backlog.md` batch 11's row for ORI-T-0058 still declared `crates/ori-integrations/src/traits.rs` at tier 1 (corrected in place, struck through, to the paths and tier E-0002's answer gave it); and ORI-T-0141, recorded above as tier 1, becomes **tier 2** once ORI-T-0137 merges, because it changes `crates/ori-core/src/adapters.rs`.
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 69, 77 to 80. The next free identifier is ORI-T-0146.
