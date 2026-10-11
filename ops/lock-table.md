@@ -487,3 +487,40 @@ ORI-T-0129 stays waiting: on the operator for item 1, and on a decision for item
 Claims 67 and 68 share a file with each other, so one coder runs them in order on one branch, each commit carrying only its own `Ticket:` trailer. Neither overlaps claim 61 or 62: those hold `oplog.rs`, `retrieval.rs`, `citation.rs`, `drift.rs`, and `barrier.rs` and `freshness.rs` additively, never `code_map.rs` or `indexer.rs`.
 
 **State after this section:** the claims held are 20, 61 to 65, 67 and 68. The next free identifier is ORI-T-0130.
+
+---
+
+## Session of 2026-10-11: claim 65 released, three more answers, ORI-T-0058 redefined, claims 69 to 76
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+**Claim 65 released.** ORI-T-0127 is on `claude/sweet-maxwell-jkaiie` as 7f421ee (cherry-picked from 5926f63), reviewed by the lead: `spec/LLD.md` and `spec/API_SPEC.md` say the seven adapter traits and the types in their signatures are declared in `ori-core`, the five slot traits implemented in `ori-integrations` and `AgentRuntime` in `ori-runtime`. `cargo test -p ori-gates` passed (138). Its agent found [[E-0002]]'s premise false, and the operator, asked again, chose all seven with their types (E-0002's State line). The text it wrote already says that, so it stands. What it reported and did not change, each now a follow-up for the lead to ticket: `spec/ARCHITECTURE.md`'s `integrations` row and `spec/ROADMAP.md` (lines 9 and 72) still put the traits in `ori-integrations`; `spec/RISK_MAP.md` (tier 2) has no row for the `ori-core` file that will declare `VcsHost::merge`; nothing mechanical enforces "only `merge_queue` calls `merge`" now that every crate can name the trait; and [[R8]]'s `INT --> STORE` edge is still drawn though `ori-integrations` must not read the store.
+
+**Three more answers from the operator, 2026-10-11:**
+
+| Question | Answer | Recorded in |
+|---|---|---|
+| `test_modified` for ORI-T-0129 | Authorized, on a condition | [[R41]] |
+| Which `Event.actor` the recovery requeue carries | Widen `system` in `spec/DATA_MODEL.md` section 4 to the engine's restart recovery | ORI-T-0130 below |
+| `ops/phase-1-backlog.md` open escalation 2: move the fixtures forward | Yes | that row of the backlog; claims 72 to 75 |
+
+**ORI-T-0058 redefined.** `ops/phase-1-backlog.md` batch 11 declares it as `crates/ori-integrations/src/traits.rs`, tier 1. Under the operator's answer it declares the seven traits of `spec/API_SPEC.md` section 4 in `ori-core` and moves into `ori-core` the types their signatures name, `AgentIdentity` from `ori-broker` and `SessionSpec`, `SessionHandle` and `RuntimeCaps` from `ori-runtime` among them, with the old paths kept as re-exports so that no caller and no existing test changes. Moving `AgentIdentity` changes `crates/ori-broker/src/identity.rs`, which `spec/RISK_MAP.md` tiers 2, so ORI-T-0058 is **tier 2**.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0130 | `spec/DATA_MODEL.md` section 4: `system` is allowed for scheduled triggers, watchers, and the engine's restart recovery (`spec/runbooks/recover-engine.md`), which ORI-T-0128's recovery edge needs an actor for | `spec/DATA_MODEL.md` | 1 | dispatched, claim 71 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 69 | ORI-T-0058, the adapter traits and their types in `ori-core` | `crates/ori-core/src/adapters.rs` (new), `crates/ori-core/src/lib.rs` (queue); the declarations it moves, in `crates/ori-broker/src/identity.rs` and `crates/ori-runtime/src/acp.rs`, each replaced by a re-export; nothing else in either crate | 2 | `feat/ORI-T-0058-adapter-traits` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 70 | ORI-T-0129, the recovery edge in the ticket machine | `crates/ori-core/src/ticket.rs` (its table, its docs, and its test module under [[R41]]); `crates/ori-runtime/src/recovery.rs` (its module doc and its docs only, where they call the edge missing) | 2 | `feat/ORI-T-0129-recovery-edge` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 71 | ORI-T-0130, `system` as the recovery actor | `spec/DATA_MODEL.md` | 1 | `docs/ORI-T-0130-recovery-actor` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 72 | ORI-T-0073, `fixtures/new-product` | `fixtures/new-product/**` | 1 | `feat/ORI-T-0073-fixture-new-product` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 73 | ORI-T-0074, `fixtures/migrated-with-drift` | `fixtures/migrated-with-drift/**` | 1 | `feat/ORI-T-0074-fixture-migrated-with-drift` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 74 | ORI-T-0075, `fixtures/inert-gate` | `fixtures/inert-gate/**` | 1 | `feat/ORI-T-0075-fixture-inert-gate` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 75 | ORI-T-0076, `fixtures/looping-agent` | `fixtures/looping-agent/**` | 1 | `feat/ORI-T-0076-fixture-looping-agent` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 76 | ORI-T-0046, the liveness definition | `crates/ori-gates/src/liveness.rs` (new), `crates/ori-gates/src/lib.rs` (queue) | 2, `spec/RISK_MAP.md` (`prover.rs, liveness.rs`) | `feat/ORI-T-0046-liveness` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Checked against every claim held: 20, 61 to 64, 67 and 68. Claims 69 and 70 share only `crates/ori-core/src/lib.rs`, a queue file neither holds; 69's `acp.rs` and 70's `recovery.rs` are different files of `ori-runtime`, and nothing else holds either. Claim 71 is the only claim under `spec/`. Claims 72 to 75 are four disjoint new directories, and none is under `fixtures/planted/`. Claim 76 shares only the queue file `crates/ori-gates/src/lib.rs` with claim 63.
+
+**State after this section:** the claims held are 20, 61 to 64 and 67 to 76. The next free identifier is ORI-T-0131.
