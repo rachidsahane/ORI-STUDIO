@@ -31,7 +31,11 @@
 //! worktree is a directory like any other: the engine runs one [`TreeWatcher`]
 //! on the product root and, to attribute a change inside a session's worktree
 //! to that session (criterion ORI-P1-015), one on each worktree, or hands the
-//! batch to attribution with the root it came from.
+//! batch to attribution with the root it came from. The tests here show a
+//! change inside a worktree is *delivered*, with a path relative to it; none of
+//! them shows it is *attributed* (ORI-P1-015 asks for "attributed to the
+//! session; no incident"), and ORI-P1-015 is not claimed as covered until
+//! ORI-T-0055's attribution has its own tests.
 //!
 //! # This module never writes
 //!
@@ -65,7 +69,24 @@
 //!    and it is reported as that entry, never resolved. On Windows `std`
 //!    reports a junction as a link too, which `code_map.rs` documents.
 //!
-//! Neither this module nor the backend ever opens a reported path.
+//! 4. A directory that appears is listed by the new-directory scan (below)
+//!    only after it, and every directory above it, has been looked at again,
+//!    without following, immediately before it is listed; a directory that has
+//!    become a link in the meantime is counted in [`Batch::rejected`] and not
+//!    listed.
+//!
+//! **What this does not claim.** Each check looks at one instant, and `std`
+//! has no `openat` to hold a directory between a check and its use. A process
+//! that can write inside the root and races the watcher can swap a directory
+//! for a link between the last look and the listing of a new directory (or
+//! between an event and the ancestor check). The scan then lists the link's
+//! target and reports the names in it as `Created`, under an in-root path.
+//! Nothing is opened and no file content is read, so nothing leaves the
+//! target but names, and the names are not attributed to anything. This is
+//! the threat model `code_map.rs` documents in its module doc ("Threat
+//! model"): a hostile repository that holds still is in scope, and a live
+//! writer racing the walk is not claimed. Neither this module nor the
+//! backend opens a reported path or reads a file's content from the tree.
 //!
 //! # What is ignored, and why
 //!
@@ -109,7 +130,7 @@
 //!
 //! The latency this adds is the quiet window plus the operating system's own
 //! delivery time; the measured figure is in the pull request report and
-//! asserted by `tests::ori_p1_015_the_latency_from_a_write_to_a_reported_change_is_bounded`.
+//! asserted by `tests::ori_t_0054_the_latency_from_a_write_to_a_reported_change_is_bounded`.
 //!
 //! A directory that appears is scanned (bounded, links not followed) for the
 //! files already in it, because the backend registers its watch a moment after
@@ -122,8 +143,7 @@
 //! A watcher that has lost events and says nothing is the defect AICD §14
 //! names "present but reporting nothing". Four things make the watcher lose
 //! events, and each one sets [`MissedChanges`], which is delivered in the next
-//! [`Batch`] and held by [`TreeWatcher::health`] until the engine reconciles
-//! with [`TreeWatcher::mark_reconciled`]:
+//! [`Batch`] and held by [`TreeWatcher::health`] until the engine reconciles:
 //!
 //! - the backend reports an overflow or a rescan notice
 //!   ([`MissedReason::Overflow`]), such as an inotify queue overflow;
@@ -136,7 +156,45 @@
 //!
 //! Reconciling means finding out what changed since: a full comparison of the
 //! tree against git is the engine's to run (it spawns processes; this crate
-//! does not). A backend that stops altogether is [`WatchError::Stopped`].
+//! does not). The engine drains with [`TreeWatcher::next_batch`], takes a
+//! [`ReconcileToken`] from [`TreeWatcher::begin_reconcile`], compares, and
+//! hands the token to [`TreeWatcher::mark_reconciled`], which clears the state
+//! only if nothing was recorded after the token was taken: a loss during the
+//! comparison is not covered by it.
+//!
+//! **A backend that stops is reported.** When the backend's thread ends (notify
+//! panics in it, for one), the queue disconnects, [`TreeWatcher::next_batch`]
+//! returns [`WatchError::Stopped`] and [`TreeWatcher::health`] reads
+//! [`Health::Stopped`]; a stopped watcher is replaced, not reconciled. That
+//! holds only because the watcher keeps no sender of its own in a production
+//! build; a held sender would keep the queue connected for ever and a dead
+//! backend would read as a quiet tree. Dropping a watcher whose backend is dead
+//! cannot panic the caller either: notify's drop `unwrap`s a send to the dead
+//! thread, and [`TreeWatcher`]'s own drop catches that panic (the panic hook
+//! still prints it). That holds under `panic = "unwind"`, the default, which
+//! this workspace does not change.
+//!
+//! # What `Health::Watching` does not vouch for
+//!
+//! The states above are the losses this module can see. These notify does not
+//! report, so none of them sets [`MissedChanges`]; treat [`Health::Watching`]
+//! as "the backend reported nothing wrong", and keep the periodic comparison
+//! of the tree with git as the check that does not depend on the backend:
+//!
+//! - On Linux, the walk that registers the initial watches skips a directory
+//!   it cannot read, with no error (`filter_dir` in notify's `inotify.rs`).
+//!   A directory unreadable at start is never watched, and changes in it are
+//!   never seen.
+//! - On Linux, when a directory is created later, adding the watch for it
+//!   drops every error but the watch limit (the same file, where it handles
+//!   the events it read). A directory whose watch fails is silently unwatched
+//!   from then on; this module's scan lists what is in it once, not after.
+//! - On Windows, notify does not flag a `ReadDirectoryChangesW` buffer
+//!   overflow, and a directory whose watch hits an unidentified error is
+//!   unwatched and only logged (`windows.rs`, `handle_event`).
+//! - A file created in a new directory after this module's scan of it and
+//!   before the backend's watch on it is registered. The settle delay before
+//!   the scan narrows that window; it does not close it.
 //!
 //! # Blocking calls
 //!
@@ -150,7 +208,23 @@
 //!
 //! [`RefPoller`] reads `.git/HEAD`, `.git/packed-refs` and `.git/refs/**`
 //! directly and reports refs that appeared, moved or vanished since the last
-//! poll. It spawns no process (only `ori-runtime` does) and follows no link.
+//! poll. It spawns no process (only `ori-runtime` does) and follows no link:
+//! `HEAD`, `packed-refs` and every ref file are read as plain files
+//! (`open_plain_file`: looked at without following, opened with `O_NOFOLLOW`
+//! and `O_NONBLOCK` where those are verified, and the opened handle checked),
+//! so a `.git/HEAD` that is a link, or a pipe, cannot turn another file's first
+//! line into an event or make the poll wait; `.git/refs` must be a real
+//! directory and is walked by `DirEntry::file_type`. A `HEAD` or `refs/` that
+//! is not plain is refused ([`WatchError::RefStorageNotPlain`]); a ref file
+//! inside `refs/` that is a link or a pipe is skipped and listed in
+//! [`RefPoll::skipped`]. The same limit as above holds: a directory swapped
+//! for a link by a live writer between the listing and the read is not
+//! claimed against.
+//!
+//! The loose refs are read before `packed-refs`. `git pack-refs` writes the
+//! new `packed-refs` first and prunes the loose files after, so the other order
+//! can read the old packed file and the pruned directory and see a branch that
+//! never moved deleted, then created.
 //! It is the detector that does not depend on a hook: it sees a commit made
 //! with `--no-verify`, a hook that was removed, and a push (git updates
 //! `refs/remotes/<remote>/<branch>` after a successful one). The engine calls
@@ -164,10 +238,13 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::io::Read;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+#[cfg(test)]
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TrySendError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use notify::event::{ModifyKind, RenameMode};
@@ -328,6 +405,19 @@ pub enum Health {
     Watching,
     /// Something may have been missed and nobody has reconciled yet.
     MayHaveMissedChanges(MissedChanges),
+    /// The backend's thread has ended and no further event will ever arrive.
+    /// Set when [`TreeWatcher::next_batch`] sees it, and for good: a stopped
+    /// watcher is replaced, not reconciled.
+    Stopped,
+}
+
+/// A marker taken when a reconciliation begins: AICD §14.
+///
+/// [`TreeWatcher::mark_reconciled`] clears the missed state only if nothing
+/// was recorded after the token was taken.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReconcileToken {
+    generation: u64,
 }
 
 /// What [`TreeWatcher::next_batch`] hands back for one quiet period:
@@ -430,6 +520,13 @@ pub enum WatchError {
         /// The path of `.git`.
         path: PathBuf,
     },
+    /// `HEAD` or `refs/` is a link or not the plain file or directory git
+    /// writes, so it is not read: followed, a link would turn whatever it
+    /// points at into refs, and a first line of some other file into an event.
+    RefStorageNotPlain {
+        /// The path that is not plain.
+        path: PathBuf,
+    },
     /// The repository stores refs in a format this poller cannot read, and
     /// reading none would be silence.
     UnsupportedRefStorage {
@@ -444,13 +541,14 @@ impl WatchError {
     /// [`WatchError::UnsupportedRefStorage`] cites AICD §14: a poller that
     /// cannot read this repository's refs and reports no change would be
     /// "present but reporting nothing". [`WatchError::GitDirNotADirectory`]
-    /// cites AICD §13: git is the audit trail, and reading it through a link
-    /// would audit some other repository.
+    /// and [`WatchError::RefStorageNotPlain`] cite AICD §13: git is the audit
+    /// trail, and reading it through a link would audit some other
+    /// repository.
     #[must_use]
     pub fn methodology_ref(&self) -> Option<MethodologyRef> {
         let section = match self {
             Self::UnsupportedRefStorage { .. } => 14,
-            Self::GitDirNotADirectory { .. } => 13,
+            Self::GitDirNotADirectory { .. } | Self::RefStorageNotPlain { .. } => 13,
             _ => return None,
         };
         Some(MethodologyRef {
@@ -481,6 +579,16 @@ impl fmt::Display for WatchError {
             Self::GitDirNotADirectory { path } => write!(
                 f,
                 "refused: {} is a link or not a directory, so refs are not read through it ({})",
+                path.display(),
+                MethodologyRef {
+                    section: 13,
+                    subsection: None
+                }
+            ),
+            Self::RefStorageNotPlain { path } => write!(
+                f,
+                "refused: {} is a link or not a plain file or directory, so it is not read \
+                 ({})",
                 path.display(),
                 MethodologyRef {
                     section: 13,
@@ -526,6 +634,18 @@ enum Raw {
 struct Shared {
     /// Events the queue had no room for.
     dropped: AtomicU32,
+    /// Makes the backend's thread die at its next event, so a test can watch
+    /// the consumer find out.
+    #[cfg(test)]
+    panic_in_backend: std::sync::atomic::AtomicBool,
+}
+
+/// Which rename halves the backend has just delivered, so the combined event
+/// that follows them is not counted a second time.
+#[derive(Debug, Default)]
+struct RenameTracking {
+    from: Option<usize>,
+    to: Option<usize>,
 }
 
 /// Watches one tree and reports changes: AICD §13, AICD §23.
@@ -539,11 +659,36 @@ pub struct TreeWatcher {
     receiver: Receiver<Raw>,
     shared: Arc<Shared>,
     health: Health,
-    /// Kept so tests can inject a notice; the backend holds its own clone.
-    #[cfg_attr(not(test), allow(dead_code))]
-    sender: SyncSender<Raw>,
-    /// Held for its `Drop`: dropping it stops the backend thread.
-    _backend: RecommendedWatcher,
+    /// Counts the times a missed state was recorded, for [`ReconcileToken`].
+    generation: u64,
+    /// A second sender, so a test can put a notice on the queue as the backend
+    /// would. It exists only in test builds: in a production build the
+    /// backend's handler holds the only sender, so the queue disconnects, and
+    /// [`WatchError::Stopped`] is returned, the moment the backend's thread
+    /// ends. A sender held here would keep it connected for ever.
+    #[cfg(test)]
+    injector: Option<SyncSender<Raw>>,
+    /// Held for its `Drop`: dropping it stops the backend thread. Taken in
+    /// [`TreeWatcher`]'s own `Drop` so a dead backend cannot panic the caller.
+    backend: Option<RecommendedWatcher>,
+}
+
+impl Drop for TreeWatcher {
+    /// Stops the backend, and survives a backend that is already dead.
+    ///
+    /// notify's `INotifyWatcher::drop` does `self.channel.send(Shutdown).unwrap()`
+    /// ("we expect the event loop to live"). If the event loop's thread has
+    /// panicked, that send fails and the `unwrap` panics, inside whatever
+    /// dropped the watcher: the engine. The drop is caught here instead. The
+    /// panic message is still printed by the panic hook, so it is not silent,
+    /// but it ends here. This holds under the default `panic = "unwind"`; a
+    /// build with `panic = "abort"` would abort, and this workspace does not
+    /// set it.
+    fn drop(&mut self) {
+        if let Some(backend) = self.backend.take() {
+            let _ = catch_unwind(AssertUnwindSafe(move || drop(backend)));
+        }
+    }
 }
 
 impl TreeWatcher {
@@ -580,11 +725,17 @@ impl TreeWatcher {
         }
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity.max(1));
         let shared = Arc::new(Shared::default());
-        let handler_sender = sender.clone();
+        #[cfg(test)]
+        let injector = Some(sender.clone());
         let handler_shared = Arc::clone(&shared);
+        let mut renames = RenameTracking::default();
         let handler = move |result: notify::Result<Event>| {
-            for raw in translate(result, now()) {
-                match handler_sender.try_send(raw) {
+            #[cfg(test)]
+            if handler_shared.panic_in_backend.load(Ordering::SeqCst) {
+                panic!("test: the backend's thread dies here");
+            }
+            for raw in translate(result, now(), &mut renames) {
+                match sender.try_send(raw) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
                         handler_shared.dropped.fetch_add(1, Ordering::SeqCst);
@@ -610,8 +761,10 @@ impl TreeWatcher {
             receiver,
             shared,
             health: Health::Watching,
-            sender,
-            _backend: backend,
+            generation: 0,
+            #[cfg(test)]
+            injector,
+            backend: Some(backend),
         })
     }
 
@@ -627,11 +780,38 @@ impl TreeWatcher {
         self.health.clone()
     }
 
+    /// Takes the marker a reconciliation starts from: AICD §14.
+    ///
+    /// Drain the watcher with [`TreeWatcher::next_batch`] first, then take
+    /// the token, then compare the tree with git, then hand the token to
+    /// [`TreeWatcher::mark_reconciled`].
+    #[must_use]
+    pub fn begin_reconcile(&self) -> ReconcileToken {
+        ReconcileToken {
+            generation: self.generation,
+        }
+    }
+
     /// Clears [`Health::MayHaveMissedChanges`] after the engine has compared
     /// the tree with git and attributed or raised whatever differed:
     /// AICD §14.
-    pub fn mark_reconciled(&mut self) {
+    ///
+    /// Clears only what the reconciliation covered. It returns `false` and
+    /// leaves the state as it is when a missed state was recorded after
+    /// `token` was taken (the comparison began before the loss, so it may not
+    /// include it), when events were dropped that no batch has reported yet,
+    /// or when the backend has stopped. A notice still waiting in the queue
+    /// is recorded when the next batch takes it, after which the state is not
+    /// clear: a token only ever errs towards keeping the state.
+    pub fn mark_reconciled(&mut self, token: ReconcileToken) -> bool {
+        if matches!(self.health, Health::Stopped)
+            || token.generation != self.generation
+            || self.shared.dropped.load(Ordering::SeqCst) > 0
+        {
+            return false;
+        }
         self.health = Health::Watching;
+        true
     }
 
     /// Waits up to `wait` for a change, then collects until the tree is quiet,
@@ -648,7 +828,10 @@ impl TreeWatcher {
         let first = match self.receiver.recv_timeout(wait) {
             Ok(raw) => Some(raw),
             Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return Err(WatchError::Stopped),
+            Err(RecvTimeoutError::Disconnected) => {
+                self.health = Health::Stopped;
+                return Err(WatchError::Stopped);
+            }
         };
         let mut accumulator = Accumulator::new(&self.root, &self.config.ignore);
         let received = first.is_some();
@@ -663,7 +846,12 @@ impl TreeWatcher {
                 let slice = self.config.quiet.min(self.config.max_hold - elapsed);
                 match self.receiver.recv_timeout(slice) {
                     Ok(raw) => accumulator.push(raw),
-                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => break,
+                    // Deliver what was collected; the next call reports it.
+                    Err(RecvTimeoutError::Disconnected) => {
+                        self.health = Health::Stopped;
+                        break;
+                    }
                 }
             }
         }
@@ -673,9 +861,11 @@ impl TreeWatcher {
         }
         let batch = accumulator.finish();
         if let Some(missed) = &batch.missed {
+            self.generation += 1;
             match &mut self.health {
                 Health::Watching => self.health = Health::MayHaveMissedChanges(missed.clone()),
                 Health::MayHaveMissedChanges(held) => held.absorb(missed),
+                Health::Stopped => {}
             }
         }
         if received || batch.missed.is_some() {
@@ -688,9 +878,21 @@ impl TreeWatcher {
     /// Puts a notice on the queue as the backend would, for tests.
     #[cfg(test)]
     fn inject(&self, raw: Raw) {
-        self.sender
+        self.injector
+            .as_ref()
+            .expect("the injector has not been dropped")
             .try_send(raw)
             .expect("the queue has room for a test notice");
+    }
+
+    /// Ends the backend the way a panic in its thread would, for tests: the
+    /// handler (the only other sender) is dropped with the backend, and so is
+    /// the injector, which leaves the production path to find the queue
+    /// disconnected.
+    #[cfg(test)]
+    fn kill_backend_thread(&mut self) {
+        self.shared.panic_in_backend.store(true, Ordering::SeqCst);
+        self.injector = None;
     }
 }
 
@@ -708,7 +910,11 @@ fn now() -> Timestamp {
 ///
 /// Reads are ignored (`Access` events are what a reader causes, not an edit);
 /// a rename becomes a removal of the old name and a creation of the new one.
-fn translate(result: notify::Result<Event>, at: Timestamp) -> Vec<Raw> {
+fn translate(
+    result: notify::Result<Event>,
+    at: Timestamp,
+    renames: &mut RenameTracking,
+) -> Vec<Raw> {
     let event = match result {
         Ok(event) => event,
         Err(error) => {
@@ -748,6 +954,7 @@ fn translate(result: notify::Result<Event>, at: Timestamp) -> Vec<Raw> {
         }
         EventKind::Modify(ModifyKind::Name(mode)) => match mode {
             RenameMode::From => {
+                renames.from = event.tracker();
                 raws.extend(
                     event
                         .paths
@@ -756,6 +963,7 @@ fn translate(result: notify::Result<Event>, at: Timestamp) -> Vec<Raw> {
                 );
             }
             RenameMode::To => {
+                renames.to = event.tracker();
                 raws.extend(
                     event
                         .paths
@@ -764,7 +972,16 @@ fn translate(result: notify::Result<Event>, at: Timestamp) -> Vec<Raw> {
                 );
             }
             RenameMode::Both => {
-                if let [from, to] = event.paths.as_slice() {
+                // inotify sends the two halves and then this combined event
+                // for one rename, with one tracker. Counting all three would
+                // report the old name removed twice, which for a temporary
+                // that already netted to nothing reports a removal of a file
+                // that was never seen.
+                let tracker = event.tracker();
+                let already_counted =
+                    tracker.is_some() && tracker == renames.from && tracker == renames.to;
+                *renames = RenameTracking::default();
+                if !already_counted && let [from, to] = event.paths.as_slice() {
                     raws.push(change(from, ChangeKind::Removed));
                     raws.push(change(to, ChangeKind::Created));
                 }
@@ -865,6 +1082,31 @@ fn ancestors_are_real_directories(root: &Path, relative: &Path) -> bool {
         }
     }
     true
+}
+
+/// What a second look at a directory found.
+enum DirectoryCheck {
+    /// A real directory under real directories.
+    Real,
+    /// Not there, or no longer a directory: nothing to list.
+    Gone,
+    /// It, or a directory above it, is a link now.
+    Refused,
+}
+
+/// Looks at `relative` and its ancestors without following links, to decide
+/// whether it may be listed: AICD §23.
+fn check_directory(root: &Path, relative: &Path) -> DirectoryCheck {
+    if !ancestors_are_real_directories(root, relative) {
+        return DirectoryCheck::Refused;
+    }
+    match fs::symlink_metadata(root.join(relative)) {
+        Ok(metadata) if metadata.file_type().is_symlink() => DirectoryCheck::Refused,
+        Ok(metadata) if metadata.is_dir() => DirectoryCheck::Real,
+        Ok(_) => DirectoryCheck::Gone,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => DirectoryCheck::Gone,
+        Err(_) => DirectoryCheck::Refused,
+    }
 }
 
 /// Whether `relative` is a name the watcher does not report: AICD §23.
@@ -1007,6 +1249,19 @@ impl<'a> Accumulator<'a> {
         for (directory, at) in scans {
             let mut stack = vec![(directory, 0usize)];
             while let Some((dir, depth)) = stack.pop() {
+                // The directory was checked when its event arrived, at least
+                // `quiet` ago. A directory that was removed and replaced by a
+                // link in that time would be listed through the link, so it
+                // is looked at again, with its ancestors, just before it is
+                // read.
+                match check_directory(self.root, &dir) {
+                    DirectoryCheck::Real => {}
+                    DirectoryCheck::Gone => continue,
+                    DirectoryCheck::Refused => {
+                        self.rejected += 1;
+                        continue;
+                    }
+                }
                 let listing = match fs::read_dir(self.root.join(&dir)) {
                     Ok(listing) => listing,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -1210,8 +1465,9 @@ impl RefPoller {
     /// # Errors
     ///
     /// [`WatchError::GitDirNotADirectory`] when `.git` is a link or a file,
-    /// [`WatchError::UnsupportedRefStorage`] when the repository uses the
-    /// reftable format, [`WatchError::Io`] when the refs cannot be read.
+    /// [`WatchError::RefStorageNotPlain`] when `HEAD` or `refs/` is a link or
+    /// a pipe, [`WatchError::UnsupportedRefStorage`] when the repository uses
+    /// the reftable format, [`WatchError::Io`] when the refs cannot be read.
     pub fn open(repo_root: &Path) -> Result<Self, WatchError> {
         let git_dir = repo_root.join(".git");
         let metadata = fs::symlink_metadata(&git_dir).map_err(|source| WatchError::Io {
@@ -1238,7 +1494,8 @@ impl RefPoller {
     ///
     /// # Errors
     ///
-    /// [`WatchError::Io`] when `HEAD` or `refs/` cannot be read.
+    /// [`WatchError::RefStorageNotPlain`] when `HEAD` or `refs/` has become a
+    /// link or a pipe, [`WatchError::Io`] when they cannot be read.
     pub fn poll(&mut self) -> Result<RefPoll, WatchError> {
         let Snapshot {
             refs: current,
@@ -1282,59 +1539,57 @@ impl RefPoller {
     }
 
     fn snapshot(&self) -> Result<Snapshot, WatchError> {
-        let mut refs = BTreeMap::new();
+        self.snapshot_with(&mut || {})
+    }
+
+    /// Reads `HEAD`, then every loose ref, then `packed-refs`, calling
+    /// `between` after the loose refs and before `packed-refs`.
+    ///
+    /// The order is the point. `git pack-refs` writes the new `packed-refs`
+    /// first and prunes the loose files after. Reading `packed-refs` first
+    /// and the loose refs second can see the old packed file and the pruned
+    /// directory, so a branch that never moved looks deleted and, one poll
+    /// later, created. Reading the loose refs first sees them either before
+    /// the prune or not at all, and `packed-refs`, read after, then holds
+    /// them. `between` is where a test packs refs.
+    fn snapshot_with(&self, between: &mut dyn FnMut()) -> Result<Snapshot, WatchError> {
         let mut skipped = Vec::new();
         let mut incomplete = false;
 
         let head = self.git_dir.join("HEAD");
-        let value =
-            read_first_line(&head, REF_FILE_BYTES_CAP).map_err(|source| WatchError::Io {
-                path: head.clone(),
-                source,
-            })?;
-        refs.insert("HEAD".to_owned(), value);
-
-        let packed = self.git_dir.join("packed-refs");
-        match fs::symlink_metadata(&packed) {
-            Ok(metadata) if metadata.is_file() => {
-                match read_bounded(&packed, PACKED_REFS_BYTES_CAP) {
-                    Ok((text, truncated)) => {
-                        incomplete |= truncated;
-                        for line in text.lines() {
-                            if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
-                                continue;
-                            }
-                            if let Some((value, name)) = line.split_once(' ') {
-                                refs.insert(name.to_owned(), cap_value(value));
-                            }
-                        }
-                    }
-                    Err(error) => skipped.push(SkippedRef {
-                        path: packed,
-                        reason: SkippedRefReason::Unreadable {
-                            error: error.to_string(),
-                        },
-                    }),
-                }
+        let (text, too_long) = match read_plain_file(&head, REF_FILE_BYTES_CAP) {
+            Ok(read) => read,
+            Err(PlainReadError::Symlink | PlainReadError::NotARegularFile) => {
+                return Err(WatchError::RefStorageNotPlain { path: head });
             }
-            Ok(metadata) if metadata.file_type().is_symlink() => skipped.push(SkippedRef {
-                path: packed,
-                reason: SkippedRefReason::Symlink,
-            }),
-            Ok(_) => skipped.push(SkippedRef {
-                path: packed,
-                reason: SkippedRefReason::NotARegularFile,
-            }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => skipped.push(SkippedRef {
-                path: packed,
-                reason: SkippedRefReason::Unreadable {
-                    error: error.to_string(),
-                },
-            }),
+            Err(PlainReadError::Io(source)) => {
+                return Err(WatchError::Io { path: head, source });
+            }
+        };
+        if too_long {
+            return Err(WatchError::Io {
+                path: head,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the file is longer than a ref file can be",
+                ),
+            });
         }
+        let head_value = cap_value(text.lines().next().unwrap_or(""));
 
         let refs_dir = self.git_dir.join("refs");
+        match fs::symlink_metadata(&refs_dir) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(WatchError::RefStorageNotPlain { path: refs_dir });
+            }
+            Ok(_) => {}
+            Err(source) => {
+                return Err(WatchError::Io {
+                    path: refs_dir,
+                    source,
+                });
+            }
+        }
         let mut loose = BTreeMap::new();
         let mut stack = vec![(refs_dir, "refs".to_owned(), 0usize)];
         let mut visited = 0usize;
@@ -1398,19 +1653,30 @@ impl RefPoller {
                         incomplete = true;
                     }
                 } else if file_type.is_file() {
-                    match read_first_line(&path, REF_FILE_BYTES_CAP) {
-                        Ok(value) => {
-                            loose.insert(format!("{prefix}/{name}"), value);
+                    match read_plain_file(&path, REF_FILE_BYTES_CAP) {
+                        Ok((text, false)) => {
+                            loose.insert(
+                                format!("{prefix}/{name}"),
+                                cap_value(text.lines().next().unwrap_or("")),
+                            );
                         }
-                        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                            skipped.push(SkippedRef {
-                                path,
-                                reason: SkippedRefReason::TooLarge,
-                            });
-                        }
+                        Ok((_, true)) => skipped.push(SkippedRef {
+                            path,
+                            reason: SkippedRefReason::TooLarge,
+                        }),
+                        // Swapped for a link or a pipe since the listing.
+                        Err(PlainReadError::Symlink) => skipped.push(SkippedRef {
+                            path,
+                            reason: SkippedRefReason::Symlink,
+                        }),
+                        Err(PlainReadError::NotARegularFile) => skipped.push(SkippedRef {
+                            path,
+                            reason: SkippedRefReason::NotARegularFile,
+                        }),
                         // Git removed it between the listing and the read.
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => skipped.push(SkippedRef {
+                        Err(PlainReadError::Io(error))
+                            if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(PlainReadError::Io(error)) => skipped.push(SkippedRef {
                             path,
                             reason: SkippedRefReason::Unreadable {
                                 error: error.to_string(),
@@ -1425,8 +1691,42 @@ impl RefPoller {
                 }
             }
         }
+
+        between();
+
+        let mut refs = BTreeMap::new();
+        let packed = self.git_dir.join("packed-refs");
+        match read_plain_file(&packed, PACKED_REFS_BYTES_CAP) {
+            Ok((text, truncated)) => {
+                incomplete |= truncated;
+                for line in text.lines() {
+                    if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                        continue;
+                    }
+                    if let Some((value, name)) = line.split_once(' ') {
+                        refs.insert(name.to_owned(), cap_value(value));
+                    }
+                }
+            }
+            Err(PlainReadError::Symlink) => skipped.push(SkippedRef {
+                path: packed,
+                reason: SkippedRefReason::Symlink,
+            }),
+            Err(PlainReadError::NotARegularFile) => skipped.push(SkippedRef {
+                path: packed,
+                reason: SkippedRefReason::NotARegularFile,
+            }),
+            Err(PlainReadError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(PlainReadError::Io(error)) => skipped.push(SkippedRef {
+                path: packed,
+                reason: SkippedRefReason::Unreadable {
+                    error: error.to_string(),
+                },
+            }),
+        }
         // A loose ref is newer than the packed one of the same name.
         refs.extend(loose);
+        refs.insert("HEAD".to_owned(), head_value);
         Ok(Snapshot {
             refs,
             skipped,
@@ -1448,30 +1748,128 @@ fn cap_value(value: &str) -> String {
     value[..end].to_owned()
 }
 
-/// Reads at most `limit` bytes of `path` as text and says whether more
-/// followed.
-fn read_bounded(path: &Path, limit: u64) -> io::Result<(String, bool)> {
-    let file = fs::File::open(path)?;
+/// Why [`read_plain_file`] did not read a file: AICD §13.
+#[derive(Debug)]
+pub(crate) enum PlainReadError {
+    /// The path is a symbolic link (or, on Windows, a junction).
+    Symlink,
+    /// The path is not a regular file: a directory, a pipe, a device.
+    NotARegularFile,
+    /// The open or the read failed.
+    Io(io::Error),
+}
+
+/// The raw `open(2)` flag values passed to `custom_flags`, on the platforms
+/// `crates/ori-memory/src/code_map.rs` verified them for (see its
+/// `raw_open_flags` for the evidence: macOS from the SDK header, Linux x86_64
+/// and aarch64 each compiled and run). `libc` is not a dependency of this
+/// crate and adding it is an escalation, so these are the platform's own
+/// header constants, as that module does. Every other unix opens plainly,
+/// after the `symlink_metadata` check in [`read_plain_file`].
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+))]
+mod raw_open_flags {
+    #[cfg(target_os = "macos")]
+    pub(super) const O_NOFOLLOW: i32 = 0x0100;
+    #[cfg(target_os = "macos")]
+    pub(super) const O_NONBLOCK: i32 = 0x0004;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(super) const O_NOFOLLOW: i32 = 0o400_000;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(super) const O_NONBLOCK: i32 = 0o4_000;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(super) const O_NOFOLLOW: i32 = 0o100_000;
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(super) const O_NONBLOCK: i32 = 0o4_000;
+}
+
+/// Opens `path` for reading without following a final link and without
+/// waiting for a pipe's other end: `open(2)` on a FIFO with no writer blocks
+/// until one appears, and `O_NONBLOCK` is what stops that. The caller decides
+/// by the handle's own metadata before it reads.
+fn open_without_following(path: &Path) -> io::Result<fs::File> {
+    #[cfg(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    ))]
+    {
+        use raw_open_flags::{O_NOFOLLOW, O_NONBLOCK};
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        windows,
+    )))]
+    {
+        // The `symlink_metadata` check before this call has refused a link
+        // and a pipe that is already in place; a swap after that check is not
+        // covered on a platform whose flags are not verified.
+        fs::File::open(path)
+    }
+}
+
+/// Opens the regular file at `path` for reading, never through a link and
+/// never waiting on a pipe, and returns the handle with its own metadata:
+/// AICD §13.
+///
+/// The path is looked at without following (`symlink_metadata`), opened with
+/// `O_NOFOLLOW | O_NONBLOCK` where those are verified (see
+/// `raw_open_flags`), and the handle's own metadata must say regular file
+/// before the caller reads anything. What it does not cover is stated where it
+/// matters: a directory in the middle of the path swapped for a link by a live
+/// writer.
+pub(crate) fn open_plain_file(path: &Path) -> Result<(fs::File, fs::Metadata), PlainReadError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => return Err(PlainReadError::Symlink),
+        Ok(metadata) if !metadata.is_file() => return Err(PlainReadError::NotARegularFile),
+        Ok(_) => {}
+        Err(error) => return Err(PlainReadError::Io(error)),
+    }
+    let file = open_without_following(path).map_err(PlainReadError::Io)?;
+    let metadata = file.metadata().map_err(PlainReadError::Io)?;
+    if metadata.file_type().is_symlink() {
+        return Err(PlainReadError::Symlink);
+    }
+    if !metadata.is_file() {
+        return Err(PlainReadError::NotARegularFile);
+    }
+    Ok((file, metadata))
+}
+
+/// Reads at most `limit` bytes of the regular file at `path` as text, through
+/// [`open_plain_file`], and says whether more followed: AICD §13.
+///
+/// It is how everything in `.git` and the hooks directory is read.
+pub(crate) fn read_plain_file(path: &Path, limit: u64) -> Result<(String, bool), PlainReadError> {
+    let (file, _) = open_plain_file(path)?;
     let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(PlainReadError::Io)?;
     let truncated = u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit;
     if truncated {
         bytes.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     }
     Ok((String::from_utf8_lossy(&bytes).into_owned(), truncated))
-}
-
-/// Reads the first line of a small file; a file longer than `limit` is an
-/// [`io::ErrorKind::InvalidData`] error.
-fn read_first_line(path: &Path, limit: u64) -> io::Result<String> {
-    let (text, truncated) = read_bounded(path, limit)?;
-    if truncated {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the file is longer than a ref file can be",
-        ));
-    }
-    Ok(cap_value(text.lines().next().unwrap_or("")))
 }
 
 #[cfg(test)]
@@ -1586,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_015_an_edit_under_the_root_is_reported_with_its_relative_path_and_kind() {
+    fn ori_t_0054_an_edit_under_the_root_is_reported_with_its_relative_path_and_kind() {
         let scratch = Scratch::new("edit");
         let root = scratch.dir("root");
         fs::create_dir_all(root.join("src")).unwrap();
@@ -1627,7 +2025,7 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_015_an_edit_inside_a_linked_worktree_is_reported_relative_to_the_worktree() {
+    fn ori_t_0054_an_edit_inside_a_linked_worktree_is_reported_relative_to_the_worktree() {
         let scratch = Scratch::new("worktree");
         let repo = scratch.dir("repo");
         let git = |dir: &Path, args: &[&str]| {
@@ -1695,7 +2093,7 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_015_a_file_written_into_a_directory_made_a_moment_before_is_not_missed() {
+    fn ori_t_0054_a_file_written_into_a_directory_made_a_moment_before_is_not_missed() {
         let scratch = Scratch::new("newdir");
         let root = scratch.dir("root");
         let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
@@ -1718,7 +2116,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ori_p1_015_a_symlink_to_a_directory_outside_the_root_is_never_followed_or_reported_as_inside()
+    fn ori_t_0054_a_symlink_to_a_directory_outside_the_root_is_never_followed_or_reported_as_inside()
      {
         let scratch = Scratch::new("linkdir");
         let root = scratch.dir("root");
@@ -1764,7 +2162,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ori_p1_015_a_symlink_to_a_file_outside_the_root_is_not_reported_when_its_target_changes() {
+    fn ori_t_0054_a_symlink_to_a_file_outside_the_root_is_not_reported_when_its_target_changes() {
+        // On Linux this test cannot fail: inotify watches the link's directory,
+        // not the file the link points at, so the backend never sends an event
+        // for the far side and nothing here has anything to refuse. It stays
+        // as a regression guard for backends that do follow a link to a file
+        // (kqueue, polling). The refusal that matters, a path through a
+        // linked directory, is in the test above and the ancestor check's own.
         let scratch = Scratch::new("linkfile");
         let root = scratch.dir("root");
         let outside = scratch.dir("outside");
@@ -1859,7 +2263,7 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_015_git_internals_are_not_reported_as_edits() {
+    fn ori_t_0054_git_internals_are_not_reported_as_edits() {
         let scratch = Scratch::new("gitignore");
         let root = scratch.dir("root");
         fs::create_dir_all(root.join(".git").join("refs").join("heads")).unwrap();
@@ -2100,7 +2504,7 @@ mod tests {
     }
 
     #[test]
-    fn ori_p1_015_the_latency_from_a_write_to_a_reported_change_is_bounded() {
+    fn ori_t_0054_the_latency_from_a_write_to_a_reported_change_is_bounded() {
         let scratch = Scratch::new("latency");
         let root = scratch.dir("root");
         // The defaults: this is the figure the engine will get.
@@ -2161,7 +2565,11 @@ mod tests {
 
         // What notify sends on an inotify queue overflow.
         let notice = Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
-        let raws = translate(Ok(notice), Timestamp::from_millis(9));
+        let raws = translate(
+            Ok(notice),
+            Timestamp::from_millis(9),
+            &mut RenameTracking::default(),
+        );
         assert_eq!(
             raws.len(),
             1,
@@ -2187,14 +2595,107 @@ mod tests {
                 .is_none()
         );
         assert!(matches!(watcher.health(), Health::MayHaveMissedChanges(_)));
-        watcher.mark_reconciled();
+        let token = watcher.begin_reconcile();
+        assert!(watcher.mark_reconciled(token));
         assert_eq!(watcher.health(), Health::Watching);
+    }
+
+    #[test]
+    fn ori_t_0054_a_loss_recorded_after_a_reconciliation_began_is_not_cleared_by_it() {
+        let scratch = Scratch::new("generation");
+        let root = scratch.dir("root");
+        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
+        watcher.inject(Raw::Missed(
+            MissedReason::Overflow,
+            Timestamp::from_millis(9),
+        ));
+        watcher
+            .next_batch(PATIENCE)
+            .unwrap()
+            .expect("the first loss");
+
+        // The engine begins to compare the tree with git.
+        let token = watcher.begin_reconcile();
+        // While it compares, the backend loses events again.
+        watcher.inject(Raw::Missed(
+            MissedReason::BackendError {
+                message: "later".to_owned(),
+            },
+            Timestamp::from_millis(10),
+        ));
+        watcher
+            .next_batch(PATIENCE)
+            .unwrap()
+            .expect("the second loss");
+
+        // The comparison that began before the second loss cannot vouch for it.
+        assert!(!watcher.mark_reconciled(token));
+        match watcher.health() {
+            Health::MayHaveMissedChanges(missed) => assert_eq!(missed.reasons.len(), 2),
+            other => panic!("the second loss was cleared: {other:?}"),
+        }
+        // A comparison that began after it can.
+        let token = watcher.begin_reconcile();
+        assert!(watcher.mark_reconciled(token));
+        assert_eq!(watcher.health(), Health::Watching);
+    }
+
+    #[test]
+    fn ori_t_0054_a_dead_backend_is_reported_as_stopped_never_as_a_quiet_tree() {
+        let scratch = Scratch::new("dead");
+        let root = scratch.dir("root");
+        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
+        // Alive and quiet is a timeout, not an error.
+        assert!(
+            watcher
+                .next_batch(Duration::from_millis(100))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(watcher.health(), Health::Watching);
+
+        // The backend's thread dies while handling the next event, as it does
+        // if notify panics in it.
+        watcher.kill_backend_thread();
+        fs::write(root.join("trigger.txt"), b"x").unwrap();
+        let deadline = Instant::now() + PATIENCE;
+        let error = loop {
+            assert!(
+                Instant::now() < deadline,
+                "the backend's thread died and next_batch kept answering as for a quiet tree"
+            );
+            match watcher.next_batch(Duration::from_millis(200)) {
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert!(matches!(error, WatchError::Stopped), "{error}");
+        assert_eq!(watcher.health(), Health::Stopped);
+        // It stays stopped, and cannot be reconciled back to healthy.
+        assert!(matches!(
+            watcher.next_batch(Duration::from_millis(50)),
+            Err(WatchError::Stopped)
+        ));
+        let token = watcher.begin_reconcile();
+        assert!(!watcher.mark_reconciled(token));
+
+        // notify's own drop unwraps a send to the dead thread and panics; ours
+        // must not let that out.
+        let dropped = catch_unwind(AssertUnwindSafe(move || drop(watcher)));
+        assert!(
+            dropped.is_ok(),
+            "dropping a watcher whose backend died panicked in the caller"
+        );
     }
 
     #[test]
     fn ori_t_0054_a_backend_error_is_recorded_as_may_have_missed_changes() {
         let error = notify::Error::generic("inotify watch limit reached");
-        let raws = translate(Err(error), Timestamp::from_millis(3));
+        let raws = translate(
+            Err(error),
+            Timestamp::from_millis(3),
+            &mut RenameTracking::default(),
+        );
         assert_eq!(raws.len(), 1);
         match &raws[0] {
             Raw::Missed(MissedReason::BackendError { message }, at) => {
@@ -2533,5 +3034,297 @@ mod tests {
             "packing refs moved nothing, yet the poll reported {:?}",
             packed.changes
         );
+    }
+    // ---- the review round: links, pipes, renames, ordering ----
+
+    /// Runs `work` on its own thread and fails, rather than hangs, if it does
+    /// not finish: a call that blocks for ever must be a failing test.
+    fn within<T: Send + 'static>(what: &str, work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(work());
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what} did not return within 5 s: it blocked"))
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo can be run");
+        assert!(status.success(), "mkfifo {path:?} failed");
+    }
+
+    /// A file with something a user would not want in an event, standing in
+    /// for a `.env` line.
+    const SECRET: &str = "API_KEY=hunter2";
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_ref_poll_never_reads_through_a_head_that_is_a_link() {
+        let scratch = Scratch::new("headlink");
+        let repo = fake_repo(&scratch);
+        let secret = scratch.path.join("secret.env");
+        fs::write(&secret, format!("{SECRET}\nmore\n")).unwrap();
+        let head = repo.join(".git").join("HEAD");
+
+        // At open.
+        fs::remove_file(&head).unwrap();
+        std::os::unix::fs::symlink(&secret, &head).unwrap();
+        let error = RefPoller::open(&repo).unwrap_err();
+        assert!(
+            matches!(error, WatchError::RefStorageNotPlain { .. }),
+            "{error}"
+        );
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+        assert!(!format!("{error:?} {error}").contains("hunter2"));
+
+        // After a good baseline, when HEAD is swapped for a link.
+        fs::remove_file(&head).unwrap();
+        fs::write(&head, "ref: refs/heads/main\n").unwrap();
+        let mut poller = RefPoller::open(&repo).unwrap();
+        fs::remove_file(&head).unwrap();
+        std::os::unix::fs::symlink(&secret, &head).unwrap();
+        let error = poller.poll().unwrap_err();
+        assert!(
+            matches!(error, WatchError::RefStorageNotPlain { .. }),
+            "{error}"
+        );
+        assert!(!format!("{error:?} {error}").contains("hunter2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_ref_poll_never_walks_a_refs_directory_that_is_a_link() {
+        let scratch = Scratch::new("refslink");
+        let repo = fake_repo(&scratch);
+        let elsewhere = scratch.dir("elsewhere");
+        fs::write(elsewhere.join("secret"), format!("{SECRET}\n")).unwrap();
+        fs::write(elsewhere.join("other"), "second file\n").unwrap();
+
+        let mut poller = RefPoller::open(&repo).unwrap();
+        let refs = repo.join(".git").join("refs");
+        fs::remove_dir_all(&refs).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &refs).unwrap();
+        let error = poller.poll().unwrap_err();
+        assert!(
+            matches!(error, WatchError::RefStorageNotPlain { .. }),
+            "{error}"
+        );
+        assert!(!format!("{error:?} {error}").contains("hunter2"));
+
+        // And at open.
+        let error = RefPoller::open(&repo).unwrap_err();
+        assert!(
+            matches!(error, WatchError::RefStorageNotPlain { .. }),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_ref_poll_does_not_block_on_a_pipe_in_the_place_of_a_ref_file() {
+        let scratch = Scratch::new("refpipe");
+        let repo = fake_repo(&scratch);
+        let git_dir = repo.join(".git");
+
+        // HEAD is a pipe: open(2) with no writer would wait for ever.
+        let head = git_dir.join("HEAD");
+        fs::remove_file(&head).unwrap();
+        mkfifo(&head);
+        let repo_for_head = repo.clone();
+        let error = within("opening a poller over a pipe at HEAD", move || {
+            RefPoller::open(&repo_for_head)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, WatchError::RefStorageNotPlain { .. }),
+            "{error}"
+        );
+        fs::remove_file(&head).unwrap();
+        fs::write(&head, "ref: refs/heads/main\n").unwrap();
+
+        // packed-refs and a loose ref are pipes: skipped, said so, not waited on.
+        mkfifo(&git_dir.join("packed-refs"));
+        mkfifo(&head_ref(&repo, "piped"));
+        let poll = within("polling over pipes in the refs", move || {
+            RefPoller::open(&repo)?.poll()
+        })
+        .unwrap();
+        let reasons: Vec<&SkippedRefReason> = poll.skipped.iter().map(|s| &s.reason).collect();
+        assert_eq!(reasons.len(), 2, "{poll:?}");
+        assert!(
+            reasons
+                .iter()
+                .all(|r| **r == SkippedRefReason::NotARegularFile)
+        );
+    }
+
+    #[test]
+    fn ori_t_0054_a_pack_refs_between_the_two_reads_does_not_make_a_branch_vanish() {
+        let scratch = Scratch::new("packrace");
+        let repo = fake_repo(&scratch);
+        fs::write(head_ref(&repo, "stable"), format!("{OID_B}\n")).unwrap();
+        let poller = RefPoller::open(&repo).unwrap();
+
+        // `git pack-refs --all --prune` runs in the gap: it writes the new
+        // packed-refs, then deletes the loose files.
+        let git_dir = repo.join(".git");
+        let repo_for_hook = repo.clone();
+        let snapshot = poller
+            .snapshot_with(&mut || {
+                fs::write(
+                    git_dir.join("packed-refs"),
+                    format!("{OID_A} refs/heads/main\n{OID_B} refs/heads/stable\n"),
+                )
+                .unwrap();
+                fs::remove_file(head_ref(&repo_for_hook, "main")).unwrap();
+                fs::remove_file(head_ref(&repo_for_hook, "stable")).unwrap();
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot.refs.get("refs/heads/stable").map(String::as_str),
+            Some(OID_B),
+            "a branch that was only packed mid-poll looked deleted: {:?}",
+            snapshot.refs
+        );
+        assert_eq!(
+            snapshot.refs.get("refs/heads/main").map(String::as_str),
+            Some(OID_A)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_directory_swapped_for_a_link_before_its_scan_is_not_listed() {
+        let scratch = Scratch::new("scanlink");
+        let root = scratch.dir("root");
+        let outside = scratch.dir("outside");
+        fs::write(outside.join("leaked.txt"), b"x").unwrap();
+        fs::create_dir_all(outside.join("b")).unwrap();
+        fs::write(outside.join("b").join("deep.txt"), b"x").unwrap();
+        fs::create_dir_all(root.join("x")).unwrap();
+        fs::create_dir_all(root.join("a").join("b")).unwrap();
+        let rules = WatchConfig::default().ignore;
+        let mut accumulator = Accumulator::new(&root, &rules);
+        for path in [root.join("x"), root.join("a").join("b")] {
+            accumulator.push(Raw::Change {
+                path,
+                kind: ChangeKind::Created,
+                at: Timestamp::from_millis(1),
+            });
+        }
+        // In the window between the event and the scan: `x` is replaced by a
+        // link out of the root, and `a` (an ancestor of `a/b`) likewise.
+        fs::remove_dir(root.join("x")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("x")).unwrap();
+        fs::remove_dir_all(root.join("a")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("a")).unwrap();
+
+        let batch = accumulator.finish();
+        let paths: Vec<String> = batch
+            .changes
+            .iter()
+            .map(|change| change.path_text().unwrap())
+            .collect();
+        assert!(
+            paths
+                .iter()
+                .all(|path| path != "x/leaked.txt" && !path.starts_with("a/b/")),
+            "names from outside the root were listed as inside it: {paths:?}"
+        );
+        assert_eq!(batch.rejected, 2, "{batch:?}");
+    }
+
+    #[test]
+    fn ori_t_0054_one_rename_is_counted_once_however_many_events_the_backend_sends() {
+        let rename = |mode: RenameMode, paths: &[&str], tracker: usize| {
+            let mut event =
+                Event::new(EventKind::Modify(ModifyKind::Name(mode))).set_tracker(tracker);
+            for path in paths {
+                event = event.add_path(PathBuf::from(path));
+            }
+            event
+        };
+        let at = Timestamp::from_millis(1);
+
+        // inotify: From, To, then Both, one tracker.
+        let mut tracking = RenameTracking::default();
+        let mut raws = Vec::new();
+        raws.extend(translate(
+            Ok(rename(RenameMode::From, &["/r/tmp"], 7)),
+            at,
+            &mut tracking,
+        ));
+        raws.extend(translate(
+            Ok(rename(RenameMode::To, &["/r/target"], 7)),
+            at,
+            &mut tracking,
+        ));
+        raws.extend(translate(
+            Ok(rename(RenameMode::Both, &["/r/tmp", "/r/target"], 7)),
+            at,
+            &mut tracking,
+        ));
+        assert_eq!(
+            raws.len(),
+            2,
+            "one rename became {} records: {raws:?}",
+            raws.len()
+        );
+
+        // A backend that sends only the combined event is still heard.
+        let mut tracking = RenameTracking::default();
+        let alone = translate(
+            Ok(rename(RenameMode::Both, &["/r/old", "/r/new"], 9)),
+            at,
+            &mut tracking,
+        );
+        assert_eq!(alone.len(), 2);
+
+        // A combined event for a different rename than the halves just seen is
+        // not swallowed.
+        let mut tracking = RenameTracking::default();
+        let _ = translate(
+            Ok(rename(RenameMode::From, &["/r/a"], 1)),
+            at,
+            &mut tracking,
+        );
+        let _ = translate(Ok(rename(RenameMode::To, &["/r/b"], 1)), at, &mut tracking);
+        let other = translate(
+            Ok(rename(RenameMode::Both, &["/r/c", "/r/d"], 2)),
+            at,
+            &mut tracking,
+        );
+        assert_eq!(other.len(), 2);
+    }
+
+    #[test]
+    fn ori_t_0054_a_temporary_renamed_over_its_target_is_one_change_to_the_target_and_none_to_the_temporary()
+     {
+        let scratch = Scratch::new("sedi");
+        let root = scratch.dir("root");
+        fs::write(root.join("target.txt"), b"old").unwrap();
+        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
+
+        // What `sed -i` and most editors do.
+        fs::write(root.join(".target.txt.tmp"), b"new content").unwrap();
+        fs::rename(root.join(".target.txt.tmp"), root.join("target.txt")).unwrap();
+        let seen = collect_until(&mut watcher, "target.txt", |change| {
+            change.path == Path::new("target.txt")
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let mut paths = seen.paths();
+        if let Some(batch) = watcher.next_batch(Duration::from_millis(300)).unwrap() {
+            paths.extend(batch.changes.iter().map(|c| c.path_text().unwrap()));
+        }
+        assert!(
+            paths.iter().all(|path| path != ".target.txt.tmp"),
+            "the temporary was reported although it never outlived the save: {paths:?}"
+        );
+        assert!(seen.transient >= 1, "{seen:?}");
     }
 }
