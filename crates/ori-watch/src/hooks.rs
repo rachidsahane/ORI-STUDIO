@@ -64,7 +64,12 @@
 //! one level below `hooks/`, so a hook that finds its files by `$0`-relative
 //! path (`$(dirname "$0")/..`) finds a different place. A hook that is a
 //! relative symbolic link is kept as a link whose target is adjusted for that
-//! one level, so it still reaches what it stood for. The report says so
+//! one level, so it still reaches what it stood for, with one exception that
+//! is refused: a link to another hook the installer also replaces
+//! (`post-merge -> post-commit`) would resolve, once kept, to the engine's own
+//! script, so the hook it stood for, a `pre-push` veto included, would stop
+//! running without a word. That installation fails
+//! ([`HooksError::HookLinksToManagedHook`]) and writes nothing. The report says so
 //! ([`InstallOutcome::InstalledPreserving`]). If the preserved name is taken
 //! the installer refuses ([`HooksError::PreservedNameTaken`]) rather than
 //! choose which of two hooks to lose.
@@ -83,9 +88,15 @@
 //! - A hook that was absent at the decision is put in place by `link(2)` too,
 //!   and a hook of the engine's that is rewritten is looked at again just
 //!   before the rename; a hook that appeared or changed meanwhile is refused
-//!   ([`HooksError::HookAppeared`]), not replaced. The remaining window is the
-//!   instruction between that last look and the rename of a hook the engine
-//!   itself wrote.
+//!   ([`HooksError::HookAppeared`]), not replaced. Two windows remain, and
+//!   they are not closed: the instruction between that last look and the
+//!   rename of a hook the engine itself wrote; and, for a hook of someone
+//!   else's, the interval between the `link(2)` that gives it its second name
+//!   and the rename that replaces its first. A third tool that *replaces* the
+//!   hook in that interval (writes a new file and renames it into place, as
+//!   an installer does) has its write lost to our rename; a tool that writes
+//!   the hook in place is not lost, because it writes the file both names
+//!   share.
 //! - The installer needs hard links: a file system without them (some network
 //!   and removable ones) makes installation fail loudly instead of falling
 //!   back to a rename that could replace.
@@ -289,6 +300,16 @@ pub enum HooksError {
         /// The path of the existing preserved hook.
         path: PathBuf,
     },
+    /// An existing hook is a link to another hook this installer also
+    /// replaces (`post-merge -> post-commit`). Kept as a link it would resolve
+    /// to the engine's own script, and the hook it stood for, a `pre-push`
+    /// veto included, would never run again. Nothing was written.
+    HookLinksToManagedHook {
+        /// The hook that is a link.
+        path: PathBuf,
+        /// What the link says it points at, as written.
+        target: PathBuf,
+    },
     /// A hook appeared, or changed, between deciding what to do and doing it.
     /// Nothing was overwritten; running the installation again decides afresh.
     HookAppeared {
@@ -342,6 +363,7 @@ impl HooksError {
             | Self::HookNotAFile { .. }
             | Self::PreservedNameTaken { .. }
             | Self::HookAppeared { .. }
+            | Self::HookLinksToManagedHook { .. }
             | Self::SpoolLogNotAFile { .. } => 13,
             Self::Root { .. } | Self::Io { .. } => return None,
         };
@@ -412,6 +434,15 @@ impl fmt::Display for HooksError {
                 "refused: another actor's hook is installed and {} already holds a preserved \
                  one; neither is overwritten",
                 path.display()
+            )
+            .and_then(|()| cite(f, self)),
+            Self::HookLinksToManagedHook { path, target } => write!(
+                f,
+                "refused: {} is a link to {}, another hook this installer replaces, so the \
+                 hook it stands for would stop running and the engine's own script would run \
+                 in its place; point it at a file of its own and install again",
+                path.display(),
+                target.display()
             )
             .and_then(|()| cite(f, self)),
             Self::HookAppeared { path } => write!(
@@ -545,13 +576,7 @@ impl GitHooks {
             });
         }
         let git_dir = root.join(".git");
-        let metadata = fs::symlink_metadata(&git_dir).map_err(|source| HooksError::Io {
-            path: git_dir.clone(),
-            source,
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(HooksError::GitDirNotADirectory { path: git_dir });
-        }
+        check_git_dir(&git_dir)?;
         let plain = spool_dir.is_absolute()
             && spool_dir.to_str().is_some_and(|text| !text.contains('\0'))
             && spool_dir
@@ -613,10 +638,16 @@ impl GitHooks {
     ///
     /// # Errors
     ///
-    /// [`HooksError::HooksPathConfigured`],
-    /// [`HooksError::HooksDirNotADirectory`], [`HooksError::HookNotAFile`],
-    /// [`HooksError::PreservedNameTaken`] or [`HooksError::Io`].
+    /// [`HooksError::GitDirNotADirectory`] when `.git` has become a link or a
+    /// file since [`GitHooks::new`], [`HooksError::ConfigNotReadable`] and
+    /// [`HooksError::HooksPathConfigured`] when `.git/config` cannot be read or
+    /// sets `core.hooksPath`, [`HooksError::HooksDirNotADirectory`],
+    /// [`HooksError::HookNotAFile`], [`HooksError::HookLinksToManagedHook`]
+    /// and [`HooksError::PreservedNameTaken`] when what is in the hooks
+    /// directory cannot be kept safely, [`HooksError::HookAppeared`] when a
+    /// hook appeared or changed while installing, or [`HooksError::Io`].
     pub fn install(&self) -> Result<InstallReport, HooksError> {
+        check_git_dir(&self.git_dir)?;
         self.refuse_if_hooks_path_is_configured()?;
         let hooks_dir = self.hooks_dir();
         match fs::symlink_metadata(&hooks_dir) {
@@ -661,9 +692,12 @@ impl GitHooks {
     ///
     /// # Errors
     ///
-    /// [`HooksError::HookNotAFile`] when a directory sits where a hook
-    /// belongs, [`HooksError::Io`] when a hook file cannot be examined.
+    /// [`HooksError::GitDirNotADirectory`] when `.git` has become a link or a
+    /// file since [`GitHooks::new`], [`HooksError::HookNotAFile`] when a
+    /// directory sits where a hook belongs, [`HooksError::Io`] when a hook
+    /// file cannot be examined.
     pub fn status(&self) -> Result<Vec<HookStatus>, HooksError> {
+        check_git_dir(&self.git_dir)?;
         let hooks_dir = self.hooks_dir();
         let mut statuses = Vec::new();
         for hook in GitHook::ALL {
@@ -709,6 +743,9 @@ impl GitHooks {
                 }
             }
             Examined::Foreign => {
+                if let Some(target) = links_to_managed_hook(&hooks_dir, &path) {
+                    return Err(HooksError::HookLinksToManagedHook { path, target });
+                }
                 let directory = hooks_dir.join(PRESERVED_DIR);
                 match fs::symlink_metadata(&directory) {
                     Ok(metadata) => {
@@ -988,6 +1025,63 @@ fn preserve_unchecked(path: &Path, preserved: &Path) -> io::Result<()> {
     fs::hard_link(path, preserved)
 }
 
+/// Whether `git_dir` is the repository's own directory: a real directory,
+/// not a link and not a file.
+///
+/// Checked by [`GitHooks::new`] and again by every [`GitHooks::install`] and
+/// [`GitHooks::status`], because `.git` can be replaced by a link after the
+/// installer was built, and everything below it would then be read and
+/// written through the link.
+fn check_git_dir(git_dir: &Path) -> Result<(), HooksError> {
+    let metadata = fs::symlink_metadata(git_dir).map_err(|source| HooksError::Io {
+        path: git_dir.to_path_buf(),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(HooksError::GitDirNotADirectory {
+            path: git_dir.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// The target of `path` as written, if `path` is a symbolic link that
+/// resolves to a hook this installer manages in `hooks_dir`.
+///
+/// The target is resolved lexically against the link's own directory, so
+/// `../hooks/post-commit`, `./post-commit` and an absolute path into the hooks
+/// directory all count. A link to a same-named hook in some other directory
+/// (a team's shared hooks, say) does not.
+fn links_to_managed_hook(hooks_dir: &Path, path: &Path) -> Option<PathBuf> {
+    if !fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let target = fs::read_link(path).ok()?;
+    let joined = if target.is_absolute() {
+        target.clone()
+    } else {
+        path.parent()?.join(&target)
+    };
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    GitHook::from_file_name(resolved.file_name()?.to_str()?)?;
+    let parent = resolved.parent()?;
+    let same_directory = parent == hooks_dir
+        || matches!(
+            (fs::canonicalize(parent), fs::canonicalize(hooks_dir)),
+            (Ok(left), Ok(right)) if left == right
+        );
+    same_directory.then_some(target)
+}
+
 enum Plan {
     Keep,
     Write,
@@ -1128,7 +1222,7 @@ const HEADER: &str = "#!/bin/sh
 ori_hook=@HOOK@
 ori_spool=@SPOOL@
 ori_log=\"$ori_spool/hook-events.log\"
-ori_original=\"$(dirname \"$0\")/ori-original/$ori_hook\"
+ori_original=\"$(dirname -- \"$0\")/ori-original/$ori_hook\"
 
 ori_warn() {
     printf 'ori-studio: ERROR: the %s hook could not report to the Ori Studio engine: %s\\n' \"$ori_hook\" \"$1\" >&2
@@ -1748,6 +1842,133 @@ mod tests {
         assert!(is_ours(&fs::read_to_string(&path).unwrap()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_hook_that_is_an_absolute_symlink_is_kept_with_its_target_unchanged() {
+        let scratch = Scratch::new("hookabslink");
+        let (repo, spool) = skeleton(&scratch);
+        // An absolute target outside the repository: read from anywhere, so
+        // the preserved link must carry it exactly as written.
+        let target = scratch.path.join("team-hooks.sh");
+        fs::write(&target, "#!/bin/sh\necho team\n").unwrap();
+        let path = hook_path(&repo, GitHook::PrePush);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+
+        let kept = preserved(&repo, GitHook::PrePush);
+        assert!(
+            fs::symlink_metadata(&kept)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_link(&kept).unwrap(),
+            target,
+            "an absolute target was rewritten"
+        );
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "#!/bin/sh\necho team\n");
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "#!/bin/sh\necho team\n",
+            "the link's target was written through"
+        );
+        assert!(is_ours(&fs::read_to_string(&path).unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_hook_that_links_to_another_hook_the_installer_replaces_is_refused() {
+        let scratch = Scratch::new("hooksibling");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        // `pre-push` is `post-commit` by another name: the user's one script
+        // serves both. Kept as a link it would resolve to the engine's
+        // script, and the veto in it would stop vetoing.
+        let theirs = "#!/bin/sh\necho theirs\nexit 1\n";
+        fs::write(hooks_dir.join("post-commit"), theirs).unwrap();
+        make_executable(&hooks_dir.join("post-commit")).unwrap();
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+
+        for target in [
+            PathBuf::from("post-commit"),
+            PathBuf::from("./post-commit"),
+            PathBuf::from("../hooks/post-commit"),
+            hooks_dir.join("post-commit"),
+        ] {
+            let link = hooks_dir.join("pre-push");
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let error = hooks.install().unwrap_err();
+            match &error {
+                HooksError::HookLinksToManagedHook { path, target: seen } => {
+                    assert_eq!(path, &link);
+                    assert_eq!(seen, &target);
+                }
+                other => panic!("{target:?}: expected HookLinksToManagedHook, got {other}"),
+            }
+            assert_eq!(error.methodology_ref().unwrap().section, 13);
+            // Nothing was written, for any hook.
+            assert_eq!(
+                fs::read_to_string(hooks_dir.join("post-commit")).unwrap(),
+                theirs
+            );
+            assert_eq!(fs::read_link(&link).unwrap(), target);
+            assert_eq!(hook_dir_names(&repo), vec!["post-commit", "pre-push"]);
+            assert!(
+                !spool.exists(),
+                "the spool was created by a refused install"
+            );
+        }
+
+        // A link to a same-named hook in another directory is the usual
+        // shared-hooks arrangement, and is kept.
+        let shared = repo.join(".git").join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("pre-push"), "#!/bin/sh\necho shared\n").unwrap();
+        let link = hooks_dir.join("pre-push");
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("../shared/pre-push", &link).unwrap();
+        fs::remove_file(hooks_dir.join("post-commit")).unwrap();
+        hooks.install().unwrap();
+        assert_eq!(
+            fs::read_to_string(preserved(&repo, GitHook::PrePush)).unwrap(),
+            "#!/bin/sh\necho shared\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0054_a_git_dir_replaced_by_a_link_after_the_installer_was_built_is_refused() {
+        let scratch = Scratch::new("hooksgitswap");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+
+        // `.git` is moved away and a link to another directory put back.
+        let elsewhere = scratch.dir("elsewhere");
+        fs::rename(repo.join(".git"), scratch.path.join("moved-git")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, repo.join(".git")).unwrap();
+        let error = hooks.install().unwrap_err();
+        assert!(
+            matches!(error, HooksError::GitDirNotADirectory { .. }),
+            "{error}"
+        );
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+        let error = hooks.status().unwrap_err();
+        assert!(
+            matches!(error, HooksError::GitDirNotADirectory { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "something was written through the link"
+        );
+    }
+
     #[test]
     fn ori_t_0054_a_directory_where_a_hook_belongs_is_refused() {
         let scratch = Scratch::new("hookdir");
@@ -1894,7 +2115,9 @@ mod tests {
     }
 
     /// Runs `work` on its own thread and fails, rather than hangs, if it does
-    /// not finish: a call that blocks forever must be a failing test.
+    /// not finish: a call that blocks forever must be a failing test. Used by
+    /// the tests that make a pipe, so Unix only.
+    #[cfg(unix)]
     fn within<T: Send + 'static>(what: &str, work: impl FnOnce() -> T + Send + 'static) -> T {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
