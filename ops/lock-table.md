@@ -631,3 +631,22 @@ Written by the lead on 2026-10-11 under [[R31]].
 | ORI-T-0143 | `AcpClient::call`'s `IO_TIMEOUT` does not bound a child that stays silent or holds a partial line: the deadline is checked only between frames, around a blocking `read_line` | `crates/ori-runtime/src/acp.rs` | 1, `spec/RISK_MAP.md` (`ori-runtime` acp) | ready; dispatched after ORI-T-0140's review settles the shape of the fix; ORI-T-0141 waits on it, since both change `acp.rs` | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 61, 62, 64, 67 to 70 (69 narrowed), 76 and 77. The next free identifier is ORI-T-0144.
+
+---
+
+## Claims 61 and 76 integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`.
+
+| # | Ticket | Integrated as | Review | Verified by the lead on the session branch | Tier, who merges to `main` |
+|---|---|---|---|---|---|
+| 61 | ORI-T-0039, the operational log and the retrieval package | d517576 to 0c8a6ff, seven commits (from b3b8055 ... 26a6f63) | Independent review on Opus 5.5: changes requested, one blocking (the "cited by" line of a module item read spec document paths and heading text from the code map beside the admitted candidate, around `Authorization::filter`, contradicting the module's own doc) and four should-fix (a record's ordinal among all records disclosed out-of-scope counts; a divergence filed against a file did not reach its sections; the freshness corpus was read before the search; a code-map-incomplete note counted files the map never parses). All repaired in attempt 2; the lead confirmed the blocking one by reading: `module_lines` now takes only the admitted module | `cargo test -p ori-memory -- oplog retrieval`: 40 passed; `cargo clippy -p ori-memory --all-targets -D warnings`: clean; `cargo test -p ori-gates`: 161 passed; strict `cargo doc`: clean | 1: the lead may merge under [[R38]]; it rides with the session branch |
+| 76 | ORI-T-0046, the liveness definition | three commits (from 4f1b19d, 3d627a5, 9660b61) | Independent review on Opus 5.5: nothing blocking; one should-fix (no test of an installed gate that ran and went quiet, `Inert(TooOld)`, or one with only future-dated runs), repaired in attempt 2 with the refactor the review described shown to fail exactly those two tests | `cargo test -p ori-gates`: 190 passed; clippy clean | **2**: the operator |
+
+`barrier.rs` was not touched by ORI-T-0039, so claim 61's extension to it is released unused. The review's note N10, that `barrier.rs` parses an evidence blob's `content_ref` from the log unvalidated and `EvidenceReply` hands it to a caller to read, is a defect in `barrier.rs`, not in this ticket:
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0144 | An evidence blob's `content_ref` is parsed from the `memory.evidence_stored` event and handed out unvalidated, so a planted event names any absolute path, and the first caller that reads evidence by reference reads that file. It should be resolved under the product's evidence directory and refused otherwise | `crates/ori-memory/src/barrier.rs` | 2, `spec/RISK_MAP.md` (`barrier.rs`) | ready | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 70 and 77. The next free identifier is ORI-T-0145.
