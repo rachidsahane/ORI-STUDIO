@@ -615,3 +615,19 @@ Written by the lead on 2026-10-11 under [[R31]].
 Written by the lead on 2026-10-11. Under [[R43]] the actor guard ORI-T-0142 described is built in ORI-T-0129, under claim 70, which already holds `crates/ori-core/src/ticket.rs`. ORI-T-0142 is closed into ORI-T-0129 and keeps its identifier as a record. What stays open from its row: a role or verb check for the move in `crates/ori-orchestrator/src/lifecycle.rs` (tier 2), allocated when it is planned.
 
 **State after this section:** unchanged. The claims held are 20, 61, 62, 64, 67 to 70, 76 and 77. The next free identifier is ORI-T-0143.
+
+---
+
+## Claim 69 narrowed; ORI-T-0143 allocated
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+**Claim 69 narrowed.** ORI-T-0058 moved no declaration out of `crates/ori-runtime/src/acp.rs` ([[R42]] staged that as ORI-T-0141), and its branch does not change the file (`git diff --stat e095d4f..HEAD` on `feat/ORI-T-0058-adapter-traits` lists five files, none in `ori-runtime`). `acp.rs` is released from claim 69.
+
+**A defect in merged code, found by ORI-T-0140's coder by reading and confirmed by the lead by reading.** `crates/ori-runtime/src/acp.rs`, `AcpClient::call`: the loop checks `Instant::now() > deadline` only between frames, then calls `read_line`, which does `BufReader<ChildStdout>::read_line` and blocks until a newline or end of file. An agent process that stays alive and silent, or writes a partial line, blocks `call` indefinitely, and `IO_TIMEOUT` never fires. It is the same class as ORI-T-0140, in the ACP path rather than the headless one.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0143 | `AcpClient::call`'s `IO_TIMEOUT` does not bound a child that stays silent or holds a partial line: the deadline is checked only between frames, around a blocking `read_line` | `crates/ori-runtime/src/acp.rs` | 1, `spec/RISK_MAP.md` (`ori-runtime` acp) | ready; dispatched after ORI-T-0140's review settles the shape of the fix; ORI-T-0141 waits on it, since both change `acp.rs` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70 (69 narrowed), 76 and 77. The next free identifier is ORI-T-0144.
