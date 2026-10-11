@@ -287,11 +287,60 @@
 //! constructor that reads a clock"): every timestamp and every text this
 //! module compares against is a value the caller already had, most naturally
 //! a real `Document.verified_against_code_at`.
+//!
+//! # A divergence has an origin, and several can stand at once (ORI-T-0040)
+//!
+//! A divergence on record has one of three origins ([`DivergenceOrigin`]):
+//! found by the drift audit's own mechanical comparison
+//! ([`FreshnessTracker::record_audit_divergence`]), filed by the documentation
+//! agent or a human ([`FreshnessTracker::file_finding`]), or recorded without
+//! saying who found it ([`FreshnessTracker::record_divergence`], the original
+//! method, whose meaning has not changed). They are kept apart, because they
+//! end differently:
+//!
+//! - An **audit** divergence is the audit's current finding. The audit
+//!   re-asserts it on every run, so its own next run replaces it, withdraws it
+//!   ([`FreshnessTracker::withdraw_audit_divergence`]) when it no longer finds
+//!   it, or clears it with a verification
+//!   ([`FreshnessTracker::record_audit_verification`]).
+//! - A **filed** finding is somebody's judgement that a mechanical comparison
+//!   cannot reproduce (the retry limit is three here and five in the code). It
+//!   stands until a human resolves it with
+//!   [`FreshnessTracker::resolve_finding`], and nothing else ends it: not an
+//!   audit run that finds no missing path, not a verification of any kind, not
+//!   a later audit divergence on the same document. Several can stand on one
+//!   document. A review of ORI-T-0040's first round reproduced both failures
+//!   this prevents: a filed finding erased by the next audit run, and a filed
+//!   finding overwritten by an audit divergence and then lost when the path was
+//!   repaired, so that readiness read true without a human having seen it.
+//! - An **unattributed** divergence is what [`FreshnessTracker::record_divergence`]
+//!   has always held: one slot, replaced by the next call, cleared by
+//!   [`FreshnessTracker::record_verification`].
+//!
+//! [`FreshnessTracker::record_verification`] clears the unattributed and the
+//! audit divergence, as it always has cleared "the divergence", and never a
+//! filed finding. Every standing divergence of a document makes it
+//! [`StaleReason::Divergence`], whose description then lists each, tagged by
+//! origin when there is more than one; with one the description is that
+//! divergence's own text, exactly as before. [`FreshnessTracker::divergences`]
+//! lists them with their origins.
+//!
+//! Who may resolve a filed finding: a human. [`FreshnessTracker::resolve_finding`]
+//! takes the resolving [`ori_core::types::Actor`] and refuses an agent or the
+//! engine itself, because AICD §8 has the documentation agent "flag every
+//! divergence to a human" and AICD §24.3 has each one "resolved by a human
+//! decision". The drift audit never calls it. This module cannot check that the
+//! actor is who the caller says, so the caller (the engine's RPC layer, on a
+//! request that carries an authenticated seat holder) is responsible for the
+//! identity it passes.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::Path;
 
+use ori_core::error::MethodologyRef;
+use ori_core::types::Actor;
 use ori_core::types::Timestamp;
 
 use crate::indexer::NotIndexed;
@@ -408,6 +457,152 @@ impl StaleReason {
     }
 }
 
+/// Who found a divergence: AICD §8.
+///
+/// The module doc's "A divergence has an origin" says how each ends.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DivergenceOrigin {
+    /// The drift audit's own mechanical comparison found it. The audit's next
+    /// run replaces, withdraws or clears it.
+    Audit,
+    /// The documentation agent or a human filed it. It stands until a human
+    /// resolves it.
+    Filed,
+    /// [`FreshnessTracker::record_divergence`] recorded it without saying who
+    /// found it.
+    Unattributed,
+}
+
+impl DivergenceOrigin {
+    /// The tag a description carries when several divergences stand on one
+    /// document.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Audit => "drift audit",
+            Self::Filed => "filed finding",
+            Self::Unattributed => "recorded",
+        }
+    }
+}
+
+/// The identity of a filed finding within one tracker: AICD §8.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FindingId(u64);
+
+impl FindingId {
+    /// The number behind the identity, for a caller that writes it to an event.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for FindingId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "finding-{}", self.0)
+    }
+}
+
+/// One divergence standing on a document, as
+/// [`FreshnessTracker::divergences`] reports it: AICD §8.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandingDivergence {
+    /// Who found it.
+    pub origin: DivergenceOrigin,
+    /// The identity to resolve it by, for a [`DivergenceOrigin::Filed`] one.
+    pub id: Option<FindingId>,
+    /// What diverged, in the finder's words.
+    pub description: String,
+    /// When it was found or filed.
+    pub detected_at: Timestamp,
+}
+
+/// A filed finding a human resolved, returned so the caller can write it to an
+/// event: AICD §8, AICD §24.3.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedFinding {
+    /// Its identity.
+    pub id: FindingId,
+    /// The document it stood on.
+    pub path: String,
+    /// What it said.
+    pub description: String,
+    /// When it was filed.
+    pub filed_at: Timestamp,
+    /// The human's decision: the code is right and the intent updates, or the
+    /// intent is right and a ticket is created.
+    pub resolution: String,
+    /// Who resolved it.
+    pub resolved_by: Actor,
+    /// When.
+    pub resolved_at: Timestamp,
+}
+
+/// Why a finding could not be resolved: AICD §8.
+///
+/// Every variant carries [`FreshnessError::methodology_ref`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FreshnessError {
+    /// The actor is not a human. AICD §8: the documentation agent "flags every
+    /// divergence to a human", and AICD §24.3: each is "resolved by a human
+    /// decision".
+    NotAHuman {
+        /// The kind of the refused actor, `agent` or `system`.
+        kind: &'static str,
+    },
+    /// No finding with this identity stands on this document.
+    UnknownFinding {
+        /// The document.
+        path: String,
+        /// The identity that was asked for.
+        id: FindingId,
+    },
+    /// The resolution was blank, so the decision would not be on record.
+    BlankResolution,
+}
+
+impl FreshnessError {
+    /// The methodology section this refusal rests on: AICD §8, whose drift
+    /// audit flags every divergence to a human.
+    #[must_use]
+    pub const fn methodology_ref(&self) -> MethodologyRef {
+        MethodologyRef {
+            section: 8,
+            subsection: None,
+        }
+    }
+}
+
+impl fmt::Display for FreshnessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAHuman { kind } => write!(
+                f,
+                "a filed finding is resolved by a human decision, and a {kind} cannot resolve it"
+            ),
+            Self::UnknownFinding { path, id } => {
+                write!(f, "no finding {id} stands on {path}")
+            }
+            Self::BlankResolution => f.write_str(
+                "a finding cannot be resolved with a blank resolution: the decision would not be \
+                 on record",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FreshnessError {}
+
+/// One finding filed by an agent or a human and not yet resolved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FiledFinding {
+    id: FindingId,
+    description: String,
+    filed_at: Timestamp,
+}
+
 /// What is on record for one tracked document.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TrackedDocument {
@@ -424,6 +619,66 @@ struct TrackedDocument {
     /// leaves `Stale` by being re-reviewed, which is what a fresh
     /// verification is).
     divergence: Option<(String, Timestamp)>,
+    /// The drift audit's own current finding, set by
+    /// [`FreshnessTracker::record_audit_divergence`], replaced, withdrawn or
+    /// cleared by the audit alone (and cleared by `record_verification`).
+    audit_divergence: Option<(String, Timestamp)>,
+    /// Findings filed by an agent or a human, in the order filed. Only
+    /// [`FreshnessTracker::resolve_finding`] removes one.
+    filed: Vec<FiledFinding>,
+}
+
+impl TrackedDocument {
+    /// Every divergence standing on this document: unattributed first, then the
+    /// audit's, then the filed ones in filing order.
+    fn standing(&self) -> Vec<StandingDivergence> {
+        let mut standing = Vec::new();
+        if let Some((description, detected_at)) = &self.divergence {
+            standing.push(StandingDivergence {
+                origin: DivergenceOrigin::Unattributed,
+                id: None,
+                description: description.clone(),
+                detected_at: *detected_at,
+            });
+        }
+        if let Some((description, detected_at)) = &self.audit_divergence {
+            standing.push(StandingDivergence {
+                origin: DivergenceOrigin::Audit,
+                id: None,
+                description: description.clone(),
+                detected_at: *detected_at,
+            });
+        }
+        for finding in &self.filed {
+            standing.push(StandingDivergence {
+                origin: DivergenceOrigin::Filed,
+                id: Some(finding.id),
+                description: finding.description.clone(),
+                detected_at: finding.filed_at,
+            });
+        }
+        standing
+    }
+
+    /// The one description and time a [`StaleReason`] carries for every
+    /// divergence standing: with one divergence, its own text and time; with
+    /// several, each tagged by origin and joined, at the earliest time.
+    fn combined_divergence(&self) -> Option<(String, Timestamp)> {
+        let standing = self.standing();
+        match standing.as_slice() {
+            [] => None,
+            [only] => Some((only.description.clone(), only.detected_at)),
+            several => {
+                let description = several
+                    .iter()
+                    .map(|item| format!("[{}] {}", item.origin.label(), item.description))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let earliest = several.iter().map(|item| item.detected_at).min()?;
+                Some((description, earliest))
+            }
+        }
+    }
 }
 
 /// One stale document, as [`FreshnessTracker::list_stale`] reports it.
@@ -517,6 +772,8 @@ impl StaleReport {
 #[derive(Clone, Debug, Default)]
 pub struct FreshnessTracker {
     documents: BTreeMap<String, TrackedDocument>,
+    /// The next [`FindingId`] to hand out; never reused.
+    next_finding: u64,
 }
 
 impl FreshnessTracker {
@@ -533,7 +790,8 @@ impl FreshnessTracker {
     /// [`FreshnessTracker::list_stale`]'s corpus holds for it (the module
     /// doc's "What a verification covers").
     ///
-    /// Clears any divergence on record: a fresh verification is a review
+    /// Clears the unattributed and the audit divergence on record, and never a
+    /// filed finding ([`FreshnessTracker::file_finding`]): a fresh verification is a review
     /// (`spec/DATA_MODEL.md` section 3, `Stale --> UnderReview`), and this is
     /// this module's read of "the document has been looked at again", which
     /// is what ends the state a `Divergence` reason names. If the drift
@@ -551,6 +809,11 @@ impl FreshnessTracker {
         entry.verified_at = Some(at);
         entry.verified_text = Some(content.into());
         entry.divergence = None;
+        // The audit's own finding goes with "the divergence", as it would have
+        // when this was the one slot. A filed finding does not: only
+        // `resolve_finding` ends one (the module doc's "A divergence has an
+        // origin").
+        entry.audit_divergence = None;
     }
 
     /// Records that the drift audit found `path` and the code disagree, with
@@ -570,6 +833,126 @@ impl FreshnessTracker {
         entry.divergence = Some((description.into(), at));
     }
 
+    /// Records the drift audit's own current finding for `path`, replacing the
+    /// audit's earlier one and touching no other divergence: a filed finding
+    /// and an unattributed divergence stand beside it.
+    pub fn record_audit_divergence(
+        &mut self,
+        path: impl Into<String>,
+        description: impl Into<String>,
+        at: Timestamp,
+    ) {
+        let entry = self.documents.entry(path.into()).or_default();
+        entry.audit_divergence = Some((description.into(), at));
+    }
+
+    /// Withdraws the drift audit's own finding for `path`, because its latest
+    /// run no longer finds it, without recording a verification. Touches no
+    /// other divergence. Returns whether there was a finding to withdraw.
+    pub fn withdraw_audit_divergence(&mut self, path: &str) -> bool {
+        self.documents
+            .get_mut(path)
+            .is_some_and(|entry| entry.audit_divergence.take().is_some())
+    }
+
+    /// Records that the drift audit verified `path` against the code at `at`,
+    /// with the text `content` (as [`FreshnessTracker::record_verification`]
+    /// takes it), and clears the audit's own finding. It clears **no other**
+    /// divergence: a filed finding or an unattributed divergence stands, so a
+    /// scheduled audit run can never erase a judgement it did not make.
+    pub fn record_audit_verification(
+        &mut self,
+        path: impl Into<String>,
+        at: Timestamp,
+        content: impl Into<String>,
+    ) {
+        let entry = self.documents.entry(path.into()).or_default();
+        entry.verified_at = Some(at);
+        entry.verified_text = Some(content.into());
+        entry.audit_divergence = None;
+    }
+
+    /// Files a divergence the drift audit's mechanical comparison cannot
+    /// find, the documentation agent's or a human's, on `path`. Several can
+    /// stand on one document. It stands until a human resolves it with
+    /// [`FreshnessTracker::resolve_finding`].
+    ///
+    /// Takes no validation: a description that is blank would list a stale
+    /// document with no divergence. `DriftAudit::file_finding`, in
+    /// [`crate::drift`], is the entry point that refuses one.
+    pub fn file_finding(
+        &mut self,
+        path: impl Into<String>,
+        description: impl Into<String>,
+        at: Timestamp,
+    ) -> FindingId {
+        let id = FindingId(self.next_finding);
+        self.next_finding += 1;
+        let entry = self.documents.entry(path.into()).or_default();
+        entry.filed.push(FiledFinding {
+            id,
+            description: description.into(),
+            filed_at: at,
+        });
+        id
+    }
+
+    /// Resolves the filed finding `id` on `path`: a human's decision, recorded
+    /// as `resolution`. The only way a filed finding ends.
+    ///
+    /// # Errors
+    ///
+    /// [`FreshnessError::NotAHuman`] when `by` is an agent or the engine;
+    /// [`FreshnessError::BlankResolution`] when `resolution` is blank;
+    /// [`FreshnessError::UnknownFinding`] when no such finding stands on
+    /// `path`. Nothing changes in any of the three cases.
+    pub fn resolve_finding(
+        &mut self,
+        path: &str,
+        id: FindingId,
+        resolution: &str,
+        by: &Actor,
+        at: Timestamp,
+    ) -> Result<ResolvedFinding, FreshnessError> {
+        if !matches!(by, Actor::Human(_)) {
+            return Err(FreshnessError::NotAHuman { kind: by.kind() });
+        }
+        if resolution.trim().is_empty() {
+            return Err(FreshnessError::BlankResolution);
+        }
+        let unknown = || FreshnessError::UnknownFinding {
+            path: path.to_owned(),
+            id,
+        };
+        let entry = self.documents.get_mut(path).ok_or_else(unknown)?;
+        let at_index = entry
+            .filed
+            .iter()
+            .position(|finding| finding.id == id)
+            .ok_or_else(unknown)?;
+        let finding = entry.filed.remove(at_index);
+        Ok(ResolvedFinding {
+            id,
+            path: path.to_owned(),
+            description: finding.description,
+            filed_at: finding.filed_at,
+            resolution: resolution.to_owned(),
+            resolved_by: by.clone(),
+            resolved_at: at,
+        })
+    }
+
+    /// Every divergence standing on `path`, with its origin: unattributed
+    /// first, then the audit's, then the filed ones in filing order. Empty for
+    /// a path with none and for a path never seen.
+    #[must_use]
+    pub fn divergences(&self, path: &str) -> Vec<StandingDivergence> {
+        self.documents
+            .get(path)
+            .map(TrackedDocument::standing)
+            .unwrap_or_default()
+    }
+
     /// The freshness of one document, given the text it holds right now:
     /// for a document of the index, its title and its body
     /// ([`crate::indexer::IndexableDocument::freshness_text`]).
@@ -585,10 +968,10 @@ impl FreshnessTracker {
         let Some(entry) = self.documents.get(path) else {
             return Freshness::Stale(StaleReason::NeverVerified);
         };
-        if let Some((description, detected_at)) = &entry.divergence {
+        if let Some((description, detected_at)) = entry.combined_divergence() {
             return Freshness::Stale(StaleReason::Divergence {
-                description: description.clone(),
-                detected_at: *detected_at,
+                description,
+                detected_at,
             });
         }
         let (Some(verified_at), Some(verified_text)) = (entry.verified_at, &entry.verified_text)
@@ -746,17 +1129,18 @@ impl FreshnessTracker {
             if current.contains_key(path) {
                 continue;
             }
+            let standing = entry.combined_divergence();
             if let Some(skipped) = left_out(&by_key, path) {
                 stale.push(StaleDocument {
                     path: path.clone(),
                     reason: StaleReason::NotIndexed {
                         skipped: skipped.clone(),
-                        divergence: entry.divergence.clone(),
+                        divergence: standing,
                     },
                 });
                 continue;
             }
-            let reason = match (&entry.divergence, files.contains(path.as_str())) {
+            let reason = match (&standing, files.contains(path.as_str())) {
                 // A divergence on a file the corpus holds documents of.
                 (Some((description, detected_at)), true) => StaleReason::Divergence {
                     description: description.clone(),
@@ -2123,5 +2507,188 @@ mod tests {
             section("A", "B\nC").freshness_text(),
             section("A\nB", "C").freshness_text()
         );
+    }
+}
+
+/// Tests of the divergence origin added in ORI-T-0040's repair round. A module of
+/// their own, beside the original tests and not among them: nothing above this
+/// line was changed to write them.
+#[cfg(test)]
+mod divergence_origin_tests {
+    use super::*;
+    use crate::indexer::SkipReason;
+    use ori_core::types::Id;
+
+    fn at(millis: i64) -> Timestamp {
+        Timestamp::from_millis(millis)
+    }
+
+    fn human() -> Actor {
+        Actor::Human(Id::parse("01J0000000000000000000000A").expect("a ULID"))
+    }
+
+    fn corpus(path: &str, text: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(path.to_owned(), text.to_owned())])
+    }
+
+    fn origins(tracker: &FreshnessTracker, path: &str) -> Vec<DivergenceOrigin> {
+        tracker
+            .divergences(path)
+            .iter()
+            .map(|divergence| divergence.origin)
+            .collect()
+    }
+
+    #[test]
+    fn ori_t_0040_record_verification_clears_the_unattributed_and_audit_divergences_and_never_a_filed_finding()
+     {
+        let mut tracker = FreshnessTracker::new();
+        tracker.record_divergence("spec/A.md", "unattributed", at(1));
+        tracker.record_audit_divergence("spec/A.md", "audit", at(2));
+        tracker.file_finding("spec/A.md", "filed", at(3));
+        assert_eq!(
+            origins(&tracker, "spec/A.md"),
+            [
+                DivergenceOrigin::Unattributed,
+                DivergenceOrigin::Audit,
+                DivergenceOrigin::Filed
+            ]
+        );
+        tracker.record_verification("spec/A.md", at(4), "text");
+        assert_eq!(origins(&tracker, "spec/A.md"), [DivergenceOrigin::Filed]);
+        assert!(matches!(
+            tracker.check("spec/A.md", "text"),
+            Freshness::Stale(StaleReason::Divergence { .. })
+        ));
+    }
+
+    #[test]
+    fn ori_t_0040_record_audit_verification_clears_only_the_audits_own_divergence() {
+        let mut tracker = FreshnessTracker::new();
+        tracker.record_divergence("spec/A.md", "unattributed", at(1));
+        tracker.record_audit_divergence("spec/A.md", "audit", at(2));
+        tracker.file_finding("spec/A.md", "filed", at(3));
+        tracker.record_audit_verification("spec/A.md", at(4), "text");
+        assert_eq!(
+            origins(&tracker, "spec/A.md"),
+            [DivergenceOrigin::Unattributed, DivergenceOrigin::Filed]
+        );
+
+        // With only the audit's own finding standing, the verification makes the
+        // document fresh.
+        tracker.record_audit_divergence("spec/B.md", "audit", at(5));
+        assert!(tracker.check("spec/B.md", "text").is_stale());
+        tracker.record_audit_verification("spec/B.md", at(6), "text");
+        assert_eq!(tracker.check("spec/B.md", "text"), Freshness::Fresh);
+    }
+
+    #[test]
+    fn ori_t_0040_record_divergence_still_holds_one_slot_replaced_by_the_next_call() {
+        let mut tracker = FreshnessTracker::new();
+        tracker.record_divergence("spec/A.md", "first", at(1));
+        tracker.record_divergence("spec/A.md", "second", at(2));
+        let standing = tracker.divergences("spec/A.md");
+        assert_eq!(standing.len(), 1);
+        assert_eq!(standing[0].description, "second");
+        assert_eq!(standing[0].origin, DivergenceOrigin::Unattributed);
+        // And with one divergence standing the reason carries its text untagged.
+        tracker.record_verification("spec/A.md", at(0), "x");
+        tracker.record_divergence("spec/A.md", "second", at(2));
+        assert_eq!(
+            tracker.check("spec/A.md", "x"),
+            Freshness::Stale(StaleReason::Divergence {
+                description: "second".to_owned(),
+                detected_at: at(2)
+            })
+        );
+    }
+
+    #[test]
+    fn ori_t_0040_the_audit_divergence_is_replaced_by_the_audit_and_never_replaces_a_filed_one() {
+        let mut tracker = FreshnessTracker::new();
+        tracker.file_finding("spec/A.md", "filed", at(1));
+        tracker.record_audit_divergence("spec/A.md", "audit one", at(2));
+        tracker.record_audit_divergence("spec/A.md", "audit two", at(3));
+        let standing = tracker.divergences("spec/A.md");
+        assert_eq!(
+            standing
+                .iter()
+                .map(|d| d.description.as_str())
+                .collect::<Vec<_>>(),
+            ["audit two", "filed"]
+        );
+    }
+
+    #[test]
+    fn ori_t_0040_withdrawing_an_audit_divergence_creates_nothing_and_touches_nothing_else() {
+        let mut tracker = FreshnessTracker::new();
+        assert!(!tracker.withdraw_audit_divergence("spec/never-seen.md"));
+        assert_eq!(tracker.tracked_count(), 0, "withdrawing records no path");
+        tracker.file_finding("spec/A.md", "filed", at(1));
+        assert!(!tracker.withdraw_audit_divergence("spec/A.md"));
+        tracker.record_audit_divergence("spec/A.md", "audit", at(2));
+        assert!(tracker.withdraw_audit_divergence("spec/A.md"));
+        assert_eq!(origins(&tracker, "spec/A.md"), [DivergenceOrigin::Filed]);
+    }
+
+    #[test]
+    fn ori_t_0040_a_finding_identity_is_never_reused() {
+        let mut tracker = FreshnessTracker::new();
+        let first = tracker.file_finding("spec/A.md", "one", at(1));
+        tracker
+            .resolve_finding("spec/A.md", first, "done", &human(), at(2))
+            .expect("resolves");
+        let second = tracker.file_finding("spec/A.md", "two", at(3));
+        assert_ne!(first, second);
+        assert!(second.get() > first.get());
+        assert_eq!(second.to_string(), format!("finding-{}", second.get()));
+    }
+
+    #[test]
+    fn ori_t_0040_several_standing_divergences_are_listed_tagged_at_the_earliest_time() {
+        let mut tracker = FreshnessTracker::new();
+        tracker.record_verification("spec/A.md", at(0), "text");
+        tracker.file_finding("spec/A.md", "filed words", at(5));
+        tracker.record_audit_divergence("spec/A.md", "audit words", at(9));
+        assert_eq!(
+            tracker.check("spec/A.md", "text"),
+            Freshness::Stale(StaleReason::Divergence {
+                description: "[drift audit] audit words; [filed finding] filed words".to_owned(),
+                detected_at: at(5),
+            })
+        );
+    }
+
+    #[test]
+    fn ori_t_0040_a_filed_finding_on_a_document_the_walk_left_out_stays_listed_with_its_text() {
+        let mut tracker = FreshnessTracker::new();
+        tracker.file_finding("spec/A.md", "a finding on a file nobody could read", at(1));
+        let left_out: NotIndexed = [("spec/A.md".to_owned(), SkipReason::Symlink)]
+            .into_iter()
+            .collect();
+        let report = tracker.list_stale(&BTreeMap::new(), &left_out);
+        assert!(!report.is_ready());
+        let line = report.stale[0].reason.divergence();
+        assert!(
+            line.contains("a finding on a file nobody could read"),
+            "{line}"
+        );
+        assert!(line.contains("freshness unknown"), "{line}");
+    }
+
+    #[test]
+    fn ori_t_0040_a_filed_finding_on_a_file_path_is_listed_beside_its_indexed_sections() {
+        let mut tracker = FreshnessTracker::new();
+        tracker.record_audit_verification("spec/A.md#one", at(1), "section text");
+        tracker.file_finding("spec/A.md", "the file as a whole disagrees", at(2));
+        let current = corpus("spec/A.md#one", "section text");
+        let report = tracker.list_stale(&current, &NotIndexed::default());
+        assert_eq!(report.documents_covered, 1);
+        assert!(!report.is_ready());
+        assert_eq!(report.stale[0].path, "spec/A.md");
+        assert!(matches!(
+            report.stale[0].reason,
+            StaleReason::Divergence { .. }
+        ));
     }
 }

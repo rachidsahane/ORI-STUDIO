@@ -14,8 +14,10 @@
 //! flowchart LR
 //!   D[canonical documents: path to text] --> A[DriftAudit::run]
 //!   V[CodeView: the files the code has] --> A
-//!   A -->|no divergence| VER[record_verification: the date moves]
-//!   A -->|dangling reference| DIV[record_divergence: the document is stale]
+//!   A -->|every claim present| VER[record_audit_verification: the date moves]
+//!   A -->|dangling reference| DIV[record_audit_divergence: the document is stale]
+//!   A -->|no claim at all| NC[nothing compared: no verification, freshness as it was]
+//!   F[documentation agent: file_finding] --> T
 //!   VER --> T[FreshnessTracker]
 //!   DIV --> T
 //!   T -->|list_stale| S[StaleReport]
@@ -49,13 +51,50 @@
 //! entry the code's walk did not look inside is *unverifiable*, neither present
 //! nor missing; anything else is *missing*, and a missing path is a divergence.
 //!
-//! The divergence is filed as the document's own, with the paths in its
-//! description: `ori readiness` lists the stale document with it
-//! (criterion ORI-P1-026). A document with no divergence and no unverifiable path
-//! is verified at the audit's time. A document with an unverifiable path is
-//! neither: it keeps whatever the tracker already holds for it, so a document
-//! that was never verified stays stale, because a document nobody could check is
-//! never fresh (`crate::freshness`, "Freshness unknown is never fresh").
+//! The divergence is recorded as the audit's own finding on the document, with
+//! the paths in its description: `ori readiness` lists the stale document with
+//! it (criterion ORI-P1-026). What the audit then does with a document depends
+//! on what it could compare:
+//!
+//! - A path missing: the divergence is recorded, and the document is not
+//!   verified.
+//! - Every claim present, and at least one claim: the document is verified at
+//!   the audit's time, and the audit's own earlier finding on it is cleared.
+//! - **No claim at all** ([`crate::drift::AuditOutcome::NothingChecked`]): the
+//!   document names no path, or every span that looked like one was filtered out
+//!   (a placeholder, another product's path, a path whose top-level directory
+//!   the code no longer has). Nothing was compared with the code, so no
+//!   verification is recorded; the document's freshness is left as it was, and
+//!   the audit's own earlier finding, which the document no longer supports, is
+//!   withdrawn. Such a document is not "verified against code" by this module: it
+//!   waits for the documentation agent's review, which records it through
+//!   `FreshnessTracker::record_verification`. Seven of the thirty documents of
+//!   this repository's `spec/` were in this case when this was written, so a
+//!   product whose documents are mostly prose is not ready until they have been
+//!   reviewed. The report lists them
+//!   ([`crate::drift::DriftReport::nothing_checked`]).
+//! - A claim unverifiable and none missing: nothing is recorded either way, so a
+//!   document that was never verified stays stale, because a document nobody
+//!   could check is never fresh (`crate::freshness`, "Freshness unknown is never
+//!   fresh").
+//!
+//! A path whose first segment is no longer at the top of the code (a directory
+//! deleted outright) reads as not a claim about this product at all, which is
+//! also [`crate::drift::AuditOutcome::NothingChecked`], not a divergence: the
+//! audit cannot tell a deleted directory from another product's path.
+//!
+//! ## An audit run never erases a finding it did not make
+//!
+//! The audit's divergence and a finding filed by the documentation agent or a
+//! human are different things with different ends (`crate::freshness`, "A
+//! divergence has an origin"). A run records and clears **only** the audit's own
+//! finding, through the tracker's audit methods. A finding filed with
+//! [`crate::drift::DriftAudit::file_finding`] stands beside it, and across every
+//! later run, until a human resolves it with
+//! `FreshnessTracker::resolve_finding`. That method is the human's and not this
+//! module's: it takes the resolving actor and refuses an agent or the engine, the
+//! audit never calls it, and a document with a standing finding is not ready
+//! however many clean runs follow.
 //!
 //! ## What this does not catch
 //!
@@ -69,8 +108,8 @@
 //!   name with no `/` (`Cargo.toml`).
 //! - A path that exists and is the wrong file, or a line suffix past the end of
 //!   its file.
-//! - A document that is wrong and names no path: it is verified, and the report
-//!   says how many references were checked for it, which may be none.
+//! - A document that is wrong and names no path: nothing is compared, so nothing
+//!   is verified (above).
 //! - An empty directory, which is not in a list of files. A cited directory
 //!   that holds nothing reads as missing.
 //! - A document that describes a path that is planned and not yet built. The
@@ -91,7 +130,8 @@
 //! answer from the stale list.
 //!
 //! This module writes no file and appends no event. The tracker is in memory;
-//! persisting it, and the audit's report, is the caller's, through the event log.
+//! persisting it, and the audit's report, is the caller's, through the event log,
+//! and a report the caller drops is lost.
 //!
 //! # Refusals
 //!
@@ -111,6 +151,7 @@ use ori_core::types::Timestamp;
 
 use crate::code_map::CodeMap;
 use crate::code_map::SkipReason;
+use crate::freshness::FindingId;
 use crate::freshness::FreshnessTracker;
 
 /// The most missing paths one divergence description lists; the rest are
@@ -452,6 +493,9 @@ pub enum AuditOutcome {
     /// A path it names is under an entry nobody looked inside, and none is
     /// missing: nothing was recorded either way.
     Unverifiable,
+    /// It makes no path claim, so nothing was compared with the code: no
+    /// verification was recorded and its freshness is as it was.
+    NothingChecked,
 }
 
 /// What the audit found in one document: AICD §9.
@@ -490,6 +534,14 @@ impl DriftReport {
             .filter(|audit| audit.outcome == AuditOutcome::Diverged)
     }
 
+    /// The documents that made no path claim, so nothing was compared with the
+    /// code and no verification was recorded for them.
+    pub fn nothing_checked(&self) -> impl Iterator<Item = &DocumentAudit> {
+        self.documents
+            .iter()
+            .filter(|audit| audit.outcome == AuditOutcome::NothingChecked)
+    }
+
     /// How many path claims were checked across all documents. Zero means the
     /// audit compared nothing, however many documents it verified.
     #[must_use]
@@ -521,12 +573,16 @@ impl DriftAudit {
     /// [`crate::indexer::Indexer::freshness_corpus`] gives it) and records the
     /// result in `tracker` at `at`.
     ///
-    /// A document that names a missing path gets a divergence on record
-    /// (`FreshnessTracker::record_divergence`); one that names none is verified
-    /// at `at` with the text given (`FreshnessTracker::record_verification`),
-    /// which also clears an earlier divergence, so a document that was repaired,
-    /// or a code tree that gained the file, reads fresh at the next run. A
-    /// document with only unverifiable paths is left as the tracker has it.
+    /// A document that names a missing path gets the audit's own divergence on
+    /// record (`FreshnessTracker::record_audit_divergence`). One whose claims are
+    /// all present is verified at `at` with the text given
+    /// (`FreshnessTracker::record_audit_verification`), which clears the audit's
+    /// own earlier finding, so a document that was repaired, or a code tree that
+    /// gained the file, reads fresh at the next run. A finding filed by an agent
+    /// or a human is never touched, and neither is an unattributed divergence. A
+    /// document with only unverifiable paths is left as the tracker has it, and
+    /// a document with no claim at all is not verified (the module doc,
+    /// "Nothing was compared").
     ///
     /// # Errors
     ///
@@ -558,12 +614,18 @@ impl DriftAudit {
                 }
             }
             let outcome = if !missing.is_empty() {
-                tracker.record_divergence(path.clone(), describe(&missing), at);
+                tracker.record_audit_divergence(path.clone(), describe(&missing), at);
                 AuditOutcome::Diverged
             } else if !unverifiable.is_empty() {
+                // Neither verified nor withdrawn: the audit could not see.
                 AuditOutcome::Unverifiable
+            } else if claims.is_empty() {
+                // Nothing was compared, so nothing is verified; the finding the
+                // audit made earlier is no longer supported by the document.
+                tracker.withdraw_audit_divergence(path);
+                AuditOutcome::NothingChecked
             } else {
-                tracker.record_verification(path.clone(), at, text.clone());
+                tracker.record_audit_verification(path.clone(), at, text.clone());
                 AuditOutcome::Verified
             };
             audited.push(DocumentAudit {
@@ -582,8 +644,10 @@ impl DriftAudit {
 
     /// Files a divergence found by something other than this module's
     /// mechanical comparison, such as the documentation agent's weekly read:
-    /// D-09's "files divergences". It lands in `tracker` exactly as a mechanical
-    /// one does.
+    /// D-09's "files divergences". It stands beside the audit's own finding and
+    /// survives every later run; only a human ends it, with
+    /// `FreshnessTracker::resolve_finding` (the module doc, "An audit run never
+    /// erases a finding it did not make"). Returns its identity.
     ///
     /// # Errors
     ///
@@ -593,7 +657,7 @@ impl DriftAudit {
         path: &str,
         description: &str,
         at: Timestamp,
-    ) -> Result<(), DriftError> {
+    ) -> Result<FindingId, DriftError> {
         if path.trim().is_empty() {
             return Err(DriftError::EmptyFinding { field: "path" });
         }
@@ -602,8 +666,7 @@ impl DriftAudit {
                 field: "description",
             });
         }
-        tracker.record_divergence(path, description, at);
-        Ok(())
+        Ok(tracker.file_finding(path, description, at))
     }
 }
 
@@ -638,9 +701,13 @@ mod tests {
     use super::*;
     use crate::citation::SectionIndex;
     use crate::code_map::build_code_map;
+    use crate::freshness::DivergenceOrigin;
     use crate::freshness::Freshness;
+    use crate::freshness::FreshnessError;
     use crate::freshness::StaleReason;
     use crate::indexer::NotIndexed;
+    use ori_core::types::Actor;
+    use ori_core::types::Id;
 
     const DOC: &str = "spec/LLD.md#2-crate-responsibilities-and-dependency-direction";
 
@@ -815,7 +882,7 @@ mod tests {
             outcomes,
             [
                 ("spec/CI_CD.md", AuditOutcome::Verified),
-                ("spec/LLD.md", AuditOutcome::Verified),
+                ("spec/LLD.md", AuditOutcome::NothingChecked),
                 ("spec/PRD.md", AuditOutcome::Diverged),
             ]
         );
@@ -828,12 +895,11 @@ mod tests {
                 .iter()
                 .map(|d| d.path.as_str())
                 .collect::<Vec<_>>(),
-            ["spec/PRD.md"]
+            ["spec/LLD.md", "spec/PRD.md"],
+            "the diverging one, and the one nothing was compared in, which was never verified"
         );
-        assert_eq!(
-            report.documents[1].references_checked, 0,
-            "a document that names no path is verified, and says it was compared with nothing"
-        );
+        assert!(matches!(stale.stale[0].reason, StaleReason::NeverVerified));
+        assert_eq!(report.documents[1].references_checked, 0);
         assert_eq!(report.references_checked(), 2);
     }
 
@@ -1129,8 +1195,8 @@ mod tests {
     #[test]
     fn ori_p1_033_every_drift_error_carries_a_methodology_ref_that_resolves() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let index = SectionIndex::from_file(&repo.join(crate::citation::SECTION_INDEX_PATH))
-            .expect("the committed methodology index reads");
+        let index =
+            SectionIndex::from_repository(&repo).expect("the committed methodology index reads");
         let samples = [
             DriftError::NothingToAudit,
             DriftError::EmptyCodeView,
@@ -1154,5 +1220,320 @@ mod tests {
             );
             assert!(!error.to_string().is_empty());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Repair round, B1: an audit run never erases a finding it did not make
+    // -----------------------------------------------------------------
+
+    fn human() -> Actor {
+        Actor::Human(Id::parse("01J0000000000000000000000A").expect("a ULID"))
+    }
+
+    fn agent() -> Actor {
+        Actor::Agent(Id::parse("01J0000000000000000000000B").expect("a ULID"))
+    }
+
+    #[test]
+    fn ori_p1_026_a_filed_finding_survives_the_next_audit_run_on_a_document_that_names_a_path() {
+        let documents = corpus("See `scripts/gates.sh`.\n");
+        let audit = DriftAudit::new(code());
+        let mut tracker = FreshnessTracker::new();
+        audit.run(&mut tracker, &documents, at(1)).expect("audits");
+        assert!(stale_report(&tracker, &documents).is_ready());
+
+        let id = DriftAudit::file_finding(
+            &mut tracker,
+            DOC,
+            "the retry limit is 3 here and 5 in the code",
+            at(2),
+        )
+        .expect("files");
+        assert!(!stale_report(&tracker, &documents).is_ready());
+
+        // The next scheduled run finds no missing path.
+        let report = audit.run(&mut tracker, &documents, at(3)).expect("audits");
+        assert_eq!(report.documents[0].outcome, AuditOutcome::Verified);
+        let stale = stale_report(&tracker, &documents);
+        assert_eq!(stale.documents_covered, 1);
+        assert!(
+            !stale.is_ready(),
+            "a clean audit run cannot erase a judgement it did not make"
+        );
+        assert!(
+            stale.stale[0]
+                .reason
+                .divergence()
+                .contains("the retry limit is 3 here and 5 in the code")
+        );
+        // And not after any number of further runs.
+        for turn in 4..8 {
+            audit
+                .run(&mut tracker, &documents, at(turn))
+                .expect("audits");
+        }
+        assert!(!stale_report(&tracker, &documents).is_ready());
+
+        // Only a human's explicit resolution ends it.
+        tracker
+            .resolve_finding(
+                DOC,
+                id,
+                "the intent is right; ticket filed",
+                &human(),
+                at(9),
+            )
+            .expect("a human resolves it");
+        assert!(stale_report(&tracker, &documents).is_ready());
+    }
+
+    #[test]
+    fn ori_p1_026_a_filed_finding_survives_the_next_audit_run_on_a_document_that_names_no_path() {
+        let documents = corpus("Retries stop after three attempts.\n");
+        let audit = DriftAudit::new(code());
+        let mut tracker = FreshnessTracker::new();
+        DriftAudit::file_finding(
+            &mut tracker,
+            DOC,
+            "retries stop after five in the code",
+            at(2),
+        )
+        .expect("files");
+        assert!(!stale_report(&tracker, &documents).is_ready());
+        let report = audit.run(&mut tracker, &documents, at(3)).expect("audits");
+        assert_eq!(report.documents[0].outcome, AuditOutcome::NothingChecked);
+        assert!(!stale_report(&tracker, &documents).is_ready());
+        assert_eq!(tracker.divergences(DOC).len(), 1);
+    }
+
+    #[test]
+    fn ori_p1_026_a_filed_finding_is_not_overwritten_by_a_path_divergence_and_outlives_its_repair()
+    {
+        let mut documents = corpus("See `scripts/ghost.sh`.\n");
+        let audit = DriftAudit::new(code());
+        let mut tracker = FreshnessTracker::new();
+        let id = DriftAudit::file_finding(
+            &mut tracker,
+            DOC,
+            "SEMANTIC: the retry limit is 3 here and 5 in the code",
+            at(1),
+        )
+        .expect("files");
+
+        // A run that also finds a missing path: both stand.
+        audit.run(&mut tracker, &documents, at(2)).expect("audits");
+        let stale = stale_report(&tracker, &documents);
+        assert!(!stale.is_ready());
+        let line = stale.stale[0].reason.divergence();
+        assert!(line.contains("SEMANTIC: the retry limit"), "{line}");
+        assert!(line.contains("scripts/ghost.sh"), "{line}");
+        let standing = tracker.divergences(DOC);
+        assert_eq!(
+            standing.iter().map(|d| d.origin).collect::<Vec<_>>(),
+            [DivergenceOrigin::Audit, DivergenceOrigin::Filed],
+            "the origins are kept apart"
+        );
+        assert_eq!(standing[1].id, Some(id));
+
+        // The path is fixed and the audit re-runs: its own finding is cleared,
+        // the filed one is not, and readiness does not read true.
+        documents.insert(DOC.to_owned(), "See `scripts/gates.sh`.\n".to_owned());
+        audit.run(&mut tracker, &documents, at(3)).expect("audits");
+        let stale = stale_report(&tracker, &documents);
+        assert!(
+            !stale.is_ready(),
+            "readiness must not read true without a human having seen the finding"
+        );
+        assert_eq!(
+            tracker
+                .divergences(DOC)
+                .iter()
+                .map(|d| d.origin)
+                .collect::<Vec<_>>(),
+            [DivergenceOrigin::Filed]
+        );
+        assert!(
+            stale.stale[0]
+                .reason
+                .divergence()
+                .contains("SEMANTIC: the retry limit"),
+        );
+    }
+
+    #[test]
+    fn ori_p1_026_several_findings_stand_on_one_document_and_each_is_resolved_by_name() {
+        let documents = corpus("See `scripts/gates.sh`.\n");
+        let mut tracker = FreshnessTracker::new();
+        DriftAudit::new(code())
+            .run(&mut tracker, &documents, at(1))
+            .expect("audits");
+        let first =
+            DriftAudit::file_finding(&mut tracker, DOC, "first finding", at(2)).expect("files");
+        let second =
+            DriftAudit::file_finding(&mut tracker, DOC, "second finding", at(3)).expect("files");
+        assert_ne!(first, second);
+        let line = stale_report(&tracker, &documents).stale[0]
+            .reason
+            .divergence();
+        assert!(
+            line.contains("first finding") && line.contains("second finding"),
+            "{line}"
+        );
+
+        tracker
+            .resolve_finding(DOC, first, "code is right; spec updated", &human(), at(4))
+            .expect("resolves");
+        let stale = stale_report(&tracker, &documents);
+        assert!(!stale.is_ready(), "the second still stands");
+        let line = stale.stale[0].reason.divergence();
+        assert!(
+            line.contains("second finding") && !line.contains("first finding"),
+            "{line}"
+        );
+        tracker
+            .resolve_finding(DOC, second, "ticket filed", &human(), at(5))
+            .expect("resolves");
+        assert!(stale_report(&tracker, &documents).is_ready());
+    }
+
+    #[test]
+    fn ori_p1_026_only_a_human_resolves_a_finding_and_a_refusal_changes_nothing() {
+        let documents = corpus("See `scripts/gates.sh`.\n");
+        let mut tracker = FreshnessTracker::new();
+        DriftAudit::new(code())
+            .run(&mut tracker, &documents, at(1))
+            .expect("audits");
+        let id = DriftAudit::file_finding(&mut tracker, DOC, "a finding", at(2)).expect("files");
+
+        let refused = tracker
+            .resolve_finding(DOC, id, "looked fine", &agent(), at(3))
+            .expect_err("an agent cannot resolve a finding");
+        assert_eq!(refused, FreshnessError::NotAHuman { kind: "agent" });
+        let refused = tracker
+            .resolve_finding(DOC, id, "looked fine", &Actor::System, at(3))
+            .expect_err("the engine cannot resolve a finding");
+        assert_eq!(refused, FreshnessError::NotAHuman { kind: "system" });
+        assert_eq!(
+            tracker
+                .resolve_finding(DOC, id, "  ", &human(), at(3))
+                .expect_err("a blank resolution is refused"),
+            FreshnessError::BlankResolution
+        );
+        assert!(matches!(
+            tracker.resolve_finding("spec/PRD.md", id, "x", &human(), at(3)),
+            Err(FreshnessError::UnknownFinding { .. })
+        ));
+        assert!(
+            !stale_report(&tracker, &documents).is_ready(),
+            "none of the refusals resolved it"
+        );
+
+        let resolved = tracker
+            .resolve_finding(
+                DOC,
+                id,
+                "the code is right; the spec is updated",
+                &human(),
+                at(4),
+            )
+            .expect("a human resolves it");
+        assert_eq!(resolved.id, id);
+        assert_eq!(resolved.description, "a finding");
+        assert_eq!(resolved.filed_at, at(2));
+        assert_eq!(resolved.resolved_at, at(4));
+        assert_eq!(resolved.resolved_by, human());
+        assert!(matches!(
+            tracker.resolve_finding(DOC, id, "again", &human(), at(5)),
+            Err(FreshnessError::UnknownFinding { .. })
+        ));
+    }
+
+    #[test]
+    fn ori_p1_033_every_freshness_error_carries_a_methodology_ref_that_resolves() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let index = SectionIndex::from_repository(&repo).expect("the committed index reads");
+        let samples = [
+            FreshnessError::NotAHuman { kind: "agent" },
+            FreshnessError::UnknownFinding {
+                path: "p".to_owned(),
+                id: FreshnessTracker::new().file_finding("p", "d", at(1)),
+            },
+            FreshnessError::BlankResolution,
+        ];
+        for error in samples {
+            let reference = error.methodology_ref();
+            assert!(reference.resolves(), "{reference}");
+            assert!(
+                index.contains(&reference.section.to_string()),
+                "{reference}"
+            );
+            assert!(!error.to_string().is_empty());
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Repair round, S1: nothing compared, nothing verified
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ori_p1_026_a_document_that_names_no_path_is_not_stamped_verified() {
+        let documents = corpus("Retries stop after three attempts.\n");
+        let mut tracker = FreshnessTracker::new();
+        let report = DriftAudit::new(code())
+            .run(&mut tracker, &documents, at(1))
+            .expect("audits");
+        assert_eq!(report.documents[0].outcome, AuditOutcome::NothingChecked);
+        assert_eq!(report.documents[0].references_checked, 0);
+        assert_eq!(report.nothing_checked().count(), 1);
+        assert_eq!(tracker.tracked_count(), 0, "no verification was recorded");
+        let stale = stale_report(&tracker, &documents);
+        assert!(!stale.is_ready());
+        assert!(matches!(stale.stale[0].reason, StaleReason::NeverVerified));
+        // Its freshness is as it was: a documentation agent's review verifies it.
+        tracker.record_verification(DOC, at(2), "Retries stop after three attempts.\n");
+        assert!(stale_report(&tracker, &documents).is_ready());
+        DriftAudit::new(code())
+            .run(&mut tracker, &documents, at(3))
+            .expect("audits");
+        assert!(
+            stale_report(&tracker, &documents).is_ready(),
+            "a later run leaves the review's verification alone"
+        );
+    }
+
+    #[test]
+    fn ori_p1_026_a_document_whose_every_claim_points_into_a_deleted_top_level_directory_is_not_verified()
+     {
+        let documents = corpus("Run `scripts/gates.sh` before every push.\n");
+        let without_scripts =
+            CodeView::from_paths(["crates/ori-memory/src/lib.rs", "spec/LLD.md", "Cargo.toml"]);
+        let mut tracker = FreshnessTracker::new();
+        let report = DriftAudit::new(without_scripts)
+            .run(&mut tracker, &documents, at(1))
+            .expect("audits");
+        assert_eq!(report.documents[0].outcome, AuditOutcome::NothingChecked);
+        assert!(!stale_report(&tracker, &documents).is_ready());
+    }
+
+    #[test]
+    fn ori_p1_026_a_document_edited_to_drop_its_dangling_path_withdraws_the_audits_finding() {
+        let broken = corpus("See `crates/ori-memory/src/ghost.rs`.\n");
+        let mut tracker = FreshnessTracker::new();
+        let audit = DriftAudit::new(code());
+        audit.run(&mut tracker, &broken, at(1)).expect("audits");
+        assert_eq!(tracker.divergences(DOC).len(), 1);
+        // The path is dropped and nothing else is claimed.
+        let edited = corpus("The audit lives in the memory crate.\n");
+        let report = audit.run(&mut tracker, &edited, at(2)).expect("audits");
+        assert_eq!(report.documents[0].outcome, AuditOutcome::NothingChecked);
+        assert!(
+            tracker.divergences(DOC).is_empty(),
+            "the finding the document no longer supports is withdrawn"
+        );
+        let stale = stale_report(&tracker, &edited);
+        assert!(
+            matches!(stale.stale[0].reason, StaleReason::NeverVerified),
+            "and the document is honestly unverified, not divergent"
+        );
     }
 }
