@@ -337,13 +337,23 @@ pub enum PullRequestState {
 
 /// The outcome of one named check on a pull request: AICD §13,
 /// [`VcsHost::set_check`].
+///
+/// **Fail closed.** [`CheckOutcome::Passed`] is the host's explicit statement
+/// of success and nothing else. Every other host conclusion maps to
+/// [`CheckOutcome::Failed`] (the check finished without success: failure,
+/// cancelled, skipped, timed out, neutral, stale, action required) or to
+/// [`CheckOutcome::Pending`] (it has not finished, or the adapter cannot tell
+/// whether it has), never to `Passed`. A conclusion the adapter does not
+/// recognise is `Failed`. There is deliberately no `Cancelled`, `Skipped` or
+/// `Unknown` variant: a caller that waits for `Passed` must not have a
+/// fourth way to be told something other than "pass".
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CheckOutcome {
-    /// Not finished.
+    /// Not finished, or the adapter cannot tell.
     Pending,
-    /// Passed.
+    /// The host said it succeeded, explicitly.
     Passed,
-    /// Failed.
+    /// Finished without success, or not recognised.
     Failed,
 }
 
@@ -421,9 +431,10 @@ pub struct WebhookSpec {
 /// The sketch elides every argument but one. These are the smallest honest
 /// ones: a branch is named by text, a pull request by [`PullRequestRef`]. Not
 /// decided: how a host that has no per-identity tokens answers
-/// [`VcsHost::identity_token`], pagination of check lists, whether
-/// [`VcsHost::merge`] returns the merge commit, merge strategy, and the
-/// signature scheme of [`WebhookSpec`].
+/// [`VcsHost::identity_token`], how the host's own pagination is followed
+/// (that the whole list is read is decided: see [`VcsHost::pr_status`]),
+/// whether [`VcsHost::merge`] returns the merge commit, merge strategy, and
+/// the signature scheme of [`WebhookSpec`].
 pub trait VcsHost {
     /// A token limited to what `identity`'s role may do on this host
     /// (AICD §17). The adapter obtains the credential from the broker; it is
@@ -461,11 +472,28 @@ pub trait VcsHost {
         body: &str,
     ) -> Result<PullRequestRef, AdapterError>;
 
-    /// Where `pr` stands, with the checks the host holds for it.
+    /// Where `pr` stands, with its head commit and the checks the host holds
+    /// for that head.
+    ///
+    /// An implementation owes two things, both so that a caller waiting for
+    /// every check to be [`CheckOutcome::Passed`] cannot be told "yes" by
+    /// mistake:
+    ///
+    /// - **Fail closed.** A host conclusion other than an explicit success
+    ///   maps to [`CheckOutcome::Failed`] or [`CheckOutcome::Pending`], never
+    ///   to `Passed` (see [`CheckOutcome`]).
+    /// - **All of it or an error.** `checks` holds every check the host has
+    ///   for `head`: the implementation follows the host's pagination to the
+    ///   end, or returns [`AdapterError::Unavailable`]. It never returns a
+    ///   partial page, because a check missing from the list looks to a
+    ///   caller like a check that does not exist. An empty `checks` says the
+    ///   host holds none for `head`; it is not a pass. Which checks must be
+    ///   present is the caller's rule (the merge queue's), not the adapter's.
     ///
     /// # Errors
     ///
-    /// [`AdapterError`] when the host declines or is unavailable.
+    /// [`AdapterError`] when the host declines or is unavailable, or when the
+    /// complete list could not be read.
     fn pr_status(
         &self,
         token: &ScopedToken,
@@ -684,15 +712,25 @@ pub trait Notification {
 // ---------------------------------------------------------------------------
 
 /// Where a CI run stands: `spec/API_SPEC.md` section 4, [`Ci::status`].
+///
+/// **Fail closed**, as [`CheckOutcome`] is. [`CiRunStatus::Succeeded`] is the
+/// system's explicit statement of success and nothing else. A run that was
+/// cancelled, skipped, timed out, ended neutral or in a state the adapter does
+/// not recognise is [`CiRunStatus::Failed`]; a run not yet started or not yet
+/// finished is [`CiRunStatus::Queued`] or [`CiRunStatus::Running`]. There is
+/// deliberately no `Cancelled` variant: it would be a way to say "not
+/// succeeded" that a caller testing for `Succeeded` must remember to treat as
+/// a failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CiRunStatus {
     /// Waiting to start.
     Queued,
-    /// Running.
+    /// Running, or the adapter cannot tell that it has finished.
     Running,
-    /// Finished and succeeded.
+    /// The system said it succeeded, explicitly.
     Succeeded,
-    /// Finished and failed.
+    /// Finished without success (failed, cancelled, skipped, timed out) or
+    /// not recognised.
     Failed,
 }
 
@@ -727,11 +765,14 @@ pub trait Ci {
     /// [`AdapterError`] when the system declines or is unavailable.
     fn status(&self, token: &ScopedToken, run: &CiRunRef) -> Result<CiRunStatus, AdapterError>;
 
-    /// The files `run` produced.
+    /// The files `run` produced: all of them, following the system's
+    /// pagination to the end, or an error; never a partial list, for the
+    /// reason given at [`VcsHost::pr_status`].
     ///
     /// # Errors
     ///
-    /// [`AdapterError`] when the system declines or is unavailable.
+    /// [`AdapterError`] when the system declines or is unavailable, or when
+    /// the complete list could not be read.
     fn artifacts(
         &self,
         token: &ScopedToken,
