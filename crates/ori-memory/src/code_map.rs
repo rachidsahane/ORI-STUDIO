@@ -9506,6 +9506,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ori_t_0036_the_files_seen_invariant_holds_with_every_pre_skip_reason_nested() {
+        /// Whether this process is root, found with no call this crate does
+        /// not already make: a path this process created is owned by its
+        /// effective user, and root is user 0. Only ever asked about a path
+        /// the test itself created.
+        fn runs_as_root(created_by_this_test: &Path) -> bool {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(created_by_this_test).is_ok_and(|metadata| metadata.uid() == 0)
+        }
+
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("invariant-nested");
         let guard = DropGuard(dir.clone());
@@ -9566,6 +9575,15 @@ mod tests {
         if locked_is_unreadable {
             expected.push(("deep/locked", SkipReason::Unreadable(String::new())));
         } else {
+            // Only a process that is root may skip the unreadable half: any
+            // other process on which chmod 000 did not restrict access (one
+            // holding CAP_DAC_OVERRIDE, say) is a broken precondition, and
+            // fails here as it always did. Asked after the mode is put back,
+            // so the failure leaves nothing locked.
+            assert!(
+                runs_as_root(&locked),
+                "this test needs a process the directory mode applies to"
+            );
             eprintln!(
                 "chmod 000 did not restrict access here (a process that runs as root is \
                  bound by no file mode); the unreadable half is not exercised, and \
