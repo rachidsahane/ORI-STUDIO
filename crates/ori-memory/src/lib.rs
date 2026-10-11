@@ -10,6 +10,7 @@
 pub mod barrier;
 pub mod citation;
 pub mod code_map;
+pub mod drift;
 pub mod freshness;
 pub mod indexer;
 pub mod oplog;
