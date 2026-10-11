@@ -650,3 +650,21 @@ Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`.
 | ORI-T-0144 | An evidence blob's `content_ref` is parsed from the `memory.evidence_stored` event and handed out unvalidated, so a planted event names any absolute path, and the first caller that reads evidence by reference reads that file. It should be resolved under the product's evidence directory and refused otherwise | `crates/ori-memory/src/barrier.rs` | 2, `spec/RISK_MAP.md` (`barrier.rs`) | ready | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 62, 64, 67 to 70 and 77. The next free identifier is ORI-T-0145.
+
+---
+
+## ORI-T-0137 widened and claimed (78)
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+ORI-T-0058's independent review found a governance defect the ticket created: `AgentIdentity` and its creation path, `ScopedToken` and `VcsHost::merge` now live in `crates/ori-core/src/adapters.rs` and `crates/ori-core/src/adapters/identity.rs`, which `spec/RISK_MAP.md` tiers 1 ("crates/ori-core (other types)"), while they came from `crates/ori-broker`, tier 2 ("Credentials"), and `spec/SECURITY_NOTES.md` "Tier 2 modules" lists `ori-broker` (all) for "Credentials and identities". `spec/adr/ADR-0002-single-operator.md` says no module is moved out of tier 2 to avoid it. ORI-T-0058 does not merge before this is answered.
+
+ORI-T-0137 already held the half of this about `VcsHost::merge`. It is widened to the whole: tier both `ori-core` adapter files at 2 in `spec/RISK_MAP.md` and list them in `spec/SECURITY_NOTES.md`'s tier 2 table, and correct any statement in `spec/adr/ADR-0002-single-operator.md` the move makes false. All three are tier 2 documents, so the operator merges it.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 78 | ORI-T-0137, the adapter files tiered 2 | `spec/RISK_MAP.md`, `spec/SECURITY_NOTES.md`, `spec/adr/ADR-0002-single-operator.md` | 2 | `docs/ORI-T-0137-adapters-tier-2` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+No other claim holds a path under `spec/`. Claim 69 is noted to include `crates/ori-core/src/adapters/identity.rs`, which ORI-T-0058's split clause allowed and the review asked to be recorded (its note N8).
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 70, 77 and 78. The next free identifier is ORI-T-0145.
