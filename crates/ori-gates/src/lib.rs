@@ -20,8 +20,9 @@ pub mod gate;
 /// (AICD §14, `spec/PRD.md` section 4.11, O-06).
 pub mod liveness;
 
-/// The methodology's machine-readable section index and its generator (AICD §39).
-/// The detector that makes CLAUDE.md's never-modify-a-test rule real (AICD §14).
+/// The modified-test detector: reports an existing test that a diff modified,
+/// weakened or removed, the check gate 5 of `spec/CI_CD.md` section 1 names
+/// (AICD §14).
 pub mod modified_tests;
 
 /// The prover: a gate is proven only by a clean pass and a failure on its
@@ -34,11 +35,12 @@ pub mod prover;
 /// (`spec/LLD.md` section 2).
 pub mod runner;
 
+/// The methodology's machine-readable section index and its generator (AICD §39).
 pub mod sections;
 
-/// The index of this repository's own specification and the reader that
-/// resolves prose references to it (AICD §39).
 /// Gate 12: the significance labeler (AICD §15).
 pub mod significance;
 
+/// The index of this repository's own specification and the reader that
+/// resolves prose references to it (AICD §39).
 pub mod spec_refs;
