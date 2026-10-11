@@ -8,6 +8,7 @@
 | Question | May the MCP server expose the tools of the operator's own MCP servers to the roles the operator names, given that `spec/LLD.md`'s `ori-mcp` row forbids exposing "a tool not in API_SPEC" and `spec/API_SPEC.md` section 3 forbids giving agents file-write tools to `spec/` or `ops/`? |
 | Recommendation | Yes, under four conditions. (1) Read LLD's "must not" as bounding Ori's own eleven tools. (2) Add a paragraph to API_SPEC section 3. Proxied tools exist only for servers the operator added to the project, and only for the roles in `exposed_to_roles`. They are named `<server>__<tool>` and return untrusted text blocks only. They never carry a credential of Ori's. (3) State in `spec/ENV_SETUP.md` section 5 that exposing a server to a role can widen that role beyond the manifest, so exposure is an operator act, recorded as an event. (4) Keep API_SPEC section 3's write rule binding on Ori's own tools |
 | What is blocked | Slice S6, and with it ORI-P1-038. The host (H1, H2) and every other slice proceed |
+| State | Answered by the operator in session on 2026-10-11: **yes, with the four conditions of the recommendation**. LLD's rule bounds Ori's own eleven tools; proxied tools are named `<server>__<tool>`, exist only for servers the operator added and roles the operator listed, return untrusted text only, and carry no credential of Ori's; API_SPEC section 3 and ENV_SETUP section 5 say so |
 
 ### Context
 

@@ -897,3 +897,24 @@ Gate 7 judges `notify`'s dependency graph in CI on the push that carries this se
 Written by the lead on 2026-10-11. The plan is `ops/batch-10-plan.md`: the lead's decisions D1 to D4, D8 and D9, twelve slices, and seven prerequisites outside `ori-mcp`. Nothing is claimed yet. The first slice, W0 (the shared wire), waits on the MCP specification text, which its ticket must supply. Slice S1 waits on PD-1 (RISK_MAP rows for the new files) because `ports.rs`, `server.rs` and `tools/**` have no tier until then, and ORI-T-0058's review showed what landing code on an untiered path costs. The four questions are with the operator: [[E-0010]], [[E-0011]], [[E-0012]], [[E-0013]].
 
 **State after this section:** unchanged. The claims held are 20, 81 and 86. The next free identifier is ORI-T-0156.
+
+---
+
+## E-0010 to E-0013 answered; ORI-T-0156 to ORI-T-0158 allocated; claims 87 and 89
+
+Written by the lead on 2026-10-11 under [[R31]]. The operator answered all four in session, each as recommended (State lines in the escalation files).
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0156 | Write the four answers and the batch 10 decisions into the specification: API_SPEC sections 2 and 3, LLD's `ori-mcp` row, ENV_SETUP section 5, SECURITY_NOTES, and a **new** RISK_MAP row for `crates/ori-mcp/src/scopes.rs, ports.rs, server.rs, tools/` at 2 plus `protocol.rs` at 1. This is plan prerequisites PD-1 and PD-2 together. The existing abstract row `crates/ori-mcp (server tool scopes)` stays as it is: gate 12's test `ori_t_0044_three_risk_map_tier_two_rows_are_recorded_as_unresolved_and_not_silently` counts it as one of exactly three unresolved rows, and changing it would be a `test_modified` | `spec/API_SPEC.md`, `spec/LLD.md`, `spec/ENV_SETUP.md`, `spec/SECURITY_NOTES.md`, `spec/RISK_MAP.md` | 2 | dispatched, claim 87; documentation role | 2026-10-11 |
+| ORI-T-0157 | Restate ORI-T-0156's new tier 2 row in gate 12's `RISK_MAP_TIER_TWO`, on ORI-T-0156's branch: the pattern of ORI-T-0137 and ORI-T-0145 | `crates/ori-gates/src/significance.rs` | 1 by path; carried with ORI-T-0156, so tier 2 | after ORI-T-0156; claim 88 reserved | 2026-10-11 |
+| ORI-T-0158 | Batch 10 slice W0: the shared MCP wire (`protocol.rs`), on MCP 2025-11-25, which the lead fetched from the specification's repository because the specification's site is outside this container's network policy | `crates/ori-mcp/Cargo.toml`, `src/lib.rs`, `src/protocol.rs`, `Cargo.lock` | 1 | dispatched, claim 89 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 87 | ORI-T-0156 | as above | 2 | `docs/ORI-T-0156-mcp-spec` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 89 | ORI-T-0158 | as above | 1 | `feat/ORI-T-0158-mcp-wire` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Claim 87 and claim 89 are disjoint, and both are disjoint from every held claim (20, 81, 86). No other claim holds `Cargo.lock` or any path under `crates/ori-mcp/`.
+
+**State after this section:** the claims held are 20, 81, 86, 87 and 89; claim 88 is reserved for ORI-T-0157. The next free identifier is ORI-T-0159.

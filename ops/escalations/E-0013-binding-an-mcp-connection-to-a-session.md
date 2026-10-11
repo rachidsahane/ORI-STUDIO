@@ -8,6 +8,7 @@
 | Question | In phase 1, may a session's MCP identity be bound by handing that session alone a per-session local endpoint, accepting the residual risk below? |
 | Recommendation | Yes, on six conditions the documentation role records in `spec/SECURITY_NOTES.md`. (i) The endpoint sits in a per-session directory of mode 0700. (ii) No secret is in its path. (iii) Tier 2 tickets refuse to start in worktree-only mode. This is specified (`spec/SECURITY_NOTES.md`, "Container runtime unavailable"; ORI-P1-032) but not yet built, so the condition is a dependency, not a fact. (iv) Container mode mounts only that session's endpoint (phase 2). (v) Once the engine has a cryptographic random source, which it needs for identifiers anyway, the endpoint name becomes unguessable. (vi) A later `ori-memory` ticket adds a role lookup to the scope enforcer, so tools other than the memory tools do not rest on the engine's role alone |
 | What is blocked | PE1 only. Every slice in `ori-mcp` is tested over in-memory channels and proceeds |
+| State | Answered by the operator in session on 2026-10-11: **accepted for phase 1, on the six conditions of the recommendation**, which the documentation role records in SECURITY_NOTES |
 
 ### Context
 

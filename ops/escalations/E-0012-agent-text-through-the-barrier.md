@@ -8,6 +8,7 @@
 | Question | `barrier::submit_report` accepts six record kinds and is the only public entry to the barrier. How do agent plans, escalation text, and the "run and audit" reports API_SPEC names reach storage through it? |
 | Recommendation | (1) `barrier.rs` gains one public entry that returns the sealed sanitized field, and the server's ports take that type, so barrier passage is checked at compile time. This is tier 2, after claim 81 releases `barrier.rs`. (2) `aicd_report.kind` is one of `closing`, `blocked`, `qa_run`, `drift_audit`, mapped onto the existing record kinds (closing report, blocked report, finding, finding), as `scope.rs` already maps QA runs. `content` is an object of named string fields, listed per kind from `templates/closing-report.md` and `templates/blocked-report.md`. (3) Kinds by role: coder {closing, blocked}; documentation {closing, drift_audit, blocked}; qa {qa_run, blocked}; operations {blocked} until phase 4 |
 | What is blocked | Slice S4 beyond `closing` and `blocked`, which proceed now; slice S9 |
+| State | Answered by the operator in session on 2026-10-11: **a sealed public barrier entry, and four report kinds** (`closing`, `blocked`, `qa_run`, `drift_audit`) mapped onto existing record kinds with an allowed list per role, as recommended |
 
 ### Context
 
