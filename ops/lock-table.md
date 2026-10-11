@@ -832,3 +832,24 @@ Written by the lead at dispatch, 2026-10-11, under [[R31]]. Claim 79 is released
 Disjoint from every held claim (20, 64, 81, 82, 85). Its test changes are the two [[R42]] authorizes, and no others. The ticket forbids a new file under `crates/ori-core/src/adapters/`: `spec/RISK_MAP.md` tiers only `adapters.rs` and `adapters/identity.rs`, and ORI-T-0058's review found that kind of move landing types on an untiered path. ORI-T-0149, ORI-T-0150 and ORI-T-0151 wait on this claim.
 
 **State after this section:** the claims held are 20, 64, 81, 82, 85 and 86. The next free identifier is ORI-T-0152.
+
+---
+
+## Claim 85 integrated; ORI-T-0152 and ORI-T-0153 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review | Verified |
+|---|---|---|---|
+| 85 | ORI-T-0147, a legend for ARCHITECTURE's overview diagram | The lead read the diff: one paragraph under the diagram, saying its arrows are runtime and data-flow interactions and pointing to `spec/LLD.md` section 2 for crate dependencies. No edge changed. Its agent checked every edge against the manifests and confirmed the ticket's claims, with one nuance: `acp.rs` sends `mcpServers` in `session/new`, but the list is empty, a named seam until `ori-mcp` exists | its agent: `cargo test -p ori-gates` 191 passed, gate 13 clean |
+
+From the same report:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0152 | `spec/LLD.md` section 2's graph draws `INT` in the `--> STORE` fan-in, but `crates/ori-integrations/Cargo.toml` depends only on `ori-core`, and the same table says `ori-integrations` must not read the store. The graph is wrong about `ori-integrations`; every other drawn edge agrees with the manifests. First noted under claim 65 | `spec/LLD.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0153 | `crates/ori-integrations/Cargo.toml`'s `description` still says "Adapter traits, reference adapters ...", while the traits are declared in `ori-core` | `crates/ori-integrations/Cargo.toml` | 1 | ready; best carried by ORI-T-0059, the next ticket in that crate | 2026-10-11 |
+
+For batch 10's plan: the runtime does not call the MCP server. It tells the agent where the server is (ACP `session/new`, `mcpServers`), and the agent calls it. As built, that list is empty.
+
+**State after this section:** the claims held are 20, 64, 81, 82 and 86. The next free identifier is ORI-T-0154.
