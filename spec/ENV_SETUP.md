@@ -66,6 +66,8 @@ All identities run in auto mode: no interactive prompts; the row is what they re
 | implementor (bootstrap only) | Read; write `spec/`, `ops/`, `.github/`, `templates/`, `scripts/aicd/` on a bootstrap branch | None | None | None | Create backlog | Write on bootstrap branch | All | Installation token scoped to the bootstrap branch |
 | operator (human) | Everything | Everything | Everything | Approves releases | Everything | Everything | Everything | Owns the keychain |
 
+Exposing a server of the operator's to a role can widen that role beyond this manifest. A tool of a server added with `project.mcp.add` reaches whatever that server reaches, which may be a file, a repository or a system that the role's row above denies it, and Ori cannot tell which (API_SPEC section 3, "Proxied tools"). Exposure is therefore the operator's act, never an agent's and never a default: the operator makes it with `exposed_to_roles` when adding the server, and it is recorded as an event (`mcp.server_added`, `mcp.server_removed`; API_SPEC section 2).
+
 ## 6. Forbidden actions (the test, AICD §23 G3)
 
 One per identity, attempted at launch, on every permission change, and in the release pipeline; each must be refused and the refusal recorded:
