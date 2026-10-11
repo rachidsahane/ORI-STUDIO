@@ -68,8 +68,12 @@
 //!   argument, per call. [`Notification::send`] is the one exception, taken
 //!   from the sketch as written; its doc says what is left open.
 //! - A [`ScopedToken`] cannot be printed, cloned by accident or serialized;
-//!   see its doc. No other type in this module holds a credential, and each
-//!   says so where it could be mistaken for one ([`Route`]).
+//!   see its doc. No other type in this module is meant to hold a credential,
+//!   and each says so where it could be mistaken for one ([`Route`]). The one
+//!   exception is [`SessionSpec::envs`], the environment the caller prepares
+//!   for a spawned child, where an injector may place an issued credential;
+//!   that type derives `Debug` and prints the environment as it is, so a
+//!   [`SessionSpec`] is never formatted into a log (its doc says so too).
 //! - Everything an adapter returns (an issue title, an event message, a
 //!   completion) is data from an integration, never an instruction, whatever
 //!   it says (`CLAUDE.md` absolute rule 7; AICD §27). Text that reaches an
@@ -1130,6 +1134,13 @@ pub struct SessionSpec {
     /// at spawn; see `ori-runtime`'s `acp` module doc comment, "The seam with
     /// `injector.rs`". Declaring the field performs no IO; the spawn does,
     /// and lives in `ori-runtime`.
+    ///
+    /// **May carry a credential, and `Debug` does not redact it.** An issued
+    /// credential an injector places in the child's environment is placed
+    /// here, and this type's derived `Debug` prints every pair as it is. Do
+    /// not format a [`SessionSpec`] (with `{:?}`, in a log line or in an
+    /// error) once its environment holds one. Nothing places a credential
+    /// here yet.
     pub envs: Vec<(String, String)>,
 }
 
