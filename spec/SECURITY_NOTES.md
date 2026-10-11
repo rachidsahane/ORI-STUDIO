@@ -56,6 +56,7 @@ Permissions are a function of (actor, role, resource, action) evaluated in `ori-
 | Module | Why |
 |---|---|
 | `ori-core` (state machines, the permission function) | Control structure and the authorization decision itself |
+| `ori-core::adapters` (`adapters.rs`, `adapters/identity.rs`) | Identities and how they are created, the scoped credential type (`ScopedToken`) an adapter receives per call, and the adapter traits, among them the contract of `VcsHost::merge` |
 | `ori-broker` (all) | Credentials and identities |
 | `ori-orchestrator::merge_queue` | The only merge path |
 | `ori-orchestrator::lifecycle` (tier and category rules) | Control structure |

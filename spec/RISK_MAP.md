@@ -5,6 +5,7 @@ Every module of the repository with its tier and the reason. Maintained with the
 | Path | Tier | Reason |
 |---|---|---|
 | crates/ori-core (state machines, permission function) | 2 | Control structure |
+| crates/ori-core/src/adapters.rs, adapters/identity.rs | 2 | Identities, credentials, the merge method's contract |
 | crates/ori-core (other types) | 1 | |
 | crates/ori-store/src/event_log.rs, migrations/ | 2 | Audit trail, data integrity |
 | crates/ori-store (projections) | 1 | Rebuildable |
