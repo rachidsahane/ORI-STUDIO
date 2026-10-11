@@ -548,3 +548,20 @@ Written by the lead on 2026-10-11 under [[R31]].
 | ORI-T-0139 | Code docs still quote the old rule "`system` only for scheduled triggers and watchers", some arguing from it: `crates/ori-core/src/types.rs`, `crates/ori-core/src/ticket.rs` (`by_human`), `crates/ori-store/src/event_log.rs`, `crates/ori-memory/src/barrier.rs`, `crates/ori-memory/src/scope.rs`. No behaviour changes; each conclusion was checked by ORI-T-0130's agent and still holds | those five files, docs only | 2: four of the five are tier 2 paths | ready, after claims 61 and 70 release `barrier.rs` and `ticket.rs` | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 61 to 64, 67 to 70 and 72 to 76. The next free identifier is ORI-T-0140.
+
+---
+
+## Claims 63 and 74: integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. "Integrated" means on `claude/sweet-maxwell-jkaiie`, reviewed and verified there; it is not on `main`. A claim is released here when its work is integrated, because nothing else in this session will touch its modules; it is released on `main` only when the operator merges.
+
+| # | Ticket | Integrated as | Review | Verified by the lead on the session branch | Tier, and who merges to `main` |
+|---|---|---|---|---|---|
+| 63 | ORI-T-0045, the prover | 4639bc3, 31274fa (cherry-picked from 4fe2554, 8e0ee60) | Independent review on Opus 5.5: nothing blocking, two should-fix (a stale proof could be attached to a changed gate; a false claim in `revoke`'s doc) and four notes, all repaired in attempt 2 and re-checked by the lead | `cargo test -p ori-gates`: 161 passed; `cargo clippy -p ori-gates --all-targets -D warnings`: clean | **2**: the operator |
+| 74 | ORI-T-0075, `fixtures/inert-gate` | 9be53c7 (from e6aa6c5) | The lead: a valid workflow whose only triggers name a branch the fixture never has, and a liveness record documented in its README | `cargo test -p ori-gates`: 138 passed before the prover landed; `scripts/secret-scan.sh`: no finding, 378 files, 670 history blobs | 1 |
+
+**Two lead errors the ORI-T-0075 coder found, recorded because they reached four tickets.** The fixture tickets' standing facts offered the commit type `test(fixtures):`, which gate 13 refuses (this repository's types are `feat`, `fix`, `docs`, `ci` and `chore`); and they told the fixture and documentation agents to share one cargo target directory, `/home/user/wt/shared-target`. `ori-gates`' repository-wide tests bake `CARGO_MANIFEST_DIR` in at compile time and cargo reused a test binary built in another worktree, so a test run there scans the other worktree's tree and can report green on a tree that does not contain the files under review. The coder saw 32 failures pointing at a removed worktree, which is how it surfaced. The three fixture coders still running were corrected in flight. ORI-T-0130's result was re-established by the lead from its own target directory on the session branch (138 passed). The repository clone was also shallow, so `scripts/secret-scan.sh` refused in every worktree; the lead unshallowed it.
+
+**ORI-P1-013 is not satisfied by ORI-T-0045.** "Proof stored with evidence refs" has no owner: ORI-T-0132.
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 72, 73, 75 and 76. The next free identifier is ORI-T-0140.
