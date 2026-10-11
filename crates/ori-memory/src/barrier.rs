@@ -1304,11 +1304,12 @@ fn parse_evidence(db: &ProductDb, event: &Event) -> Result<EvidenceBlob, Barrier
 /// "Reading a blob back", decision 3). A pure function of its arguments:
 /// reads no file.
 ///
-/// The product directory's name is compared as `submit_report` wrote it,
-/// through `Path::to_string_lossy`, so a name that is not valid UTF-8 still
-/// matches its own blobs. A `db` whose directory has no final component
-/// (it cannot be built from a product id that is a real name) names nothing:
-/// fail closed.
+/// The product directory's name is compared through `to_string_lossy`, the
+/// encoding `evidence_payload` wrote the string with. The name is the
+/// `&str` product id `ProductDb::open` was given, so it is valid UTF-8 and
+/// nothing is lost; only the prefix, which is not compared, can be anything.
+/// A `db` whose directory has no final component (a product id such as `..`)
+/// names nothing: fail closed.
 fn names_this_blobs_file(db: &ProductDb, evidence_id: &Id, content_ref: &str) -> bool {
     if content_ref.contains('\0') {
         return false;
@@ -2563,6 +2564,28 @@ mod tests {
         assert_eq!(blobs.len(), 1);
         assert_eq!(blobs[0].content_ref(), file);
         assert!(!file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0144_an_evidence_path_that_cannot_be_examined_fails_the_read_closed() {
+        let (_scratch, mut db) = fresh("unexaminable");
+        let submission = submit_one(&mut db, "RECORDODD", "EVIDENCEODD", "raw text");
+        let file = submission.evidence()[0].content_ref().to_path_buf();
+
+        // A regular file where the evidence directory belongs: the blob's
+        // path is then below a file, which `symlink_metadata` reports as an
+        // error other than "not found". Not a link, not absent: fail closed.
+        let evidence_dir = db.dir().join("evidence");
+        fs::remove_dir_all(&evidence_dir).expect("the evidence directory goes");
+        fs::write(&evidence_dir, "not a directory").expect("a file stands in its place");
+
+        let err = read_evidence(&mut db).expect_err("an unexaminable path is not read");
+        match &err {
+            BarrierError::Io { path, .. } => assert_eq!(path, &file),
+            other => panic!("expected Io, got {other}"),
+        }
+        assert_eq!(err.methodology_ref(), None, "an I/O failure is no refusal");
     }
 
     #[cfg(unix)]
