@@ -889,3 +889,11 @@ Gate 7 judges `notify`'s dependency graph in CI on the push that carries this se
 | ORI-T-0155 | The hook installer's link refusal does only one `read_link` with an exact name match, and only for the four managed hooks. Pass 3 reproduced two misses in a copy. (a) A chain, `pre-push -> relay -> post-commit`, installs, and the user's pre-push veto is silently lost. (b) An unmanaged hook linked to a managed one, `post-checkout -> post-merge`, makes every checkout record a false `post-merge` event into the spool the engine reads. Compare canonical paths, and scan every entry of the hooks directory for a link that resolves to a managed hook. Also, all from pass 3: `RefPoller::poll`'s `# Errors` omits `GitDirNotADirectory` and `UnsupportedRefStorage`; the hooks module doc does not state that a `.git` swapped during an install is still written through; two doc sentences are stale (hooks.rs around 66 to 73; the `Drop` doc's "this workspace does not set it", which the new `compile_error!` makes moot); a case-insensitive file system misses `Post-Commit`. **Must land before anything installs the hooks or reads the spool** (ORI-T-0055 and the engine) | `crates/ori-watch/src/hooks.rs`, `watcher.rs` | 1 | ready | 2026-10-11 |
 
 **State after this section:** the claims held are 20, 81 and 86. The next free identifier is ORI-T-0156.
+
+---
+
+## Batch 10 planned; E-0010 to E-0013 raised
+
+Written by the lead on 2026-10-11. The plan is `ops/batch-10-plan.md`: the lead's decisions D1 to D4, D8 and D9, twelve slices, and seven prerequisites outside `ori-mcp`. Nothing is claimed yet. The first slice, W0 (the shared wire), waits on the MCP specification text, which its ticket must supply. Slice S1 waits on PD-1 (RISK_MAP rows for the new files) because `ports.rs`, `server.rs` and `tools/**` have no tier until then, and ORI-T-0058's review showed what landing code on an untiered path costs. The four questions are with the operator: [[E-0010]], [[E-0011]], [[E-0012]], [[E-0013]].
+
+**State after this section:** unchanged. The claims held are 20, 81 and 86. The next free identifier is ORI-T-0156.
