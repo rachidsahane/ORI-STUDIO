@@ -314,6 +314,8 @@ version = "0.1.0"
 dependencies = [
  "ori-memory",
  "ori-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -20,3 +20,9 @@
 //! methodology binds the shape and the scopes; the ADR binds the wire format.
 //!
 //! Must not: expose a tool not in `spec/API_SPEC.md` (`spec/LLD.md` section 2).
+
+/// The MCP wire both halves of this crate share: JSON-RPC 2.0 framing and
+/// messages, the phase 1 MCP messages, version negotiation and the connection
+/// state machine, on MCP 2025-11-25 (AICD §8). It holds no scope, tool or
+/// policy.
+pub mod protocol;
