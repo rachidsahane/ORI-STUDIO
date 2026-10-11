@@ -168,8 +168,16 @@
 //!
 //! A search that reached its limit is a [`Note::SearchLimitReached`], not a
 //! count: the index cannot say how many more matched. A filtered-out
-//! candidate is neither cut nor noted: the existence of what a reader may not
-//! read is not told to them either.
+//! candidate is neither cut nor noted, and a package names no count of them.
+//!
+//! Two numbers from the product's whole log do reach a reader, and this
+//! cannot hide them: each record item's event `seq`, and the tip `seq` in
+//! the header. The log holds every ticket's records and every other kind of
+//! event, evidence events included, so a gap between two `seq`s, or a high
+//! tip, says only that other events exist, not what they are, whose they are
+//! or how many are records. What would count the out-of-scope records
+//! exactly, a record's ordinal among all the product's records
+//! (`crate::oplog::OplogEntry::position`), is not carried by an item.
 //!
 //! # What reaches a package that is not an item
 //!
@@ -514,10 +522,10 @@ impl From<IndexerError> for RetrievalError {
 pub enum Origin {
     /// The product's operational log.
     OperationalLog {
-        /// The `seq` of the `memory.record_created` event.
+        /// The `seq` of the `memory.record_created` event. It locates the
+        /// record in the product's log for the operator; see the module
+        /// doc for what a `seq` discloses.
         seq: u64,
-        /// The record's ordinal among the product's operational records.
-        position: usize,
     },
     /// The product's repository index.
     Index {
@@ -577,8 +585,8 @@ impl ItemProvenance {
 
     fn line(&self) -> String {
         let mut line = match &self.origin {
-            Origin::OperationalLog { seq, position } => format!(
-                "operational log of product {}, event seq {seq}, operational record {position}",
+            Origin::OperationalLog { seq } => format!(
+                "operational log of product {}, event seq {seq}",
                 self.product_id
             ),
             Origin::Index { path } => format!(
@@ -1623,10 +1631,7 @@ impl<'a> Retrieval<'a> {
                     score: 0.0,
                     name: String::new(),
                 },
-                origin: Origin::OperationalLog {
-                    seq: entry.seq(),
-                    position: entry.position(),
-                },
+                origin: Origin::OperationalLog { seq: entry.seq() },
             });
         }
     }
@@ -2666,12 +2671,12 @@ mod tests {
                 .date()
                 .unwrap_or_else(|| panic!("{} has no verification date", item.render()));
             match (item.candidate(), item.provenance().origin()) {
-                (Some(Candidate::Record(record)), Origin::OperationalLog { seq, position }) => {
+                (Some(Candidate::Record(record)), Origin::OperationalLog { seq }) => {
                     let entry = log
                         .with_id(record.id())
                         .next()
                         .expect("the record is in the log");
-                    assert_eq!((entry.seq(), entry.position()), (*seq, *position));
+                    assert_eq!(entry.seq(), *seq);
                     assert_eq!(item.verification(), &Verification::Recorded { at: at(200) });
                     assert_eq!(
                         item.provenance().filed_by(),
@@ -3710,6 +3715,32 @@ mod tests {
                 "text read beside the admitted module reached the package: {beside}"
             );
         }
+    }
+
+    #[test]
+    fn ori_t_0039_an_item_carries_its_seq_and_no_ordinal_among_all_the_products_records() {
+        let mut w = world("t0039-no-ordinal");
+        let (_, package) = coder_package(&mut w);
+        let mut checked = 0;
+        for item in package.items() {
+            if let Origin::OperationalLog { seq } = item.provenance().origin() {
+                checked += 1;
+                let line = item.provenance().line();
+                assert!(
+                    line.starts_with(&format!(
+                        "operational log of product {}, event seq {seq}; filed by ",
+                        w.p.id
+                    )),
+                    "{line}"
+                );
+                assert!(!line.contains("operational record"), "{line}");
+            }
+        }
+        assert!(checked >= 3, "the fixture's in-scope records were checked");
+        // The out-of-scope records exist (RECO, RECX, RECNONE) and none of
+        // them is counted anywhere in the text.
+        let rendered = package.render();
+        assert!(!rendered.contains("operational record "));
     }
 
     #[test]
