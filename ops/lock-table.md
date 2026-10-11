@@ -853,3 +853,21 @@ From the same report:
 For batch 10's plan: the runtime does not call the MCP server. It tells the agent where the server is (ACP `session/new`, `mcpServers`), and the agent calls it. As built, that list is empty.
 
 **State after this section:** the claims held are 20, 64, 81, 82 and 86. The next free identifier is ORI-T-0154.
+
+---
+
+## Claim 82 integrated; ORI-T-0154 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review | Verified |
+|---|---|---|---|
+| 82 | ORI-T-0134, `ori-gates`' module docs on the right modules | The lead read the diff: four `pub mod` lines, each with exactly one doc. One deviation, accepted: the coder replaced rather than moved `modified_tests`' sentence. "The detector that makes CLAUDE.md's never-modify-a-test rule real" claimed enforcement that does not exist: gate 5 is defined and not installed, and `scripts/gates.sh` reports it not available. The new sentence says what the module does and names gate 5 without saying it runs | its coder: workspace test, clippy, strict doc, fmt all exit 0; gate 13 clean |
+
+The coder's finding, recorded:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0154 | Nothing in CI or `scripts/gates.sh` runs `RUSTDOCFLAGS="-D warnings" cargo doc`, and no crate sets `missing_docs`. `CLAUDE.md` rule 9 requires a doc comment on every public item, and INC-0003's second half broke rustdoc on a branch. Today the check exists only as a standing instruction in each ticket. Two modules here carried no doc at all, and every gate was green | `.github/workflows/ci.yml`, `scripts/gates.sh`, possibly the workspace `Cargo.toml` lints | 2 (`.github/workflows`, supply chain) | **needs planning**: a change to the gate set; the operator decides, and claim 20 holds `ci.yml` and `scripts/gates.sh` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 64, 81 and 86. The next free identifier is ORI-T-0155.
