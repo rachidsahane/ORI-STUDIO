@@ -9567,7 +9567,9 @@ mod tests {
             expected.push(("deep/locked", SkipReason::Unreadable(String::new())));
         } else {
             eprintln!(
-                "chmod 000 did not restrict access here; the unreadable half is not exercised"
+                "chmod 000 did not restrict access here (a process that runs as root is \
+                 bound by no file mode); the unreadable half is not exercised, and \
+                 `deep/locked/hidden.rs` is walked as the fourth clean module"
             );
         }
         for (path, reason) in &expected {
@@ -9579,11 +9581,28 @@ mod tests {
             };
             assert!(matches, "{path} must be recorded as {reason:?}: {c:?}");
         }
+        // Where the directory could be listed after all (a process no mode
+        // binds), the file inside it is not a skip: it is read as one more
+        // clean module, and `deep/locked` is not recorded at all.
+        let hidden_is_read = usize::from(!locked_is_unreadable);
+        if !locked_is_unreadable {
+            assert!(
+                map.modules
+                    .iter()
+                    .any(|m| m.path == "deep/locked/hidden.rs"),
+                "a directory that could be listed has its file mapped: {c:?}"
+            );
+            assert!(
+                c.files_skipped.iter().all(|f| f.path != "deep/locked"),
+                "a directory that could be listed is not recorded as skipped: {c:?}"
+            );
+        }
         // Two clean modules (`clean.rs`, `deep/nested/ok.rs`) and
         // `deep/target_dir/inside.rs`, a third, reached directly; plus every
-        // nested pre-skip above. `.git` is never walked, and since round 7
-        // is recorded (above).
-        assert_eq!(c.files_seen, 3 + expected.len(), "{c:?}");
+        // nested pre-skip above, plus `deep/locked/hidden.rs` where the
+        // directory holding it could be listed. `.git` is never walked, and
+        // since round 7 is recorded (above).
+        assert_eq!(c.files_seen, 3 + hidden_is_read + expected.len(), "{c:?}");
         drop(guard);
         drop(outside_guard);
     }
