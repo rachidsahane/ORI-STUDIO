@@ -65,6 +65,14 @@
 //!   is here, because the log is the product's own. Whether a reader may see
 //!   one is [`crate::scope::ScopeEnforcer`]'s decision, applied to the
 //!   result, never to this module's output by this module.
+//! - **Not a gate.** [`OperationalLog::read`] is a public reader of every
+//!   record of the product, unfiltered, as `crate::barrier::read_records`,
+//!   the indexer and the code map are; nothing in the type system keeps a
+//!   caller from using it around the enforcer. The review rule of
+//!   `crate::scope`'s "The seam the retrieval stands on" applies to it as to
+//!   those three: nothing it returns may reach a context package except
+//!   through [`crate::scope::Authorization::filter`], which is how
+//!   `crate::retrieval` uses it.
 //!
 //! ```mermaid
 //! flowchart LR

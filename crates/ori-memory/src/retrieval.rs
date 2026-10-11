@@ -74,7 +74,9 @@
 //!   never as text.
 //! - **Nothing returned by the barrier, the indexer or the code map reaches a
 //!   package except through the filter.** `gather_records` (the barrier's
-//!   records, through `crate::oplog`), `gather_documents` (the indexer) and
+//!   records, through `crate::oplog::OperationalLog`, itself a public reader
+//!   of every record that nothing in the type system keeps a caller from
+//!   using around the enforcer), `gather_documents` (the indexer) and
 //!   `gather_modules` (the code map) each produce `Gathered` values, and the
 //!   only function that turns a `Gathered` into something a package holds is
 //!   `admit`, which calls `Authorization::filter` on its candidate first.
@@ -119,6 +121,10 @@
 //! were not queried. That is a limit, not a decision about what such a reader
 //! may read: their package is not a smaller one by permission but by lack of
 //! a task to focus it on, and `aicd_search` and a `Read` query remain theirs.
+//! A coder whose declared scope holds no module (no claim recorded for its
+//! ticket yet) has a declared scope and no focus: its package is the same,
+//! and says so in those words ([`NoFocusReason::EmptyDeclaredScope`]), not
+//! that it has no declared scope.
 //!
 //! With a focus, the gather is:
 //!
@@ -165,6 +171,15 @@
 //!   [`PackageConfig::item_bytes`]: counted in a [`Cut`] with
 //!   [`CutReason::ItemBound`], and the item's own text ends in a line naming
 //!   how many lines were not shown.
+//!
+//! **Only the rendering and the body are bounded.** The cap and the item
+//! bound apply to [`ContextPackage::render`], [`ContextPackage::size_bytes`]
+//! and [`ContextItem::body`]. [`ContextItem::candidate`] and
+//! [`ContextItem::admitted`] expose the whole admitted candidate, a record's
+//! every field at the barrier's own cap and a code map module's every list at
+//! the map's own bounds, which can be far larger than the body shown. A
+//! caller that hands an agent anything but the rendering (or the body) hands
+//! it content the package cap never measured.
 //!
 //! A search that reached its limit is a [`Note::SearchLimitReached`], not a
 //! count: the index cannot say how many more matched. A filtered-out
@@ -727,14 +742,20 @@ pub struct ContextItem {
 
 impl ContextItem {
     /// The filter's result this item is: exactly one candidate, filtered
-    /// under the package's own authorization: AICD §25.
+    /// under the package's own authorization: AICD §25. The whole candidate,
+    /// not the bounded body: see the module doc, "Bounded, and what was cut
+    /// is said".
     #[must_use]
     pub const fn admitted(&self) -> &Admitted {
         &self.admitted
     }
 
     /// The candidate itself, `Some` for every item this module builds:
-    /// AICD §25.
+    /// AICD §25. It is unbounded: a record's every field and a module's
+    /// every list, where [`ContextItem::body`] and [`ContextPackage::render`]
+    /// are bounded by [`PackageConfig::item_bytes`] and
+    /// [`PackageConfig::cap_bytes`]. Only the rendering is measured against
+    /// the cap.
     #[must_use]
     pub fn candidate(&self) -> Option<&Candidate> {
         self.admitted.candidates().first()
@@ -855,6 +876,26 @@ impl Cut {
     }
 }
 
+/// Why a package has no focus: AICD §12, AICD §25.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoFocusReason {
+    /// The reader has no declared scope: every role but the coder.
+    NoDeclaredScope,
+    /// The reader has a declared scope and it holds no module, as a coder
+    /// whose ticket has no recorded claim.
+    EmptyDeclaredScope,
+}
+
+impl NoFocusReason {
+    /// The words the rendering uses for this reason: AICD §25.
+    const fn clause(self) -> &'static str {
+        match self {
+            Self::NoDeclaredScope => "the reader has no declared scope",
+            Self::EmptyDeclaredScope => "the reader's declared scope holds no module",
+        }
+    }
+}
+
 /// Something the package is not, or did not do, that its reader should know:
 /// AICD §25.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -865,11 +906,13 @@ pub enum Note {
         /// The sources.
         sources: Vec<Source>,
     },
-    /// Sources the reader may read that were not queried, because the reader
-    /// has no declared scope to focus the package on.
+    /// Sources the reader may read that were not queried, because the
+    /// package has no module to focus them on.
     NoFocus {
         /// The sources.
         sources: Vec<Source>,
+        /// Why the package has no module.
+        reason: NoFocusReason,
     },
     /// The index search for a declared module reached its limit; further
     /// matching documents were not read.
@@ -908,9 +951,10 @@ impl Note {
                 "note: {} readable by this reader but no module of this crate produces it yet; nothing of it is in this package",
                 source_list(sources)
             ),
-            Self::NoFocus { sources } => format!(
-                "note: {} not queried: the reader has no declared scope, so the package has no module to focus it on",
-                source_list(sources)
+            Self::NoFocus { sources, reason } => format!(
+                "note: {} not queried: {}, so the package has no module to focus it on",
+                source_list(sources),
+                reason.clause()
             ),
             Self::SearchLimitReached { module, limit } => format!(
                 "note: the index search for module {module} reached its limit of {limit} hits; further matching documents were not read"
@@ -953,6 +997,7 @@ pub struct ContextPackage {
     ticket_id: Id,
     reader: Reader,
     focus: Vec<ModulePath>,
+    declared_scope: bool,
     sources: Vec<Source>,
     log_tip_seq: Option<u64>,
     index_queried: bool,
@@ -987,6 +1032,13 @@ impl ContextPackage {
     #[must_use]
     pub fn focus(&self) -> &[ModulePath] {
         &self.focus
+    }
+
+    /// Whether the reader has a declared scope at all, whether or not it
+    /// holds a module: AICD §12.
+    #[must_use]
+    pub const fn has_declared_scope(&self) -> bool {
+        self.declared_scope
     }
 
     /// The sources the authorization allowed: AICD §25.
@@ -1058,7 +1110,12 @@ impl ContextPackage {
         out.push_str(&format!("ticket: {}\n", self.ticket_id));
         out.push_str(&format!("reader: {}\n", reader_line(&self.reader)));
         if self.focus.is_empty() {
-            out.push_str("focus: none (the reader has no declared scope)\n");
+            let reason = if self.declared_scope {
+                NoFocusReason::EmptyDeclaredScope
+            } else {
+                NoFocusReason::NoDeclaredScope
+            };
+            out.push_str(&format!("focus: none ({})\n", reason.clause()));
         } else {
             let modules: Vec<&str> = self.focus.iter().map(ModulePath::as_str).collect();
             out.push_str(&format!("focus: {}\n", modules.join(", ")));
@@ -1606,7 +1663,15 @@ impl<'a> Retrieval<'a> {
             Vec::new()
         };
         if !unfocused.is_empty() {
-            notes.push(Note::NoFocus { sources: unfocused });
+            let reason = if authorization.declared_scope().is_some() {
+                NoFocusReason::EmptyDeclaredScope
+            } else {
+                NoFocusReason::NoDeclaredScope
+            };
+            notes.push(Note::NoFocus {
+                sources: unfocused,
+                reason,
+            });
         }
 
         let mut index_queried = false;
@@ -1654,6 +1719,7 @@ impl<'a> Retrieval<'a> {
             ticket_id,
             reader: authorization.reader().clone(),
             focus,
+            declared_scope: authorization.declared_scope().is_some(),
             sources: authorization.sources().keys().copied().collect(),
             log_tip_seq,
             index_queried,
@@ -3527,7 +3593,10 @@ mod tests {
             .notes()
             .iter()
             .find_map(|note| match note {
-                Note::NoFocus { sources } => Some(sources.clone()),
+                Note::NoFocus { sources, reason } => {
+                    assert_eq!(*reason, NoFocusReason::NoDeclaredScope);
+                    Some(sources.clone())
+                }
                 _ => None,
             })
             .expect("the package says it was not focused");
@@ -4042,6 +4111,194 @@ mod tests {
                 .lines()
                 .skip(4)
                 .all(|line| line.starts_with("  "))
+        );
+    }
+
+    /// A ticket filed with no lock claim and no record.
+    fn bare_ticket(w: &mut World, label: &str) -> Id {
+        let ticket = id(label);
+        file_ticket(&mut w.p, &ticket);
+        ticket
+    }
+
+    #[test]
+    fn ori_t_0039_a_coder_with_an_empty_declared_scope_is_not_told_it_has_none() {
+        let mut w = world("t0039-empty-scope");
+        let ticket = bare_ticket(&mut w, "TICKETEMPTY");
+        let request = context(&ticket);
+        let auth = authorize(&mut w.p, Role::Coder, &ticket, &request);
+        assert!(auth.declared_scope().is_some() && auth.declared_modules().is_empty());
+        let retrieval = Retrieval::new(
+            &w.p.db,
+            &w.code_map,
+            Some(at(BUILT_AT)),
+            &w.tracker,
+            PackageConfig::default(),
+        )
+        .expect("a retrieval");
+        let package = retrieval.assemble(&mut w.p.db, &auth).expect("a package");
+        assert!(package.has_declared_scope());
+        assert!(package.focus().is_empty());
+        assert!(
+            package.notes().iter().any(|note| matches!(
+                note,
+                Note::NoFocus {
+                    reason: NoFocusReason::EmptyDeclaredScope,
+                    ..
+                }
+            )),
+            "{:?}",
+            package.notes()
+        );
+        let rendered = package.render();
+        assert!(rendered.contains("focus: none (the reader's declared scope holds no module)"));
+        assert!(rendered.contains("not queried: the reader's declared scope holds no module"));
+        assert!(
+            !rendered.contains("has no declared scope"),
+            "a coder that has a declared scope was told it has none: {rendered}"
+        );
+        // And the reader that really has none is still told so.
+        let lead_request = context(&ticket);
+        let lead = authorize(&mut w.p, Role::Lead, &ticket, &lead_request);
+        let package = retrieval.assemble(&mut w.p.db, &lead).expect("a package");
+        assert!(!package.has_declared_scope());
+        assert!(
+            package
+                .render()
+                .contains("the reader has no declared scope")
+        );
+    }
+
+    #[test]
+    fn ori_t_0039_a_package_with_no_item_renders_and_stays_under_its_cap() {
+        let mut w = world("t0039-zero-items");
+        let ticket = bare_ticket(&mut w, "TICKETEMPTY");
+        let build = |w: &mut World, role: Role, cap_bytes: usize| {
+            let request = context(&ticket);
+            let auth = authorize(&mut w.p, role, &ticket, &request);
+            let retrieval = Retrieval::new(
+                &w.p.db,
+                &w.code_map,
+                None,
+                &w.tracker,
+                PackageConfig {
+                    cap_bytes,
+                    ..PackageConfig::default()
+                },
+            )
+            .expect("a retrieval");
+            retrieval.assemble(&mut w.p.db, &auth)
+        };
+        for role in [Role::Coder, Role::Lead] {
+            let package = build(&mut w, role, DEFAULT_PACKAGE_CAP_BYTES).expect("a package");
+            assert!(
+                package.items().is_empty(),
+                "{role:?} has nothing on this ticket"
+            );
+            assert!(package.cuts().is_empty());
+            assert!(package.size_bytes() <= package.cap_bytes());
+            let rendered = package.render();
+            assert!(rendered.contains("items: 0\n"));
+            assert!(rendered.contains("cuts: none\n"));
+            assert!(rendered.ends_with("end of context package\n"));
+            assert_eq!(rendered.matches("--- item: ").count(), 0);
+        }
+        // The least cap that holds it: a cap one byte under refuses, with the
+        // size an empty package needs, rather than returning an oversize one.
+        let probe = build(&mut w, Role::Lead, DEFAULT_PACKAGE_CAP_BYTES).expect("a package");
+        let first = build(&mut w, Role::Lead, probe.size_bytes()).expect("a package");
+        let least = first.size_bytes();
+        let fits = build(&mut w, Role::Lead, least).expect("the least cap holds the empty package");
+        assert_eq!(fits.size_bytes(), least);
+        match build(&mut w, Role::Lead, least - 1) {
+            Err(RetrievalError::CapTooSmall {
+                cap_bytes,
+                needed_bytes,
+            }) => assert_eq!((cap_bytes, needed_bytes), (least - 1, least)),
+            other => panic!("one byte under the least cap must refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ori_t_0039_an_item_larger_than_the_cap_is_cut_whole_while_smaller_ones_fit() {
+        let mut w = world("t0039-oversize-item");
+        let ticket = w.ticket_m.clone();
+        // One record of 25 fields of 3,900 characters each, under the
+        // barrier's default cap, filed last so it ranks first among the
+        // own ticket's records.
+        let fields: Vec<NewReportField> = (0..25)
+            .map(|index| NewReportField {
+                name: FieldName::parse(&format!("field{index:02}")).expect("a field name"),
+                raw_text: "x".repeat(3_900),
+                evidence_id: id(&format!("EVBIG{index}")),
+            })
+            .collect();
+        let big = id("BIGRECORD");
+        submit_report(
+            &mut w.p.db,
+            at(300),
+            Actor::Agent(id("AUTHOR")),
+            NewReport {
+                record_id: big.clone(),
+                kind: RecordKind::ClosingReport,
+                ticket_id: Some(ticket),
+                fields,
+            },
+            &BarrierConfig::default(),
+        )
+        .expect("the big record is submitted");
+        let (_, unbounded) = assemble_for(
+            &mut w,
+            Role::Coder,
+            PackageConfig {
+                cap_bytes: 1 << 24,
+                item_bytes: 1 << 20,
+                ..PackageConfig::default()
+            },
+        );
+        let big_item = unbounded
+            .items()
+            .iter()
+            .find(|item| matches!(item.candidate(), Some(Candidate::Record(r)) if r.id() == &big))
+            .expect("the big record is in the unbounded package");
+        let big_size = big_item.render().len();
+        assert!(big_size > 90_000, "the fixture record is large: {big_size}");
+        let smaller = unbounded.items().len() - 1;
+        assert!(smaller >= 8);
+
+        let cap = 16_000;
+        let (_, package) = assemble_for(
+            &mut w,
+            Role::Coder,
+            PackageConfig {
+                cap_bytes: cap,
+                item_bytes: 1 << 20,
+                ..PackageConfig::default()
+            },
+        );
+        assert!(
+            package.size_bytes() <= cap,
+            "{} bytes",
+            package.size_bytes()
+        );
+        assert!(
+            !record_ids(&package).contains(&big),
+            "the oversize record cannot be in a package under {cap} bytes"
+        );
+        assert_eq!(
+            package.items().len(),
+            smaller,
+            "every smaller item still fits after the big one is cut"
+        );
+        assert!(package.cuts().iter().any(|cut| {
+            cut.source() == Source::OperationalRecord
+                && cut.count() == 1
+                && matches!(cut.reason(), CutReason::PackageCap { cap_bytes } if cap_bytes == cap)
+        }));
+        assert!(
+            package
+                .render()
+                .contains("1 operational_record item(s) left out whole")
         );
     }
 
