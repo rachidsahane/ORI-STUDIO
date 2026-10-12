@@ -385,3 +385,632 @@ Written by the lead on 2026-09-27 under [[R31]] rule 1.
 | ORI-T-0125 | Three code map deadline tests time out under machine load and fail `cargo test --workspace` locally, on `main` as well as on every branch: `ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings`, `ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded`, `ori_t_0036_the_rust_declaration_walk_checks_its_deadline`. Each passes alone in about a second; CI has passed them. Reported by the ORI-T-0038 coder and the ORI-T-0123 documentation agent on 2026-09-27 | `crates/ori-memory/src/code_map.rs` (its tests) | 1, `spec/RISK_MAP.md` (code map) | **waiting on the operator**: the fix changes existing tests, which is trigger `test_modified` | 2026-09-27 |
 
 **State after this section:** the claims held are 20, 60, 61 and 62. The next free identifier is ORI-T-0126.
+
+---
+
+## Session of 2026-10-11: claim 60 released, claims 61 and 62 re-dispatched, claim 63
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]] rules 2 and 3. Coders in this session run on Sonnet 5.5 ([[R39]]).
+
+**Claim 60 released.** ORI-T-0038 merged as pull request 77 on 2026-09-27; its commits are on `main` (1f5328f to 9c661e1). Verified from the merge history, not from memory.
+
+**Claims 61 and 62 are still held, and their work is not in the repository.** Both were dispatched on 2026-09-27 to `feat/ORI-T-0039-memory` and `feat/ORI-T-0040-memory`. Neither branch exists on the remote today, no pull request names either ticket, and the only remote commits whose `Ticket:` trailer names either one are two lead records under `ops/` (27b8833 and e12e31e, both `ORI-T-0040`), neither of which changes a file under `crates/`. Whatever was built under them, including the targeted repair round that extended claim 61 to `barrier.rs`, was never pushed. Both tickets are dispatched again from `main` at 7bed207, under the same claims and the same modules. Claim 61's extension to `barrier.rs` stands, additively only: a coder that needs it says so in its report and that change is tier 2 ([[R38]] point 3).
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 63 | ORI-T-0045, the prover: the planted-defect demonstration | `crates/ori-gates/src/prover.rs`, `crates/ori-gates/src/lib.rs` (queue) | 2, `ops/phase-1-backlog.md` batch 7 | `feat/ORI-T-0045-prover` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Checked against every claim held once this section is read: 20 (`.github/workflows/ci.yml`, `scripts/gates.sh`, `fixtures/planted/gate-13/**`), 61 (`oplog.rs`, `retrieval.rs`, `barrier.rs` additively) and 62 (`citation.rs`, `drift.rs`, `freshness.rs` additively). Claim 63 is in `crates/ori-gates/` and is disjoint from all three. Claims 61 and 62 share only the queue file `crates/ori-memory/src/lib.rs`, which neither holds.
+
+**Where the work lands.** This session runs in a cloud container whose standing instruction is to develop on one branch, `claude/sweet-maxwell-jkaiie`, and to open no pull request unless the operator asks. Each ticket is still built on its own branch, in its own worktree, by its own coder; those branches stay local. The lead reviews each one and brings it onto `claude/sweet-maxwell-jkaiie` as rebased commits that keep the coder's `Ticket:` and `Spec:` trailers. Nothing reaches `main` from this session without a pull request the operator asks for, so a tier 2 change on that branch is merged by the operator, as [[R38]] requires.
+
+**State after this section:** the claims held are 20, 61, 62 and 63. The next free identifier is ORI-T-0126.
+
+---
+
+## Claim 64, and ORI-T-0126 allocated
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 64 | ORI-T-0054, the tree watcher and the git hooks installer | `crates/ori-watch/src/watcher.rs`, `crates/ori-watch/src/hooks.rs`, `crates/ori-watch/Cargo.toml` (`notify`, approved in [[E-0009]], and the workspace crates the two modules need), `crates/ori-watch/src/lib.rs` (queue), `Cargo.lock` (queue) | 1, `spec/RISK_MAP.md` (`ori-watch` watcher, hooks) | `feat/ORI-T-0054-watch` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from claims 20, 61, 62 and 63: nothing else has claimed a path under `crates/ori-watch/`. `Cargo.lock` is a queue file, as in claims 32 to 59.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0126 | Five tests fail whenever the suite runs as root, because each makes a path mode 000 and asserts the process can no longer read it: `code_map::tests::ori_t_0036_the_files_seen_invariant_holds_with_every_pre_skip_reason_nested`, and in `indexer::tests` `ori_p1_026_a_divergence_on_a_file_the_walk_leaves_out_stays_listed_with_the_reason`, `ori_p1_026_entries_that_share_a_key_list_every_file_and_every_reason`, `ori_p1_026_with_no_record_an_unreadable_file_is_freshness_unknown_and_not_ready`, `ori_t_0035_a_walk_splits_and_reads_no_more_than_its_budget_and_records_what_it_left_out`. Seen by the lead on 2026-10-11 in a container that runs as root; CI does not run as root and passed all five on `main` at 7bed207. A root-run suite is red for a reason that is not a defect in the code under test, and the cure is a test that recognises it cannot exercise the unreadable case and says so | `crates/ori-memory/src/code_map.rs`, `crates/ori-memory/src/indexer.rs` (their tests) | 1, `spec/RISK_MAP.md` (code map, indexer) | **waiting on the operator**: the fix changes existing tests, trigger `test_modified` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61, 62, 63 and 64. The next free identifier is ORI-T-0127.
+
+---
+
+## Session of 2026-10-11: the operator's answers, and ORI-T-0127 to ORI-T-0129 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 1. The operator answered four open questions in session the same day, each with the option the lead recommended:
+
+| Question | Answer | Recorded in |
+|---|---|---|
+| [[E-0002]], where the adapter traits live | Option A: in `ori-core` | E-0002's State line |
+| [[E-0007]], what the lead's "merge tier 0" means | Reading 1: authority; the lead holds no merge credential | E-0007's State line |
+| `test_modified` for ORI-T-0125 and ORI-T-0126 | Both authorized, on a condition | [[R40]] |
+| ORI-P1-031 asks for a ticket move the machine refuses (recorded under E-0007) | Add the edge `InProgress --> Queued` to `spec/DATA_MODEL.md` section 3 | E-0007's State line |
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0127 | State E-0002 option A in the specification: the adapter traits of `spec/API_SPEC.md` section 4 are declared in `ori-core` and implemented in `ori-integrations`, and `ori-orchestrator` names `dyn VcsHost` without a new edge | `spec/LLD.md` section 2, `spec/API_SPEC.md` section 4 | 1, `spec/RISK_MAP.md` (`spec/`) | ready; documentation role | 2026-10-11 |
+| ORI-T-0128 | Draw `InProgress --> Queued` in the Ticket state machine, labelled for engine recovery, so ORI-P1-031's "ticket Queued" is a move the machine allows | `spec/DATA_MODEL.md` section 3 | 1, `spec/RISK_MAP.md` (`spec/`) | ready; documentation role | 2026-10-11 |
+| ORI-T-0129 | Add that edge to `crates/ori-core/src/ticket.rs`'s transition table, after ORI-T-0128 merges | `crates/ori-core/src/ticket.rs` | 2, `spec/RISK_MAP.md` (`ori-core` state machines) | waits on ORI-T-0128 | 2026-10-11 |
+
+**Unblocked by these answers:** ORI-T-0029, the forbidden-action test harness (`crates/ori-broker/src/forbidden.rs`, tier 2), no longer waits on E-0007. ORI-T-0058, the adapter traits, now builds in `ori-core` rather than at `crates/ori-integrations/src/traits.rs` as `ops/phase-1-backlog.md` batch 11 declares, and waits on ORI-T-0127 so that the code follows the specification rather than the other way round. ORI-T-0125 and ORI-T-0126 no longer wait on the operator and run one at a time against `code_map.rs` and `indexer.rs` with the other follow-ups there.
+
+**State after this section:** the claims held are 20, 61, 62, 63 and 64. The next free identifier is ORI-T-0130.
+
+---
+
+## Claims 65 and 66
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. Both are documentation-role tickets and write only under `spec/`.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 65 | ORI-T-0127, E-0002 option A in the specification | `spec/LLD.md`, `spec/API_SPEC.md` | 1, `spec/RISK_MAP.md` (`spec/`) | `docs/ORI-T-0127-adapter-traits-in-core` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 66 | ORI-T-0128, the recovery edge `InProgress --> Queued` | `spec/DATA_MODEL.md` | 1, `spec/RISK_MAP.md` (`spec/`) | `docs/ORI-T-0128-recovery-edge` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from each other and from claims 20 and 61 to 64, none of which holds a path under `spec/`.
+
+**State after this section:** the claims held are 20 and 61 to 66. The next free identifier is ORI-T-0130.
+
+---
+
+## Claim 66 released; claims 67 and 68; what ORI-T-0129 inherits
+
+Written by the lead on 2026-10-11 under [[R31]] rules 2 and 3.
+
+**Claim 66 released.** ORI-T-0128 is on `claude/sweet-maxwell-jkaiie` as 3298433, reviewed by the lead: three lines added to `spec/DATA_MODEL.md` section 3, the edge and one paragraph saying it is the engine's recovery move only, in the order of `spec/runbooks/recover-engine.md` step 1. `cargo test -p ori-gates` passed (138), so every reference it adds resolves. It is not on `main`.
+
+**What ORI-T-0129 inherits from ORI-T-0128's report**, so its ticket is written from this rather than rediscovered:
+
+1. `crates/ori-core/src/ticket.rs`'s test module hard-codes the diagram: fourteen lines in `DIAGRAM`, `DIAGRAM_EDGES = 14`, and `ALL_PAIRS - permitted == 130`. The new edge makes them fifteen and 129. **That is a change to an existing test**, so ORI-T-0129 needs the operator's `test_modified` answer before it starts, the shape of [[R37]] and [[R40]].
+2. "The engine's move and no one else's" has no code behind it yet. `TicketEventKind::Queued` serves both existing edges into `Queued`, and `crates/ori-orchestrator/src/lifecycle.rs` gates no verb on the new edge, so nothing distinguishes a recovery requeue from any other `Queued` event. If distinguishing it needs a new event kind, that is `contract_change`.
+3. Which `Event.actor` the recovery requeue carries is unspecified: `spec/DATA_MODEL.md` section 4 allows `system` "only for scheduled triggers and watchers", and engine recovery is neither. A specification gap, not decided here.
+4. Out of ORI-T-0129's file but in its path: `crates/ori-runtime/src/recovery.rs` describes the edge as missing (its module doc, and a test fixture string), and says `Queued --> InProgress` is the only edge into `InProgress`, which is false: three edges enter it.
+
+ORI-T-0129 stays waiting: on the operator for item 1, and on a decision for items 2 and 3.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 67 | ORI-T-0126, the five root-only tests | the `#[cfg(test)]` modules of `crates/ori-memory/src/code_map.rs` and `crates/ori-memory/src/indexer.rs`: the five tests [[R40]] names and test-only helpers | 1 | `fix/ORI-T-0126-0125-tests` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 68 | ORI-T-0125, the three load-sensitive deadline tests | the `#[cfg(test)]` module of `crates/ori-memory/src/code_map.rs`: the three tests [[R40]] names and test-only helpers | 1 | the same branch, after claim 67's commits | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Claims 67 and 68 share a file with each other, so one coder runs them in order on one branch, each commit carrying only its own `Ticket:` trailer. Neither overlaps claim 61 or 62: those hold `oplog.rs`, `retrieval.rs`, `citation.rs`, `drift.rs`, and `barrier.rs` and `freshness.rs` additively, never `code_map.rs` or `indexer.rs`.
+
+**State after this section:** the claims held are 20, 61 to 65, 67 and 68. The next free identifier is ORI-T-0130.
+
+---
+
+## Session of 2026-10-11: claim 65 released, three more answers, ORI-T-0058 redefined, claims 69 to 76
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+**Claim 65 released.** ORI-T-0127 is on `claude/sweet-maxwell-jkaiie` as 7f421ee (cherry-picked from 5926f63), reviewed by the lead: `spec/LLD.md` and `spec/API_SPEC.md` say the seven adapter traits and the types in their signatures are declared in `ori-core`, the five slot traits implemented in `ori-integrations` and `AgentRuntime` in `ori-runtime`. `cargo test -p ori-gates` passed (138). Its agent found [[E-0002]]'s premise false, and the operator, asked again, chose all seven with their types (E-0002's State line). The text it wrote already says that, so it stands. What it reported and did not change, each now a follow-up for the lead to ticket: `spec/ARCHITECTURE.md`'s `integrations` row and `spec/ROADMAP.md` (lines 9 and 72) still put the traits in `ori-integrations`; `spec/RISK_MAP.md` (tier 2) has no row for the `ori-core` file that will declare `VcsHost::merge`; nothing mechanical enforces "only `merge_queue` calls `merge`" now that every crate can name the trait; and [[R8]]'s `INT --> STORE` edge is still drawn though `ori-integrations` must not read the store.
+
+**Three more answers from the operator, 2026-10-11:**
+
+| Question | Answer | Recorded in |
+|---|---|---|
+| `test_modified` for ORI-T-0129 | Authorized, on a condition | [[R41]] |
+| Which `Event.actor` the recovery requeue carries | Widen `system` in `spec/DATA_MODEL.md` section 4 to the engine's restart recovery | ORI-T-0130 below |
+| `ops/phase-1-backlog.md` open escalation 2: move the fixtures forward | Yes | that row of the backlog; claims 72 to 75 |
+
+**ORI-T-0058 redefined.** `ops/phase-1-backlog.md` batch 11 declares it as `crates/ori-integrations/src/traits.rs`, tier 1. Under the operator's answer it declares the seven traits of `spec/API_SPEC.md` section 4 in `ori-core` and moves into `ori-core` the types their signatures name, `AgentIdentity` from `ori-broker` and `SessionSpec`, `SessionHandle` and `RuntimeCaps` from `ori-runtime` among them, with the old paths kept as re-exports so that no caller and no existing test changes. Moving `AgentIdentity` changes `crates/ori-broker/src/identity.rs`, which `spec/RISK_MAP.md` tiers 2, so ORI-T-0058 is **tier 2**.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0130 | `spec/DATA_MODEL.md` section 4: `system` is allowed for scheduled triggers, watchers, and the engine's restart recovery (`spec/runbooks/recover-engine.md`), which ORI-T-0128's recovery edge needs an actor for | `spec/DATA_MODEL.md` | 1 | dispatched, claim 71 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 69 | ORI-T-0058, the adapter traits and their types in `ori-core` | `crates/ori-core/src/adapters.rs` (new), `crates/ori-core/src/lib.rs` (queue); the declarations it moves, in `crates/ori-broker/src/identity.rs` and `crates/ori-runtime/src/acp.rs`, each replaced by a re-export; nothing else in either crate | 2 | `feat/ORI-T-0058-adapter-traits` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 70 | ORI-T-0129, the recovery edge in the ticket machine | `crates/ori-core/src/ticket.rs` (its table, its docs, and its test module under [[R41]]); `crates/ori-runtime/src/recovery.rs` (its module doc and its docs only, where they call the edge missing) | 2 | `feat/ORI-T-0129-recovery-edge` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 71 | ORI-T-0130, `system` as the recovery actor | `spec/DATA_MODEL.md` | 1 | `docs/ORI-T-0130-recovery-actor` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 72 | ORI-T-0073, `fixtures/new-product` | `fixtures/new-product/**` | 1 | `feat/ORI-T-0073-fixture-new-product` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 73 | ORI-T-0074, `fixtures/migrated-with-drift` | `fixtures/migrated-with-drift/**` | 1 | `feat/ORI-T-0074-fixture-migrated-with-drift` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 74 | ORI-T-0075, `fixtures/inert-gate` | `fixtures/inert-gate/**` | 1 | `feat/ORI-T-0075-fixture-inert-gate` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 75 | ORI-T-0076, `fixtures/looping-agent` | `fixtures/looping-agent/**` | 1 | `feat/ORI-T-0076-fixture-looping-agent` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 76 | ORI-T-0046, the liveness definition | `crates/ori-gates/src/liveness.rs` (new), `crates/ori-gates/src/lib.rs` (queue) | 2, `spec/RISK_MAP.md` (`prover.rs, liveness.rs`) | `feat/ORI-T-0046-liveness` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Checked against every claim held: 20, 61 to 64, 67 and 68. Claims 69 and 70 share only `crates/ori-core/src/lib.rs`, a queue file neither holds; 69's `acp.rs` and 70's `recovery.rs` are different files of `ori-runtime`, and nothing else holds either. Claim 71 is the only claim under `spec/`. Claims 72 to 75 are four disjoint new directories, and none is under `fixtures/planted/`. Claim 76 shares only the queue file `crates/ori-gates/src/lib.rs` with claim 63.
+
+**State after this section:** the claims held are 20, 61 to 64 and 67 to 76. The next free identifier is ORI-T-0131.
+
+---
+
+## Claim 71 released; follow-ups ORI-T-0131 to ORI-T-0139 allocated
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+**Claim 71 released.** ORI-T-0130 is on `claude/sweet-maxwell-jkaiie` as 8f8a4cd, reviewed by the lead: `spec/DATA_MODEL.md` section 4 admits `system` for "the engine's recovery after a restart (`spec/runbooks/recover-engine.md`)", and section 3's recovery paragraph records the requeue and the events around it with actor `system`. `cargo test -p ori-gates` passed (138). This closes item 3 of "what ORI-T-0129 inherits".
+
+**Follow-ups**, each stated as the defect, from the reports and reviews of ORI-T-0045, ORI-T-0127 and ORI-T-0130. None is claimed; each claim is written at dispatch.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0131 | A `GateProof` is not sealed: `GateProof::new` and `GateDef::with_proof` are public and a proof carries no gate number, so code that never ran the prover can make `Registry::list` report `Installed`. `runner.rs`'s own tests do so. "Only `Registry` produces `Installed`" holds; "`Installed` implies a demonstration ran" is a convention. Found by ORI-T-0045's coder, confirmed by its reviewer | `crates/ori-gates/src/gate.rs` | `spec/RISK_MAP.md` does not name `gate.rs`; the lead recommends 2, because it decides what may be called installed; the operator sets it | ready | 2026-10-11 |
+| ORI-T-0132 | ORI-P1-013's "proof stored with evidence refs" has no owner: no ticket in `ops/phase-1-backlog.md` builds the gate projection, the `gates.prove` method's wiring, or a durable proof and revocation event, and `Registry` has no replace or remove for the runbook's rollback. ORI-P1-013 is not satisfied by ORI-T-0045 alone | backlog gap: `ori-store` projections, `ori-rpc`, `ori-gates` | to be set when planned | **needs planning** | 2026-10-11 |
+| ORI-T-0133 | `gate.proven` is named in `spec/LLD.md` section 4 and `spec/design/DESIGN.md`, and by ORI-T-0045's constant, but not in `spec/API_SPEC.md` section 2's event list; no event kind exists for revoking a proof | `spec/API_SPEC.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0134 | `crates/ori-gates/src/lib.rs` has misattached `///` docs: `modified_tests` carries two stacked docs, one describing `sections`; `significance` carries the `spec_refs` doc; `sections` and `spec_refs` carry none | `crates/ori-gates/src/lib.rs` | 1 | ready, after claims 63 and 76 release the queue file | 2026-10-11 |
+| ORI-T-0135 | Two more `code_map` timing tests fail under machine load and pass alone: `ori_t_0036_a_spec_document_of_long_lines_cannot_overrun_the_scan_deadline`, `ori_t_0036_python_relative_import_work_is_linear_in_dots_plus_names`. Seen by ORI-T-0045's coder at load average about 5 | `crates/ori-memory/src/code_map.rs` (its tests) | 1 | **waiting on the operator**: `test_modified`, not covered by [[R40]] | 2026-10-11 |
+| ORI-T-0136 | After [[E-0002]], `spec/ARCHITECTURE.md`'s `integrations` row and `spec/ROADMAP.md` (lines 9 and 72) still put the adapter traits in `ori-integrations` | `spec/ARCHITECTURE.md`, `spec/ROADMAP.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0137 | After [[E-0002]], `spec/RISK_MAP.md` has no row for the `ori-core` file that declares `VcsHost::merge`, so the merge signature moved from a tier 2 path to an untiered one; `spec/SECURITY_NOTES.md` and `spec/adr/ADR-0002-single-operator.md` name only `ori-integrations::*::merge` | `spec/RISK_MAP.md`, `spec/SECURITY_NOTES.md`, `spec/adr/ADR-0002-single-operator.md` | 2 | ready; documentation role; the operator merges | 2026-10-11 |
+| ORI-T-0138 | Nothing mechanical enforces `CLAUDE.md`'s "Only `ori-orchestrator::merge_queue` calls `VcsHost::merge`", and since [[E-0002]] every crate can name the trait | a test or gate, location to be decided | to be set; the lead recommends 2 (merge path) | **needs planning** | 2026-10-11 |
+| ORI-T-0139 | Code docs still quote the old rule "`system` only for scheduled triggers and watchers", some arguing from it: `crates/ori-core/src/types.rs`, `crates/ori-core/src/ticket.rs` (`by_human`), `crates/ori-store/src/event_log.rs`, `crates/ori-memory/src/barrier.rs`, `crates/ori-memory/src/scope.rs`. No behaviour changes; each conclusion was checked by ORI-T-0130's agent and still holds | those five files, docs only | 2: four of the five are tier 2 paths | ready, after claims 61 and 70 release `barrier.rs` and `ticket.rs` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61 to 64, 67 to 70 and 72 to 76. The next free identifier is ORI-T-0140.
+
+---
+
+## Claims 63 and 74: integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. "Integrated" means on `claude/sweet-maxwell-jkaiie`, reviewed and verified there; it is not on `main`. A claim is released here when its work is integrated, because nothing else in this session will touch its modules; it is released on `main` only when the operator merges.
+
+| # | Ticket | Integrated as | Review | Verified by the lead on the session branch | Tier, and who merges to `main` |
+|---|---|---|---|---|---|
+| 63 | ORI-T-0045, the prover | 4639bc3, 31274fa (cherry-picked from 4fe2554, 8e0ee60) | Independent review on Opus 5.5: nothing blocking, two should-fix (a stale proof could be attached to a changed gate; a false claim in `revoke`'s doc) and four notes, all repaired in attempt 2 and re-checked by the lead | `cargo test -p ori-gates`: 161 passed; `cargo clippy -p ori-gates --all-targets -D warnings`: clean | **2**: the operator |
+| 74 | ORI-T-0075, `fixtures/inert-gate` | 9be53c7 (from e6aa6c5) | The lead: a valid workflow whose only triggers name a branch the fixture never has, and a liveness record documented in its README | `cargo test -p ori-gates`: 138 passed before the prover landed; `scripts/secret-scan.sh`: no finding, 378 files, 670 history blobs | 1 |
+
+**Two lead errors the ORI-T-0075 coder found, recorded because they reached four tickets.** The fixture tickets' standing facts offered the commit type `test(fixtures):`, which gate 13 refuses (this repository's types are `feat`, `fix`, `docs`, `ci` and `chore`); and they told the fixture and documentation agents to share one cargo target directory, `/home/user/wt/shared-target`. `ori-gates`' repository-wide tests bake `CARGO_MANIFEST_DIR` in at compile time and cargo reused a test binary built in another worktree, so a test run there scans the other worktree's tree and can report green on a tree that does not contain the files under review. The coder saw 32 failures pointing at a removed worktree, which is how it surfaced. The three fixture coders still running were corrected in flight. ORI-T-0130's result was re-established by the lead from its own target directory on the session branch (138 passed). The repository clone was also shallow, so `scripts/secret-scan.sh` refused in every worktree; the lead unshallowed it.
+
+**ORI-P1-013 is not satisfied by ORI-T-0045.** "Proof stored with evidence refs" has no owner: ORI-T-0132.
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 72, 73, 75 and 76. The next free identifier is ORI-T-0140.
+
+---
+
+## Claims 72 and 75 integrated; ORI-T-0140 allocated and claimed (77)
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+| # | Ticket | Integrated as | Verified by the lead on the session branch |
+|---|---|---|---|
+| 72 | ORI-T-0073, `fixtures/new-product` | cherry-picked from 3a9cf82 | `cargo test -p ori-gates`: 161 passed; `scripts/secret-scan.sh`: no finding |
+| 75 | ORI-T-0076, `fixtures/looping-agent` | cherry-picked from bb5be9c | `cargo test -p ori-gates`: 161 passed; `scripts/secret-scan.sh`: no finding; the fixture's own `selftest.sh`: 41 passed |
+
+**A defect in merged code, found by ORI-T-0076's coder and confirmed by the lead by reading.** `crates/ori-runtime/src/headless.rs`, `send`: `session.stdout.read_to_end(&mut output)` (line 276) runs before `wait_with_timeout(&mut session.child, RUN_TIMEOUT)` (line 277). `read_to_end` returns only when every holder of the pipe's write end has closed it, so a child that keeps its stdout open, or leaves a descendant holding it, blocks `send` indefinitely and the 20 second kill never starts. The coder measured it with a scratch crate against the real adapter: `sh -c 'sleep 23'` returned `Ok(EndTurn)` after 23.0 s with no `Timeout` and no defect recorded. The module doc promises the bound. A looping or hung agent is exactly what budgets and the liveness of the engine exist for, so this is a defect in a control, not a performance note.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0140 | The headless run's `RUN_TIMEOUT` does not bound a child that holds its stdout open: `send` reads to end before it starts the clock | `crates/ori-runtime/src/headless.rs` | 1, `spec/RISK_MAP.md` (`ori-runtime` headless) | dispatched, claim 77 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 77 | ORI-T-0140 | `crates/ori-runtime/src/headless.rs` | 1 | `fix/ORI-T-0140-headless-timeout` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from claim 69 (`acp.rs`, `identity.rs`, `ori-core`) and claim 70 (`ticket.rs`, `recovery.rs`). If the same pattern exists in `crates/ori-runtime/src/acp.rs`, claim 69 holds that file, so ORI-T-0140 reports it and does not change it.
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 73, 76 and 77. The next free identifier is ORI-T-0141.
+
+---
+
+## Claim 73 integrated; claim 69 extended; ORI-T-0141 and ORI-T-0142 allocated
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+**Claim 73 integrated.** ORI-T-0074, `fixtures/migrated-with-drift`, cherry-picked from 300dce5. Verified on the session branch: not a member of this workspace (`cargo metadata`: 17 packages, no `parceltrack`), `cargo build --workspace --locked` passes, `cargo test -p ori-gates` 161 passed, `scripts/secret-scan.sh` no finding with its 16 new declared fakes. The lead did not read the fixture's `.env` (`CLAUDE.md` rule 4); the scanner did.
+
+**Claim 69 extended**, under [[R42]]: `crates/ori-memory/src/scope.rs`, the one line of `ori_t_0038_identity_payload_layout_and_rules_match_ori_broker_registration` that names the file it reads. Nothing else in that file. No other claim holds `scope.rs`: claim 60 was released when pull request 77 merged.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0141 | Move `AgentRuntime` and the types its signatures need (`SessionSpec`, `SessionHandle`, `RuntimeCaps`, `StopReason`, `LaunchConfig`, `StdioMode`, `RuntimeError`, `transcript::Entry`, `TranscriptError`) into `ori-core`, re-exported at their old paths, completing [[E-0002]]'s answer. ORI-T-0058's report section 1 lists what a re-export cannot preserve | `crates/ori-core/src/adapters.rs`, `crates/ori-runtime/src/acp.rs`, `transcript.rs`, `headless.rs` | 1 by `spec/RISK_MAP.md` (`ori-core` other types; `ori-runtime` acp, headless, transcript) | waits on claim 77 (ORI-T-0140) releasing `headless.rs`, and on claim 69 releasing `adapters.rs`; its two test changes are authorized by [[R42]] | 2026-10-11 |
+| ORI-T-0142 | `spec/DATA_MODEL.md` says `InProgress --> Queued` is "the engine's move and no one else's", and nothing enforces it: `Ticket::apply` accepts it from any actor, and `crates/ori-orchestrator/src/lifecycle.rs`'s `verb()` gates no AICD §17 verb on it. ORI-T-0129's coder proposes a guard on `Actor::System` in `Ticket::apply` (no new event kind, which the `ori-store` projector would ignore), at the cost of changing `ori_t_0020_apply_accepts_exactly_the_pairs_the_diagram_draws`; `system` is also the actor of triggers and watchers, so the guard is wider than the sentence | `crates/ori-core/src/ticket.rs`; possibly `lifecycle.rs` | 2 | **waiting on the operator**: `test_modified` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70, 76 and 77. The next free identifier is ORI-T-0143.
+
+---
+
+## R43: ORI-T-0142 folded into ORI-T-0129
+
+Written by the lead on 2026-10-11. Under [[R43]] the actor guard ORI-T-0142 described is built in ORI-T-0129, under claim 70, which already holds `crates/ori-core/src/ticket.rs`. ORI-T-0142 is closed into ORI-T-0129 and keeps its identifier as a record. What stays open from its row: a role or verb check for the move in `crates/ori-orchestrator/src/lifecycle.rs` (tier 2), allocated when it is planned.
+
+**State after this section:** unchanged. The claims held are 20, 61, 62, 64, 67 to 70, 76 and 77. The next free identifier is ORI-T-0143.
+
+---
+
+## Claim 69 narrowed; ORI-T-0143 allocated
+
+Written by the lead on 2026-10-11 under [[R31]].
+
+**Claim 69 narrowed.** ORI-T-0058 moved no declaration out of `crates/ori-runtime/src/acp.rs` ([[R42]] staged that as ORI-T-0141), and its branch does not change the file (`git diff --stat e095d4f..HEAD` on `feat/ORI-T-0058-adapter-traits` lists five files, none in `ori-runtime`). `acp.rs` is released from claim 69.
+
+**A defect in merged code, found by ORI-T-0140's coder by reading and confirmed by the lead by reading.** `crates/ori-runtime/src/acp.rs`, `AcpClient::call`: the loop checks `Instant::now() > deadline` only between frames, then calls `read_line`, which does `BufReader<ChildStdout>::read_line` and blocks until a newline or end of file. An agent process that stays alive and silent, or writes a partial line, blocks `call` indefinitely, and `IO_TIMEOUT` never fires. It is the same class as ORI-T-0140, in the ACP path rather than the headless one.
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0143 | `AcpClient::call`'s `IO_TIMEOUT` does not bound a child that stays silent or holds a partial line: the deadline is checked only between frames, around a blocking `read_line` | `crates/ori-runtime/src/acp.rs` | 1, `spec/RISK_MAP.md` (`ori-runtime` acp) | ready; dispatched after ORI-T-0140's review settles the shape of the fix; ORI-T-0141 waits on it, since both change `acp.rs` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 61, 62, 64, 67 to 70 (69 narrowed), 76 and 77. The next free identifier is ORI-T-0144.
+
+---
+
+## Claims 61 and 76 integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`.
+
+| # | Ticket | Integrated as | Review | Verified by the lead on the session branch | Tier, who merges to `main` |
+|---|---|---|---|---|---|
+| 61 | ORI-T-0039, the operational log and the retrieval package | d517576 to 0c8a6ff, seven commits (from b3b8055 ... 26a6f63) | Independent review on Opus 5.5: changes requested, one blocking (the "cited by" line of a module item read spec document paths and heading text from the code map beside the admitted candidate, around `Authorization::filter`, contradicting the module's own doc) and four should-fix (a record's ordinal among all records disclosed out-of-scope counts; a divergence filed against a file did not reach its sections; the freshness corpus was read before the search; a code-map-incomplete note counted files the map never parses). All repaired in attempt 2; the lead confirmed the blocking one by reading: `module_lines` now takes only the admitted module | `cargo test -p ori-memory -- oplog retrieval`: 40 passed; `cargo clippy -p ori-memory --all-targets -D warnings`: clean; `cargo test -p ori-gates`: 161 passed; strict `cargo doc`: clean | 1: the lead may merge under [[R38]]; it rides with the session branch |
+| 76 | ORI-T-0046, the liveness definition | three commits (from 4f1b19d, 3d627a5, 9660b61) | Independent review on Opus 5.5: nothing blocking; one should-fix (no test of an installed gate that ran and went quiet, `Inert(TooOld)`, or one with only future-dated runs), repaired in attempt 2 with the refactor the review described shown to fail exactly those two tests | `cargo test -p ori-gates`: 190 passed; clippy clean | **2**: the operator |
+
+`barrier.rs` was not touched by ORI-T-0039, so claim 61's extension to it is released unused. The review's note N10, that `barrier.rs` parses an evidence blob's `content_ref` from the log unvalidated and `EvidenceReply` hands it to a caller to read, is a defect in `barrier.rs`, not in this ticket:
+
+| Ticket | Defect | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0144 | An evidence blob's `content_ref` is parsed from the `memory.evidence_stored` event and handed out unvalidated, so a planted event names any absolute path, and the first caller that reads evidence by reference reads that file. It should be resolved under the product's evidence directory and refused otherwise | `crates/ori-memory/src/barrier.rs` | 2, `spec/RISK_MAP.md` (`barrier.rs`) | ready | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 70 and 77. The next free identifier is ORI-T-0145.
+
+---
+
+## ORI-T-0137 widened and claimed (78)
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+ORI-T-0058's independent review found a governance defect the ticket created: `AgentIdentity` and its creation path, `ScopedToken` and `VcsHost::merge` now live in `crates/ori-core/src/adapters.rs` and `crates/ori-core/src/adapters/identity.rs`, which `spec/RISK_MAP.md` tiers 1 ("crates/ori-core (other types)"), while they came from `crates/ori-broker`, tier 2 ("Credentials"), and `spec/SECURITY_NOTES.md` "Tier 2 modules" lists `ori-broker` (all) for "Credentials and identities". `spec/adr/ADR-0002-single-operator.md` says no module is moved out of tier 2 to avoid it. ORI-T-0058 does not merge before this is answered.
+
+ORI-T-0137 already held the half of this about `VcsHost::merge`. It is widened to the whole: tier both `ori-core` adapter files at 2 in `spec/RISK_MAP.md` and list them in `spec/SECURITY_NOTES.md`'s tier 2 table, and correct any statement in `spec/adr/ADR-0002-single-operator.md` the move makes false. All three are tier 2 documents, so the operator merges it.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 78 | ORI-T-0137, the adapter files tiered 2 | `spec/RISK_MAP.md`, `spec/SECURITY_NOTES.md`, `spec/adr/ADR-0002-single-operator.md` | 2 | `docs/ORI-T-0137-adapters-tier-2` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+No other claim holds a path under `spec/`. Claim 69 is noted to include `crates/ori-core/src/adapters/identity.rs`, which ORI-T-0058's split clause allowed and the review asked to be recorded (its note N8).
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 70, 77 and 78. The next free identifier is ORI-T-0145.
+
+---
+
+## Claim 79: ORI-T-0143 dispatched
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. ORI-T-0140's independent review approved its shape (a reader thread feeding a channel, one deadline over the whole run) and confirmed the ACP defect by reading: `AcpClient::call` checks its deadline only between lines around a blocking `read_line`, and `write_frame` can also block on a full stdin pipe.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 79 | ORI-T-0143, ACP read and write bounded by `IO_TIMEOUT` | `crates/ori-runtime/src/acp.rs` | 1 | `fix/ORI-T-0143-acp-timeout` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from claim 77 (`headless.rs`). Claim 69 no longer holds `acp.rs` (narrowed above). ORI-T-0141, which also changes `acp.rs`, waits on this claim's release.
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 69, 77, 78 and 79. The next free identifier is ORI-T-0145.
+
+---
+
+## ORI-T-0145 allocated and claimed (80), paired with ORI-T-0137
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+ORI-T-0137's documentation agent found that its new `spec/RISK_MAP.md` row turns `cargo test -p ori-gates` red: `crates/ori-gates/src/significance.rs` (gate 12) restates RISK_MAP's tier 2 rows in `RISK_MAP_TIER_TWO`, and `significance::tests::ori_t_0044_the_restated_risk_map_rows_agree_with_a_fresh_read_of_the_file` compares the restatement with the file. The two must land together, so the code half is ORI-T-0145, built on ORI-T-0137's branch, the shape of ORI-T-0123 and ORI-T-0124. It adds a row to a constant, not to a test, so no `test_modified` arises. Until it lands, gate 12 would not count the adapter files as tier 2.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0145 | Restate the new tier 2 row (`crates/ori-core/src/adapters.rs, adapters/identity.rs`) in `RISK_MAP_TIER_TWO` | `crates/ori-gates/src/significance.rs` | 1 by `spec/RISK_MAP.md` (`ori-gates` runners); carried with ORI-T-0137, so the pull request is tier 2 | dispatched, claim 80 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 80 | ORI-T-0145 | `crates/ori-gates/src/significance.rs` | 1 | `docs/ORI-T-0137-adapters-tier-2` (with claim 78) | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+No other claim holds `significance.rs`; claim 42 (ORI-T-0044) released when pull request 52 merged.
+
+Two records corrected now, both found by ORI-T-0137's agent: `ops/phase-1-backlog.md` batch 11's row for ORI-T-0058 still declared `crates/ori-integrations/src/traits.rs` at tier 1 (corrected in place, struck through, to the paths and tier E-0002's answer gave it); and ORI-T-0141, recorded above as tier 1, becomes **tier 2** once ORI-T-0137 merges, because it changes `crates/ori-core/src/adapters.rs`.
+
+**State after this section:** the claims held are 20, 62, 64, 67 to 69, 77 to 80. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 62, 67, 68 and 77 integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1 unless stated.
+
+| # | Ticket | Review, and what was repaired | Verified by the lead on the session branch |
+|---|---|---|---|
+| 62 | ORI-T-0040, the citation checker and the drift audit | Changes requested, one blocking, **reproduced** by the reviewer: the audit's routine verification erased a divergence filed by someone else, and a path divergence overwrote it, so readiness turned true without a human seeing the finding. Repaired by giving every divergence an origin (audit, filed, unattributed) in `freshness.rs` (additively, claim 62 widened), the audit clearing only its own, and only a human resolving a filed finding. Should-fix: vacuous verification of documents with no path claim (now `NothingChecked`, freshness left as it was); readers that followed links outside the root; a check over only excluded documents read as clean; gate-reader evasions (a non-breaking space, a trigger word); directories not counted against the walk limit. All repaired; the lead confirmed the blocking repair by reading `record_audit_verification` and the audit's calls | `cargo test -p ori-memory`: 466 passed; `cargo test -p ori-gates`: 190 passed; workspace clippy, strict doc, fmt: clean |
+| 67, 68 | ORI-T-0126 then ORI-T-0125, eight tests under [[R40]] | R40's condition holds for all eight on an ordinary non-root runner (the reviewer emulated one with `setpriv` and, for the capability case, ran as uid 65534 with `CAP_DAC_OVERRIDE`). Two should-fix, repaired: the code-map test took its "mode does not apply" branch without checking for root; a regression would have failed under a message blaming load. **Deviation from the ticket, accepted by the lead and recorded here:** `ori_t_0036_retained_heading_text_is_bounded_for_many_modules_citing_long_headings` now runs with a 3600 s scan budget. The ticket said to stop if the only fix was a wider bound; the review established the test never asserted a deadline (its five seconds were an incidental precondition of a complete scan, and the deadline is proven by other tests), so R40's "never widen a bound until it bounds nothing" is not engaged | `cargo test -p ori-memory` **as root: 466 passed, 0 failed**, the five root-only failures gone |
+| 77 | ORI-T-0140, the headless deadline | Approved, no blocking. One should-fix repaired: the abandoned reader drained a continuously writing descendant at full speed after the deadline; now a shared flag stops it and the writer gets EPIPE. The two waits share one deadline | `cargo test -p ori-runtime`: 163 passed |
+
+ORI-T-0140's coder found that `acp.rs`'s `drain_stderr` has the same unbounded drain for standard error. It is added to ORI-T-0143 (claim 79), which holds `acp.rs`.
+
+**State after this section:** the claims held are 20, 64, 69, 78, 79 and 80. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 69, 78 and 80 integrated on the session branch
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`. All three are tier 2 by their paths and go to the operator with the pull request.
+
+| # | Ticket | Review, and what was repaired | Verified by the lead on the session branch |
+|---|---|---|---|
+| 78 | ORI-T-0137, the `ori-core` adapter files tiered 2 | The lead read the diff: one `spec/RISK_MAP.md` row, one `spec/SECURITY_NOTES.md` row, two rows of `spec/adr/ADR-0002-single-operator.md`'s surface table brought up to date. It adds tier 2 coverage and removes none. Its agent corrected the lead's ticket: only `AgentIdentity` came from `ori-broker`; `ScopedToken` and the six traits are new declarations | with claim 80 below |
+| 80 | ORI-T-0145, gate 12 restates the new row | The lead read it: a thirteenth `RiskMapRow` with the Path cell verbatim, the count in the doc corrected, one new test that the identity adapter is significant and a tier 1 core file is not; the failing test reproduced first, the new test shown to fail on a wrong path | `cargo test -p ori-gates`: 191 passed |
+| 69 | ORI-T-0058, six adapter traits and `AgentIdentity` in `ori-core` | Three attempts. Attempt 1 stopped correctly on two escalations ([[R42]]). The independent review found no code defect; its blocker was governance (the moved files fell off every tier 2 path), answered by claims 78 and 80, which are integrated first so the files are never untiered on this branch. Its four should-fix were repaired in attempt 3: `merge` and `set_check` are pinned to the head the gates passed on; status is fail-closed and all-or-error; a token's scope is a type of its own so it cannot be swapped with the secret; `identity_token` says an identity is not proof of registration. Integrated after claims 78 and 80. Commit ee92886 alone is red on the [[R42]] test, which 6cd1cdd fixes; a squash merge keeps `main` bisectable | `cargo test -p ori-core`: 118 passed; `-p ori-broker`: 66; `-p ori-memory ori_t_0038`: passed; workspace clippy, strict doc, fmt: clean |
+
+`AgentRuntime` stays staged as ORI-T-0141, now **tier 2** by the new row (it changes `crates/ori-core/src/adapters.rs`), and waits on claim 79 (ORI-T-0143) releasing `acp.rs`.
+
+**State after this section:** the claims held are 20, 64 and 79. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 81 to 84 dispatched; batch 10 planning started
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. Every branch below is cut from a962bd9.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 81 | ORI-T-0144, an evidence blob's `content_ref` resolved under the product's evidence directory | `crates/ori-memory/src/barrier.rs` | 2 | `fix/ORI-T-0144-evidence-ref` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 82 | ORI-T-0134, `ori-gates`' module docs attached to the right modules | `crates/ori-gates/src/lib.rs` (doc comments only) | 1 | `fix/ORI-T-0134-gates-lib-docs` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 83 | ORI-T-0133, `gate.proven` named in the event stream | `spec/API_SPEC.md` | 1 | `docs/ORI-T-0133-gate-events` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 84 | ORI-T-0136, the adapter traits' home stated in the architecture and the roadmap | `spec/ARCHITECTURE.md`, `spec/ROADMAP.md` | 1 | `docs/ORI-T-0136-adapter-home` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from each other and from every held claim. Claim 20 holds `.github/workflows/ci.yml`, `scripts/gates.sh` and `fixtures/planted/gate-13/**`; claim 64 holds `ori-watch`; claim 79 holds `acp.rs`. ORI-T-0139, which also changes `barrier.rs` (docs only), waits on claim 81's release. ORI-T-0134 was ready once claims 63 and 76 released `lib.rs`, and both have.
+
+**Batch 10 (`ori-mcp`) is being planned, and nothing is claimed for it.** ORI-T-0056 and ORI-T-0057 share design questions the backlog row does not settle:
+- how `Server` reaches the lock table and escalations without a sideways dependency (`spec/LLD.md` section 2);
+- what carries MCP to an agent session, and how a connection is bound to one identity;
+- how the host reaches a user's server when only `ori-runtime` spawns processes;
+- which tools make up the phase 1 subset (`spec/ROADMAP.md`).
+
+One coder writes the plan for both, reading only, with no worktree and no branch. The lead reviews it and takes any spec conflict to the operator before claims are granted. This is the "before each batch" control point of `ops/phase-1-backlog.md`.
+
+**State after this section:** the claims held are 20, 64, 79 and 81 to 84. The next free identifier is ORI-T-0146.
+
+---
+
+## Claims 83 and 84 integrated; ORI-T-0146 to ORI-T-0148 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; both tier 1.
+
+| # | Ticket | Review | Verified by the lead on the session branch |
+|---|---|---|---|
+| 83 | ORI-T-0133, `gate.proven` in `spec/API_SPEC.md` section 2 | The lead read the diff: one bare kind added after `gate.inert`, in the list's own form, with no payload, projection or revocation kind invented. Its agent confirmed the three places that already named the kind | its agent: `cargo test -p ori-gates` 191 passed, gate 13 clean; the lead re-ran gate 13 on the integrated commits |
+| 84 | ORI-T-0136, the adapter traits' home in `spec/ARCHITECTURE.md` and `spec/ROADMAP.md` | The lead read the diff: the `integrations` row and two roadmap lines now place the declarations in `ori-core`. The diagram label "adapter slots" was rightly left as it is (PROJECT_BRIEF principle 12 names the integration categories that way). Its agent corrected the lead's ticket: the specification now says all seven traits are in `ori-core`, but at a962bd9 `AgentRuntime` is still declared in `crates/ori-runtime/src/acp.rs`; ORI-T-0141 closes that, and until it lands a drift audit would flag it | as for 83 |
+
+The documentation agent's findings, recorded:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0146 | `crates/ori-gates/src/prover.rs`'s module doc (around lines 103 to 106) says `spec/API_SPEC.md` section 2 does not list `gate.proven`, and calls that a gap. Claim 83 closed the gap, so the sentence is now false. Docs only | `crates/ori-gates/src/prover.rs` | 2 (`spec/RISK_MAP.md`: `prover.rs`) | ready | 2026-10-11 |
+| ORI-T-0147 | `spec/ARCHITECTURE.md` section 1's diagram never says what its arrows mean. Read as crate dependencies, it contradicts `spec/LLD.md` section 2 on four edges (`RPC --> ORC`, `RPC --> FLOW`, `WATCH --> ORC`, `RT --> MCP`); read as runtime interaction, which is what the document says it describes, it agrees. Add a legend that points to LLD section 2 for dependencies | `spec/ARCHITECTURE.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0148 | `ModelProvider` is declared in `ori-core` by the specification, but no document names the crate that implements it. `spec/API_SPEC.md` section 4 and `spec/LLD.md` section 2 name implementers only for the five slot traits and `AgentRuntime`. A model provider makes network calls, which `spec/ARCHITECTURE.md` section 9 allows only in integrations, runtime and mcp | `spec/API_SPEC.md`, `spec/LLD.md` | 1 | **needs planning**: the implementing crate is a decision | 2026-10-11 |
+
+Added to ORI-T-0132 (needs planning), from the same report: `spec/criteria/phase-1.md` ORI-P1-013 ends with "gate state Installed" after `gates.prove`. `spec/DATA_MODEL.md` section 3 draws `Defined → Proven → Installed` as one prose line, with no edge back to `Defined` and none out of `Inert`. Nothing in `spec/` says what moves a gate from `Proven` to `Installed`. The runbook's revocation ("state back to Defined") has no edge and no event kind.
+
+**State after this section:** the claims held are 20, 64, 79, 81 and 82. The next free identifier is ORI-T-0149.
+
+---
+
+## Claim 85: ORI-T-0147 dispatched
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]].
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 85 | ORI-T-0147, a legend for ARCHITECTURE's overview diagram | `spec/ARCHITECTURE.md` | 1 | `docs/ORI-T-0147-architecture-legend` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Claim 84 (ORI-T-0136), which also changed `spec/ARCHITECTURE.md`, is integrated, and the branch is cut after it, from 7bf0508. No other claim holds a path under `spec/`.
+
+**State after this section:** the claims held are 20, 64, 79, 81, 82 and 85. The next free identifier is ORI-T-0149.
+
+---
+
+## Claim 79 integrated; ORI-T-0149 to ORI-T-0151 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review, and what was decided | Verified by the lead on the session branch |
+|---|---|---|---|
+| 79 | ORI-T-0143, the ACP client's reads and writes bounded by `IO_TIMEOUT` | Independent review (Opus): nothing blocking. Every wait on a pipe is a `recv_timeout` on the remaining time. On a timeout the child is killed and reaped and the session is spent. No existing test changed: the test module at base is a byte-identical prefix of the new one. The reviewer overlaid ORI-T-0140's `headless.rs` and ran `ori-runtime` green. Two should-fix findings are carried into ORI-T-0149 below, because nothing in the engine calls `AcpClient::prompt` yet (`grep` over `crates/`: the only other user of the trait is `headless.rs`'s own implementation). Decisions the lead accepts and records: a prompt that times out kills the child and spends the session, and no launch defect is recorded for an ACP timeout. On that path the process ends before the supervisor revokes the session's credentials. `spec/LLD.md` section 5's order (revoke, then terminate, then release locks) is the supervisor's kill sequence, and the supervisor must still run it on a `Timeout`; that is a constraint on whichever ticket builds the session supervisor. Integrated as d2a9b0b | `cargo test -p ori-runtime`: 183 passed, 8 ignored; workspace clippy and fmt: clean |
+
+The review's findings and the coder's, recorded. All three tickets change files that ORI-T-0141 also changes (`acp.rs`, `headless.rs`, `transcript.rs`), so all three wait on ORI-T-0141:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0149 | Make `AcpClient` fit to drive a real agent. **This must land before any production caller drives `AcpClient`.** Four parts. (1) `session/prompt` runs under `IO_TIMEOUT` (20 s) for the whole turn, and an agent that thinks or runs a tool silently for longer is killed. In ACP the response to `session/prompt` arrives only when the turn ends. Bound the turn by the session's budget (`budget.rs`) and an inactivity bound instead, and keep `IO_TIMEOUT` for the handshake round trips. (2) `MAX_LINE_BYTES` (1 MiB) refuses, and spends the session on, any longer frame. A tool-call `diff` carrying a large file's old and new text, or an image block, can exceed it. Check the cap against the ACP specification; raise it, or bound the queue by bytes rather than by line count, or record with a source why 1 MiB is enough. (3) A timeout drops up to 16 queued lines, which can include a `session/request_permission` that would otherwise be recorded as a launch defect (ORI-P1-039). Drain the queue before retiring. (4) `retire` calls `kill_child`, whose `wait()` after the kill has no bound, and `let _ =` discards a kill or wait failure while the docs say "killed and reaped" | `crates/ori-runtime/src/acp.rs` | 1 (`spec/RISK_MAP.md`: `ori-runtime` acp) | ready after ORI-T-0141 | 2026-10-11 |
+| ORI-T-0150 | `headless.rs` drains standard error with `drain_stderr`, which stops only at end of file. ORI-T-0143 added `drain_stderr_until(stderr, stop)`; switch the headless adapter to it so a descendant holding standard error open is not drained at full speed after the deadline | `crates/ori-runtime/src/headless.rs` | 1 | ready after ORI-T-0141 | 2026-10-11 |
+| ORI-T-0151 | `Transcript::record` clones the whole entry list on every append (`transcript.rs`, around line 242), so each pass of `AcpClient::call` costs time proportional to the transcript, and a chatty agent grows the transcript without limit over a session. Cap it, and say what a capped transcript records about what it dropped | `crates/ori-runtime/src/transcript.rs` | 1 | ready after ORI-T-0141 | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 64, 81, 82 and 85. The next free identifier is ORI-T-0152.
+
+---
+
+## Claim 86: ORI-T-0141 dispatched
+
+Written by the lead at dispatch, 2026-10-11, under [[R31]]. Claim 79 is released (ORI-T-0143 integrated), and claim 77 released earlier (ORI-T-0140). The branch is cut from 56dc155, which carries both.
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 86 | ORI-T-0141, `AgentRuntime` and the types in its signatures moved into `ori-core` | `crates/ori-core/src/adapters.rs`, `crates/ori-runtime/src/acp.rs`, `transcript.rs`, `headless.rs` | 2 (`spec/RISK_MAP.md`: `crates/ori-core/src/adapters.rs`) | `feat/ORI-T-0141-agent-runtime-core` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Disjoint from every held claim (20, 64, 81, 82, 85). Its test changes are the two [[R42]] authorizes, and no others. The ticket forbids a new file under `crates/ori-core/src/adapters/`: `spec/RISK_MAP.md` tiers only `adapters.rs` and `adapters/identity.rs`, and ORI-T-0058's review found that kind of move landing types on an untiered path. ORI-T-0149, ORI-T-0150 and ORI-T-0151 wait on this claim.
+
+**State after this section:** the claims held are 20, 64, 81, 82, 85 and 86. The next free identifier is ORI-T-0152.
+
+---
+
+## Claim 85 integrated; ORI-T-0152 and ORI-T-0153 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review | Verified |
+|---|---|---|---|
+| 85 | ORI-T-0147, a legend for ARCHITECTURE's overview diagram | The lead read the diff: one paragraph under the diagram, saying its arrows are runtime and data-flow interactions and pointing to `spec/LLD.md` section 2 for crate dependencies. No edge changed. Its agent checked every edge against the manifests and confirmed the ticket's claims, with one nuance: `acp.rs` sends `mcpServers` in `session/new`, but the list is empty, a named seam until `ori-mcp` exists | its agent: `cargo test -p ori-gates` 191 passed, gate 13 clean |
+
+From the same report:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0152 | `spec/LLD.md` section 2's graph draws `INT` in the `--> STORE` fan-in, but `crates/ori-integrations/Cargo.toml` depends only on `ori-core`, and the same table says `ori-integrations` must not read the store. The graph is wrong about `ori-integrations`; every other drawn edge agrees with the manifests. First noted under claim 65 | `spec/LLD.md` | 1 | ready; documentation role | 2026-10-11 |
+| ORI-T-0153 | `crates/ori-integrations/Cargo.toml`'s `description` still says "Adapter traits, reference adapters ...", while the traits are declared in `ori-core` | `crates/ori-integrations/Cargo.toml` | 1 | ready; best carried by ORI-T-0059, the next ticket in that crate | 2026-10-11 |
+
+For batch 10's plan: the runtime does not call the MCP server. It tells the agent where the server is (ACP `session/new`, `mcpServers`), and the agent calls it. As built, that list is empty.
+
+**State after this section:** the claims held are 20, 64, 81, 82 and 86. The next free identifier is ORI-T-0154.
+
+---
+
+## Claim 82 integrated; ORI-T-0154 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review | Verified |
+|---|---|---|---|
+| 82 | ORI-T-0134, `ori-gates`' module docs on the right modules | The lead read the diff: four `pub mod` lines, each with exactly one doc. One deviation, accepted: the coder replaced rather than moved `modified_tests`' sentence. "The detector that makes CLAUDE.md's never-modify-a-test rule real" claimed enforcement that does not exist: gate 5 is defined and not installed, and `scripts/gates.sh` reports it not available. The new sentence says what the module does and names gate 5 without saying it runs | its coder: workspace test, clippy, strict doc, fmt all exit 0; gate 13 clean |
+
+The coder's finding, recorded:
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0154 | Nothing in CI or `scripts/gates.sh` runs `RUSTDOCFLAGS="-D warnings" cargo doc`, and no crate sets `missing_docs`. `CLAUDE.md` rule 9 requires a doc comment on every public item, and INC-0003's second half broke rustdoc on a branch. Today the check exists only as a standing instruction in each ticket. Two modules here carried no doc at all, and every gate was green | `.github/workflows/ci.yml`, `scripts/gates.sh`, possibly the workspace `Cargo.toml` lints | 2 (`.github/workflows`, supply chain) | **needs planning**: a change to the gate set; the operator decides, and claim 20 holds `ci.yml` and `scripts/gates.sh` | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 64, 81 and 86. The next free identifier is ORI-T-0155.
+
+---
+
+## Claim 64 integrated; ORI-T-0155 allocated
+
+Written by the lead on 2026-10-11 under [[R31]] rule 3. Not on `main`; tier 1.
+
+| # | Ticket | Review, and what was repaired | Verified by the lead on the session branch |
+|---|---|---|---|
+| 64 | ORI-T-0054, the tree watcher and the git hooks installer, on `notify` 8.2.0 exactly pinned ([[E-0009]]) | Three review passes, all independent (Opus). **Pass 1** found blocking defects; repaired in 679eb47 and 1000df3: a dead backend reported as a quiet tree; refs read through links; a preserved hook overwritten. **Pass 2** found two defects that fail only on CI's other legs: the dead-backend test panicked inside notify's `extern "C"` and `extern "system"` callbacks, which aborts the test binary on macOS and Windows; and three test helpers were dead code on Windows, which fails `clippy -D warnings` there. Both repaired in eae39cc, along with five should-fix items: open-flag tests (mutation-checked), `.git` re-checked on every poll and install, a hook linked to a managed hook refused, the third-tool window documented, and an absolute-link test. Pass 2 also found a secret-shaped test string. The scanner reads every blob any ref reaches, so the coder folded the fix into the commit that introduced it, on its own unpushed branch, and the string never reached this branch. **Pass 3** found nothing blocking. It checked the cfg gating line by line against notify 8.2.0 and libc 0.2.189, and simulated the Windows and macOS clippy runs in copies; both were clean. Its should-fix items go to ORI-T-0155 | workspace `cargo test`: **1342 passed, 0 failed**, as root; workspace clippy, strict doc, fmt: clean; secret scan: no finding in 784 history blobs |
+
+Gate 7 judges `notify`'s dependency graph in CI on the push that carries this section.
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0155 | The hook installer's link refusal does only one `read_link` with an exact name match, and only for the four managed hooks. Pass 3 reproduced two misses in a copy. (a) A chain, `pre-push -> relay -> post-commit`, installs, and the user's pre-push veto is silently lost. (b) An unmanaged hook linked to a managed one, `post-checkout -> post-merge`, makes every checkout record a false `post-merge` event into the spool the engine reads. Compare canonical paths, and scan every entry of the hooks directory for a link that resolves to a managed hook. Also, all from pass 3: `RefPoller::poll`'s `# Errors` omits `GitDirNotADirectory` and `UnsupportedRefStorage`; the hooks module doc does not state that a `.git` swapped during an install is still written through; two doc sentences are stale (hooks.rs around 66 to 73; the `Drop` doc's "this workspace does not set it", which the new `compile_error!` makes moot); a case-insensitive file system misses `Post-Commit`. **Must land before anything installs the hooks or reads the spool** (ORI-T-0055 and the engine) | `crates/ori-watch/src/hooks.rs`, `watcher.rs` | 1 | ready | 2026-10-11 |
+
+**State after this section:** the claims held are 20, 81 and 86. The next free identifier is ORI-T-0156.
+
+---
+
+## Batch 10 planned; E-0010 to E-0013 raised
+
+Written by the lead on 2026-10-11. The plan is `ops/batch-10-plan.md`: the lead's decisions D1 to D4, D8 and D9, twelve slices, and seven prerequisites outside `ori-mcp`. Nothing is claimed yet. The first slice, W0 (the shared wire), waits on the MCP specification text, which its ticket must supply. Slice S1 waits on PD-1 (RISK_MAP rows for the new files) because `ports.rs`, `server.rs` and `tools/**` have no tier until then, and ORI-T-0058's review showed what landing code on an untiered path costs. The four questions are with the operator: [[E-0010]], [[E-0011]], [[E-0012]], [[E-0013]].
+
+**State after this section:** unchanged. The claims held are 20, 81 and 86. The next free identifier is ORI-T-0156.
+
+---
+
+## E-0010 to E-0013 answered; ORI-T-0156 to ORI-T-0158 allocated; claims 87 and 89
+
+Written by the lead on 2026-10-11 under [[R31]]. The operator answered all four in session, each as recommended (State lines in the escalation files).
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0156 | Write the four answers and the batch 10 decisions into the specification: API_SPEC sections 2 and 3, LLD's `ori-mcp` row, ENV_SETUP section 5, SECURITY_NOTES, and a **new** RISK_MAP row for `crates/ori-mcp/src/scopes.rs, ports.rs, server.rs, tools/` at 2 plus `protocol.rs` at 1. This is plan prerequisites PD-1 and PD-2 together. The existing abstract row `crates/ori-mcp (server tool scopes)` stays as it is: gate 12's test `ori_t_0044_three_risk_map_tier_two_rows_are_recorded_as_unresolved_and_not_silently` counts it as one of exactly three unresolved rows, and changing it would be a `test_modified` | `spec/API_SPEC.md`, `spec/LLD.md`, `spec/ENV_SETUP.md`, `spec/SECURITY_NOTES.md`, `spec/RISK_MAP.md` | 2 | dispatched, claim 87; documentation role | 2026-10-11 |
+| ORI-T-0157 | Restate ORI-T-0156's new tier 2 row in gate 12's `RISK_MAP_TIER_TWO`, on ORI-T-0156's branch: the pattern of ORI-T-0137 and ORI-T-0145 | `crates/ori-gates/src/significance.rs` | 1 by path; carried with ORI-T-0156, so tier 2 | after ORI-T-0156; claim 88 reserved | 2026-10-11 |
+| ORI-T-0158 | Batch 10 slice W0: the shared MCP wire (`protocol.rs`), on MCP 2025-11-25, which the lead fetched from the specification's repository because the specification's site is outside this container's network policy | `crates/ori-mcp/Cargo.toml`, `src/lib.rs`, `src/protocol.rs`, `Cargo.lock` | 1 | dispatched, claim 89 | 2026-10-11 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 87 | ORI-T-0156 | as above | 2 | `docs/ORI-T-0156-mcp-spec` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+| 89 | ORI-T-0158 | as above | 1 | `feat/ORI-T-0158-mcp-wire` | 2026-10-11 | **held** | 2026-10-11, at dispatch |
+
+Claim 87 and claim 89 are disjoint, and both are disjoint from every held claim (20, 81, 86). No other claim holds `Cargo.lock` or any path under `crates/ori-mcp/`.
+
+**State after this section:** the claims held are 20, 81, 86, 87 and 89; claim 88 is reserved for ORI-T-0157. The next free identifier is ORI-T-0159.
+
+---
+
+## Claim 64 withdrawn from the session branch and held again
+
+Written by the lead on 2026-10-11. CI on 3e53283, the first run to carry ORI-T-0054, failed two checks. The lead reverted its seven commits in one commit (6d406e4: a revert, not a history rewrite), so the session branch's code is again identical to f3da68e, which CI passed in full.
+
+| Check | What failed | Whose |
+|---|---|---|
+| gate-7 (`cargo deny check bans`) | `windows-sys` locked at both 0.60.2 (through `keyring` 3.6.3, `notify` 8.2.0 itself, and `winapi-util`) and 0.61.2 (through `mio` 1.2.4 under `notify`). [[E-0009]] predicted this and set its terms: if gate 7 refuses, the question returns to the operator, and `deny.toml` is not relaxed to admit it. The lead read the manifests. `notify` pulls `mio` only on Linux, Android, macOS and the BSDs, and `mio` pulls `windows-sys` only on Windows, so the two versions never build together on any one target. `deny.toml` has no `[graph] targets` and judges the union of every target. Every `notify` release has the same pair (8.x on 0.60, its `mio` on 0.61; 9.0 release candidates on 0.61 against `keyring`'s 0.60) | this ticket's dependency; the operator decides |
+| test (macos-latest) | Four watcher tests fail under FSEvents: three wait for a modification and see `Created`, because FSEvents reports a later write to a recently created file as a creation; one sees the temporary of a rename-over reported beside its target, because FSEvents does not pair the two halves of the rename as inotify does | this ticket's code; repaired on its branch |
+
+**Claim 64 is held again** for the repair on `feat/ORI-T-0054-watch`. ORI-T-0155 (the follow-up from pass 3) is folded into the same repair, since it changes the same two files and nothing of ORI-T-0054 is integrated to follow up on.
+
+**State after this section:** the claims held are 20, 64, 81, 86, 87 and 89; claim 88 is reserved. The next free identifier is ORI-T-0159.
+
+---
+
+## E-0009 answered again; ORI-T-0159 re-plans ORI-T-0054's repair; claims 88 and 90
+
+Written by the lead on 2026-10-12 under [[R31]]. The worker restarted overnight. All four agents in flight (ORI-T-0141, 0144, 0156, 0158) finished before the restart, and their branches and reports survived.
+
+**Gate 7.** The operator chose one version-pinned skip entry (`windows-sys@0.61.2`), recorded in [[E-0009]].
+
+**ORI-T-0054's budget is spent.** It has had three attempts: the first build, then repair rounds 1 and 2. The remaining work is re-planned by the lead as a new ticket on top of its branch, rather than pressed into a fourth attempt (`ops/phase-1-backlog.md`, "Budget").
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0159 | On `feat/ORI-T-0054-watch`: (1) `deny.toml`'s skip entry, per E-0009; (2) the watcher under macOS FSEvents, for the four tests CI failed there (a later write reported as `Created`; a rename-over's temporary reported beside its target); (3) every item of ORI-T-0155, which it absorbs | `deny.toml`, `crates/ori-watch/src/watcher.rs`, `hooks.rs` | 2 (`deny.toml` is gate 7's configuration, supply chain) | dispatched, claim 90 | 2026-10-12 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 88 | ORI-T-0157 | `crates/ori-gates/src/significance.rs` | 1, carried with ORI-T-0156 at 2 | `docs/ORI-T-0157-mcp-tier-restated` (cut from ORI-T-0156's head, ffdcf2c) | 2026-10-12 | **held** | 2026-10-12, at dispatch |
+| 90 | ORI-T-0159 | `deny.toml`, `crates/ori-watch/src/watcher.rs`, `crates/ori-watch/src/hooks.rs` | 2 | `feat/ORI-T-0054-watch` (continues claim 64's branch) | 2026-10-12 | **held** | 2026-10-12, at dispatch |
+
+Claim 64 is folded into claim 90. Claim 88 is disjoint from everything held, since no claim holds `significance.rs`. No claim holds `deny.toml`; claim 20 holds `.github/workflows/ci.yml` and `scripts/gates.sh`, not gate 7's configuration.
+
+**State after this section:** the claims held are 20, 81, 86, 87, 88, 89 and 90. The next free identifier is ORI-T-0160.
+
+---
+
+## Wave of 2026-10-12: six tickets built, four reviewed; **paused by the operator**
+
+Written by the lead on 2026-10-12. The operator asked to pause everything once the running tasks finished. Every ticket below is **built and not integrated**: nothing in this section is on the session branch except this record and one correction to E-0009's text (`mio` reaches macOS only under `macos_kqueue`, which `ori-watch` leaves off). The claims stay held so that work resumes where it stopped.
+
+### Where each ticket stands
+
+| Ticket | Claim | Branch, head | State |
+|---|---|---|---|
+| ORI-T-0144, evidence `content_ref` confined | 81 | `fix/ORI-T-0144-evidence-ref`, f213566 | reviewed; 1 should-fix confirmed; repair not dispatched |
+| ORI-T-0141, `AgentRuntime` into `ori-core` | 86 | `feat/ORI-T-0141-agent-runtime-core`, 670aa99 | reviewed; 1 should-fix confirmed (a follow-up, below), 1 contested; R42 conformity confirmed |
+| ORI-T-0158, the MCP wire (W0) | 89 | `feat/ORI-T-0158-mcp-wire`, 1ad80e8 | reviewed; 3 should-fix confirmed; repair not dispatched |
+| ORI-T-0156, batch 10 answers in the spec | 87 | `docs/ORI-T-0156-mcp-spec`, ffdcf2c | reviewed; 1 blocking and 3 should-fix confirmed, 2 contested; two need the operator |
+| ORI-T-0157, gate 12 restates the `ori-mcp` row | 88 | `docs/ORI-T-0157-mcp-tier-restated`, 4a3d32f | built on ffdcf2c, all gates green; not reviewed |
+| ORI-T-0159, ORI-T-0054's watcher made to pass CI everywhere | 90 | `feat/ORI-T-0054-watch`, f02e877 | built; `cargo-deny` 0.20.2 passes with the pinned skip and fails without it; macOS and Windows behaviour reasoned from `notify`'s source and not run; not reviewed |
+
+The review was one workflow: three independent lenses per ticket (Opus), a merge, and two skeptics per blocking or should-fix finding, told to refute it. 50 agents, none failed. The full findings are in the session scratchpad (`review-wave-4-full.json`, `review-wave-4-summary.md`). The confirmed ones:
+
+| Finding | What | Disposition proposed by the lead |
+|---|---|---|
+| 0144-F1 (should-fix) | One evidence event that fails the check denies every explicit evidence request in the product **permanently**. The log cannot be amended and nothing can quarantine an event. The module doc's "until a human looks at it" promises a remedy that does not exist (reproduced through `ScopeEnforcer::authorize`) | Correct the doc and the operator note. A recovery path (a per-record read, or a quarantine event kind) is a decision for the operator |
+| 0141-F1 (should-fix) | `SessionSpec` derives `Debug` over `envs`, where an issued credential is placed; formatting one prints the credential. Latent: nothing places a credential there yet | Follow-up ORI-T-0160, below. It must land before the injector is wired to `SessionSpec`. Not a merge blocker |
+| 0158-F1 (should-fix) | Typed decoding copies the parsed tree, so the peak memory for one hostile 1 MiB line is about twice the documented ~90 MiB | Repair, or document and cap lower for agent connections |
+| 0158-F2 (should-fix) | In `Ready`, the state table does not check direction: a server's `tools/call` sent to a client is decoded rather than refused | Repair |
+| 0158-F3 (should-fix) | The 1 MiB cap is justified by a cap on the proxy's output, which cannot bound an operator server's inbound line, so one large legitimate result ends that server's connection | Repair: the host's cap is set separately |
+| 0156-F1 (blocking) | E-0010 exempts proxied tools from the file-write rule only. The unchanged clauses "never receive the merge operation" and "never receive credentials through MCP" become guarantees Ori cannot enforce once an operator's server exposes a merge tool or carries its own credentials | **Operator question** |
+| 0156-F3 (should-fix) | Two SECURITY_NOTES statements that E-0010's accepted proxied reach makes false (trust boundary 4, the auto-mode controls) were neither qualified nor reported | Repair, after the answer to 0156-F1 |
+| 0156-F5 (should-fix) | The sealed-barrier bullet says more than E-0012 decided ("no plain string", "one public entry", "does not compile") | Repair |
+| 0156-F9 (should-fix) | A new tier 2 RISK_MAP row is a change to ADR-0002's tier 2 surface, which ADR-0002 escalates as `adr_area` | **Operator question** (an acknowledgement) |
+
+Contested, for the lead's reading on resume: 0144-F2 (the coder's own finding that `submit_report`'s write follows a pre-existing link; pre-existing and out of scope, real but judged a note by both skeptics), 0141-F2 (a `TranscriptError` refusal carries no `MethodologyRef`; pre-existing), 0156-F2 (ENV_SETUP section 5's "any deviation is a decisional ticket" against exposure as an event), 0156-F8 (SECURITY_NOTES' and ADR-0002's tier 2 tables no longer match RISK_MAP).
+
+### Corrections to the lead's own text, found by the agents
+
+- ORI-T-0159's coder: (1) a962bd9 is **not** an ancestor of `feat/ORI-T-0054-watch` (cut from f0e61b3), so on that branch the five mode-000 tests still fail as root; the header said otherwise. (2) `spec/RISK_MAP.md` has no row for `deny.toml`; tier 2 was the lead's analogy with `.github/workflows`. (3) E-0009's "macOS" was wrong, corrected above.
+- ORI-T-0158's coder: "the caps the plan sets (256 KiB per proxied result)" is not in `ops/batch-10-plan.md`; the figure came from the planner's report.
+- ORI-T-0141's coder: `Entry` already had accessors; and `LaunchConfig::new` returns a `Result`, so the R42 edits each needed an `.expect(..)`, which tightens rather than loosens.
+- ORI-T-0144's coder: `retrieval.rs` renders evidence but does not call `read_evidence` outside a test; `scope.rs` does.
+
+### Questions waiting for the operator on resume
+
+1. **0156-F1:** does an operator-exposed MCP server's merge tool, or its own credential, fall under E-0010's accepted reach (as file writes do), or is it forbidden, with the host refusing to expose a server that offers one?
+2. **0156-F9:** acknowledge the new tier 2 RISK_MAP row as the `adr_area` decision ADR-0002 asks for.
+3. **0144-F1:** accept "permanent and product-wide" as the cost of all-or-error for now, with a recovery path as a follow-up; or require the recovery path before merge.
+4. **Stdio-only host in phase 1** (`ops/batch-10-plan.md`, last section): never answered, and ORI-T-0156 wrote nothing about it.
+
+### Follow-ups allocated
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0160 | `SessionSpec`'s `Debug` must redact `envs`, as `ScopedToken`'s does (0141-F1). Before the injector is wired to `SessionSpec` | `crates/ori-core/src/adapters.rs` | 2 | after ORI-T-0141 | 2026-10-12 |
+| ORI-T-0161 | `submit_report` writes the evidence file with `std::fs::write`, which follows a link already standing at `<product>/evidence/<id>.txt` or at `evidence/`, and overwrites a reused id's file. Refuse a link and an existing file at write time (0144-F2, the coder's own finding) | `crates/ori-memory/src/barrier.rs` | 2 | after ORI-T-0144 | 2026-10-12 |
+| ORI-T-0162 | A RISK_MAP row for `deny.toml` (gate 7's configuration), and LLD section 6's `evidence/<blob_id>` brought in line with the `.txt` the code writes (0144-F10) | `spec/RISK_MAP.md`, `spec/LLD.md` | 2 | ready; documentation role | 2026-10-12 |
+| ORI-T-0163 | Windows: `ReadDirectoryChangesW` never reports the watched root's removal, so the watcher cannot detect it there (ORI-T-0159 gated that test off Windows). A root-existence probe at reconciliation | `crates/ori-watch/src/watcher.rs` or the engine | 1 | after ORI-T-0159 | 2026-10-12 |
+
+**State after this section:** the claims held are 20, 81, 86, 87, 88, 89 and 90, all paused. The next free identifier is ORI-T-0164.

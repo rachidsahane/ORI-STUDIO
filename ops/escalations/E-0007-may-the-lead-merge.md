@@ -5,7 +5,7 @@
 | Trigger | `spec_conflict` |
 | Raised by | The lead, from ORI-T-0022's finding, which implemented AICD §17 verbatim and reported every divergence rather than blending them |
 | Blocks | **ORI-T-0029**, the forbidden-action test. Whichever way this goes, one of two tickets is wrong, and the loser is a test change |
-| State | Open, with the operator |
+| State | Answered by the operator in session on 2026-10-11: **reading 1**, the cell means authority. `permits(Lead, CodeRepository, Merge)` keeps `Allowed { limit: TierZero }`; ORI-T-0029 asserts that no merge credential is ever issued to the lead. Nothing in `spec/` changes for this. The ticket-machine gap recorded below was answered the same day with option 1, add the edge `InProgress --> Queued`: ORI-T-0128 (documentation role, `spec/DATA_MODEL.md` section 3) then ORI-T-0129 (`crates/ori-core/src/ticket.rs`, tier 2). The three divergences listed below are not answered and stay open |
 
 ## The four documents, verified
 

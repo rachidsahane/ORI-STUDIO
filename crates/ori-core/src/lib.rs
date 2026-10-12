@@ -20,6 +20,7 @@
 //!
 //! Must not: do IO, or import any other workspace crate (`spec/LLD.md` section 2).
 
+pub mod adapters;
 pub mod document;
 pub mod error;
 pub mod permission;

@@ -9859,11 +9859,45 @@ mod tests {
         }
         fs::set_permissions(file, fs::Permissions::from_mode(0o000))
             .expect("make a file unreadable");
-        assert!(
+        mode_applies_to_this_process(
+            file,
             fs::read(file).is_err(),
-            "this test needs a process the file mode applies to"
+            "this test needs a process the file mode applies to",
         );
         Restore(file.to_owned())
+    }
+
+    /// Whether this process is root, found with no call this crate does not
+    /// already make: a path this process created is owned by its effective
+    /// user, and root is user 0. Only ever asked about a path the test
+    /// itself created.
+    #[cfg(unix)]
+    fn runs_as_root(created_by_this_test: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(created_by_this_test).is_ok_and(|metadata| metadata.uid() == 0)
+    }
+
+    /// After a test took every mode bit from `path` and tried to read it
+    /// (`applies` is that the read failed): returns `applies`, with one
+    /// exception. A process that runs as root is bound by no file mode, so
+    /// `path` stays readable to it, and the unreadable half of the test
+    /// cannot be exercised there: that case prints why and returns `false`,
+    /// and the caller goes on with every assertion that does not need the
+    /// path to be unreadable. Any other process that can still read the
+    /// path fails with `requirement`, as the test always did.
+    #[cfg(unix)]
+    fn mode_applies_to_this_process(path: &Path, applies: bool, requirement: &str) -> bool {
+        if !applies && runs_as_root(path) {
+            eprintln!(
+                "{}: still readable after mode 000, because this process runs as root and no \
+                 file mode restricts root; the unreadable half of this test is not exercised \
+                 here, and every assertion that does not need the path to be unreadable runs",
+                path.display()
+            );
+            return false;
+        }
+        assert!(applies, "{requirement}");
+        true
     }
 
     /// Where the platform has no mode to take away (Windows), `file` stays
@@ -11068,12 +11102,19 @@ mod tests {
         .expect("a file of too many documents");
         fs::remove_file(scratch.path.join(&removed)).expect("remove a file");
         #[cfg(unix)]
-        let _locked = {
+        let (_locked, locked_is_listable) = {
             fs::remove_file(scratch.path.join(&linked)).expect("remove the file");
             std::os::unix::fs::symlink("PRD.md", scratch.path.join(&linked))
                 .expect("put a link in its place");
-            LockedDirectory::new(spec.join("runbooks"))
+            let locked = LockedDirectory::new(spec.join("runbooks"));
+            // A process no mode binds (root) can still list it: then the
+            // runbook in it is read like any other file, and the test does
+            // not claim it was left out.
+            let listable = !locked.is_unlistable();
+            (locked, listable)
         };
+        #[cfg(not(unix))]
+        let locked_is_listable = false;
 
         let walk = Indexer::collect_from_repo(&scratch.path)
             .expect("no file left out for want of budget, so the walk is returned");
@@ -11091,7 +11132,9 @@ mod tests {
         ];
         if cfg!(unix) {
             left_out.push((linked.clone(), "Symlink"));
-            left_out.push((in_locked_dir.clone(), "Unreadable"));
+            if !locked_is_listable {
+                left_out.push((in_locked_dir.clone(), "Unreadable"));
+            }
         }
         for (relative, kind) in &left_out {
             let listed = report
@@ -11161,11 +11204,26 @@ mod tests {
             kept_listed[0].reason,
             StaleReason::Divergence { .. }
         ));
+        if locked_is_listable {
+            // The half that needs the directory unlistable is not exercised
+            // here; what a listable directory means is, the same as for the
+            // file left alone: read, so its divergence is an ordinary one.
+            let runbook_listed: Vec<&StaleDocument> = report
+                .stale
+                .iter()
+                .filter(|document| document_file(&document.path) == in_locked_dir)
+                .collect();
+            assert_eq!(runbook_listed.len(), 1, "{runbook_listed:?}");
+            assert!(matches!(
+                runbook_listed[0].reason,
+                StaleReason::Divergence { .. }
+            ));
+        }
 
         // What the index holds for a file left out: none of its documents.
         for (relative, word) in &files {
             let found = indexer.search(word, 10).expect("search");
-            let in_index = relative == &kept;
+            let in_index = relative == &kept || (relative == &in_locked_dir && locked_is_listable);
             assert_eq!(
                 found.hits.len(),
                 usize::from(in_index) * 2,
@@ -11176,9 +11234,15 @@ mod tests {
 
     /// A directory this process cannot list, until the guard is dropped
     /// (Unix, by its mode), with its mode then put back so it can be
-    /// removed.
+    /// removed. A process that runs as root is bound by no mode: for it the
+    /// directory stays listable, `is_unlistable` says `false`, and the test
+    /// is to run only the assertions that do not need the directory to be
+    /// unlistable.
     #[cfg(unix)]
-    struct LockedDirectory(PathBuf);
+    struct LockedDirectory {
+        directory: PathBuf,
+        unlistable: bool,
+    }
 
     #[cfg(unix)]
     impl LockedDirectory {
@@ -11186,11 +11250,20 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&directory, fs::Permissions::from_mode(0o000))
                 .expect("lock a directory");
-            assert!(
+            let unlistable = mode_applies_to_this_process(
+                &directory,
                 fs::read_dir(&directory).is_err(),
-                "this test needs a process the directory mode applies to"
+                "this test needs a process the directory mode applies to",
             );
-            Self(directory)
+            Self {
+                directory,
+                unlistable,
+            }
+        }
+
+        /// Whether the mode took the directory away from this process.
+        fn is_unlistable(&self) -> bool {
+            self.unlistable
         }
     }
 
@@ -11198,7 +11271,7 @@ mod tests {
     impl Drop for LockedDirectory {
         fn drop(&mut self) {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            let _ = fs::set_permissions(&self.directory, fs::Permissions::from_mode(0o755));
         }
     }
 
@@ -12268,11 +12341,21 @@ mod tests {
             )
             .expect("write a runbook");
             let locked = LockedDirectory::new(scratch.path.join(&runbooks));
+            let unlistable = locked.is_unlistable();
             let walk = Indexer::walk_repo(&scratch.path).expect("walk");
             drop(locked);
-            let tracker = assert_freshness_unknown_with_no_record(&walk, &runbooks, |reason| {
-                matches!(reason, SkipReason::Unreadable { .. })
-            });
+            let tracker = if unlistable {
+                assert_freshness_unknown_with_no_record(&walk, &runbooks, |reason| {
+                    matches!(reason, SkipReason::Unreadable { .. })
+                })
+            } else {
+                // A process no mode binds (root) lists the directory, so
+                // nothing is left out: the half that needs it unlistable is
+                // not exercised here, and the rest is, with every document
+                // the walk did read, the runbook among them, verified.
+                assert!(walk.skipped.is_empty(), "{:?}", walk.skipped);
+                every_document_verified(&walk_corpus(&walk))
+            };
             fs::remove_dir_all(scratch.path.join(&runbooks)).expect("delete the directory");
             assert_ready_once_resolved(&scratch, &tracker);
         }
@@ -13635,32 +13718,59 @@ mod tests {
             fs::write(directory.join("deploy.md"), "# Deploy\n\nthe steps\n")
                 .expect("write a runbook");
             let locked = LockedDirectory::new(directory.clone());
+            let unlistable = locked.is_unlistable();
             let walk = Indexer::walk_repo(&scratch.path).expect("walk");
             drop(locked);
             fs::remove_dir_all(&directory).expect("remove the directory");
-            let denied = walk
-                .skipped
-                .iter()
-                .find(|entry| matches!(entry.reason, SkipReason::Unreadable { .. }))
-                .map(|entry| entry.reason.clone())
-                .expect("the directory is left out");
-            expect_both(&walk, denied.clone());
-            let corpus = walk_corpus(&walk);
-            let mut tracker = every_document_verified(&corpus);
-            let deploy = format!("{big}/deploy.md");
-            let found = Timestamp::from_millis(2_000);
-            tracker.record_divergence(deploy.clone(), "DEPLOY-DIVERGENCE", found);
-            let report = tracker.list_stale(&corpus, &walk.not_indexed());
-            assert_eq!(
-                report.stale,
-                [StaleDocument {
-                    path: deploy,
-                    reason: StaleReason::NotIndexed {
-                        skipped: denied,
-                        divergence: Some(("DEPLOY-DIVERGENCE".to_owned(), found)),
-                    },
-                }]
-            );
+            if unlistable {
+                let denied = walk
+                    .skipped
+                    .iter()
+                    .find(|entry| matches!(entry.reason, SkipReason::Unreadable { .. }))
+                    .map(|entry| entry.reason.clone())
+                    .expect("the directory is left out");
+                expect_both(&walk, denied.clone());
+                let corpus = walk_corpus(&walk);
+                let mut tracker = every_document_verified(&corpus);
+                let deploy = format!("{big}/deploy.md");
+                let found = Timestamp::from_millis(2_000);
+                tracker.record_divergence(deploy.clone(), "DEPLOY-DIVERGENCE", found);
+                let report = tracker.list_stale(&corpus, &walk.not_indexed());
+                assert_eq!(
+                    report.stale,
+                    [StaleDocument {
+                        path: deploy,
+                        reason: StaleReason::NotIndexed {
+                            skipped: denied,
+                            divergence: Some(("DEPLOY-DIVERGENCE".to_owned(), found)),
+                        },
+                    }]
+                );
+            } else {
+                // A process no mode binds (root) lists the directory: the
+                // half that needs it unlistable is not exercised here. What
+                // is: the directory is read, so only the section past the
+                // cap is left out, and the runbook in the directory is an
+                // indexed document that the walk does not list as left out.
+                assert!(
+                    matches!(
+                        walk.skipped.as_slice(),
+                        [SkippedEntry {
+                            reason: SkipReason::DocumentTooLarge { .. },
+                            ..
+                        }]
+                    ),
+                    "{:?}",
+                    walk.skipped
+                );
+                assert!(
+                    walk.documents
+                        .iter()
+                        .any(|document| document.path.starts_with(&format!("{big}/deploy.md"))),
+                    "the runbook in the listable directory is read: {:?}",
+                    walk.documents.iter().map(|d| &d.path).collect::<Vec<_>>()
+                );
+            }
         }
 
         // Second, a criterion row repeated twice, once past the cap: two

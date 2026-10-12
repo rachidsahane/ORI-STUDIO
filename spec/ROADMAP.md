@@ -6,7 +6,7 @@ The authority on phases. Each phase is a batch of tickets with its own acceptanc
 
 **Goal.** The engine exists, enforces the methodology's core, and the CLI exposes it. No UI. The author's own migration backlog runs through it instead of through an implementor session.
 
-**Delivers.** A-01, A-02, A-04, A-05, A-06, A-09; S-01; D-01, D-08, D-09, D-10, D-11, D-13, D-15; L-01, L-03; M-01, M-02, M-04, M-05, M-06, M-14; T-01 to T-07; F-02 (table), F-03 (tier 0 and 1), F-05, F-06; G-01 to G-03; V-03, V-04, V-06; Q-02 (label), Q-03; O-05; P-01 to P-05; K-01 to K-07, K-10; I-01, I-03, I-04, I-05; Z-01 to Z-04, Z-06; the crates ori-core, ori-store, ori-memory (without vectors), ori-broker (identities and keychain), ori-runtime (worktrees, one ACP runtime, one headless adapter, credential injection, budgets), ori-gates (coverage matrix, modified tests, citation, prover), ori-orchestrator (lifecycle, lock table, escalation, closing rules; merge queue for tier 0 and 1 with a single human), ori-flows (init skeleton and readiness, migrate M0 and M2 document generation, divergence register), ori-watch, ori-mcp (server with the phase 1 tool subset, host), ori-integrations (traits, one vcs host reference adapter), ori-rpc (uds and named pipe), ori-engine, ori-cli.
+**Delivers.** A-01, A-02, A-04, A-05, A-06, A-09; S-01; D-01, D-08, D-09, D-10, D-11, D-13, D-15; L-01, L-03; M-01, M-02, M-04, M-05, M-06, M-14; T-01 to T-07; F-02 (table), F-03 (tier 0 and 1), F-05, F-06; G-01 to G-03; V-03, V-04, V-06; Q-02 (label), Q-03; O-05; P-01 to P-05; K-01 to K-07, K-10; I-01, I-03, I-04, I-05; Z-01 to Z-04, Z-06; the crates ori-core (with the declarations of the seven adapter traits of API_SPEC section 4), ori-store, ori-memory (without vectors), ori-broker (identities and keychain), ori-runtime (worktrees, one ACP runtime, one headless adapter, credential injection, budgets), ori-gates (coverage matrix, modified tests, citation, prover), ori-orchestrator (lifecycle, lock table, escalation, closing rules; merge queue for tier 0 and 1 with a single human), ori-flows (init skeleton and readiness, migrate M0 and M2 document generation, divergence register), ori-watch, ori-mcp (server with the phase 1 tool subset, host), ori-integrations (one vcs host reference adapter, implementing the VcsHost trait declared in ori-core), ori-rpc (uds and named pipe), ori-engine, ori-cli.
 
 **Phase set to sign before start.** The PRD section 4 catalog rows for the feature identifiers in Delivers above, API_SPEC, DATA_MODEL, LLD, TESTING, `criteria/phase-1.md`, the QA agent's test plan for it.
 
@@ -69,7 +69,7 @@ Ticket batches in dependency order. Each becomes several tickets with declared s
 8. ori-orchestrator: lifecycle, lock table, escalation triggers, budgets, closing rules, merge queue (tier 0 and 1).
 9. ori-watch: tree watcher, git hooks, attribution, unattributed changes, merge block.
 10. ori-mcp: server tools for phase 1 roles, host.
-11. ori-integrations: traits, vcs host reference adapter with installation tokens and webhooks.
+11. The adapter traits, declared in ori-core (API_SPEC section 4), then ori-integrations: the vcs host reference adapter with installation tokens and webhooks.
 12. ori-flows: init (skeleton, readiness), migrate (M0, M2 document generation through the documentation role, divergence register).
 13. ori-rpc and ori-engine: method registry, transports, subscriptions, composition.
 14. ori-cli: commands mirroring the Client API; JSON output for scripting.

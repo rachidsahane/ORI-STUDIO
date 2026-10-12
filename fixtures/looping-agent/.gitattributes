@@ -1,0 +1,11 @@
+# .gitattributes of the looping-agent fixture, ORI-T-0076.
+#
+# This directory becomes a repository of its own when a test copies it and runs
+# git over the copy (make-repo.sh). That repository does not inherit the
+# attributes of the Ori Studio repository it is committed inside, so it carries
+# its own. Without them a Windows machine whose git has core.autocrlf=true
+# writes CRLF into every worktree of the copy, and a shell script whose first
+# line ends in a carriage return does not run as written, so agent.sh would fail
+# on its own line endings instead of failing the way it is built to.
+* text=auto eol=lf
+*.sh text eol=lf

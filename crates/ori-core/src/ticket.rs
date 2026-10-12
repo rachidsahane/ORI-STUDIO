@@ -29,17 +29,79 @@
 //!
 //! # Why the events are named after the states they enter
 //!
-//! No two edges of the diagram enter one state for two reasons this machine
-//! must tell apart. Three edges enter `InProgress` (a lead assigns, an
-//! escalation is answered, a reviewer requests changes) and two enter `Queued`
-//! (a validated ticket joins the queue, a blocked one is re-planned); in every
-//! case the ticket simply is in that state afterwards, and nothing downstream
-//! of this function reads which edge was walked. So one value per reachable
-//! state is the whole event vocabulary, and the labels the diagram writes on
-//! those edges are recorded in the doc comments rather than in the type. It
-//! also makes [`TicketEventKind::target`] a bijection onto the eleven states an
-//! event can reach, which is what lets the tests below enumerate the machine
-//! rather than sample it.
+//! Three edges enter `InProgress` (a lead assigns, an escalation is answered, a
+//! reviewer requests changes) and three enter `Queued` (a validated ticket
+//! joins the queue, a blocked one is re-planned, an interrupted one is returned
+//! by the engine's recovery); in every case the ticket simply is in that state
+//! afterwards, and with one exception nothing this function computes depends on
+//! which edge was walked. So one value per reachable state is the whole event
+//! vocabulary, and the labels the diagram writes on those edges are recorded in
+//! the doc comments rather than in the type. It also makes
+//! [`TicketEventKind::target`] a bijection onto the eleven states an event can
+//! reach, which is what lets the tests below enumerate the machine rather than
+//! sample it.
+//!
+//! The exception is the recovery edge, which the diagram labels "engine
+//! recovery only". The event kind cannot carry that restriction, because
+//! [`TicketEventKind::Queued`] also serves the two other edges into `Queued`,
+//! and no kind is added for it. The actor carries it instead: the next section
+//! says how, and what is left over.
+//!
+//! # The recovery edge, and what enforces "engine recovery only"
+//!
+//! `spec/DATA_MODEL.md` section 3 draws `InProgress --> Queued: engine recovery
+//! only`, and the paragraph under the diagram says the edge "is the engine's
+//! move and no one else's": it is made only by the engine's recovery after a
+//! restart (`spec/runbooks/recover-engine.md` step 1, criterion ORI-P1-031),
+//! for a ticket whose session was found `Running`, once that session is
+//! `Killed`, its credential issuances are revoked and its lock entries are
+//! released, and `session.recovered` is appended after it. It does not pass
+//! through `Blocked`, because an interrupted ticket exhausted no budget. The
+//! requeue is recorded with actor `system`: that sentence of the paragraph, and
+//! section 4's widening of the invariant on `system` to the engine's recovery
+//! after a restart, are ORI-T-0130's text (commit 8f8a4cd on the integration
+//! branch, which the branch this was written on does not yet carry).
+//!
+//! What this module does:
+//!
+//! - The pair is in [`TRANSITIONS`], so [`TicketState::may_advance_to`] answers
+//!   `true` for `InProgress` to `Queued`, and `Validated --> Queued` and
+//!   `Blocked --> Queued` are the pairs they were. `InProgress --> Blocked`
+//!   stays the move for a ticket that exhausted a budget.
+//! - [`Ticket::apply`] refuses `InProgress --> Queued` unless the event's actor
+//!   is [`Actor::System`], by ruling R43 in `ops/rulings`. The refusal is
+//!   `RefusalKind::TicketTransition`, which cites AICD §11 like every other
+//!   refusal of a transition, and its detail names the actor refused. The guard
+//!   is on this one edge: the other two edges into `Queued`, and the other
+//!   edges out of `InProgress`, ask nothing of the actor.
+//!
+//! The guard closes a path, and it is worth naming which. `Lifecycle::advance`
+//! in `ori-orchestrator` assembles what this machine decides on, and
+//! `crates/ori-runtime/src/session.rs` names `Lifecycle` as where a recovered
+//! ticket's return to `Queued` is performed. Its permission step looks for a
+//! verb of AICD §17's matrix, finds none for this move, and so checks nothing,
+//! and a move that leaves `InProgress` releases every lock the ticket holds.
+//! With the edge in the table and no guard, any actor in any role could have
+//! freed the modules of a ticket whose coder session was still running. With
+//! the guard, `Ticket::apply` refuses that call and `advance` records nothing.
+//!
+//! What this module does not do, and says so rather than imply it does:
+//!
+//! - It does not know that the actor is the engine's recovery. `system` is also
+//!   the actor of scheduled triggers and watchers, so the guard admits any
+//!   `system` event on this edge and is wider than the sentence it enforces.
+//! - It does not check the paragraph's preconditions. Whether the session is
+//!   `Killed`, the issuances are revoked, the locks are released and
+//!   `session.recovered` follows are facts about the session, the lock table
+//!   and the log, none of which this crate may read.
+//! - It does not give the move a role or a verb. `Lifecycle::advance` still
+//!   checks no permission for it, so a call carrying the `system` actor passes
+//!   that step whatever role it names. A check there is a follow-up and
+//!   `lifecycle.rs` is not this module's.
+//! - It adds no event kind. A distinct kind would have to be known to the
+//!   projector in `ori-store`, which leaves a `ticket.` kind it does not know
+//!   alone, so a recovery recorded under a new kind would leave the projected
+//!   row at `InProgress`.
 //!
 //! # Order of decision
 //!
@@ -47,7 +109,8 @@
 //!
 //! 1. the entry guards of the destination, which are about the destination and
 //!    not about the path taken to it;
-//! 2. the transition table, which is about the path;
+//! 2. the transition table, which is about the path, and the one guard that
+//!    belongs to a single path, the actor of the recovery edge;
 //! 3. the field rules, which are about the actor and the value it proposes.
 //!
 //! Criterion ORI-P1-006 in `spec/criteria/phase-1.md` fixes phase 1 before
@@ -98,13 +161,21 @@ use crate::types::Tier;
 /// Derived from AICD §11's "Lifecycle" line, "Filed to Categorized to Validated
 /// to Queued to In progress to In review to Merged to Deployed to Closed", and
 /// from `spec/DATA_MODEL.md` section 3's Ticket diagram, which draws that line
-/// together with the five edges the prose of AICD §11 and AICD §12 describe but
-/// the line does not carry. The diagram is the transcription source; the pairs
-/// below are in the order it draws them and each carries the label it writes.
+/// together with the edges the prose of AICD §11 and AICD §12 describe but the
+/// line does not carry, and with the recovery edge `InProgress --> Queued`,
+/// which `spec/runbooks/recover-engine.md` step 1 and criterion ORI-P1-031
+/// require and the line does not carry either. The diagram is the transcription
+/// source; the pairs below are in the order it draws them and each carries the
+/// label it writes.
 ///
-/// Fourteen pairs out of the 144 that twelve states admit. A pair absent here
+/// Fifteen pairs out of the 144 that twelve states admit. A pair absent here
 /// is refused, including every self-transition: the diagram draws no loop, so a
 /// ticket never re-enters the state it is in.
+///
+/// A label is a comment on a pair and not a guard of this table. In particular
+/// the recovery edge's "engine recovery only" is not enforced by the pair being
+/// listed: [`Ticket::apply`] asks the actor, and the module doc says what that
+/// enforces and what it does not.
 ///
 /// The table is public because a caller that needs to ask the shape of the
 /// lifecycle, such as a queue view offering the moves available from a state,
@@ -126,6 +197,8 @@ pub const TRANSITIONS: &[(TicketState, TicketState)] = &[
     (TicketState::InProgress, TicketState::Escalated),
     // Blocked --> Queued: re-planned
     (TicketState::Blocked, TicketState::Queued),
+    // InProgress --> Queued: engine recovery only
+    (TicketState::InProgress, TicketState::Queued),
     // Escalated --> InProgress: answered
     (TicketState::Escalated, TicketState::InProgress),
     // InProgress --> InReview: PR ready
@@ -153,8 +226,9 @@ impl TicketState {
     ///
     /// Derived from AICD §11's "Lifecycle" by way of [`TRANSITIONS`]. This is
     /// the table and nothing else: it knows no actor, no ticket and no
-    /// invariant, so a `true` here means only that the diagram draws the edge.
-    /// [`Ticket::apply`] is what adds the guards.
+    /// invariant, so a `true` here means only that the diagram draws the edge,
+    /// including the recovery edge, which [`Ticket::apply`] then refuses to
+    /// any actor but the system. [`Ticket::apply`] is what adds the guards.
     #[must_use]
     pub fn may_advance_to(self, to: Self) -> bool {
         TRANSITIONS
@@ -321,7 +395,12 @@ pub enum TicketEventKind {
     /// label is a guard, and [`Ticket::apply`] enforces it against
     /// [`TicketEvent::actor`].
     Validated,
-    /// `Validated --> Queued`, and `Blocked --> Queued` labelled "re-planned".
+    /// `Validated --> Queued`, `Blocked --> Queued` labelled "re-planned", and
+    /// `InProgress --> Queued` labelled "engine recovery only".
+    ///
+    /// One value serves all three, so the label of the last is not carried by
+    /// the kind. [`Ticket::apply`] enforces it on the actor instead, and the
+    /// module doc says what that leaves unenforced.
     Queued,
     /// `Queued --> InProgress` labelled "lead assigns, scope locked",
     /// `Escalated --> InProgress` labelled "answered", and
@@ -532,7 +611,9 @@ impl Ticket {
     ///   modified an existing test is asked to enter `InReview` with no
     ///   escalation open (AICD §12).
     /// - `RefusalKind::TicketTransition` when the diagram draws no such edge,
-    ///   and when a `Decisional` ticket is validated by anything but a human.
+    ///   when a `Decisional` ticket is validated by anything but a human, and
+    ///   when an `InProgress` ticket is requeued by an actor that is not
+    ///   [`Actor::System`] (AICD §11, by ruling R43 in `ops/rulings`).
     /// - `RefusalKind::CategoryDowngrade` when an actor that is not human lowers
     ///   the category (AICD §11, criterion ORI-P1-005). Its code is
     ///   `E_UPGRADE_ONLY`.
@@ -554,6 +635,8 @@ impl Ticket {
                 format!("ticket {}", self.id),
             ));
         }
+
+        self.check_recovery_edge(to, event)?;
 
         let mut next = self.clone();
         next.state = to;
@@ -636,6 +719,39 @@ impl Ticket {
             ));
         }
         Ok(())
+    }
+
+    /// `spec/DATA_MODEL.md` section 3's "Recovery edge" paragraph:
+    /// `InProgress --> Queued` "is the engine's move and no one else's", and
+    /// the requeue is recorded with actor `system` (the second half is the text
+    /// ORI-T-0130 added, commit 8f8a4cd on the integration branch, which the
+    /// branch this was written on does not yet carry).
+    ///
+    /// The refusal is `RefusalKind::TicketTransition`, the refusal the table
+    /// would make for a pair it does not draw, with the detail naming the actor
+    /// because the pair alone is drawn and does not explain who was refused.
+    /// This asks about the actor and nothing else: the paragraph's
+    /// preconditions are facts about the session and the log, which this crate
+    /// may not read, and `system` is also the actor of scheduled triggers and
+    /// watchers, so the guard is wider than the sentence it enforces.
+    fn check_recovery_edge(&self, to: TicketState, event: &TicketEvent) -> Result<()> {
+        if self.state != TicketState::InProgress
+            || to != TicketState::Queued
+            || event.actor.is_system()
+        {
+            return Ok(());
+        }
+        Err(Error::refused_with(
+            RefusalKind::TicketTransition {
+                from: self.state,
+                to,
+            },
+            format!(
+                "ticket {}: in progress to queued is the engine's recovery, recorded with actor \
+                 system, and {} is not the system",
+                self.id, event.actor
+            ),
+        ))
     }
 
     /// `spec/DATA_MODEL.md` section 3: "a ticket whose PR modified an existing
@@ -749,7 +865,7 @@ mod tests {
     /// This is the point of the enumeration below and the reason it is not
     /// circular. A test that asked `TRANSITIONS` what the transitions are would
     /// pass whatever `TRANSITIONS` said, including nothing and everything.
-    /// These fourteen lines are the diagram's own, in its order, each written
+    /// These fifteen lines are the diagram's own, in its order, each written
     /// next to the line it came from.
     const DIAGRAM: &[(TicketState, TicketState)] = &[
         // Filed --> Categorized
@@ -768,6 +884,8 @@ mod tests {
         (TicketState::InProgress, TicketState::Escalated),
         // Blocked --> Queued: re-planned
         (TicketState::Blocked, TicketState::Queued),
+        // InProgress --> Queued: engine recovery only
+        (TicketState::InProgress, TicketState::Queued),
         // Escalated --> InProgress: answered
         (TicketState::Escalated, TicketState::InProgress),
         // InProgress --> InReview: PR ready
@@ -787,7 +905,7 @@ mod tests {
     /// Written as a number so that a transcription that lost or gained a line
     /// fails here, where the count is checked against the list, before it can
     /// agree with a production table that lost or gained the same line.
-    const DIAGRAM_EDGES: usize = 14;
+    const DIAGRAM_EDGES: usize = 15;
 
     /// How many ordered pairs twelve states admit.
     const ALL_PAIRS: usize = 144;
@@ -928,11 +1046,11 @@ mod tests {
         }
 
         assert_eq!(pairs, ALL_PAIRS, "twelve states make 144 ordered pairs");
-        assert_eq!(permitted, DIAGRAM_EDGES, "the diagram draws fourteen edges");
+        assert_eq!(permitted, DIAGRAM_EDGES, "the diagram draws fifteen edges");
         assert_eq!(
             ALL_PAIRS - permitted,
-            130,
-            "the other 130 pairs are refused"
+            129,
+            "the other 129 pairs are refused"
         );
         assert!(
             wrong.is_empty(),
@@ -1030,7 +1148,15 @@ mod tests {
                 }
                 checked += 1;
                 let expected = diagram.contains(&(from, to));
-                let outcome = feature(from).apply(&event_reaching(to));
+                // Ruling R43: the recovery edge is the engine's move, so this
+                // one pair is offered the system actor and every other pair
+                // keeps the human one.
+                let event = if (from, to) == (TicketState::InProgress, TicketState::Queued) {
+                    recovery_requeue()
+                } else {
+                    event_reaching(to)
+                };
+                let outcome = feature(from).apply(&event);
                 match (&outcome, expected) {
                     (Ok(next), true) => {
                         accepted += 1;
@@ -1636,6 +1762,252 @@ mod tests {
                 ))
                 .expect("tier approvals and gates");
             assert_eq!(merged.significant, Some(significant));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // ORI-P1-031 and ORI-T-0129: the recovery edge InProgress --> Queued
+    // ---------------------------------------------------------------------
+
+    /// The requeue as the engine's recovery makes it: the kind that reaches
+    /// `Queued`, and `system` for the actor, which `spec/DATA_MODEL.md` section
+    /// 3's "Recovery edge" paragraph names as the one the recovery is recorded
+    /// with.
+    fn recovery_requeue() -> TicketEvent {
+        TicketEvent::new(Actor::System, TicketEventKind::Queued)
+    }
+
+    /// The states from which `Queued` is reachable, read off the table.
+    fn states_entering_queued() -> HashSet<TicketState> {
+        TicketState::ALL
+            .iter()
+            .copied()
+            .filter(|from| from.may_advance_to(TicketState::Queued))
+            .collect()
+    }
+
+    #[test]
+    fn ori_p1_031_a_ticket_whose_session_was_running_is_requeued_without_passing_through_blocked() {
+        // The fifth clause of the criterion, "ticket Queued", from the state a
+        // ticket is in while its session is Running.
+        assert!(TicketState::InProgress.may_advance_to(TicketState::Queued));
+        assert!(TRANSITIONS.contains(&(TicketState::InProgress, TicketState::Queued)));
+
+        let interrupted = feature(TicketState::InProgress);
+        let requeued = interrupted
+            .apply(&recovery_requeue())
+            .expect("the diagram draws InProgress --> Queued");
+
+        let mut expected = interrupted.clone();
+        expected.state = TicketState::Queued;
+        assert_eq!(
+            requeued, expected,
+            "one event moved the ticket to Queued and rewrote no field"
+        );
+        assert_eq!(
+            interrupted,
+            feature(TicketState::InProgress),
+            "the ticket it was applied to is left alone"
+        );
+    }
+
+    #[test]
+    fn ori_p1_031_a_requeued_ticket_is_assigned_again_and_the_replay_never_visits_blocked() {
+        let events = [
+            TicketEvent::new(agent(), TicketEventKind::InProgress),
+            recovery_requeue(),
+            TicketEvent::new(agent(), TicketEventKind::InProgress),
+        ];
+
+        let mut ticket = feature(TicketState::Queued);
+        let mut visited = vec![ticket.state];
+        for event in &events {
+            ticket = ticket.apply(event).expect("each step is an edge");
+            visited.push(ticket.state);
+        }
+
+        assert_eq!(
+            visited,
+            vec![
+                TicketState::Queued,
+                TicketState::InProgress,
+                TicketState::Queued,
+                TicketState::InProgress,
+            ],
+            "Queued, assigned, interrupted and requeued, assigned again"
+        );
+        assert_eq!(
+            feature(TicketState::Queued)
+                .replay(&events)
+                .expect("the same walk as a fold")
+                .state,
+            TicketState::InProgress
+        );
+    }
+
+    #[test]
+    fn ori_t_0129_the_edges_into_queued_are_validated_blocked_and_in_progress() {
+        let expected: HashSet<_> = [
+            TicketState::Validated,
+            TicketState::Blocked,
+            TicketState::InProgress,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            states_entering_queued(),
+            expected,
+            "three edges enter Queued, and the new one is InProgress"
+        );
+
+        // The two that existed before are as they were: each is accepted, and
+        // lands in Queued with no field rewritten.
+        for (from, actor) in [
+            (TicketState::Validated, agent()),
+            (TicketState::Blocked, human()),
+        ] {
+            let moved = feature(from)
+                .apply(&TicketEvent::new(actor, TicketEventKind::Queued))
+                .expect("an edge the diagram already drew");
+            let mut after = feature(from);
+            after.state = TicketState::Queued;
+            assert_eq!(moved, after, "{from} --> Queued");
+        }
+
+        // Every other state, Queued itself included, is still refused as a
+        // transition.
+        for from in TicketState::ALL.iter().copied() {
+            if expected.contains(&from) {
+                continue;
+            }
+            let error = feature(from)
+                .apply(&recovery_requeue())
+                .expect_err("the diagram draws no such edge");
+            assert_eq!(
+                refusal(&error),
+                RefusalKind::TicketTransition {
+                    from,
+                    to: TicketState::Queued,
+                },
+                "{from} --> Queued is not an edge"
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0129_the_edges_out_of_in_progress_are_blocked_escalated_in_review_and_queued() {
+        let leaving: HashSet<_> = TicketState::ALL
+            .iter()
+            .copied()
+            .filter(|to| TicketState::InProgress.may_advance_to(*to))
+            .collect();
+        let expected: HashSet<_> = [
+            TicketState::Blocked,
+            TicketState::Escalated,
+            TicketState::InReview,
+            TicketState::Queued,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(leaving, expected);
+
+        // A budget limit is still the move into Blocked, and the new edge is
+        // not a way into it.
+        let blocked = feature(TicketState::InProgress)
+            .apply(&TicketEvent::new(agent(), TicketEventKind::Blocked))
+            .expect("budget exceeded");
+        assert_eq!(blocked.state, TicketState::Blocked);
+    }
+
+    #[test]
+    fn ori_t_0129_only_the_system_actor_may_requeue_an_in_progress_ticket() {
+        let held = feature(TicketState::InProgress);
+
+        let requeued = held
+            .apply(&TicketEvent::new(Actor::System, TicketEventKind::Queued))
+            .expect("the engine's recovery is the actor the edge is for");
+        assert_eq!(requeued.state, TicketState::Queued);
+
+        for actor in [human(), agent()] {
+            let error = held
+                .apply(&TicketEvent::new(actor.clone(), TicketEventKind::Queued))
+                .expect_err("the edge is the engine's move and no one else's");
+            assert_eq!(
+                refusal(&error),
+                RefusalKind::TicketTransition {
+                    from: TicketState::InProgress,
+                    to: TicketState::Queued,
+                },
+                "{actor} was refused, and not as a transition"
+            );
+            assert_eq!(
+                error.methodology_ref().expect("a reason").section,
+                11,
+                "AICD §11 carries the lifecycle"
+            );
+            assert!(
+                error.to_string().contains(&actor.to_string()),
+                "the detail names the actor refused: {error}"
+            );
+            assert_eq!(
+                held,
+                feature(TicketState::InProgress),
+                "a refused requeue leaves the ticket where it was"
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0129_a_replay_that_has_a_human_requeue_an_in_progress_ticket_stops_there() {
+        let events = [
+            TicketEvent::new(agent(), TicketEventKind::InProgress),
+            TicketEvent::new(human(), TicketEventKind::Queued),
+            TicketEvent::new(agent(), TicketEventKind::InProgress),
+        ];
+        let error = feature(TicketState::Queued)
+            .replay(&events)
+            .expect_err("the second event is a requeue by a human");
+        assert_eq!(
+            refusal(&error),
+            RefusalKind::TicketTransition {
+                from: TicketState::InProgress,
+                to: TicketState::Queued,
+            }
+        );
+    }
+
+    #[test]
+    fn ori_t_0129_the_actor_guard_is_on_the_recovery_edge_and_on_no_other() {
+        // The two edges into Queued that existed before are open to a human
+        // and to an agent alike, as they were.
+        for from in [TicketState::Validated, TicketState::Blocked] {
+            for actor in [human(), agent(), Actor::System] {
+                let moved = feature(from)
+                    .apply(&TicketEvent::new(actor.clone(), TicketEventKind::Queued))
+                    .expect("an edge the diagram already drew, with no guard on the actor");
+                assert_eq!(
+                    moved.state,
+                    TicketState::Queued,
+                    "{actor}: {from} --> Queued"
+                );
+            }
+        }
+
+        // The other edges out of InProgress ask nothing of the actor either.
+        for kind in [
+            TicketEventKind::Blocked,
+            TicketEventKind::Escalated,
+            TicketEventKind::InReview {
+                tests: TestModification::None,
+            },
+        ] {
+            let to = kind.target().expect("each names a state");
+            for actor in [human(), agent()] {
+                let moved = feature(TicketState::InProgress)
+                    .apply(&TicketEvent::new(actor.clone(), kind.clone()))
+                    .expect("an edge out of InProgress that is not the recovery edge");
+                assert_eq!(moved.state, to, "{actor}: InProgress --> {to}");
+            }
         }
     }
 }

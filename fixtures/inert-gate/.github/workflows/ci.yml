@@ -1,0 +1,53 @@
+# ci.yml: the CI workflow of the inert-gate fixture. It is DEFECTIVE ON PURPOSE.
+#
+# This repository is a test fixture, not a product anyone ships. README.md at
+# its root says what it is for. The defect below is the input a liveness gate
+# is proven against (AICD §14 names the class: "a workflow file whose trigger
+# never fires"; AICD §39 records the incident that earned the rule).
+#
+# ===========================================================================
+# THE TRIGGERS THAT FIRE THIS WORKFLOW, NAMED
+# ===========================================================================
+#
+# FIRES ON, and these are the only two:
+#
+#   push           to a branch named `master`, and to no other branch.
+#   pull_request   into a branch named `master`, and into no other branch.
+#
+# This repository has one branch, `main`. It has never had a branch named
+# `master`. Neither event can therefore occur here, so this workflow has never
+# run and cannot run. Nothing else fires it: there is no `workflow_dispatch`
+# (not even a manual run is offered), no `schedule`, no `merge_group`, and no
+# other event.
+#
+# The file is VALID. GitHub would accept it, register it and list it as a
+# workflow. Registered is not the same as run, and a reader skimming this file
+# sees `pull_request` and a job that runs a check, and concludes the pull
+# request is protected. It is not. A workflow that reads as protection in every
+# document and has no run is "present but reporting nothing".
+#
+# DO NOT REPAIR IT. Changing `master` to `main` makes this a live workflow and
+# the fixture stops being the thing the liveness gate must fail on.
+#
+# This file is also not read by GitHub at the path the fixture sits at inside
+# the Ori Studio repository: GitHub reads workflows only from `.github/workflows/`
+# at the root of a repository, and in that repository this one is several
+# directories down. It becomes the root `.github/workflows/ci.yml` only in the
+# throwaway repository the end-to-end suite builds from a copy of the fixture.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sh check.sh

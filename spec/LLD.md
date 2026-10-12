@@ -8,7 +8,7 @@ Low-level design: repository layout, crates, module responsibilities, naming, an
 ori-studio/
   Cargo.toml                 # workspace
   crates/
-    ori-core/               # domain types, state machines, invariants, errors. No IO.
+    ori-core/               # domain types, state machines, invariants, errors, adapter trait declarations. No IO.
     ori-store/              # SQLite, event log, projections, migrations
     ori-memory/             # layers, indexer, code map, sanitization barrier, scopes, retrieval
     ori-broker/             # identities, credentials, keychain, forbidden-action test
@@ -18,7 +18,7 @@ ori-studio/
     ori-flows/              # new product, migration, document generation, readiness, phases
     ori-watch/              # working tree and git watcher, attribution, unattributed changes
     ori-mcp/                # MCP host (user servers) and MCP server (toward agents)
-    ori-integrations/       # traits + reference adapters (one per slot) + webhook receiver
+    ori-integrations/       # implementations of the slot traits: reference adapters (one per slot) + webhook receiver
     ori-notify/             # routing, desktop notifications, digest
     ori-calibration/        # calibration sets, measurements, thresholds
     ori-rpc/                # JSON-RPC server, event subscriptions, transports
@@ -64,7 +64,7 @@ flowchart TB
 
 | Crate | Owns | Must not |
 |---|---|---|
-| ori-core | `Product`, `Ticket`, `Document`, state machines as pure functions (`Ticket::apply(event) -> Result<Ticket>`), `Category`, `Tier`, `Role`, `Scope`, error enum with methodology-section reasons | Do IO, import any other workspace crate |
+| ori-core | `Product`, `Ticket`, `Document`, state machines as pure functions (`Ticket::apply(event) -> Result<Ticket>`), `Category`, `Tier`, `Role`, `Scope`, error enum with methodology-section reasons, the adapter traits of API_SPEC section 4 and the types in their signatures | Do IO (a declaration of an adapter trait does none; an implementation would), import any other workspace crate |
 | ori-store | `EventLog` (append, hash chain, read range), projections, migrations, `ProductDb` open/lock | Contain business rules |
 | ori-memory | `Layer`, `Indexer` (SQLite FTS5, ADR-0003), `CodeMap` (tree-sitter), `Barrier` (sanitize), `ScopeEnforcer`, `Retrieval` (context package), `Freshness`, `DriftAudit`, `CitationChecker` | Return unsanitized production content in a package |
 | ori-broker | `Identity`, `Issuance`, `Keychain` (keyring), `ForbiddenActionTest` | Persist secrets anywhere but the keychain |
@@ -74,13 +74,17 @@ flowchart TB
 | ori-flows | `NewProductFlow` (G0..G7), `MigrationFlow` (M0..M5), `DocumentGenerator` (templates + assistant session), `Readiness`, `PhaseControl` | Skip a approval |
 | ori-watch | `TreeWatcher` (notify crate), `GitHooks` installer, `Attribution`, `UnattributedChange` | Modify the tree |
 | ori-mcp | `Host` (client to user servers), `Server` (tools in API_SPEC section 3), `ToolScopes` | Expose a tool not in API_SPEC |
-| ori-integrations | Traits in API_SPEC section 4, `reference/` adapters, `Webhooks` | Read the store |
+| ori-integrations | Implementations of the five slot traits declared in `ori-core` (API_SPEC section 4): `reference/` adapters, one per slot, and `Webhooks` | Read the store |
 | ori-notify | `Router` (interrupt, window, digest), `Desktop`, `Digest` | Bypass the router |
 | ori-calibration | `Set`, `Measurement`, `Threshold` | Hard-code any absolute number |
 | ori-rpc | `Server`, method registry, `Transport` (uds, named pipe, websocket), `Subscriptions` | Contain logic beyond validation and dispatch |
 | ori-engine | `Engine::open(product)`, `Engine::call(method, params)`, `Engine::subscribe()` | |
 
 The broker issues a credential; the runtime injects it at spawn and holds it no longer than the session.
+
+The adapter traits of API_SPEC section 4 (`VcsHost`, `ErrorTracking`, `Analytics`, `Notification`, `Ci`, `AgentRuntime`, `ModelProvider`) are declared in `ori-core`, so that the crate that implements a trait and the crate that holds it as a trait object both reach it from below and need no dependency on each other. A trait declared there can name only types `ori-core` declares, so the types in the signatures are declared there too. A declaration states a contract and performs no IO; the "Must not" of "Do IO" bars an implementation, which performs it, and not a declaration. The five slot traits (`VcsHost`, `ErrorTracking`, `Analytics`, `Notification`, `Ci`) are implemented in `ori-integrations`; `AgentRuntime` is implemented in `ori-runtime`, the only crate that spawns processes.
+
+`ori-orchestrator` names `dyn VcsHost` through `ori-core`, which is how the carve-out in its "Must not" is expressed. The graph above draws no edge from `ori-orchestrator` to `ori-integrations` and none is added, so "Dependencies point downward only" holds as written. A crate that names an `ori-core` item depends on `ori-core` in its own manifest; that is a dependency on a crate below it, which the rule allows, and the graph does not draw it separately. The engine, the composition root (section 1), gives the merge queue the adapter that `ori-integrations` implements.
 
 ## 3. Desktop app
 

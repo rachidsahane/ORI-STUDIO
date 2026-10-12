@@ -8017,9 +8017,14 @@ mod tests {
             "registration.rs",
         ]))
         .expect("registration.rs reads");
-        let identity =
-            fs::read_to_string(repo_file(&["crates", "ori-broker", "src", "identity.rs"]))
-                .expect("identity.rs reads");
+        let identity = fs::read_to_string(repo_file(&[
+            "crates",
+            "ori-core",
+            "src",
+            "adapters",
+            "identity.rs",
+        ]))
+        .expect("identity.rs reads");
         let this = module_code();
         // The writer's layout, written the same way in both files.
         let layout = r#""{{\"id\":\"{}\",\"product_id\":\"{}\",\"role\":\"{}\",\"model\":\"{}\",\"family\":\"{}\",\"runtime\":\"{}\"}}","#;

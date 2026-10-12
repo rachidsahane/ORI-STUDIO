@@ -9506,6 +9506,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ori_t_0036_the_files_seen_invariant_holds_with_every_pre_skip_reason_nested() {
+        /// Whether this process is root, found with no call this crate does
+        /// not already make: a path this process created is owned by its
+        /// effective user, and root is user 0. Only ever asked about a path
+        /// the test itself created.
+        fn runs_as_root(created_by_this_test: &Path) -> bool {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(created_by_this_test).is_ok_and(|metadata| metadata.uid() == 0)
+        }
+
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("invariant-nested");
         let guard = DropGuard(dir.clone());
@@ -9566,8 +9575,19 @@ mod tests {
         if locked_is_unreadable {
             expected.push(("deep/locked", SkipReason::Unreadable(String::new())));
         } else {
+            // Only a process that is root may skip the unreadable half: any
+            // other process on which chmod 000 did not restrict access (one
+            // holding CAP_DAC_OVERRIDE, say) is a broken precondition, and
+            // fails here as it always did. Asked after the mode is put back,
+            // so the failure leaves nothing locked.
+            assert!(
+                runs_as_root(&locked),
+                "this test needs a process the directory mode applies to"
+            );
             eprintln!(
-                "chmod 000 did not restrict access here; the unreadable half is not exercised"
+                "chmod 000 did not restrict access here (a process that runs as root is \
+                 bound by no file mode); the unreadable half is not exercised, and \
+                 `deep/locked/hidden.rs` is walked as the fourth clean module"
             );
         }
         for (path, reason) in &expected {
@@ -9579,11 +9599,28 @@ mod tests {
             };
             assert!(matches, "{path} must be recorded as {reason:?}: {c:?}");
         }
+        // Where the directory could be listed after all (a process no mode
+        // binds), the file inside it is not a skip: it is read as one more
+        // clean module, and `deep/locked` is not recorded at all.
+        let hidden_is_read = usize::from(!locked_is_unreadable);
+        if !locked_is_unreadable {
+            assert!(
+                map.modules
+                    .iter()
+                    .any(|m| m.path == "deep/locked/hidden.rs"),
+                "a directory that could be listed has its file mapped: {c:?}"
+            );
+            assert!(
+                c.files_skipped.iter().all(|f| f.path != "deep/locked"),
+                "a directory that could be listed is not recorded as skipped: {c:?}"
+            );
+        }
         // Two clean modules (`clean.rs`, `deep/nested/ok.rs`) and
         // `deep/target_dir/inside.rs`, a third, reached directly; plus every
-        // nested pre-skip above. `.git` is never walked, and since round 7
-        // is recorded (above).
-        assert_eq!(c.files_seen, 3 + expected.len(), "{c:?}");
+        // nested pre-skip above, plus `deep/locked/hidden.rs` where the
+        // directory holding it could be listed. `.git` is never walked, and
+        // since round 7 is recorded (above).
+        assert_eq!(c.files_seen, 3 + hidden_is_read + expected.len(), "{c:?}");
         drop(guard);
         drop(outside_guard);
     }
@@ -9789,9 +9826,19 @@ mod tests {
         // in this file.
         write(&dir, &format!("spec/{}.md", "x"), &doc);
         // The document is about 2.1 MB, over the 1 MiB default cap since
-        // round 7; the cap is raised so that it is read.
+        // round 7; the cap is raised so that it is read. This test measures
+        // what the map retains, not how long the scan takes, and it can
+        // only measure a scan that ran to the end: so the scan's budget is
+        // an hour, which a loaded host cannot spend (the default 5 seconds
+        // was spent, on a loaded host, reading 2.1 MB: the scan came back
+        // `TimedOut` and the first assertion below failed with the
+        // retained text never measured). The scan's deadline is proved to
+        // be checked and honoured by the tests that arrange one:
+        // `tests::ori_t_0036_a_spec_document_of_long_lines_cannot_overrun_the_scan_deadline`
+        // and the others that set `file_timeout`.
         let options = CodeMapOptions {
             max_file_bytes: 8 * 1024 * 1024,
+            file_timeout: Duration::from_secs(3600),
             ..CodeMapOptions::default()
         };
         let map = build_code_map_with_options(&dir, &options).expect("maps");
@@ -10156,19 +10203,58 @@ mod tests {
     /// A scan the deadline cut short records the document it was in, not
     /// only its own status (on the slowest document the tests know of,
     /// `write_slowest_spec_repo`, since round 7).
+    ///
+    /// The 50 ms budget starts before the scan lists `spec/`, so on a host
+    /// loaded enough to spend it before the listing is done the deadline
+    /// falls on the directory, not on the document, and `spec` alone is
+    /// recorded (the other legitimate outcome, which
+    /// `tests::ori_t_0036_a_listing_the_deadline_interrupted_is_recorded`
+    /// proves on its own with a deadline already past). The test cannot choose
+    /// where on the clock a wall-clock deadline falls, so it makes the
+    /// attempt up to `ATTEMPTS` times and holds every one to one of the
+    /// two outcomes exactly: the scan must always say `TimedOut`, and the
+    /// record must be either the document or the `spec` directory, nothing
+    /// else, and at least one attempt must be the document, which is what
+    /// this test is for. Code that never records the document it was in fails the
+    /// first attempt; a deadline that never falls on the document fails
+    /// them all, and the failure message names both causes of that, a
+    /// loaded host and a regression that spends the budget before the
+    /// listing, so that it is not read as load without a rerun on an idle
+    /// machine.
     #[test]
     fn ori_t_0036_a_spec_document_the_deadline_interrupted_is_recorded() {
+        const ATTEMPTS: usize = 5;
         let dir = temp_dir("spec-skip-deadline");
         let guard = DropGuard(dir.clone());
         let options = write_slowest_spec_repo(&dir, "long");
-        let map = build_code_map_with_options(&dir, &options).expect("maps");
-        assert_eq!(map.coverage.spec_citation_scan, SpecScan::TimedOut);
-        assert_eq!(
-            map.coverage.spec_docs_skipped,
-            vec![SkippedFile {
-                path: format!("spec/{}.md", "long"),
-                reason: SkipReason::TimedOut,
-            }]
+        let document = vec![SkippedFile {
+            path: format!("spec/{}.md", "long"),
+            reason: SkipReason::TimedOut,
+        }];
+        let directory = vec![SkippedFile {
+            path: "spec".to_owned(),
+            reason: SkipReason::TimedOut,
+        }];
+        let mut landed_on_the_directory = 0;
+        for _ in 0..ATTEMPTS {
+            let map = build_code_map_with_options(&dir, &options).expect("maps");
+            assert_eq!(map.coverage.spec_citation_scan, SpecScan::TimedOut);
+            if map.coverage.spec_docs_skipped == directory {
+                landed_on_the_directory += 1;
+                continue;
+            }
+            assert_eq!(map.coverage.spec_docs_skipped, document);
+            break;
+        }
+        assert!(
+            landed_on_the_directory < ATTEMPTS,
+            "in {ATTEMPTS} attempts the 50 ms deadline never fell on the document, always on the \
+             directory before it. Two causes give exactly this outcome: a host loaded enough to \
+             spend 50 ms before the listing finished, and a code regression that spends the \
+             scan's budget before the listing (a deadline reused from an earlier stage rather \
+             than the scan's own, fresh one). Rerun this test alone on an idle machine before \
+             calling it load: on an idle one the first attempt records the document, and \
+             failing there is the regression"
         );
         drop(guard);
     }
@@ -11236,8 +11322,22 @@ mod tests {
     /// it gathers. With an expired deadline it records nothing and says it
     /// did not finish; with 20 ms left it stops within 250 ms. Timed on
     /// the walk alone, after the parse.
+    ///
+    /// A wall-clock time is the work plus whatever the host spent on
+    /// something else, and the second part is never negative: on a host
+    /// under load a walk that stops at once can still be measured at
+    /// hundreds of milliseconds by a thread that was descheduled for them.
+    /// So each of the two timed claims is judged on the fastest of
+    /// `ATTEMPTS` runs of the same walk, which converges on the work. The
+    /// bounds are the ones this test always had, 100 ms and 250 ms. A walk
+    /// that really does too much work does it in every attempt and fails
+    /// them all; what the repetition removes is a stall that hits one or
+    /// two attempts, not all of them. What does not depend on the clock is
+    /// asserted on every attempt: the walk says it did not finish, and
+    /// with a deadline already past it recorded nothing.
     #[test]
     fn ori_t_0036_the_rust_declaration_walk_checks_its_deadline() {
+        const ATTEMPTS: usize = 5;
         let source = format!("fn f() {{\n{}}}\n", "    use a::b;\n".repeat(200_000));
         let tree = parse_bounded(
             Language::Rust,
@@ -11264,20 +11364,34 @@ mod tests {
             );
             (completed, sink.edges.len())
         };
-        let start = Instant::now();
-        assert_eq!(run(Instant::now() - Duration::from_secs(1)), (false, 0));
+        let mut expired = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            assert_eq!(run(Instant::now() - Duration::from_secs(1)), (false, 0));
+            expired.push(start.elapsed());
+        }
+        let fastest = expired.iter().min().copied().expect("attempts were made");
         assert!(
-            start.elapsed() < Duration::from_millis(100),
-            "{:?}",
-            start.elapsed()
+            fastest < Duration::from_millis(100),
+            "a walk past its deadline must do no work, but the fastest of {ATTEMPTS} took \
+             {fastest:?}: {expired:?}"
         );
-        let start = Instant::now();
-        let (completed, _) = run(start + Duration::from_millis(20));
-        let elapsed = start.elapsed();
+        let mut mid_walk = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let start = Instant::now();
+            let (completed, _) = run(start + Duration::from_millis(20));
+            mid_walk.push(start.elapsed());
+            assert!(
+                !completed,
+                "a deadline 20 ms away must stop the walk, but it completed after {:?}",
+                start.elapsed()
+            );
+        }
+        let fastest = mid_walk.iter().min().copied().expect("attempts were made");
         assert!(
-            !completed && elapsed < Duration::from_millis(250),
-            "a deadline 20 ms away must stop the walk, but it ran {elapsed:?} (completed: \
-             {completed})"
+            fastest < Duration::from_millis(250),
+            "a deadline 20 ms away must stop the walk, but the fastest of {ATTEMPTS} ran \
+             {fastest:?}: {mid_walk:?}"
         );
         assert_eq!(
             run(Instant::now() + Duration::from_secs(600)),

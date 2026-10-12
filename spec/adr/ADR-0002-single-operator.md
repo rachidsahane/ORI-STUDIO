@@ -20,8 +20,8 @@ What the exception governs is not a corner of the product. It is the control str
 | Surface | Items |
 |---|---|
 | Control structure | `ori-core` state machines and the permission function; `ori-orchestrator::lifecycle` (tier and category rules) |
-| The merge path | `ori-orchestrator::merge_queue`; `ori-integrations::*::merge` and webhook verification |
-| Credentials and identity | `ori-broker` (all); `ori-rpc::auth` and transports |
+| The merge path | `ori-orchestrator::merge_queue`; `ori-integrations::*::merge` and webhook verification; the `VcsHost::merge` contract declared in `ori-core::adapters` |
+| Credentials and identity | `ori-broker` (all); `ori-core::adapters`, which declares the identity and its creation path and the scoped credential type; `ori-rpc::auth` and transports |
 | Isolation | `ori-runtime::container`, `ori-runtime::injector` |
 | Memory boundaries | `ori-memory::barrier`, `ori-memory::scope` |
 | Audit trail and data | `ori-store::event_log`; schema migrations |

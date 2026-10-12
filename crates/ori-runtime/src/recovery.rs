@@ -27,8 +27,8 @@
 //! - **Locks released**: `ori-orchestrator`'s `LockTable`.
 //!   [`RestartActions::release_locks`] is the seam, the same shape.
 //! - **Ticket Queued**: `ori-core`'s `Ticket::apply`. [`RestartActions::requeue_ticket`]
-//!   is the seam. See "A second gap, found in the course of this one" below:
-//!   this clause has a real problem this module did not invent and cannot fix.
+//!   is the seam. See "The ticket move, and the gap that was closed" below: the
+//!   edge this clause needs exists now, and the seam is still a seam.
 //! - **Event `session.recovered`**: `ori-store`'s `EventLog`.
 //!   [`RestartActions::append_recovered_event`] is the seam.
 //! - **No orphan process**: split two ways. The worktree half is answered by
@@ -99,34 +99,51 @@
 //! declared scope is three files in `crates/ori-runtime`, none of them
 //! `spec/DATA_MODEL.md`.
 //!
-//! # A second gap, found in the course of this one
+//! # The ticket move, and the gap that was closed
 //!
 //! ORI-P1-031 asks for "ticket Queued" directly from a session that was
-//! `Running`, which means the ticket was `InProgress`
-//! (`spec/DATA_MODEL.md` section 3's Ticket diagram: `Queued --> InProgress`,
-//! nothing else enters it). That diagram draws exactly one edge into
-//! `Queued`: `Validated --> Queued`, plus `Blocked --> Queued: re-planned`.
-//! There is no `InProgress --> Queued` edge. `crates/ori-core/src/ticket.rs`
-//! transcribes the diagram "edge for edge" into its transition table
-//! (`TRANSITIONS`, checked in that file), so `Ticket::apply` as specified
-//! refuses the exact move ORI-P1-031's fifth clause asks for.
+//! `Running`, which means the ticket was `InProgress`. When this module was
+//! written, `spec/DATA_MODEL.md` section 3's Ticket diagram drew no such edge:
+//! it drew `Validated --> Queued` and `Blocked --> Queued: re-planned` into
+//! `Queued` and nothing out of `InProgress` to it, so `Ticket::apply` as
+//! specified refused the exact move the criterion's fifth clause asks for. This
+//! module did not paper over that. It did not route the ticket through
+//! `Blocked`, which would have misrepresented the ticket's own history (it was
+//! not blocked on a budget, it was killed by a restart), and it let the refusal
+//! propagate rather than report a success it could not back.
 //!
-//! This is not this ticket's gap to close: `crates/ori-core/src/ticket.rs` is
-//! not in this ticket's declared scope, and routing around it here (for
-//! instance, by having [`RestartActions::requeue_ticket`]'s real
-//! implementation walk the ticket through `Blocked` first) would misrepresent
-//! the ticket's own history — it was not blocked on a budget, it was killed by
-//! a restart — for the sake of making a table agree with itself. What this
-//! module does instead is the same thing it does for the `Spawning` gap: it
-//! does not paper over the refusal. [`RestartActions::requeue_ticket`] returns
-//! a `Result`; if a real implementation calls `Ticket::apply` and the
-//! specified machine refuses it, that `Err` propagates out of
-//! [`recover_session`] as [`RecoveryError::ActionFailed`], and the session is
-//! **not** reported recovered. A silent success here would be the "present but
-//! reporting nothing" defect (AICD §39) applied to a specification gap instead
-//! of to a test; refusing loudly is the same policy CLAUDE.md rule 10 states
-//! for a different kind of ticket, applied here to a claim rather than to an
-//! action: prove it, or say plainly that it cannot be proven yet.
+//! The gap is closed on both sides. The diagram now draws `InProgress -->
+//! Queued: engine recovery only` (ORI-T-0128), with a "Recovery edge" paragraph
+//! that says the move does not pass through `Blocked`, and
+//! `crates/ori-core/src/ticket.rs` carries the edge in its transition table
+//! (ORI-T-0129). A real [`RestartActions::requeue_ticket`] that calls
+//! `Ticket::apply` for a ticket in `InProgress` is therefore no longer refused
+//! by the machine, and that is the whole of what changed here.
+//!
+//! What did not change, stated so that nothing is read into the edge:
+//!
+//! - This module still does not call `Ticket::apply`. [`RestartActions`] is
+//!   the seam, nothing in the workspace implements it against `ori-core` yet,
+//!   and this module's tests drive a double. That the edge exists is shown in
+//!   `crates/ori-core/src/ticket.rs`, not here.
+//! - An `Err` from the seam still propagates out of [`recover_session`]
+//!   unchanged (an implementation reports a refusal by the machine as
+//!   [`RecoveryError::ActionFailed`]), and the session is **not** reported
+//!   recovered. A silent success would be the "present but reporting nothing"
+//!   defect (AICD §39) applied to a requeue that did not happen.
+//! - The edge starts at `InProgress` only: a requeue of a ticket in any other
+//!   state is still refused by the machine.
+//! - The machine refuses the requeue of an `InProgress` ticket to any actor
+//!   but the system (`Ticket::apply`, ruling R43), so a real
+//!   [`RestartActions::requeue_ticket`] must apply its event with the system as
+//!   the actor, which is also the actor `spec/DATA_MODEL.md` section 3 gives
+//!   the recovery's events (ORI-T-0130, commit 8f8a4cd on the integration
+//!   branch, not yet on every branch). The machine cannot tell that actor is
+//!   the recovery and not a scheduled trigger or a watcher; the module doc of
+//!   `crates/ori-core/src/ticket.rs` says what the guard enforces and what it
+//!   does not. What [`recover_session`] contributes is the order: the session
+//!   has ended `Killed`, with every earlier step recorded, before the seam is
+//!   asked to requeue, and `session.recovered` is appended after it.
 //!
 //! # The cadence this module does not run
 //!
@@ -267,8 +284,10 @@ pub trait RestartActions {
         at: Timestamp,
     ) -> Result<Disposition, RecoveryError>;
 
-    /// `ori-core`'s `Ticket::apply` returns the ticket to `Queued`. See the
-    /// module doc's "second gap" for what this can honestly promise today.
+    /// `ori-core`'s `Ticket::apply` returns the ticket to `Queued`, along the
+    /// edge `InProgress --> Queued` of `spec/DATA_MODEL.md` section 3, which the
+    /// machine allows only to the system actor. See the module doc's "The
+    /// ticket move" for what this module does and does not promise about it.
     fn requeue_ticket(&mut self, session: &Session, at: Timestamp) -> Result<(), RecoveryError>;
 
     /// `ori-store` appends `session.recovered`.

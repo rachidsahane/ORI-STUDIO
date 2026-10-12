@@ -292,7 +292,7 @@ enum Resolution {
     Unresolved(#[allow(dead_code)] &'static str),
 }
 
-/// `spec/RISK_MAP.md`'s tier 2 rows, twelve of them, each with the concrete
+/// `spec/RISK_MAP.md`'s tier 2 rows, thirteen of them, each with the concrete
 /// declared-scope prefixes it resolves to, or the reason it does not.
 ///
 /// The `spec/` row (tier 1, escalating to tier 2 for four named documents) and
@@ -319,6 +319,24 @@ const RISK_MAP_TIER_TWO: &[RiskMapRow] = &[
             "crates/ori-core/src/document.rs",
             "crates/ori-core/src/phase.rs",
             "crates/ori-core/src/permission.rs",
+        ]),
+    },
+    RiskMapRow {
+        text: "crates/ori-core/src/adapters.rs, adapters/identity.rs",
+        // The row's Path cell is one directory plus two names, the shape the
+        // `ori-memory` and `ori-gates` rows below also use, so the first name
+        // is `adapters.rs` inside `crates/ori-core/src/` and the second is
+        // read relative to that same directory: `adapters/identity.rs` is
+        // `crates/ori-core/src/adapters/identity.rs`, the module file `adapters.rs`
+        // declares as a child, not a path under `crates/ori-core/` itself.
+        // Neither file exists in this tree yet, which is not a defect in this
+        // row for the reason the `event_log.rs` row below gives: the map tiers
+        // paths before their first commit. A declared scope naming the
+        // directory `crates/ori-core/src/adapters` still matches, because
+        // `matching_significant_module` checks both directions.
+        resolution: Resolution::Boundary(&[
+            "crates/ori-core/src/adapters.rs",
+            "crates/ori-core/src/adapters/identity.rs",
         ]),
     },
     RiskMapRow {
@@ -1214,5 +1232,47 @@ mod tests {
                 assert!(!reason.is_empty(), "{}", row.text);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0145: the tier 2 row ORI-T-0137 added to spec/RISK_MAP.md for the
+    // ori-core adapter files.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0145_a_change_to_the_core_identity_adapter_is_significant() {
+        // The second path of the row is written relative to the first path's
+        // directory, so it resolves to a file under crates/ori-core/src/, and a
+        // ticket of the lowest-signal category whose declared scope is that file
+        // is significant by scope alone.
+        let ticket = merged(
+            Category::Auto,
+            scope(["crates/ori-core/src/adapters/identity.rs"]),
+        );
+        let input = SignificanceInput::from_merged_ticket(&ticket).expect("a merged ticket");
+        let verdict = label(&input).expect("a decided answer");
+        assert!(
+            verdict.is_significant(),
+            "crates/ori-core/src/adapters/identity.rs is a tier 2 path of spec/RISK_MAP.md"
+        );
+        assert_eq!(
+            verdict,
+            Verdict::Significant(SignificantBecause::Scope(
+                "crates/ori-core/src/adapters/identity.rs".to_owned()
+            ))
+        );
+
+        // The first path of the same row resolves too, and a sibling file that
+        // the row does not name does not ride along on either path.
+        let ticket = merged(Category::Auto, scope(["crates/ori-core/src/adapters.rs"]));
+        let input = SignificanceInput::from_merged_ticket(&ticket).expect("a merged ticket");
+        assert!(label(&input).expect("a decided answer").is_significant());
+
+        let ticket = merged(Category::Auto, scope(["crates/ori-core/src/error.rs"]));
+        let input = SignificanceInput::from_merged_ticket(&ticket).expect("a merged ticket");
+        assert!(
+            !label(&input).expect("a decided answer").is_significant(),
+            "crates/ori-core (other types) is tier 1 and the adapters row must not widen to it"
+        );
     }
 }

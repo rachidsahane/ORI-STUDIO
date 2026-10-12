@@ -250,7 +250,7 @@ Whole crate is tier 2 (`RISK_MAP`: `crates/ori-broker | 2 | Credentials`).
 
 | Ticket | Title | Tier | Declared scope | Spec anchor | Criteria |
 |---|---|---|---|---|---|
-| ORI-T-0058 | Adapter traits | 1 | `crates/ori-integrations/src/traits.rs` | API_SPEC §4 | none |
+| ORI-T-0058 | Adapter traits | ~~1~~ **2** | ~~`crates/ori-integrations/src/traits.rs`~~ **`crates/ori-core/src/adapters.rs`, `adapters/identity.rs`, `crates/ori-broker/src/identity.rs`** | API_SPEC §4 | none |
 | ORI-T-0059 | **Version control host reference adapter: installation tokens, webhook verification, merge exposure** | **2** | `crates/ori-integrations/src/reference/vcs/**` | API_SPEC §4; SECURITY_NOTES trust boundary 3 | ORI-P1-017 |
 
 **Order.** ORI-T-0058 then ORI-T-0059.
@@ -344,7 +344,7 @@ All 41 criteria of `criteria/phase-1.md` are claimed by at least one ticket. Con
 | # | Trigger | Question |
 |---|---|---|
 | 1 | `precondition_missing` | The organizational repository (AICD §34) does not exist. ORI-T-0010 seeds `policies/significant-modification.md` into it. Do I create it as a sibling repository in batch 1, or does ORI-T-0010 move to a later batch? |
-| 2 | `precondition_missing` | ORI-T-0064 (`migrate` M0) and ORI-T-0077 (end-to-end) need the fixtures that batch 15 builds. My recommendation: move ORI-T-0073 to ORI-T-0076 from batch 15 to batch 1, where they are just directories of files and block nothing. Batch 15 then holds only the suite, the baselines and the calibration |
+| 2 | `precondition_missing` | ORI-T-0064 (`migrate` M0) and ORI-T-0077 (end-to-end) need the fixtures that batch 15 builds. My recommendation: move ORI-T-0073 to ORI-T-0076 from batch 15 to batch 1, where they are just directories of files and block nothing. Batch 15 then holds only the suite, the baselines and the calibration **Answered by the operator on 2026-10-11: move them forward.** ORI-T-0073 to ORI-T-0076 run now; batch 15 keeps ORI-T-0077 to ORI-T-0079. Recorded in `ops/lock-table.md`, claims 72 to 75 |
 | 3 | `new_dependency` | Five external crates are unavoidable in phase 1: `proptest` (batch 2), `rusqlite` (batch 3), `keyring` (batch 4), `tantivy` and `tree-sitter` (batch 6). I recommend approving them as one decision at batch 2 planning rather than four separate interruptions |
 | 4 | `spec_conflict` | The citation gate's scope is undefined. `spec/design/Ori Studio.html` contains twelve fabricated methodology subsection references (§11.7, §12.3, §17.3, §17.4, §17.9, §23.1, §23.4, §23.5, §26.1, §27.2, §39.1, §39.3) inside display copy. Does gate 9 check markdown only, or everything under `spec/`? |
 | 5 | `contract_change` | `spec/design/DESIGN.md` binds DSN-001 to `design/ori-studio-mockup-v1.html`; the file present is `spec/design/Ori Studio.html`. Rename the file, or repoint the document? Batch 0 records the mismatch in the registry rather than resolving it |
