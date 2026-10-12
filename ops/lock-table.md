@@ -956,3 +956,61 @@ Written by the lead on 2026-10-12 under [[R31]]. The worker restarted overnight.
 Claim 64 is folded into claim 90. Claim 88 is disjoint from everything held, since no claim holds `significance.rs`. No claim holds `deny.toml`; claim 20 holds `.github/workflows/ci.yml` and `scripts/gates.sh`, not gate 7's configuration.
 
 **State after this section:** the claims held are 20, 81, 86, 87, 88, 89 and 90. The next free identifier is ORI-T-0160.
+
+---
+
+## Wave of 2026-10-12: six tickets built, four reviewed; **paused by the operator**
+
+Written by the lead on 2026-10-12. The operator asked to pause everything once the running tasks finished. Every ticket below is **built and not integrated**: nothing in this section is on the session branch except this record and one correction to E-0009's text (`mio` reaches macOS only under `macos_kqueue`, which `ori-watch` leaves off). The claims stay held so that work resumes where it stopped.
+
+### Where each ticket stands
+
+| Ticket | Claim | Branch, head | State |
+|---|---|---|---|
+| ORI-T-0144, evidence `content_ref` confined | 81 | `fix/ORI-T-0144-evidence-ref`, f213566 | reviewed; 1 should-fix confirmed; repair not dispatched |
+| ORI-T-0141, `AgentRuntime` into `ori-core` | 86 | `feat/ORI-T-0141-agent-runtime-core`, 670aa99 | reviewed; 1 should-fix confirmed (a follow-up, below), 1 contested; R42 conformity confirmed |
+| ORI-T-0158, the MCP wire (W0) | 89 | `feat/ORI-T-0158-mcp-wire`, 1ad80e8 | reviewed; 3 should-fix confirmed; repair not dispatched |
+| ORI-T-0156, batch 10 answers in the spec | 87 | `docs/ORI-T-0156-mcp-spec`, ffdcf2c | reviewed; 1 blocking and 3 should-fix confirmed, 2 contested; two need the operator |
+| ORI-T-0157, gate 12 restates the `ori-mcp` row | 88 | `docs/ORI-T-0157-mcp-tier-restated`, 4a3d32f | built on ffdcf2c, all gates green; not reviewed |
+| ORI-T-0159, ORI-T-0054's watcher made to pass CI everywhere | 90 | `feat/ORI-T-0054-watch`, f02e877 | built; `cargo-deny` 0.20.2 passes with the pinned skip and fails without it; macOS and Windows behaviour reasoned from `notify`'s source and not run; not reviewed |
+
+The review was one workflow: three independent lenses per ticket (Opus), a merge, and two skeptics per blocking or should-fix finding, told to refute it. 50 agents, none failed. The full findings are in the session scratchpad (`review-wave-4-full.json`, `review-wave-4-summary.md`). The confirmed ones:
+
+| Finding | What | Disposition proposed by the lead |
+|---|---|---|
+| 0144-F1 (should-fix) | One evidence event that fails the check denies every explicit evidence request in the product **permanently**. The log cannot be amended and nothing can quarantine an event. The module doc's "until a human looks at it" promises a remedy that does not exist (reproduced through `ScopeEnforcer::authorize`) | Correct the doc and the operator note. A recovery path (a per-record read, or a quarantine event kind) is a decision for the operator |
+| 0141-F1 (should-fix) | `SessionSpec` derives `Debug` over `envs`, where an issued credential is placed; formatting one prints the credential. Latent: nothing places a credential there yet | Follow-up ORI-T-0160, below. It must land before the injector is wired to `SessionSpec`. Not a merge blocker |
+| 0158-F1 (should-fix) | Typed decoding copies the parsed tree, so the peak memory for one hostile 1 MiB line is about twice the documented ~90 MiB | Repair, or document and cap lower for agent connections |
+| 0158-F2 (should-fix) | In `Ready`, the state table does not check direction: a server's `tools/call` sent to a client is decoded rather than refused | Repair |
+| 0158-F3 (should-fix) | The 1 MiB cap is justified by a cap on the proxy's output, which cannot bound an operator server's inbound line, so one large legitimate result ends that server's connection | Repair: the host's cap is set separately |
+| 0156-F1 (blocking) | E-0010 exempts proxied tools from the file-write rule only. The unchanged clauses "never receive the merge operation" and "never receive credentials through MCP" become guarantees Ori cannot enforce once an operator's server exposes a merge tool or carries its own credentials | **Operator question** |
+| 0156-F3 (should-fix) | Two SECURITY_NOTES statements that E-0010's accepted proxied reach makes false (trust boundary 4, the auto-mode controls) were neither qualified nor reported | Repair, after the answer to 0156-F1 |
+| 0156-F5 (should-fix) | The sealed-barrier bullet says more than E-0012 decided ("no plain string", "one public entry", "does not compile") | Repair |
+| 0156-F9 (should-fix) | A new tier 2 RISK_MAP row is a change to ADR-0002's tier 2 surface, which ADR-0002 escalates as `adr_area` | **Operator question** (an acknowledgement) |
+
+Contested, for the lead's reading on resume: 0144-F2 (the coder's own finding that `submit_report`'s write follows a pre-existing link; pre-existing and out of scope, real but judged a note by both skeptics), 0141-F2 (a `TranscriptError` refusal carries no `MethodologyRef`; pre-existing), 0156-F2 (ENV_SETUP section 5's "any deviation is a decisional ticket" against exposure as an event), 0156-F8 (SECURITY_NOTES' and ADR-0002's tier 2 tables no longer match RISK_MAP).
+
+### Corrections to the lead's own text, found by the agents
+
+- ORI-T-0159's coder: (1) a962bd9 is **not** an ancestor of `feat/ORI-T-0054-watch` (cut from f0e61b3), so on that branch the five mode-000 tests still fail as root; the header said otherwise. (2) `spec/RISK_MAP.md` has no row for `deny.toml`; tier 2 was the lead's analogy with `.github/workflows`. (3) E-0009's "macOS" was wrong, corrected above.
+- ORI-T-0158's coder: "the caps the plan sets (256 KiB per proxied result)" is not in `ops/batch-10-plan.md`; the figure came from the planner's report.
+- ORI-T-0141's coder: `Entry` already had accessors; and `LaunchConfig::new` returns a `Result`, so the R42 edits each needed an `.expect(..)`, which tightens rather than loosens.
+- ORI-T-0144's coder: `retrieval.rs` renders evidence but does not call `read_evidence` outside a test; `scope.rs` does.
+
+### Questions waiting for the operator on resume
+
+1. **0156-F1:** does an operator-exposed MCP server's merge tool, or its own credential, fall under E-0010's accepted reach (as file writes do), or is it forbidden, with the host refusing to expose a server that offers one?
+2. **0156-F9:** acknowledge the new tier 2 RISK_MAP row as the `adr_area` decision ADR-0002 asks for.
+3. **0144-F1:** accept "permanent and product-wide" as the cost of all-or-error for now, with a recovery path as a follow-up; or require the recovery path before merge.
+4. **Stdio-only host in phase 1** (`ops/batch-10-plan.md`, last section): never answered, and ORI-T-0156 wrote nothing about it.
+
+### Follow-ups allocated
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0160 | `SessionSpec`'s `Debug` must redact `envs`, as `ScopedToken`'s does (0141-F1). Before the injector is wired to `SessionSpec` | `crates/ori-core/src/adapters.rs` | 2 | after ORI-T-0141 | 2026-10-12 |
+| ORI-T-0161 | `submit_report` writes the evidence file with `std::fs::write`, which follows a link already standing at `<product>/evidence/<id>.txt` or at `evidence/`, and overwrites a reused id's file. Refuse a link and an existing file at write time (0144-F2, the coder's own finding) | `crates/ori-memory/src/barrier.rs` | 2 | after ORI-T-0144 | 2026-10-12 |
+| ORI-T-0162 | A RISK_MAP row for `deny.toml` (gate 7's configuration), and LLD section 6's `evidence/<blob_id>` brought in line with the `.txt` the code writes (0144-F10) | `spec/RISK_MAP.md`, `spec/LLD.md` | 2 | ready; documentation role | 2026-10-12 |
+| ORI-T-0163 | Windows: `ReadDirectoryChangesW` never reports the watched root's removal, so the watcher cannot detect it there (ORI-T-0159 gated that test off Windows). A root-existence probe at reconciliation | `crates/ori-watch/src/watcher.rs` or the engine | 1 | after ORI-T-0159 | 2026-10-12 |
+
+**State after this section:** the claims held are 20, 81, 86, 87, 88, 89 and 90, all paused. The next free identifier is ORI-T-0164.
