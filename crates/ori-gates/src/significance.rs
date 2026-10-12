@@ -292,7 +292,7 @@ enum Resolution {
     Unresolved(#[allow(dead_code)] &'static str),
 }
 
-/// `spec/RISK_MAP.md`'s tier 2 rows, thirteen of them, each with the concrete
+/// `spec/RISK_MAP.md`'s tier 2 rows, fourteen of them, each with the concrete
 /// declared-scope prefixes it resolves to, or the reason it does not.
 ///
 /// The `spec/` row (tier 1, escalating to tier 2 for four named documents) and
@@ -395,15 +395,51 @@ const RISK_MAP_TIER_TWO: &[RiskMapRow] = &[
     },
     RiskMapRow {
         text: "crates/ori-mcp (server tool scopes)",
-        // `crates/ori-mcp/src` holds only `lib.rs` today (checked while
-        // writing this module); there is no `Server` or `ToolScopes` module
-        // yet for "server tool scopes" to resolve to, and guessing a file
-        // name ahead of the crate that has not been built would be a
-        // fabricated path, the class of error the ticket's own "Verify what
-        // I wrote" warns against.
+        // `crates/ori-mcp/src` held only `lib.rs` when this module was written;
+        // there was no `Server` or `ToolScopes` module for "server tool
+        // scopes" to resolve to, and guessing a file name ahead of the crate
+        // that had not been built would have been a fabricated path, the class
+        // of error the ticket's own "Verify what I wrote" warns against.
+        // `spec/RISK_MAP.md` has since named the files in the concrete row
+        // that follows this one (`scopes.rs`, `ports.rs`, `server.rs`,
+        // `tools/`), and that row resolves them, so the files are covered
+        // by it. This abstract row stays `Resolution::Unresolved`: the map
+        // still carries it unchanged, and the test
+        // `tests::ori_t_0044_three_risk_map_tier_two_rows_are_recorded_as_unresolved_and_not_silently`
+        // counts it among the three it records.
         resolution: Resolution::Unresolved(
-            "crates/ori-mcp carries only lib.rs; no file yet holds \"server tool scopes\"",
+            "crates/ori-mcp (server tool scopes) names the crate's tool scopes in the \
+             abstract; the files are resolved by the row \"crates/ori-mcp/src/scopes.rs, \
+             ports.rs, server.rs, tools/\" that follows it",
         ),
+    },
+    RiskMapRow {
+        text: "crates/ori-mcp/src/scopes.rs, ports.rs, server.rs, tools/",
+        // The Path cell is one directory plus three names and a directory,
+        // the shape the `ori-core` adapters, `ori-memory` and `ori-gates`
+        // rows above also use, so every name is read relative to the first
+        // path's directory, `crates/ori-mcp/src/`. `tools/` is a directory,
+        // and the row means every file under it. `Resolution::Boundary`
+        // already says exactly that: its entries are matched with `under`,
+        // which accepts the path itself or anything beneath it across a `/`
+        // boundary, the same way `crates/ori-store/migrations`,
+        // `.github/workflows` and `spec/adr` stand for directories above. So
+        // no new `Resolution` form is added. The directory is written without
+        // its trailing slash, as those entries are, and `under` would trim it
+        // anyway. It does not match `crates/ori-mcp/src/tools.rs`, a module
+        // root file the row does not name, nor a sibling such as
+        // `crates/ori-mcp/src/toolset.rs`. None of the four exists in this
+        // tree yet, which is not a defect in this row for the reason the
+        // `event_log.rs` row above gives: the map tiers paths before their
+        // first commit. `host.rs` (the tier 1 row "crates/ori-mcp (host)"),
+        // `protocol.rs` (tier 1, "The shared MCP wire") and `lib.rs` are not
+        // listed, so they are not significant by this row.
+        resolution: Resolution::Boundary(&[
+            "crates/ori-mcp/src/scopes.rs",
+            "crates/ori-mcp/src/ports.rs",
+            "crates/ori-mcp/src/server.rs",
+            "crates/ori-mcp/src/tools",
+        ]),
     },
     RiskMapRow {
         text: "crates/ori-integrations (merge exposure, webhook verification)",
@@ -1274,5 +1310,83 @@ mod tests {
             !label(&input).expect("a decided answer").is_significant(),
             "crates/ori-core (other types) is tier 1 and the adapters row must not widen to it"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0157: the tier 2 row ORI-T-0156 added to spec/RISK_MAP.md for the
+    // ori-mcp files that decide what agents can do.
+    // -----------------------------------------------------------------------
+
+    /// The verdict for a ticket of the lowest-signal category whose declared
+    /// scope is exactly `module`, so only the scope can make it significant.
+    fn verdict_for_scope_of(module: &str) -> Verdict {
+        let ticket = merged(Category::Auto, scope([module]));
+        let input = SignificanceInput::from_merged_ticket(&ticket).expect("a merged ticket");
+        label(&input).expect("a decided answer")
+    }
+
+    #[test]
+    fn ori_t_0157_the_ori_mcp_tier_two_files_are_significant_and_the_rest_of_the_crate_is_not() {
+        // The three named files, each significant by scope alone and each
+        // matched by its own entry of the row.
+        for file in [
+            "crates/ori-mcp/src/scopes.rs",
+            "crates/ori-mcp/src/ports.rs",
+            "crates/ori-mcp/src/server.rs",
+        ] {
+            assert_eq!(
+                verdict_for_scope_of(file),
+                Verdict::Significant(SignificantBecause::Scope(file.to_owned())),
+                "{file} is a tier 2 path of spec/RISK_MAP.md (What agents can do)"
+            );
+        }
+
+        // `tools/` is a directory and the row means every file under it, at
+        // any depth, not one file and not only the directory's own name.
+        for file in [
+            "crates/ori-mcp/src/tools/memory.rs",
+            "crates/ori-mcp/src/tools/ticket.rs",
+            "crates/ori-mcp/src/tools/nested/deeper.rs",
+        ] {
+            assert_eq!(
+                verdict_for_scope_of(file),
+                Verdict::Significant(SignificantBecause::Scope(
+                    "crates/ori-mcp/src/tools".to_owned()
+                )),
+                "{file} sits under tools/, which spec/RISK_MAP.md tiers 2 (What agents can do)"
+            );
+        }
+        assert!(
+            verdict_for_scope_of("crates/ori-mcp/src/tools").is_significant(),
+            "the directory itself, declared as scope, reaches every file under it"
+        );
+
+        // The rest of the crate is tier 1 and is not widened into by the row:
+        // `host.rs` (crates/ori-mcp (host)), `protocol.rs` (the shared MCP
+        // wire) and `lib.rs`.
+        for file in [
+            "crates/ori-mcp/src/host.rs",
+            "crates/ori-mcp/src/protocol.rs",
+            "crates/ori-mcp/src/lib.rs",
+        ] {
+            assert_eq!(
+                verdict_for_scope_of(file),
+                Verdict::NotSignificant { copy_only: false },
+                "{file} is tier 1 in spec/RISK_MAP.md and the tier 2 row must not widen to it"
+            );
+        }
+
+        // The directory boundary is a `/`, not a string prefix: a sibling
+        // whose name merely begins with `tools` is not under `tools/`.
+        for file in [
+            "crates/ori-mcp/src/toolset.rs",
+            "crates/ori-mcp/src/tools_extra/x.rs",
+        ] {
+            assert_eq!(
+                verdict_for_scope_of(file),
+                Verdict::NotSignificant { copy_only: false },
+                "{file} is not under crates/ori-mcp/src/tools/"
+            );
+        }
     }
 }
