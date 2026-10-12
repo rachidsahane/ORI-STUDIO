@@ -64,15 +64,29 @@
 //! one level below `hooks/`, so a hook that finds its files by `$0`-relative
 //! path (`$(dirname "$0")/..`) finds a different place. A hook that is a
 //! relative symbolic link is kept as a link whose target is adjusted for that
-//! one level, so it still reaches what it stood for, with one exception that
-//! is refused: a link to another hook the installer also replaces
-//! (`post-merge -> post-commit`) would resolve, once kept, to the engine's own
-//! script, so the hook it stood for, a `pre-push` veto included, would stop
-//! running without a word. That installation fails
-//! ([`HooksError::HookLinksToManagedHook`]) and writes nothing. The report says so
+//! one level, so it still reaches what it stood for. The report says so
 //! ([`InstallOutcome::InstalledPreserving`]). If the preserved name is taken
 //! the installer refuses ([`HooksError::PreservedNameTaken`]) rather than
 //! choose which of two hooks to lose.
+//!
+//! **One arrangement is refused, and it is looked for in every entry of the
+//! hooks directory, not only the four hooks.** A link that, followed to its
+//! end, reaches the place of a hook the installer replaces cannot be kept
+//! safely. `post-merge -> post-commit` once kept would resolve to the engine's
+//! own script, so the hook it stood for, a `pre-push` veto included, would
+//! stop running without a word. The same holds through a chain
+//! (`pre-push -> relay -> post-commit`), and it holds for a link that is not a
+//! managed hook at all: `post-checkout -> post-merge` would make every
+//! checkout record a false `post-merge` event into the spool the engine
+//! reads. Each hop is resolved against its own directory with the operating
+//! system's own reading of `..` and of links to directories, and a link to a
+//! same-named hook in some other directory (a team's shared hooks) is not
+//! this. On macOS and Windows, whose file systems are case-insensitive by
+//! default, names are compared without regard to ASCII case, so a link to
+//! `Post-Commit` counts; a case-sensitive volume there is refused where it
+//! need not be, which is the safe side of the choice
+//! (`CASE_INSENSITIVE_NAMES`). That installation fails
+//! ([`HooksError::HookLinksToManagedHook`]) and writes nothing.
 //!
 //! The installation is built so that a hook of someone else's is not lost
 //! to a failure or to a second installer running at the same time:
@@ -158,6 +172,15 @@
 //!   in `GIT_CONFIG_*` variables or through an `include`, cannot be seen from
 //!   here; the ref poller is the backstop, and [`GitHooks::status`] reports
 //!   installed hooks, not that git will run them.
+//! - A `.git` swapped for a link while an installation runs is still written
+//!   through, for the rest of that run. `.git` is looked at when the installer
+//!   is built and at the start of [`GitHooks::install`] and
+//!   [`GitHooks::status`], not between the writes that follow, and `std` has
+//!   no `openat` to hold the directory between a look and a write; the next
+//!   call refuses it ([`HooksError::GitDirNotADirectory`]). A hostile
+//!   repository that holds still is in scope, and a live writer racing the
+//!   installer is not claimed against, which is the limit `crate::watcher`
+//!   states for its own checks.
 //! - A linked worktree's `.git` is a file; the installer refuses it
 //!   ([`HooksError::GitDirNotADirectory`]). Install into the repository that
 //!   owns the worktree: hooks live in the common directory and run for every
@@ -300,14 +323,18 @@ pub enum HooksError {
         /// The path of the existing preserved hook.
         path: PathBuf,
     },
-    /// An existing hook is a link to another hook this installer also
-    /// replaces (`post-merge -> post-commit`). Kept as a link it would resolve
-    /// to the engine's own script, and the hook it stood for, a `pre-push`
-    /// veto included, would never run again. Nothing was written.
+    /// An entry of the hooks directory is a link that, directly or through
+    /// other links, reaches a hook this installer also replaces
+    /// (`post-merge -> post-commit`, `pre-push -> relay -> post-commit`,
+    /// `post-checkout -> post-merge`). Kept as a link, or left in place, it
+    /// would resolve to the engine's own script: the hook it stood for, a
+    /// `pre-push` veto included, would never run again, or an unrelated hook
+    /// would record events that never happened. Nothing was written.
     HookLinksToManagedHook {
-        /// The hook that is a link.
+        /// The entry that is a link.
         path: PathBuf,
-        /// What the link says it points at, as written.
+        /// What that link says it points at, as written: the first hop of the
+        /// chain.
         target: PathBuf,
     },
     /// A hook appeared, or changed, between deciding what to do and doing it.
@@ -438,9 +465,9 @@ impl fmt::Display for HooksError {
             .and_then(|()| cite(f, self)),
             Self::HookLinksToManagedHook { path, target } => write!(
                 f,
-                "refused: {} is a link to {}, another hook this installer replaces, so the \
-                 hook it stands for would stop running and the engine's own script would run \
-                 in its place; point it at a file of its own and install again",
+                "refused: {} is a link to {}, which leads to a hook this installer replaces, so \
+                 the hook it stands for would stop running and the engine's own script would \
+                 run in its place; point it at a file of its own and install again",
                 path.display(),
                 target.display()
             )
@@ -665,6 +692,7 @@ impl GitHooks {
             }
         }
         // Decide every hook before writing any.
+        self.refuse_if_a_link_reaches_a_managed_hook(&hooks_dir)?;
         let mut plans = Vec::new();
         for hook in GitHook::ALL {
             plans.push((hook, self.plan(hook)?));
@@ -743,9 +771,9 @@ impl GitHooks {
                 }
             }
             Examined::Foreign => {
-                if let Some(target) = links_to_managed_hook(&hooks_dir, &path) {
-                    return Err(HooksError::HookLinksToManagedHook { path, target });
-                }
+                // A link to a hook we replace was refused before any plan was
+                // made (`refuse_if_a_link_reaches_a_managed_hook`), whatever
+                // its name.
                 let directory = hooks_dir.join(PRESERVED_DIR);
                 match fs::symlink_metadata(&directory) {
                     Ok(metadata) => {
@@ -926,6 +954,61 @@ impl GitHooks {
         })
     }
 
+    /// Refuses the installation if any entry of the hooks directory is a link
+    /// that, followed to its end, reaches the place of a hook this installer
+    /// replaces: AICD §13.
+    ///
+    /// Every entry is looked at, not only the four hooks, and a chain is
+    /// followed, not one link (`chain_reaches_managed_hook`). Two arrangements
+    /// get through a check of one link on the four names. `pre-push -> relay
+    /// -> post-commit`: once `pre-push` is kept, its link still ends at
+    /// `post-commit`, which is now the engine's script, so the veto it stood
+    /// for stops running. `post-checkout -> post-merge`: the link is not ours
+    /// to move, and `post-merge` becomes the engine's script, so every checkout
+    /// records a `post-merge` event into the spool the engine reads. Entries
+    /// are looked at in name order, so the refusal names the same one each
+    /// time. A hooks directory that does not exist yet has nothing to refuse.
+    /// A link made after this look is not seen by it, as with every decision
+    /// made before the writes.
+    fn refuse_if_a_link_reaches_a_managed_hook(&self, hooks_dir: &Path) -> Result<(), HooksError> {
+        let listing = match fs::read_dir(hooks_dir) {
+            Ok(listing) => listing,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(HooksError::Io {
+                    path: hooks_dir.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let io_error = |source| HooksError::Io {
+            path: hooks_dir.to_path_buf(),
+            source,
+        };
+        let mut links = Vec::new();
+        for entry in listing {
+            let entry = entry.map_err(io_error)?;
+            if entry.file_type().map_err(io_error)?.is_symlink() {
+                links.push(entry.path());
+            }
+        }
+        links.sort();
+        let Ok(canonical_hooks) = fs::canonicalize(hooks_dir) else {
+            return Ok(());
+        };
+        for link in links {
+            if let Some(target) = chain_reaches_managed_hook(
+                hooks_dir,
+                &canonical_hooks,
+                &link,
+                CASE_INSENSITIVE_NAMES,
+            ) {
+                return Err(HooksError::HookLinksToManagedHook { path: link, target });
+            }
+        }
+        Ok(())
+    }
+
     fn refuse_if_hooks_path_is_configured(&self) -> Result<(), HooksError> {
         let config = self.git_dir.join("config");
         let text = match read_plain_file(&config, READ_CAP) {
@@ -1045,41 +1128,99 @@ fn check_git_dir(git_dir: &Path) -> Result<(), HooksError> {
     Ok(())
 }
 
-/// The target of `path` as written, if `path` is a symbolic link that
-/// resolves to a hook this installer manages in `hooks_dir`.
+/// The most links followed from one entry before the chain is given up on; the
+/// limit the Linux kernel applies to one path is the same.
+const LINK_HOPS_CAP: usize = 40;
+
+/// Whether names in a hooks directory are compared without regard to case:
+/// the default on macOS and Windows, where `Post-Commit` and `post-commit` are
+/// one file. Elsewhere names are exact.
 ///
-/// The target is resolved lexically against the link's own directory, so
-/// `../hooks/post-commit`, `./post-commit` and an absolute path into the hooks
-/// directory all count. A link to a same-named hook in some other directory
-/// (a team's shared hooks, say) does not.
-fn links_to_managed_hook(hooks_dir: &Path, path: &Path) -> Option<PathBuf> {
-    if !fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
-        return None;
-    }
-    let target = fs::read_link(path).ok()?;
-    let joined = if target.is_absolute() {
-        target.clone()
-    } else {
-        path.parent()?.join(&target)
-    };
-    let mut resolved = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            Component::ParentDir => {
-                resolved.pop();
+/// The cost of getting this wrong is not symmetric. Folding case on a
+/// case-sensitive volume (an APFS volume formatted that way, say) refuses a
+/// link to `Post-Commit` that was harmless, and the user renames it. Not
+/// folding it on a case-insensitive one lets a link to the hook we replace
+/// through, and the hook it stood for stops running. So the platforms whose
+/// default is case-insensitive fold, and the rest do not; asking the file
+/// system would need a file to be created in the hooks directory before
+/// anything is decided.
+const CASE_INSENSITIVE_NAMES: bool = cfg!(any(target_os = "macos", windows));
+
+/// Whether `name` is the file name of a hook this installer replaces,
+/// optionally ignoring ASCII case: AICD §13.
+fn names_a_managed_hook(name: &std::ffi::OsStr, fold_case: bool) -> bool {
+    name.to_str().is_some_and(|text| {
+        GitHook::ALL.iter().any(|hook| {
+            if fold_case {
+                hook.file_name().eq_ignore_ascii_case(text)
+            } else {
+                hook.file_name() == text
             }
-            Component::CurDir => {}
-            other => resolved.push(other.as_os_str()),
-        }
+        })
+    })
+}
+
+/// Whether `directory` and `hooks_dir` are one directory, by path or, where
+/// the platform can say, by identity (which also sees through a difference of
+/// letter case on a case-insensitive file system).
+fn is_same_directory(directory: &Path, hooks_dir: &Path, canonical_hooks: &Path) -> bool {
+    if directory == canonical_hooks {
+        return true;
     }
-    GitHook::from_file_name(resolved.file_name()?.to_str()?)?;
-    let parent = resolved.parent()?;
-    let same_directory = parent == hooks_dir
-        || matches!(
-            (fs::canonicalize(parent), fs::canonicalize(hooks_dir)),
-            (Ok(left), Ok(right)) if left == right
-        );
-    same_directory.then_some(target)
+    match (fs::metadata(directory), fs::metadata(hooks_dir)) {
+        (Ok(left), Ok(right)) => match (identity_of(&left), identity_of(&right)) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The first target of the link at `start`, as written, if following it and
+/// every link after it reaches the place of a hook this installer replaces in
+/// `hooks_dir`: AICD §13.
+///
+/// Each hop is resolved against the directory its own link is in, and the
+/// directory part of the result is resolved by the operating system
+/// (`canonicalize`), so `..`, a link to a directory, and a hooks directory
+/// reached by another spelling all count, as do a chain through a link in the
+/// hooks directory (`pre-push -> relay -> post-commit`) and one through a link
+/// outside it. The last component is compared by name and is not required to
+/// exist: a link to a hook that is not there yet would resolve to the
+/// engine's script once it is. A link to a same-named hook in some other
+/// directory (a team's shared hooks, say) does not count, and neither does a
+/// chain longer than [`LINK_HOPS_CAP`], which no process could run either.
+fn chain_reaches_managed_hook(
+    hooks_dir: &Path,
+    canonical_hooks: &Path,
+    start: &Path,
+    fold_case: bool,
+) -> Option<PathBuf> {
+    let written = fs::read_link(start).ok()?;
+    let mut link = start.to_path_buf();
+    let mut target = written.clone();
+    for _ in 0..LINK_HOPS_CAP {
+        let joined = if target.is_absolute() {
+            target.clone()
+        } else {
+            link.parent()?.join(&target)
+        };
+        let name = joined.file_name()?.to_os_string();
+        let directory = fs::canonicalize(joined.parent()?).ok()?;
+        if names_a_managed_hook(&name, fold_case)
+            && is_same_directory(&directory, hooks_dir, canonical_hooks)
+        {
+            return Some(written);
+        }
+        // Not the place of a hook we replace: keep going if it is a link.
+        let next = directory.join(&name);
+        if !fs::symlink_metadata(&next).ok()?.file_type().is_symlink() {
+            return None;
+        }
+        target = fs::read_link(&next).ok()?;
+        link = next;
+    }
+    None
 }
 
 enum Plan {
@@ -1937,6 +2078,245 @@ mod tests {
             fs::read_to_string(preserved(&repo, GitHook::PrePush)).unwrap(),
             "#!/bin/sh\necho shared\n"
         );
+    }
+
+    /// A repository whose hooks directory holds the user's `post-commit`, a
+    /// script that vetoes, and nothing else: the arrangement the link tests
+    /// below build their links on.
+    #[cfg(unix)]
+    fn repository_with_a_users_post_commit(
+        scratch: &Scratch,
+    ) -> (PathBuf, PathBuf, PathBuf, &'static str) {
+        let (repo, spool) = skeleton(scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let theirs = "#!/bin/sh\necho theirs\nexit 1\n";
+        fs::write(hooks_dir.join("post-commit"), theirs).unwrap();
+        make_executable(&hooks_dir.join("post-commit")).unwrap();
+        (repo, spool, hooks_dir, theirs)
+    }
+
+    /// Installs and expects the refusal for a link, and that it wrote nothing.
+    #[cfg(unix)]
+    fn expect_refused_link(
+        repo: &Path,
+        spool: &Path,
+        expected_path: &Path,
+        expected_target: &Path,
+        names_before: &[&str],
+    ) {
+        let error = GitHooks::new(repo, spool).unwrap().install().unwrap_err();
+        match &error {
+            HooksError::HookLinksToManagedHook { path, target } => {
+                assert_eq!(path, expected_path);
+                assert_eq!(target, expected_target);
+            }
+            other => panic!("expected HookLinksToManagedHook, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+        assert_eq!(
+            hook_dir_names(repo),
+            names_before,
+            "a refused installation wrote into the hooks directory"
+        );
+        assert!(
+            !spool.exists(),
+            "the spool was created by a refused install"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0159_a_chain_of_links_that_ends_at_a_hook_the_installer_replaces_is_refused() {
+        // `pre-push -> relay -> post-commit`: kept, `pre-push` would still end
+        // at `post-commit`, which is the engine's script by then, and the
+        // user's pre-push veto would stop vetoing.
+        let scratch = Scratch::new("chain-inside");
+        let (repo, spool, hooks_dir, theirs) = repository_with_a_users_post_commit(&scratch);
+        std::os::unix::fs::symlink("relay", hooks_dir.join("pre-push")).unwrap();
+        std::os::unix::fs::symlink("post-commit", hooks_dir.join("relay")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("pre-push"),
+            Path::new("relay"),
+            &["post-commit", "pre-push", "relay"],
+        );
+        assert_eq!(
+            fs::read_to_string(hooks_dir.join("post-commit")).unwrap(),
+            theirs
+        );
+
+        // The relay is not itself one of the four hooks, and is refused on
+        // its own when nothing else points at it: it ends at a managed hook.
+        let scratch = Scratch::new("chain-relay-alone");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        std::os::unix::fs::symlink("post-commit", hooks_dir.join("relay")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("relay"),
+            Path::new("post-commit"),
+            &["post-commit", "relay"],
+        );
+
+        // A chain through a link outside the hooks directory, spelled with
+        // `..` at both hops.
+        let scratch = Scratch::new("chain-outside");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        let shared = repo.join(".git").join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        std::os::unix::fs::symlink("../hooks/post-commit", shared.join("pre-push")).unwrap();
+        std::os::unix::fs::symlink("../shared/pre-push", hooks_dir.join("pre-push")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("pre-push"),
+            Path::new("../shared/pre-push"),
+            &["post-commit", "pre-push"],
+        );
+
+        // Three hops, the first absolute, ending at a hook that is not there
+        // yet and so would be created as the engine's.
+        let scratch = Scratch::new("chain-long");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        fs::remove_file(hooks_dir.join("post-commit")).unwrap();
+        std::os::unix::fs::symlink(hooks_dir.join("a"), hooks_dir.join("pre-push")).unwrap();
+        std::os::unix::fs::symlink("b", hooks_dir.join("a")).unwrap();
+        std::os::unix::fs::symlink("./post-merge", hooks_dir.join("b")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("a"),
+            Path::new("b"),
+            &["a", "b", "pre-push"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0159_a_hook_that_is_not_ours_linked_to_one_the_installer_replaces_is_refused() {
+        // `post-checkout -> post-merge`: `post-checkout` is not ours to move,
+        // and `post-merge` becomes the engine's script, so every checkout
+        // would record a `post-merge` event that never happened.
+        let scratch = Scratch::new("unmanaged");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let theirs = "#!/bin/sh\necho theirs\n";
+        fs::write(hooks_dir.join("post-merge"), theirs).unwrap();
+        make_executable(&hooks_dir.join("post-merge")).unwrap();
+        std::os::unix::fs::symlink("post-merge", hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("post-merge"),
+            &["post-checkout", "post-merge"],
+        );
+        assert_eq!(
+            fs::read_to_string(hooks_dir.join("post-merge")).unwrap(),
+            theirs
+        );
+
+        // The same when the managed hook is not there yet: once installed it
+        // is, and the link would reach it.
+        fs::remove_file(hooks_dir.join("post-merge")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("post-merge"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0159_links_that_do_not_reach_a_hook_the_installer_replaces_are_left_alone() {
+        let scratch = Scratch::new("links-kept");
+        let (repo, spool, hooks_dir, theirs) = repository_with_a_users_post_commit(&scratch);
+        // A link to a script of the user's own in the hooks directory, one to
+        // a same-named hook in another directory, a link out of the
+        // repository, a dangling one, and a loop that touches no hook.
+        fs::write(hooks_dir.join("checkout-script.sh"), "#!/bin/sh\necho c\n").unwrap();
+        std::os::unix::fs::symlink("checkout-script.sh", hooks_dir.join("post-checkout")).unwrap();
+        let shared = repo.join(".git").join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("post-commit"), "#!/bin/sh\necho shared\n").unwrap();
+        std::os::unix::fs::symlink("../shared/post-commit", hooks_dir.join("pre-commit")).unwrap();
+        std::os::unix::fs::symlink(scratch.path.join("elsewhere"), hooks_dir.join("update"))
+            .unwrap();
+        std::os::unix::fs::symlink("loop-b", hooks_dir.join("loop-a")).unwrap();
+        std::os::unix::fs::symlink("loop-a", hooks_dir.join("loop-b")).unwrap();
+
+        let report = GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+        assert_eq!(report.outcomes.len(), 4);
+        // Their own post-commit is kept, chained, under its own name.
+        assert_eq!(
+            fs::read_to_string(preserved(&repo, GitHook::PostCommit)).unwrap(),
+            theirs
+        );
+        // And what was linked is as it was.
+        assert_eq!(
+            fs::read_link(hooks_dir.join("post-checkout")).unwrap(),
+            Path::new("checkout-script.sh")
+        );
+        assert_eq!(
+            fs::read_link(hooks_dir.join("pre-commit")).unwrap(),
+            Path::new("../shared/post-commit")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0159_a_link_to_a_name_that_differs_only_in_case_is_refused_where_names_fold_case() {
+        let scratch = Scratch::new("case");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        let link = hooks_dir.join("post-checkout");
+        std::os::unix::fs::symlink("Post-Commit", &link).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+
+        // Both readings, whatever this platform's file system does: the
+        // comparison is a parameter so each is tested everywhere.
+        assert_eq!(
+            chain_reaches_managed_hook(&hooks_dir, &canonical, &link, true),
+            Some(PathBuf::from("Post-Commit")),
+            "a case-folding platform did not see the link reach post-commit"
+        );
+        assert_eq!(
+            chain_reaches_managed_hook(&hooks_dir, &canonical, &link, false),
+            None,
+            "an exact-name platform refused a link to a name it does not own"
+        );
+        assert!(names_a_managed_hook(std::ffi::OsStr::new("PRE-PUSH"), true));
+        assert!(!names_a_managed_hook(
+            std::ffi::OsStr::new("PRE-PUSH"),
+            false
+        ));
+        assert!(!names_a_managed_hook(
+            std::ffi::OsStr::new("pre-push.sample"),
+            true
+        ));
+
+        // And what the installer does on the platform it runs on: macOS and
+        // Windows fold, the rest do not.
+        if CASE_INSENSITIVE_NAMES {
+            expect_refused_link(
+                &repo,
+                &spool,
+                &link,
+                Path::new("Post-Commit"),
+                &["post-checkout", "post-commit"],
+            );
+        } else {
+            GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+            assert_eq!(
+                fs::read_link(&link).unwrap(),
+                Path::new("Post-Commit"),
+                "a link to a name this file system does not fold was moved"
+            );
+        }
     }
 
     #[cfg(unix)]
