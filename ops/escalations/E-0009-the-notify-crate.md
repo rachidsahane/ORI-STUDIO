@@ -25,3 +25,12 @@ In a scratch worktree, not in the repository, on 2026-10-11:
 1. Approve `notify`, exact pin, gate 7 decides. **Recommended.** Chosen.
 2. A polling watcher on `std` alone. No new crate, but a departure from `spec/LLD.md` section 2 that would need a documentation-role change.
 3. Hold batch 9.
+
+## Gate 7 refused it, and the question came back (2026-10-12)
+
+CI on 3e53283, the first run to carry ORI-T-0054, failed gate 7: `windows-sys` is locked at 0.60.2 (through `keyring` 3.6.3, `notify` 8.2.0 itself and `winapi-util`) and at 0.61.2 (through `mio` 1.2.4 under `notify`). On these terms the lead withdrew ORI-T-0054 from the session branch (6d406e4) and put the question to the operator again, with what the lead measured:
+
+- `notify` pulls `mio` only on Linux, Android, macOS and the BSDs, and `mio` pulls `windows-sys` only on Windows, so the two versions never build together on any one target. Every `notify` release has the same pair.
+- With CI's own `cargo-deny` 0.20.2 (fetched by the pinned URL and checked against the pinned digest), run in a scratch directory against `feat/ORI-T-0054-watch`'s lock: `deny.toml` as it is fails bans; adding `[graph] targets` for the six supported triples still fails, because `cargo-deny` keeps an edge if any listed target matches it; one skip entry `{ crate = "windows-sys@0.61.2", reason = ... }` passes bans, licenses and sources.
+
+**Answered by the operator in session on 2026-10-12: one version-pinned skip entry**, `windows-sys@0.61.2`, with its reason written in `deny.toml` and here. It is pinned to the version, so any other duplicate, or a later bump of either `windows-sys`, is still refused. It is not a general relaxation of `multiple-versions = "deny"`. The entry lands with ORI-T-0054's repair (ORI-T-0159), never alone.

@@ -933,3 +933,26 @@ Written by the lead on 2026-10-11. CI on 3e53283, the first run to carry ORI-T-0
 **Claim 64 is held again** for the repair on `feat/ORI-T-0054-watch`. ORI-T-0155 (the follow-up from pass 3) is folded into the same repair, since it changes the same two files and nothing of ORI-T-0054 is integrated to follow up on.
 
 **State after this section:** the claims held are 20, 64, 81, 86, 87 and 89; claim 88 is reserved. The next free identifier is ORI-T-0159.
+
+---
+
+## E-0009 answered again; ORI-T-0159 re-plans ORI-T-0054's repair; claims 88 and 90
+
+Written by the lead on 2026-10-12 under [[R31]]. The worker restarted overnight. All four agents in flight (ORI-T-0141, 0144, 0156, 0158) finished before the restart, and their branches and reports survived.
+
+**Gate 7.** The operator chose one version-pinned skip entry (`windows-sys@0.61.2`), recorded in [[E-0009]].
+
+**ORI-T-0054's budget is spent.** It has had three attempts: the first build, then repair rounds 1 and 2. The remaining work is re-planned by the lead as a new ticket on top of its branch, rather than pressed into a fourth attempt (`ops/phase-1-backlog.md`, "Budget").
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0159 | On `feat/ORI-T-0054-watch`: (1) `deny.toml`'s skip entry, per E-0009; (2) the watcher under macOS FSEvents, for the four tests CI failed there (a later write reported as `Created`; a rename-over's temporary reported beside its target); (3) every item of ORI-T-0155, which it absorbs | `deny.toml`, `crates/ori-watch/src/watcher.rs`, `hooks.rs` | 2 (`deny.toml` is gate 7's configuration, supply chain) | dispatched, claim 90 | 2026-10-12 |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 88 | ORI-T-0157 | `crates/ori-gates/src/significance.rs` | 1, carried with ORI-T-0156 at 2 | `docs/ORI-T-0157-mcp-tier-restated` (cut from ORI-T-0156's head, ffdcf2c) | 2026-10-12 | **held** | 2026-10-12, at dispatch |
+| 90 | ORI-T-0159 | `deny.toml`, `crates/ori-watch/src/watcher.rs`, `crates/ori-watch/src/hooks.rs` | 2 | `feat/ORI-T-0054-watch` (continues claim 64's branch) | 2026-10-12 | **held** | 2026-10-12, at dispatch |
+
+Claim 64 is folded into claim 90. Claim 88 is disjoint from everything held, since no claim holds `significance.rs`. No claim holds `deny.toml`; claim 20 holds `.github/workflows/ci.yml` and `scripts/gates.sh`, not gate 7's configuration.
+
+**State after this section:** the claims held are 20, 81, 86, 87, 88, 89 and 90. The next free identifier is ORI-T-0160.
