@@ -1675,3 +1675,29 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 110 is released.
 
 **State after this section:** the claims held are 20, 105, 108 and 109. The next free identifier is ORI-T-0181.
+
+---
+
+## ORI-T-0181 allocated (S3 with S8); claim 111: ORI-T-0182 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**ORI-T-0181** is batch 10 slices S3 (`aicd_context`) and S8 (`aicd_search`), one ticket in `crates/ori-mcp/src/tools/memory.rs`. The lead designs it from the mapping brief (decisions D1 to D12 of `map-s3-s7-s8-synthesis.md`). It is dispatched once S2 is integrated, because its branch must be cut from S2's final shape.
+
+**ORI-T-0182** is decision D10 of that brief. A document item says `untrusted: false`, but its verification line can carry a drift divergence's description, which the drift audit or an agent wrote. That text was scrubbed and cut, but shown unlabeled in the middle of the line. S3 would hand it to agents as the engine's words, so this lands before S3.
+
+The lead wrote the change and proved it in a copy of 84bfc7a:
+- `stale_reason` writes a divergence's description last, after a label saying it is untrusted text to the end of the line;
+- the stale verification line puts its date before the reason, so the reason, and the description in it, end the line;
+- one new test, `ori_t_0182_a_divergence_description_is_labelled_untrusted_and_written_last`;
+- `ori-memory`: 532 tests passed and 1 ignored; `ori-gates`: 194 passed;
+- clippy, strict doc and rustfmt are clean;
+- two mutants each fail the new test: the old reason, and the old line order.
+
+No existing test changes. Two tests check the phrase "the tracker gave no verification date", which the new line keeps.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 111 | ORI-T-0182 | `crates/ori-memory/src/retrieval.rs`: the eight edits of the lead's package only | 1 | `/home/user/wt/ORI-T-0182`, `fix/ORI-T-0182-label-drift-text` | Haiku 5.5 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 105, 108, 109 and 111. ORI-T-0181 is allocated and not yet claimed. The next free identifier is ORI-T-0183.
