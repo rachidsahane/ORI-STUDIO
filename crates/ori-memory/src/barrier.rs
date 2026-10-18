@@ -744,9 +744,12 @@ impl MemoryRecord {
 /// integration has `untrusted = true` provenance." Integration content
 /// (error tracking, analytics, webhooks, polled CI output) is exactly the
 /// content a scheduled trigger or watcher submits, and section 4 elsewhere
-/// restricts `system` to precisely that: "`system` is allowed only for
-/// scheduled triggers and watchers." So `Actor::System` is not the engine
-/// vouching for hand-written content, it is the actor that carries
+/// restricts `system` to that and to the engine's recovery after a restart,
+/// whose steps (`spec/runbooks/recover-engine.md`) record revocations and
+/// recoveries but submit no memory record: "`system` is allowed only for
+/// scheduled triggers, watchers, and the engine's recovery after a restart."
+/// So `Actor::System` is not the engine vouching for hand-written content, it
+/// is the actor that carries
 /// integration content into this barrier, and `spec/SECURITY_NOTES.md`
 /// "Injection" draws no exception for it: "Everything from integrations,
 /// from the web, from dependencies and from agent free text is data."

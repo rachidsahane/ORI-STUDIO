@@ -301,9 +301,12 @@
 //! evidence through an explicit request only, logged like anyone else's.
 //!
 //! [`Actor::System`] reads nothing through this module. `spec/DATA_MODEL.md`
-//! section 4 admits `system` "only for scheduled triggers and watchers"; a
-//! watcher reads the tree through `ori-watch`, and the organizational drift
-//! audit's cross-product retrieval is K-09, phase 2.
+//! section 4 admits `system` "only for scheduled triggers, watchers, and the
+//! engine's recovery after a restart"; a watcher reads the tree through
+//! `ori-watch`, the engine's recovery revokes, terminates, releases and
+//! requeues, and none of its steps (`spec/runbooks/recover-engine.md`) reads
+//! memory, and the organizational drift audit's cross-product retrieval is
+//! K-09, phase 2.
 //!
 //! No role gets cross-product retrieval in phase 1: that is K-09. A request
 //! made against a product whose log does not register the identity is

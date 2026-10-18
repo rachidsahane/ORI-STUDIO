@@ -196,9 +196,10 @@
 //! # What this module deliberately does not enforce
 //!
 //! `spec/DATA_MODEL.md` section 4's second clause, "`system` is allowed only
-//! for scheduled triggers and watchers," names which event *kinds* a
-//! `system` actor may attach to. Answering that needs a catalogue of kinds
-//! and which of them are scheduled triggers or watchers, which is exactly the
+//! for scheduled triggers, watchers, and the engine's recovery after a
+//! restart," names which event *kinds* a `system` actor may attach to.
+//! Answering that needs a catalogue of kinds and which of them are scheduled
+//! triggers, watchers or the engine's recovery, which is exactly the
 //! "business rules" `spec/LLD.md` section 2 forbids this crate: "ori-store |
 //! ... | Contain business rules". This module enforces the clause before it,
 //! that every event has *an* actor at all, and leaves which actor may carry

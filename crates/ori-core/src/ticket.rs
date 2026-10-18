@@ -525,8 +525,8 @@ impl TicketEvent {
     /// Derived from AICD §11's "Only a human can downgrade", which is a
     /// question about the actor and not about the identity behind it.
     /// [`Actor::System`] is not a human: `spec/DATA_MODEL.md` section 4 admits
-    /// it "only for scheduled triggers and watchers", neither of which is a
-    /// person deciding.
+    /// it "only for scheduled triggers, watchers, and the engine's recovery
+    /// after a restart", none of which is a person deciding.
     #[must_use]
     pub const fn by_human(&self) -> bool {
         matches!(self.actor, Actor::Human(_))
