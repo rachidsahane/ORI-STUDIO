@@ -1320,3 +1320,17 @@ Claims 96 and 99 are released. Slice S2 (ORI-T-0169) can now start, once its des
 **Claim 95, ORI-T-0165: the permission classifier refused the write a second time**, this time as "Instruction Poisoning". The documentation agent first stopped on its role rules (the `docs/` branch and a missing `aicd_spec_propose`). The lead answered from the standing facts, E-0005 and the `docs/` precedent, and it went on. Its apply script was then refused before it ran. The worktree is unchanged at 826289e (checked by the lead, read-only). As [[R46]] point 2 provides, the lead gives the operator the three exact replacements (`ticket-0165.md` in the session scratchpad) and stops. Neither the lead nor any agent will make this edit by another route. Claim 95 is released: the operator may commit the text on any branch.
 
 **State after this section:** the claims held are 20, 90 (repair 1 under review), 94 (repair 1; [[R46]] patch to follow) and 98 (under review). The next free identifier is ORI-T-0173.
+
+---
+
+## Claim 94 integrated: ORI-T-0161 with repair 1 and the authorized test change
+
+Written by the lead on 2026-10-18 under [[R31]], [[R44]] and [[R46]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 94 | ORI-T-0161, the evidence write refuses a link, an existing entry, a linked directory and an evidence id the log already names. With repair 1 (Sonnet, the lead's design) and the test change the operator authorized ([[R46]] point 1; Haiku, applied as the coder's patch) | Reviewed 2026-10-18 (19 agents); repair 1 answers the confirmed findings. The lead read `classify_create_failure` and `refuse_recorded_evidence_ids`. Any entry at the path is `FileAlreadyExists` on every platform. A logged id is refused before anything is created; where its file also stands, the fault reported is `FileAlreadyExists` (the coder's deviation, accepted: both are refusals under AICD §8). The test-change commit is byte-identical to the coder's patch plus the lead's two pre-checked doc paragraphs. Assertion lines before and after: 3 and 3 plus five `refused(...)` calls each (`ori_t_0038_evidence_is_only_the_blobs_stored_with_the_record`); 6 and 6 (`ori_t_0039_the_operational_log_filters_by_ticket_kind_and_id_without_dropping_a_reused_id`). A Windows simulation, with every `#[cfg(unix)]` in `barrier.rs`, `scopes.rs` and `ports.rs` switched off in a copy, passed `clippy -D warnings` | `cargo test --workspace --locked --no-fail-fast`: 1412 passed, 0 failed, 9 ignored. Workspace clippy, strict doc, fmt, secret scan and gate 13 clean |
+
+Claim 94 is released. ORI-T-0139 (the documentation of five files, `scope.rs` among them) no longer waits on it.
+
+**State after this section:** the claims held are 20, 90 (repair 1 under review) and 98 (under review). The next free identifier is ORI-T-0173.
