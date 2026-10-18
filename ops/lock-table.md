@@ -1753,3 +1753,25 @@ That closes the Windows gap the module doc records: `ReadDirectoryChangesW` neve
 | 112 | ORI-T-0163 | `crates/ori-watch/src/watcher.rs` | 1 | `/home/user/wt/ORI-T-0163`, `fix/ORI-T-0163-root-probe` | Sonnet 5.5 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 105, 109 and 112. The next free identifier is ORI-T-0183.
+
+---
+
+## Claim 113: ORI-T-0183 (batch 10 prerequisite PM4) dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+S7 (`aicd_evidence`) must return raw evidence "quoted and labeled as untrusted" (AICD §8). Quoting means scrubbing what could end a line early or reorder text. The retrieval already has that rule, `is_unsafe_char`, private to `retrieval.rs`. Rather than have `ori-mcp` write a second copy of a security rule, **PM4** gives `EvidenceContent` a method, `quoted()`. It writes each line of the content prefixed `> `, scrubbed by the retrieval's own rule, which becomes `pub(crate)`. The handler then never handles unquoted raw text.
+
+The lead wrote the change and proved it in a copy of 10cd14c:
+- one new test;
+- `ori-memory`: 544 passed and 1 ignored; `ori-gates`: 194 passed;
+- clippy, strict doc and rustfmt are clean;
+- two mutants each fail the new test: no scrub, and no prefix.
+
+This time the lead checked what precedes each insertion anchor (the ORI-T-0182 lesson).
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 113 | ORI-T-0183 | `crates/ori-memory/src/barrier.rs` (one method, one test), `crates/ori-memory/src/retrieval.rs` (`is_unsafe_char` made `pub(crate)`, one doc paragraph) | **2** (`barrier.rs`) | `/home/user/wt/ORI-T-0183`, `feat/ORI-T-0183-quoted-evidence` | Haiku 5.5 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 105, 109, 112 and 113. The next free identifier is ORI-T-0184.
