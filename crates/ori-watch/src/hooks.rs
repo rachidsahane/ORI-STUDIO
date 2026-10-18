@@ -83,9 +83,10 @@
 //! through `ori-original/`, which the installer creates, or through an entry of
 //! it named for a hook it replaces, before that is there is refused, whatever
 //! it would reach (the installer is not modelled, and `follow_chain_to_managed_hook`
-//! says why); any other directory that does not exist yet means the link
-//! reaches nothing, though its text is still read and refused if that reading
-//! reaches a hook. A link to a same-named hook in some other directory (a team's
+//! says why); any other directory that does not exist yet, except the spool's
+//! future path (bullet (c) of that doc), means the link reaches nothing,
+//! though its text is still read and refused if that reading reaches a hook. A
+//! link to a same-named hook in some other directory (a team's
 //! shared hooks) is not this. A link that cannot be read, or an entry that
 //! cannot be looked at for a reason other than not being there, refuses the
 //! installation as an IO error rather than passing it ([`HooksError::Io`]).
@@ -339,9 +340,10 @@ pub enum HooksError {
     /// `ori-original/` before this installer has made what it would reach
     /// there (`ori-original/../post-merge`, which is the hooks directory's own
     /// `post-merge` once the directory exists). Kept as a link, or left in
-    /// place, it would resolve to the engine's own script: the hook it stood
-    /// for, a `pre-push` veto included, would never run again, or an unrelated
-    /// hook would record events that never happened. Nothing was written.
+    /// place, it would, or could once the install has run, resolve to the
+    /// engine's own script: the hook it stood for, a `pre-push` veto included,
+    /// would never run again, or an unrelated hook would record events that
+    /// never happened. Nothing was written.
     HookLinksToManagedHook {
         /// The entry that is a link.
         path: PathBuf,
@@ -478,9 +480,9 @@ impl fmt::Display for HooksError {
             Self::HookLinksToManagedHook { path, target } => write!(
                 f,
                 "refused: {} is a link to {}, which leads to a hook this installer replaces, or \
-                 runs through ori-original/ before this installer has made it, so the hook it \
-                 stands for would stop running and the engine's own script would run in its \
-                 place; point it at a file of its own and install again",
+                 whose way runs through ori-original/, where this installer keeps the hooks it \
+                 replaces, so the engine's own script could run in place of the hook it stands \
+                 for; point it at a file of its own and install again",
                 path.display(),
                 target.display()
             )
@@ -1182,7 +1184,10 @@ const LINK_HOPS_CAP: usize = 40;
 /// folding chosen per platform, so on a volume whose case rule differs from its
 /// platform's default (a case-insensitive directory on Linux, a case-sensitive
 /// APFS volume) another spelling of a managed hook is judged by the platform
-/// default.
+/// default. The resolver (`way_enters_what_the_install_creates`) also compares
+/// `ori-original` and a hook-named entry of it by the platform default, so a
+/// case-folding directory on a platform that does not fold (casefold ext4, vfat
+/// on Linux) lets another spelling through.
 const CASE_INSENSITIVE_NAMES: bool = cfg!(any(target_os = "macos", windows));
 
 /// Whether `name` is the file name of a hook this installer replaces,
@@ -1461,17 +1466,20 @@ fn way_enters_what_the_install_creates(
 /// - (a) A way that first fails at `ori-original/` of the hooks directory, or
 ///   at an entry of it named for a hook this installer replaces, is refused,
 ///   whatever it would reach (`ori-original/../post-merge`; `M/post-merge`
-///   where `M` links to `ori-original/..`). `preserve` makes the directory for
-///   the first hook it keeps and an entry in it for each foreign hook, as a
-///   hard link or as a link re-pointed one level down. What it will make is
-///   not modelled: that would be a second implementation of `preserve`, and a
-///   hook that is a link to a directory, which `preserve` re-points, shows the
-///   two would differ. Refusing fails closed. It costs a link whose way runs
-///   through a missing `ori-original/` and would reach nothing, refused on a
-///   first install; no one writes one, since the directory is Ori's and is not
-///   there yet.
+///   where `M` links to `ori-original/..`). `place` makes the directory, for
+///   the first hook it keeps, and `preserve` an entry in it for each foreign
+///   hook, as a hard link or as a link re-pointed one level down. What they
+///   will make is not modelled: that would be a second implementation of
+///   `preserve`, and a hook that is a link to a directory, which `preserve`
+///   re-points, shows the two would differ. Refusing fails closed. It costs a
+///   link whose way runs through a missing `ori-original/` and would reach
+///   nothing, refused on every install while that directory is not there (a
+///   repository with no foreign hook never gets one); a link through a missing
+///   hook-named entry of it is refused on later installs too. No one writes
+///   such a link, since the directory is Ori's and is not there yet.
 /// - (b) Any other way that fails first at a directory that is not there
-///   reaches nothing on that way. It is still read by its text
+///   reaches nothing on that way, except the spool's future path, bullet (c).
+///   It is still read by its text
 ///   (`lexically_normal`) and refused if that reading reaches a hook
 ///   (`nowhere/../post-merge`). That is an over-refusal, kept as defense in
 ///   depth because it fails closed. What the text lands on is looked at: if it
@@ -1488,13 +1496,21 @@ fn way_enters_what_the_install_creates(
 ///   and a link inside that way is not followed. The spool is outside the
 ///   repository ([`HooksError::SpoolInsideTree`]) and its path is the engine's
 ///   choice.
+/// - (d) A link whose meaning depends on the process that follows it, on Linux
+///   one through `/proc/self`, `/proc/thread-self` or `/dev/fd`, is resolved
+///   as the installer's own process sees it, which is not what git's process
+///   sees when it runs the hook. Such a link is not judged correctly;
+///   ORI-T-0180 refuses it.
 ///
 /// A link whose target cannot exist, because it goes through a regular file or
 /// carries a name too long for the file system, is not a missing entry: it
 /// refuses the installation as an IO error. That fails closed, and is
 /// accepted. It holds where the operating system's own resolution meets the
 /// regular file. Behind a missing directory, a way through a regular file is
-/// read as reaching nothing, and the link passes.
+/// read as reaching nothing, and the link passes, unless that way first fails
+/// at what the install creates, rule (a), or its text reaches a hook, rule (b).
+/// On Windows, opening a path through a regular file reports it as not found,
+/// so such a way is always read this way there.
 ///
 /// # Errors
 ///
