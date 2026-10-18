@@ -1433,3 +1433,48 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 101 is released.
 
 **State after this section:** the claims held are 20 and 90 (repair 2 handed back; integration built on `integ/ORI-T-0159`, under review). The next free identifier is ORI-T-0173.
+
+---
+
+## Claim 90 integrated: ORI-T-0054 and ORI-T-0159, the tree watcher and the hooks installer; claims 102 to 105 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 64, 90 | ORI-T-0054 (the tree watcher, the ref poller and the git hooks installer, on `notify` 8.2.0 exactly pinned, [[E-0009]]) with ORI-T-0159's three attempts: the pinned gate 7 skip, macOS FSEvents batches settled against the tree, a hook link refused through any chain or from any entry, and the reviews' repairs | **Repair 2** (attempt 3 of 3, Sonnet) answered the second review: the Windows-only test helper is gated and fails on an error, a path's own arrival counts for neither condition of the temporary rule, the missing-ancestor arm of `look` is tested, and a lexical reading that lands on an existing directory is followed. cargo-deny 0.20.2 refused the package's `windows-sys@0.61.2` `deny` entry beside the skip, and the coder applied the package's fallback, a comment. The lead read the diff. **Its review** (three lenses, two skeptics per finding, `review-0159-r2-full.json`) found no defect in the repair's behaviour. It confirmed only doc errors and two untested arms, and reproduced the gap below, which is not a regression. **Integration:** the withdrawal at 6d406e4 is undone by a new commit (`fix(watch): restore the tree watcher withdrawn at 6d406e4`), not by git's default revert message, which gate 13 refuses. aecccaa's `test(watch)` subject became `fix(watch): test that ...`. Every other commit was cherry-picked as it was, and nothing was rewritten. The integrated `crates/ori-watch`, `deny.toml`, `Cargo.toml` and `Cargo.lock` are byte-identical to the coder's branch | `cargo test --workspace --locked --no-fail-fast`: 1548 passed, 0 failed, 9 ignored, as root. Workspace clippy, strict doc, fmt, secret scan, gate 13 over the 13 integrated commits, and CI's cargo-deny 0.20.2 (`bans ok, licenses ok, sources ok`) clean. On the integration branch before it was moved here, the Windows simulation of `ori-watch` (`cfg(unix)` switched off in a copy) passed clippy and its 68 tests |
+
+Claim 90 is released, and claim 64 with it.
+
+**The lead's omission, recorded.** The first review of ORI-T-0159's repairs raised R1-F7, a note: the lexical reading of a directory that does not exist yet cannot see links. The lead's last package neither scheduled it nor listed it as deferred. The second review reproduced it end to end with real git, in five layouts (H2, H2b, H3, H3b and H4): an unmanaged hook resolves, after the install, to the engine's `post-merge`, and a checkout writes a false record into the spool. Both skeptics refuted it as a defect of this repair, because the behaviour is what the lead's Decision 4 prescribed. It is ORI-T-0174 below, which must land before ORI-T-0055 installs the hooks in production. Nothing installs them yet.
+
+**Not in ORI-T-0159, recorded:** R1-F9, R1-F11, R1-F12, R1-F15 and R1-F16, as the repair 2 package listed; ORI-T-0163 (Windows root removal) and ORI-T-0168 (`ori-original` as a link) remain.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 102 | ORI-T-0173, E-0009's premise enforced by gate 7 itself: a `deny` entry `windows-sys@0.61` with `wrappers = ["mio"]`, and the skip's comment corrected (review finding R2-TP1: cargo-deny 0.20.2 refuses only the identical spec in both lists). The lead ran CI's cargo-deny 0.20.2 on the edit in a copy: it passes on the current lock, and fails with a wrong wrapper and with `winapi-util` given 0.61.2 in the lock, a case the committed configuration passes | `deny.toml` | 2 | Haiku 5.5 | `fix/ORI-T-0173-e0009-premise` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+| 103 | ORI-T-0174, a hook link whose way first fails at what the install creates (`hooks/ori-original/`, or a hook-named entry of it) is refused, through a component-by-component resolver that follows links; the doc errors and untested arms the review confirmed (R2-HOOKS-2 to 4, R2-W1 to 3, R2-TP2 to 4). Must land before ORI-T-0055 | `crates/ori-watch/src/hooks.rs`, `crates/ori-watch/src/watcher.rs` (docs and one test) | 1 | Sonnet 5.5 | `fix/ORI-T-0174-hook-way` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+| 104 | ORI-T-0175, W0's doc on `CallToolParams.task` says a server that did not declare tasks processes the call normally and ignores the field, as MCP 2025-11-25's tasks page requires (S2 critique finding S2-F1); the sentence is the lead's | `crates/ori-mcp/src/protocol.rs` (one doc comment) | 1 | Haiku 5.5 | `docs/ORI-T-0175-task-doc` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+| 105 | ORI-T-0169, batch 10 slice S2, the MCP server core, revised by the lead after a pre-dispatch critique (four lenses, 51 agents, `critique-s2-full.json`): 19 confirmed findings, 4 of them blocking, each answered in the package | `crates/ori-mcp/src/server.rs` (new), `crates/ori-mcp/src/tools/mod.rs` (new), `crates/ori-mcp/src/ports.rs`, `crates/ori-mcp/src/lib.rs` | 2 | Sonnet 5.5 | `feat/ORI-T-0169-server-core` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+The four claims are disjoint from each other and from claim 20.
+
+**The S2 critique's four blocking findings, and the lead's answers:**
+- **S2-F1:** a `tools/call` carrying `task` is processed normally, as the tasks page's MUST requires, not refused. W0's doc says otherwise, which is claim 104.
+- **S2-F2:** argument and ticket-rule refusals are `isError` results, as MCP 2025-11-25 classes input validation. They are still recorded as `mcp.tool_refused`.
+- **S2-F3:** the handler seam gets its own error, so a memory scope refusal (§25) keeps its reference.
+- **S2-F4:** the rate check runs first, and a rate-limited, inactive or unverifiable session's connection is closed after its one recorded refusal. The log then grows by at most the window's limit plus one row per connection, and API_SPEC section 3's "exactly one record per call" is kept.
+
+Three findings were refuted (S2-F6, F7, F20). One was contested: S2-F8, a proxy seam now. The lead keeps the documented edit points for S6 instead.
+
+**Follow-ups recorded, not yet tickets:**
+- S4's report path must check that a report's ticket exists in the product. No control does today, and S2 lets a non-coder role name any ticket (S2-F12).
+- The documentation ticket after S2 records in `spec/API_SPEC.md` section 3 and the LLD port row:
+  - S2's definition of a call;
+  - the refusal reply shapes and Ori's codes -32010 and -32011;
+  - the close rule;
+  - the two new ports;
+  - how the preamble's JSON-RPC error rule binds the MCP surface.
+- `ops/batch-10-plan.md`'s queue-file list gains `crates/ori-mcp/src/tools/mod.rs`, module lines only (S2-F40). It is recorded here; the plan itself is unchanged.
+
+**State after this section:** the claims held are 20, 102, 103, 104 and 105. The next free identifier is ORI-T-0176.
