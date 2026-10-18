@@ -1369,3 +1369,17 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 The Windows simulation (`cfg(unix)` switched off in a copy, clippy and tests) is a required check of this attempt.
 
 **State after this section:** the claims held are 20, 90 (repair 2, the last attempt) and 98 (repair 1). The next free identifier is ORI-T-0173.
+
+---
+
+## Claim 98 integrated: ORI-T-0170 (PM1) with repair 1
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 98 | ORI-T-0170, batch 10 prerequisite PM1: `Retrieval::search` over a search authorization, with repair 1 (Sonnet, the lead's design) | Reviewed 2026-10-18 (8 agents); repair 1 answers both confirmed findings. The lead read the document gather. A reader of all five document sources is unchanged. Any other reader asks the index for 200 hits, counts only admitted documents against the limit, and always gets the static `DocumentWindow` note, which is the same whatever the data. `IndexEmpty` and `documents_covered` go only to a reader of all five. The coder corrected the lead's arithmetic (the runbook below 60 unreadable documents ranks 61st) and strengthened the test with a third index, where the runbook falls past the window and the notes stay identical. The only changed line of an existing test is the one rename the package named. `retrieval.rs` has no `cfg(unix)`, and its two slash-joined strings are pre-existing document identifiers, not filesystem paths | `cargo test --workspace --locked --no-fail-fast`: 1435 passed, 0 failed, 9 ignored. Workspace clippy, strict doc, fmt, secret scan and gate 13 clean |
+
+Claim 98 is released. Slice S8 (`aicd_search`) now has its prerequisite, once S2 and S3 land.
+
+**State after this section:** the claims held are 20 and 90 (repair 2, the last attempt). The next free identifier is ORI-T-0173.
