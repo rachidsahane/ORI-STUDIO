@@ -112,7 +112,7 @@
 //! - `protocol/transports`: "Messages are delimited by newlines (`\n`), and
 //!   MUST NOT contain embedded newlines"; the agent MAY write logs to
 //!   stderr. Matched already (NDJSON, one frame per line; see
-//!   `drain_stderr`).
+//!   `drain_stderr_until`).
 //! - `protocol/session-setup`: `session/new` requires `cwd` **and
 //!   `mcpServers`** ("A list of MCP servers the Agent should connect to").
 //!   The result carries `sessionId`. This file sent only `cwd` until this
@@ -257,9 +257,9 @@
 //!   after every read: once the session is spent, killed or dropped, the next
 //!   read that returns ends the thread, which drops the read end of the pipe,
 //!   so a descendant still writing to it gets a broken pipe instead of being
-//!   read at full speed for as long as it lives. (`crate::headless` calls
-//!   the older `drain_stderr`, which has no stop flag; it is the same
-//!   function with a flag nobody sets.)
+//!   read at full speed for as long as it lives. (`crate::headless` uses the
+//!   same function with a flag of its own, set when its one-shot run is over,
+//!   when its session is killed and when it is dropped.)
 //! - **What cannot be stopped.** A reader blocked in a read, or a writer blocked
 //!   in a write, is released when every holder of the other end of its pipe
 //!   is gone. Killing the child releases them unless a descendant of the
@@ -1427,20 +1427,14 @@ fn read_frames<R: BufRead>(
 /// reads. Keeps nothing (CLAUDE.md: what a dependency writes is data, and
 /// this module has no use for it), so its memory is one 4 KiB buffer.
 ///
-/// Has no stop signal: it runs until the pipe ends. [`AcpClient`] uses
-/// [`drain_stderr_until`] instead; this entry point is for
-/// `crate::headless::HeadlessAdapter`, whose call it keeps compatible, and is
-/// `drain_stderr_until` with a flag nobody sets.
-pub(crate) fn drain_stderr(stderr: ChildStderr) {
-    drain_stderr_until(stderr, Arc::new(AtomicBool::new(false)));
-}
-
-/// [`drain_stderr`] with a stop flag, checked after every read: once `stop` is
-/// set the thread returns and drops the read end of the pipe, so a descendant
-/// still writing to it gets a broken pipe instead of being read at full speed
-/// by a session that has already given up (ORI-T-0143, AICD §12). `std` cannot
-/// interrupt a blocked read, so a thread blocked on a silent pipe notices the
-/// flag only when the next byte or end-of-file arrives, and then ends.
+/// The stop flag is checked after every read: once `stop` is set the thread
+/// returns and drops the read end of the pipe, so a descendant still writing
+/// to it gets a broken pipe instead of being read at full speed by a session
+/// that has already given up (ORI-T-0143, AICD §12). `std` cannot interrupt a
+/// blocked read, so a thread blocked on a silent pipe notices the flag only
+/// when the next byte or end-of-file arrives, and then ends. [`AcpClient`] and
+/// `crate::headless::HeadlessAdapter` both call this, each with a flag of its
+/// own (ORI-T-0150).
 pub(crate) fn drain_stderr_until(mut stderr: ChildStderr, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];

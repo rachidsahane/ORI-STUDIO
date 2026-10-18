@@ -105,12 +105,23 @@
 //!   the rest is read and discarded so a chatty child never blocks on a full
 //!   pipe during the run), so even before it hears the flag it cannot grow
 //!   without limit.
-//! - Standard **error** is not covered by any of this. It is drained by
-//!   `crate::acp::drain_stderr`, which this module calls at `spawn` and does
-//!   not control, and which reads until end-of-file with no stop signal. A
-//!   descendant that writes to standard error continuously keeps that
-//!   drain thread reading at full speed until the descendant exits.
-//!   `crate::acp` owns the helper; this module only names the limit.
+//! - Standard **error** has a drain of its own: a thread that
+//!   `HeadlessAdapter::spawn` starts through `crate::acp::drain_stderr_until`,
+//!   which reads and keeps nothing, with a stop flag the session holds. The
+//!   flag is **not** set while the run is going: a child that writes a lot to
+//!   standard error must still be drained, or it would block on a full pipe.
+//!   It is set when `send`'s run is over, whatever the outcome (finished,
+//!   timed out, or failed), when the session is killed, and when the session
+//!   is dropped (dropping the adapter drops its session), so an adapter that
+//!   is dropped without `kill` stops the drain too. The thread checks the flag
+//!   after every read: the first read that returns after it was set ends the
+//!   thread and drops its end of the pipe, so a descendant that is still
+//!   **writing** to standard error gets a broken pipe on its next write
+//!   instead of being read and thrown away for as long as it lives. The
+//!   caveat is the same as the output reader's: a drain thread blocked on a
+//!   **silent** pipe cannot be interrupted, and notices the flag only at its
+//!   next byte or at end-of-file. Standard error is never recorded, so nothing
+//!   it says once the run is over can matter.
 //! - A **descendant** of the child (a grandchild the child started and did
 //!   not wait for) is *not* killed by this module: `std` can kill only the
 //!   process it spawned, and a process-group kill needs a platform call this
@@ -126,7 +137,8 @@
 //!   ignores the failure, or never writes again, is an orphan like any other.
 //!   What this module does guarantee is the narrower, load-bearing thing:
 //!   such an orphan cannot keep `send` blocked past the deadline, and cannot
-//!   keep this module's reader draining it afterwards.
+//!   keep this module's readers (standard output and standard error)
+//!   draining it afterwards, subject to the silent-pipe caveat above.
 //!
 //! Windows: the deadline logic is `std` only and behaves the same, with the
 //! same limits (only the spawned child is terminated; a silent descendant that
@@ -142,11 +154,11 @@
 //! reached here through `crate::acp`, which re-exports them at the paths they
 //! always had; `LaunchDefect` and the process helpers
 //! (`crate::acp::wait_with_timeout`, `crate::acp::kill_child`,
-//! `crate::acp::drain_stderr`) are declared in `crate::acp`. All are reused
-//! here rather than duplicated: `spec/API_SPEC.md` §4 gives both adapters one
-//! trait, and a second, incompatible `LaunchConfig` in this file would make
-//! "inspect the runtime launch configuration" (ORI-P1-039) mean two different
-//! things depending on which adapter answered.
+//! `crate::acp::drain_stderr_until`) are declared in `crate::acp`. All are
+//! reused here rather than duplicated: `spec/API_SPEC.md` §4 gives both
+//! adapters one trait, and a second, incompatible `LaunchConfig` in this file
+//! would make "inspect the runtime launch configuration" (ORI-P1-039) mean two
+//! different things depending on which adapter answered.
 //! [`LaunchConfig::headless`](crate::acp::LaunchConfig::headless) is the one
 //! constructor that chooses [`StdioMode::Null`] for its caller
 //! ([`LaunchConfig::new`](crate::acp::LaunchConfig::new) takes any mode). It
@@ -209,7 +221,7 @@ use crate::acp::SessionHandle;
 use crate::acp::SessionSpec;
 use crate::acp::StdioMode;
 use crate::acp::StopReason;
-use crate::acp::drain_stderr;
+use crate::acp::drain_stderr_until;
 use crate::acp::kill_child;
 use crate::acp::wait_with_timeout;
 use crate::transcript::Entry;
@@ -248,6 +260,33 @@ struct ActiveHeadlessSession {
     stdout: Option<ChildStdout>,
     completed: bool,
     transcript: Transcript,
+    /// The stop flag of this session's standard-error drain thread, shared
+    /// with it. Clear while the run is going, so a chatty child never blocks on
+    /// a full pipe; set (see `stop_stderr_drain`) when `send`'s run is over,
+    /// when the session is killed and when it is dropped, after which the
+    /// thread ends at its next read and drops its end of the pipe. AICD §12:
+    /// an agent that hangs is stopped, not waited on.
+    stderr_stop: Arc<AtomicBool>,
+}
+
+impl ActiveHeadlessSession {
+    /// Tells the standard-error drain thread to stop; see `stderr_stop`.
+    /// Idempotent, and called on every path that ends the session's interest
+    /// in standard error.
+    fn stop_stderr_drain(&self) {
+        // A flag and nothing else crosses to the drain thread: no data depends
+        // on it, so no ordering stronger than relaxed is needed.
+        self.stderr_stop.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for ActiveHeadlessSession {
+    /// A session that goes away, by `kill` or by its adapter being dropped,
+    /// stops its standard-error drain: nothing is left that could use what the
+    /// drain reads.
+    fn drop(&mut self) {
+        self.stop_stderr_drain();
+    }
 }
 
 /// A headless CLI adapter, behind [`AgentRuntime`]: ADR-0001 "Agent
@@ -319,7 +358,12 @@ impl HeadlessAdapter {
         })?;
         session.completed = true;
 
-        let (status, output) = match run_to_end(&mut session.child, stdout, timeout)? {
+        let run = run_to_end(&mut session.child, stdout, timeout);
+        // The one-shot run is over, however it ended (finished, timed out or
+        // failed): nothing standard error says can matter any more, so its
+        // drain is told to stop before the outcome is acted on.
+        session.stop_stderr_drain();
+        let (status, output) = match run? {
             RunEnd::Finished { status, output } => (status, output),
             // Indistinguishable, from here, from a runtime blocked on a
             // prompt it should never have raised: recorded the same way.
@@ -415,8 +459,9 @@ impl AgentRuntime for HeadlessAdapter {
         let stdout = child.stdout.take().ok_or_else(|| RuntimeError::Io {
             message: "the child's stdout was not piped".to_owned(),
         })?;
+        let stderr_stop = Arc::new(AtomicBool::new(false));
         if let Some(stderr) = child.stderr.take() {
-            drain_stderr(stderr);
+            drain_stderr_until(stderr, Arc::clone(&stderr_stop));
         }
 
         let handle = SessionHandle::new(spec.id.clone());
@@ -426,17 +471,19 @@ impl AgentRuntime for HeadlessAdapter {
             stdout: Some(stdout),
             completed: false,
             transcript: Transcript::new(),
+            stderr_stop,
         });
         Ok(handle)
     }
 
     /// Waits for the one-shot run to finish (bounded by `RUN_TIMEOUT`, which
     /// covers reading its output as well as waiting for it to exit) and
-    /// records its captured output. See this module's own doc comment, "One
-    /// shot, not a turn-based session", for why `prompt` is not written
-    /// anywhere here and why a second call is refused, and "The deadline
-    /// covers the whole run, reading included", for what is and is not
-    /// cleaned up when the deadline passes.
+    /// records its captured output. However the run ends, the session's
+    /// standard-error drain is then told to stop. See this module's own doc
+    /// comment, "One shot, not a turn-based session", for why `prompt` is not
+    /// written anywhere here and why a second call is refused, and "The
+    /// deadline covers the whole run, reading included", for what is and is
+    /// not cleaned up when the deadline passes.
     ///
     /// The recorder and clock this adapter was constructed with are used
     /// when the run does not finish within `RUN_TIMEOUT`, whether because
@@ -476,6 +523,9 @@ impl AgentRuntime for HeadlessAdapter {
                 });
             }
         };
+        // Explicit, though dropping `session` below says the same: the drain
+        // is told to stop before the child is killed, not after.
+        session.stop_stderr_drain();
         let _ = kill_child(&mut session.child);
         Ok(())
     }
@@ -1642,5 +1692,245 @@ mod tests {
         )
         .expect_err("any other error ends the collection");
         assert_eq!(failure.to_string(), "the pipe broke");
+    }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0150: the standard-error drain stops when the run is over, when
+    // the session is killed and when it is dropped, and not before.
+    //
+    // Until this ticket `spawn` drained standard error with a helper that had
+    // no stop flag, so a descendant that kept the pipe open and went on
+    // writing was read, and thrown away, at full speed for as long as it
+    // lived, long after the session was over. The first test below runs one
+    // and waits, bounded, for the sign that the drain let go of the pipe.
+    // -----------------------------------------------------------------------
+
+    /// How long a test waits, polling, for something that should happen at
+    /// once: the descendant's next write after the drain has stopped.
+    #[cfg(unix)]
+    const T0150_WAIT: Duration = Duration::from_secs(5);
+
+    /// The variable through which the shell script below learns where to leave
+    /// its marker.
+    #[cfg(unix)]
+    const T0150_MARKER_VAR: &str = "ORI_T_0150_MARKER";
+
+    /// A child that prints one word and exits, leaving a descendant that
+    /// closes its standard output (so the run itself finishes normally) and
+    /// then writes to standard error without pause. The descendant ignores
+    /// `SIGPIPE`, so that once nobody reads the pipe any more its write fails
+    /// with an error instead of killing it silently; the loop then ends and
+    /// the descendant names what it saw in the file `ORI_T_0150_MARKER` names.
+    /// The marker can say `broken_pipe` only if the read end of the pipe was
+    /// closed, which a drain that went on reading until the writer stopped
+    /// would never do. The loop is also bounded (`gave_up`, after five
+    /// million writes, many seconds at the speed a shell writes), so that a
+    /// drain that never stops leaves an orphan that ends by itself rather
+    /// than one that runs for ever.
+    #[cfg(unix)]
+    const T0150_FLOODING_DESCENDANT: &str = "( trap '' PIPE; exec 1>/dev/null; n=0; \
+         while echo x >&2; do \
+           n=$((n+1)); \
+           [ \"$n\" -lt 5000000 ] || { echo gave_up > \"$ORI_T_0150_MARKER\"; exit 0; }; \
+         done; \
+         echo broken_pipe > \"$ORI_T_0150_MARKER\" ) & echo done";
+
+    /// The session's standard-error stop flag, as a test holds it. The tests
+    /// module is a child of this module, so the private field is reachable
+    /// without any accessor added for the purpose.
+    fn stderr_stop_of(adapter: &HeadlessAdapter) -> Arc<AtomicBool> {
+        Arc::clone(
+            &adapter
+                .session
+                .as_ref()
+                .expect("the session is still there")
+                .stderr_stop,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0150_a_descendant_writing_to_stderr_is_no_longer_drained_once_the_run_is_over() {
+        let dir = std::env::temp_dir().join(format!("ori-t-0150-{}-stderr", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let _scratch = ScratchDir(dir.clone());
+        let marker = dir.join("writer-stopped");
+
+        let (mut adapter, defects) = recording_adapter();
+        let mut spec = shell_spec("TA150", T0150_FLOODING_DESCENDANT);
+        spec.envs = vec![(
+            T0150_MARKER_VAR.to_owned(),
+            marker.to_string_lossy().into_owned(),
+        )];
+        let handle = adapter.spawn(spec).expect("sh spawns");
+
+        // The run itself is ordinary: the shell exited and its standard
+        // output closed, whatever its descendant is still doing.
+        let outcome = adapter.send(&handle, "unused");
+        assert_eq!(outcome, Ok(StopReason::EndTurn));
+        assert!(defects.borrow().is_empty(), "{:?}", defects.borrow());
+
+        // The session is over and the descendant is still writing to the
+        // standard-error pipe. If the drain went on reading, the descendant
+        // would never see the pipe close and would run to its own bound and
+        // say `gave_up`; with the stop flag the drain dropped the read end and
+        // the descendant's next write failed.
+        let waited = Instant::now();
+        let marker_text = || std::fs::read_to_string(&marker).unwrap_or_default();
+        while marker_text().is_empty() && waited.elapsed() < T0150_WAIT {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let seen = marker_text();
+        let _ = adapter.kill(&handle);
+        assert_eq!(
+            seen.trim(),
+            "broken_pipe",
+            "after the run the drain should drop its end of the pipe so the descendant's next \
+             write fails; after {:?} the marker says {seen:?} (empty: it was still being drained)",
+            waited.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0150_a_child_writing_far_past_the_pipe_buffer_to_stderr_is_still_drained_while_it_runs()
+     {
+        // 300 000 bytes is several pipe buffers: if the drain were never
+        // started, the child would block on a full standard-error pipe and this
+        // run would end at its deadline instead of at once; if it were stopped
+        // before the run was over, the pipe would close under the child's
+        // writes, the pipeline would fail and `printf out` would not run.
+        let (mut adapter, defects) = recording_adapter();
+        let handle = adapter
+            .spawn(shell_spec(
+                "TB150",
+                "dd if=/dev/zero bs=1000 count=300 2>/dev/null | tr '\\0' x >&2 && printf out",
+            ))
+            .expect("sh spawns");
+
+        let started = Instant::now();
+        let outcome = adapter.send(&handle, "unused");
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome, Ok(StopReason::EndTurn));
+        assert!(elapsed < T0140_MARGIN, "{elapsed:?}");
+        assert!(defects.borrow().is_empty(), "{:?}", defects.borrow());
+        assert_eq!(
+            adapter.transcript().expect("recorded").entries()[0].output(),
+            "out"
+        );
+        adapter.kill(&handle).expect("teardown");
+    }
+
+    #[test]
+    fn ori_t_0150_the_stderr_flag_is_clear_after_spawn_and_set_once_send_returns() {
+        let (mut adapter, _defects) = recording_adapter();
+        let handle = adapter
+            .spawn(hold_spec("TC150", 0))
+            .expect("the fixture spawns");
+        let stop = stderr_stop_of(&adapter);
+        assert!(
+            !stop.load(Ordering::Relaxed),
+            "a running session's child is still drained"
+        );
+
+        assert_eq!(adapter.send(&handle, "unused"), Ok(StopReason::EndTurn));
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "the one-shot run is over: nothing standard error says can matter"
+        );
+        // Not by `kill`, not by a drop: the session is still here.
+        assert!(adapter.transcript().is_some());
+        adapter.kill(&handle).expect("teardown");
+    }
+
+    #[test]
+    fn ori_t_0150_the_stderr_flag_is_set_when_the_run_timed_out_too() {
+        let (mut adapter, defects) = recording_adapter();
+        let handle = adapter
+            .spawn(hold_spec("TD150", T0140_HOLD_SECONDS))
+            .expect("the holding fixture spawns");
+        let stop = stderr_stop_of(&adapter);
+        assert!(!stop.load(Ordering::Relaxed));
+
+        let outcome = adapter.send_within(&handle, "unused", T0140_DEADLINE);
+        assert_eq!(
+            outcome,
+            Err(RuntimeError::Timeout {
+                after: T0140_DEADLINE
+            })
+        );
+        assert_eq!(defects.borrow().len(), 1, "{:?}", defects.borrow());
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "the run is over whether it finished or not"
+        );
+        // The session is still held by the adapter: the flag was set by the
+        // run's end, not by the teardown below.
+        assert!(adapter.transcript().is_some());
+        adapter.kill(&handle).expect("teardown");
+    }
+
+    #[test]
+    fn ori_t_0150_the_stderr_flag_is_set_when_the_session_is_killed() {
+        let (mut adapter, _defects) = recording_adapter();
+        // Still running when it is killed, and never sent to.
+        let handle = adapter
+            .spawn(hold_spec("TE150", T0140_HOLD_SECONDS))
+            .expect("the holding fixture spawns");
+        let stop = stderr_stop_of(&adapter);
+        assert!(!stop.load(Ordering::Relaxed));
+
+        adapter.kill(&handle).expect("teardown");
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn ori_t_0150_the_stderr_flag_is_set_when_the_session_is_dropped() {
+        let (mut adapter, _defects) = recording_adapter();
+        adapter
+            .spawn(hold_spec("TF150", 0))
+            .expect("the fixture spawns");
+        let stop = stderr_stop_of(&adapter);
+
+        // Take the session out of the adapter, so that dropping it is the
+        // only thing that can set the flag: neither `send` nor `kill` ran.
+        let mut session = adapter.session.take().expect("the session is there");
+        wait_with_timeout(&mut session.child, Duration::from_secs(5))
+            .expect("the fixture exits on its own, and is reaped");
+        assert!(
+            !stop.load(Ordering::Relaxed),
+            "nothing but a drop has run, and the session is not dropped yet"
+        );
+        drop(session);
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn ori_t_0150_the_stderr_flag_is_set_when_the_adapter_is_dropped() {
+        let (mut adapter, _defects) = recording_adapter();
+        adapter
+            .spawn(hold_spec("TG150", 0))
+            .expect("the fixture spawns");
+        let stop = stderr_stop_of(&adapter);
+        wait_with_timeout(
+            &mut adapter
+                .session
+                .as_mut()
+                .expect("the session is still there")
+                .child,
+            Duration::from_secs(5),
+        )
+        .expect("the fixture exits on its own, and is reaped");
+        assert!(
+            !stop.load(Ordering::Relaxed),
+            "nothing but a drop has run, and the adapter is not dropped yet"
+        );
+
+        drop(adapter);
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "dropping the adapter drops its session, which stops the drain"
+        );
     }
 }
