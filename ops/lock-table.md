@@ -1102,3 +1102,23 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]]. Not on `main`; tier
 **Disk.** During this integration the session's disk allowance ran out (rustc and the secret scan failed with "No space left on device"). The lead removed the `target/` build directories of twelve finished worktrees (git-ignored build output; their reports were already captured) and re-ran every check. Agents running at that moment may report build failures that are environmental.
 
 **State after this section:** the claims held are 20, 90, 93, 94 and 95. The next free identifier is ORI-T-0166.
+
+---
+
+## Claim 93 integrated; claim 95 stopped by the permission classifier; claim 96 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 93 | ORI-T-0150, the headless adapter stops draining standard error when its run is over (Sonnet, the lead's design) | The lead read the diff. The flag is set right after `run_to_end` returns, so a timeout or a failure is covered as well as a finished run. It is also set on kill and on drop, through one helper that holds the relaxed-ordering justification. The `drain_stderr` wrapper is removed, with every doc that named it. The coder's proof, run in a scratch copy, shows the flooding-descendant test fails without the fix. Its second test, strengthened after a mutation found it too weak, guards against stopping the drain while the run is going | `cargo test -p ori-runtime`: 190 passed; workspace clippy and strict doc clean |
+
+**Claim 95, ORI-T-0165, is stopped.** The Haiku documentation agent's edits (PRD F-03, CI_CD section 1, ARCHITECTURE section 9: "the merge queue merges on Ori's own merge path") were refused by the session's auto-mode permission classifier ("Security Weaken"), twice, before anything was written. The agent made no further attempt by another route, which is right. The lead will not apply the edit through another agent or by hand: that would route around a refusal (`CLAUDE.md`, "Auto mode"). The text implements [[R45]] point 1, which the operator decided, but it narrows a stated guarantee, and the classifier's judgement is the operator's to override. The question goes to the operator. The claim stays held and the worktree is unchanged.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 96 | ORI-T-0166, batch 10 slice S1: `ToolScopes` (`scopes.rs`) and the first four ports (`ports.rs`), designed by the lead in the package | `crates/ori-mcp/Cargo.toml` (`ori-core`), `crates/ori-mcp/src/lib.rs` (queue), `crates/ori-mcp/src/scopes.rs`, `crates/ori-mcp/src/ports.rs`, `Cargo.lock` (queue) | 2 | Sonnet 5.5 | `feat/ORI-T-0166-tool-scopes` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 96 is disjoint from every held claim (20, 90, 94, 95). Claim 90 (ORI-T-0159, on `feat/ORI-T-0054-watch`) touches no `ori-mcp` path. `PlanDesk` and `EscalationDesk` are left to slice S9, because they need the barrier's sealed entry (E-0012, plan prerequisite PM2).
+
+**State after this section:** the claims held are 20, 90, 94, 95 and 96. The next free identifier is ORI-T-0167.
