@@ -1514,3 +1514,22 @@ Both tests are ORI-T-0054's own and have never reached `main`. The fix follows O
 Claim 106 overlaps claim 103's files (ORI-T-0174 holds `hooks.rs` and `watcher.rs`) in two existing tests that ORI-T-0174 does not touch. The lead grants the overlap because the pull request's CI is red, and will apply ORI-T-0174 on top of it at integration. Claim 107 is disjoint from every held claim.
 
 **State after this section:** the claims held are 20, 103, 105, 106 and 107. The next free identifier is ORI-T-0178.
+
+---
+
+## Claims 106 and 107 integrated: ORI-T-0177 (two Windows tests) and ORI-T-0176 (PM2); ORI-T-0178 allocated
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 106 | ORI-T-0177, the spool test builds its `..` path as text and the linked-worktree test hands git paths without the verbatim prefix (Haiku; the edits were the lead's) | Byte-identical to the lead's four edits, which were proved on Linux in a copy. No assertion changed. The coder's report flags that the commit message says `PathBuf::push` where the test calls `join`; `join` is built on `push`, so the message stands | Fast-forwarded as 19f1d0c and pushed, so CI's Windows leg could decide the Windows half. `cargo test -p ori-watch`: 111 passed; fmt, clippy and gate 13 clean |
+| 107 | ORI-T-0176, batch 10 prerequisite PM2: `barrier::sanitize_text` and `SanitizedText` (Haiku; the code and tests were the lead's) | Byte-identical to the lead's three edits, proved in a copy against three mutations | Cherry-picked as d19e863. `cargo test -p ori-memory`: 531 passed and 44 doc tests, the compile-fail fence among them; `ori-gates` 194; fmt, strict doc, clippy and gate 13 clean |
+
+Claims 106 and 107 are released. With PM2 in, slice S4 beyond `closing` and `blocked` and slice S9 lose their barrier prerequisite; S9 still waits on PM2's ports (`PlanDesk`, `EscalationDesk`), which take a `SanitizedField`.
+
+| Ticket | What | Modules | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0178 | `ori_t_0054_a_root_spelled_with_dotdot_is_canonicalised_before_paths_are_judged` passes on Windows without testing anything: its root is verbatim there, and `join` normalizes the `..` away, so the watcher is handed the root itself. Build the spelled root as text, as ORI-T-0177 did for the spool test. A test-portability change to an ORI-T-0054 test not yet on `main` (the ORI-T-0167 precedent) | `crates/ori-watch/src/watcher.rs` (that test) | 1 | after ORI-T-0174 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 103 (ORI-T-0174) and 105 (ORI-T-0169, S2). The next free identifier is ORI-T-0179.
