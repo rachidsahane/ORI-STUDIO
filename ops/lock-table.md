@@ -1159,3 +1159,17 @@ Each fix is its own commit and can be reverted alone. The operator may overrule.
 The coder proposes planting those events by hand, with an exact patch it verified but did not apply. The lead reviews the patch before putting the question to the operator.
 
 **State after this section:** the claims held are 20, 90, 94 (stopped), 95 (stopped), 96 and 97. The next free identifier is ORI-T-0168.
+
+---
+
+## Claim 97 integrated
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 97 | ORI-T-0167, CI portability of a test helper and two tests of ORI-T-0144 and ORI-T-0150 (Haiku, every edit written by the lead) | The lead had applied the four edits to copies before dispatch, checked that each find text occurred exactly once and that rustfmt accepted the result, and ran the repaired shell script under dash and bash 5: each wrote only `broken_pipe`. The coder's two files are byte-identical to those copies. No line naming an assertion changed. Assertion lines per changed test, before and after: 11 and 11 (`ori_t_0144_another_blobs_file_and_near_miss_file_names_are_refused`), 3 and 3 (`ori_t_0150_a_descendant_writing_to_stderr_is_no_longer_drained_once_the_run_is_over`). Bash 3.2 cannot be run here, so the macOS test leg is the proof of the second commit | `cargo test --workspace --locked --no-fail-fast`: 1347 passed, 0 failed, 9 ignored. Workspace clippy with `-D warnings`, strict doc, fmt, secret scan and gate 13 clean |
+
+Claim 97 is released.
+
+**State after this section:** the claims held are 20, 90, 94 (stopped), 95 (stopped) and 96. The next free identifier is ORI-T-0168.
