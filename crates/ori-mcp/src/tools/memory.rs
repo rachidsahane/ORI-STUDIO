@@ -4,11 +4,12 @@
 //! Two handlers, [`crate::tools::memory::ContextHandler`] and
 //! [`crate::tools::memory::SearchHandler`], that the engine registers with
 //! [`crate::tools::Handlers::register`]. They are the thin layer between S2's
-//! pipeline and `ori-memory`: **no policy of their own, no event of their own,
-//! no text of their own.** `ori_memory::scope::ScopeEnforcer::authorize` decides
-//! and logs a request (AICD §25), and `ori_memory::retrieval::Retrieval` turns
-//! the grant into a rendered package. The handler builds the request from the
-//! engine's binding, asks, and returns the package's own rendering.
+//! pipeline and `ori-memory`: **no scope policy of their own, no event of their
+//! own, no text of their own.** `ori_memory::scope::ScopeEnforcer::authorize`
+//! decides a request and logs a refusal (AICD §25), and
+//! `ori_memory::retrieval::Retrieval` turns the grant into a rendered package.
+//! The handler builds the request from the engine's binding, asks, and returns
+//! the package's own rendering.
 //!
 //! | Tool | Takes | Returns |
 //! |---|---|---|
@@ -68,7 +69,8 @@
 //! and keeps it current; every connection's handlers share one
 //! ([`crate::tools::memory::SharedMemoryInputs`]). A handler takes the read lock
 //! **for the whole call**, because `Retrieval` borrows the map and the tracker,
-//! and it checks three things before it asks anything:
+//! and it checks three things before it asks anything, then fails closed the same
+//! way for each:
 //!
 //! - the lock is not poisoned: a poisoned lock fails closed, as `Unavailable`;
 //! - the inputs were built for **this** product. `CodeMap` and `FreshnessTracker`
@@ -77,8 +79,14 @@
 //!   map. A mismatch is `Unavailable`;
 //! - `config.cap_bytes` is at most
 //!   [`crate::tools::memory::MAX_PACKAGE_REPLY_BYTES`] (262 144). A rendered
-//!   package is one text block on one reply line and must stay well under W0's
-//!   1 MiB line. A larger cap is `Unavailable`.
+//!   package is one text block on one reply line. `crate::protocol::MAX_LINE_BYTES`
+//!   (1 MiB) is the cap on the lines this side reads; this cap bounds the
+//!   package's text, whose JSON at most about doubles it (`render()` is
+//!   scrubbed). The reply line also echoes the request's id, which nothing caps
+//!   on the way out, and the lead records that for S2 and W0. A larger cap is
+//!   `Unavailable`;
+//! - the scope of a failure: each of the three is `Unavailable` with a fixed
+//!   `what`, and S2 never copies `what` into a reply or an event.
 //!
 //! **Lock order.** The engine never holds the write lock while it waits for the
 //! database writer, because a handler holds the read lock while it holds the
@@ -104,8 +112,10 @@
 //! **A scope refusal is the handler's `Refused`, logged or not.** The code is
 //! `RefusalReason::code` and the section is the error's own (AICD §25), through
 //! the accessors, never by matching the variants, for both a refusal the
-//! enforcer logged and one it could not. No `Display`, no `detail` and no store
-//! error's text is copied into a reply or an event.
+//! enforcer logged and one it could not. **The handler** copies no `Display`, no
+//! `detail` and no store error's text into a reply or an event. The enforcer's
+//! own `memory.access_refused` row carries the refusal's `Display` as its
+//! `detail`, a store error's text included.
 //!
 //! **A retrieval error maps by who can cause it.**
 //!
@@ -113,7 +123,7 @@
 //! |---|---|---|
 //! | `InvalidSearchQuery` | `Refused`, `invalid_search_query` | the one an agent can cause: a NUL passes S2's schema and the retrieval refuses it after the grant ("fix the call") |
 //! | `NotAContextAuthorization`, `NotASearchAuthorization`, `NotAnEvidenceAuthorization` | `Refused`, `not_a_context_authorization`, `not_a_search_authorization`, `not_an_evidence_authorization` | refusals of the retrieval itself (AICD §25); unreachable, because the handler builds the query |
-//! | `ProductMismatch`, `SeamBroken` | `Refused`, `product_mismatch`, `seam_broken` | refusals of the retrieval itself (AICD §25); unreachable after S2's check 0 and the product check above |
+//! | `ProductMismatch`, `SeamBroken` | `Refused`, `product_mismatch`, `seam_broken` | unreachable: the handler builds the authorization and the retrieval from the same database in one call, so `check_product_links` compares one product with itself; `SeamBroken` is an internal invariant of ori-memory's admit step. Neither backs up the inputs' product check above, which ori-memory cannot make (see that bullet) |
 //! | `InvalidConfig`, `CapTooSmall` | `Unavailable` | the engine's configuration, not the agent's call: "retry later", for the operator to fix |
 //! | `Oplog` | `Unavailable` | infrastructure, or a persistent malformed record: a persistent one reads the same as a transient one |
 //! | `Index` | `Unavailable` | infrastructure |
@@ -134,8 +144,10 @@
 //! refusal, so these tools add **at most one row per admitted call**. S2 bounds
 //! its own rows in one window to twice the window's limit plus one row per
 //! connection (`crate::server`'s module documentation) and asks each slice to
-//! state its handler's rows: with this one, **a window holds at most three times
-//! the window's limit plus one row per connection.**
+//! state its handler's rows: with this one, **calls to these two tools leave at
+//! most three times the window's limit plus one row per connection.** The rate
+//! window is per session and covers every tool, and other tools' handlers append
+//! rows of their own.
 //!
 //! | Outcome | Rows, in order |
 //! |---|---|
@@ -143,8 +155,10 @@
 //! | `aicd_search` granted | `mcp.tool_called` (ticket column: the binding's ticket, or none) |
 //! | a scope refusal | `mcp.tool_called`, then `memory.access_refused` (the enforcer's: the same `at` as `mcp.tool_called`, ticket column none), then `mcp.tool_failed` (`failure: refused`, the code, AICD §25) |
 //! | a scope refusal the enforcer could not record | `mcp.tool_called`, then `mcp.tool_failed` (refused, the code). If that append fails too, `unrecorded` names `mcp.tool_failed` and the connection closes |
-//! | unavailable inputs, a configuration fault, an infrastructure fault | `mcp.tool_called`, then `mcp.tool_failed` (`failure: unavailable`) |
+//! | unavailable inputs, a configuration fault, a fault the retrieval meets (`Oplog`, `Index`) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: unavailable`) |
+//! | a store fault the enforcer meets (a log that fails `EventLog::verify`, an I/O or busy error while reading it): a scope refusal, `log_unreadable` (AICD §25) | `mcp.tool_called`, then `memory.access_refused` when the log still accepts it, then `mcp.tool_failed` (refused, `log_unreadable`) |
 //! | a `Refused` retrieval error after a grant (`invalid_search_query`) | `mcp.tool_called`, then `mcp.tool_failed` (refused, the code) |
+//! | a missing ticket argument, or a query that is not a string (unreachable through S2's schema and checks 6 and 7; test 13 calls the handler directly) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
 //!
 //! **How the rows link.** `memory.access_refused` directly follows
 //! `mcp.tool_called` and carries the same time (`call.at`), but no `session_id`
@@ -163,12 +177,13 @@
 //!   missing; if both appends fail, S2 sets `unrecorded` to `mcp.tool_failed`
 //!   and closes. Closing the gap needs a `HandlerError` variant in S2, which is
 //!   outside this slice. The lead records it.
-//! - **Nothing registers identities or files tickets yet (D8).** Nothing outside
-//!   `ori-broker` registers identities, and nothing writes `ticket.filed` or
-//!   `lock.claimed`. Once the engine (ORI-T-0070) registers identities, and until
-//!   it writes those events, every `aicd_context` and every coder memory call
-//!   under a bound ticket is refused `ticket_not_in_product`. The tests seed all
-//!   three directly.
+//! - **Nothing outside `ori-broker` registers identities, and nothing files
+//!   tickets yet (D8).** Nothing writes `ticket.filed` or `lock.claimed`. Once the
+//!   engine (ORI-T-0070) registers identities, and until it writes `ticket.filed`,
+//!   every `aicd_context` and every coder memory call under a bound ticket is
+//!   refused `ticket_not_in_product`. Only `ticket.filed` ends those refusals:
+//!   `lock.claimed` only widens a coder's declared scope, which is empty until
+//!   then. The tests seed all three directly.
 //! - **`product_signal` is offered `aicd_context` and never served (D5).** It is
 //!   listed to every role because `spec/API_SPEC.md` section 3's roles column
 //!   says "all", and it never succeeds: it is refused `ticket_not_in_product`
@@ -182,8 +197,9 @@
 //!   tools serve qa and operations their full section 5 rows. That is an
 //!   `ori-memory` scope ticket's.
 //! - **Several passes over the log per call (D12).** Each call verifies and reads
-//!   the whole log in `authorize`, and again in the retrieval, at up to the
-//!   window's limit a minute. Accepted for phase 1.
+//!   the whole log up to twice: in `authorize`, and again in the retrieval when
+//!   the grant allows a record source. That is at up to the window's limit a
+//!   minute. Accepted for phase 1.
 //! - **A grant can create `index/fts.sqlite` on disk.** `Indexer::open` creates
 //!   the product's index file when none exists, although both tools are
 //!   published as read-only.
@@ -223,10 +239,13 @@ use crate::tools::{BoundCall, HandlerError, ToolHandler};
 /// The most bytes `PackageConfig::cap_bytes` may be for these tools to serve:
 /// 262 144, a quarter of W0's line (AICD §27).
 ///
-/// A rendered package is one text block on one reply line, and the line is
-/// bounded by `crate::protocol::MAX_LINE_BYTES` (1 MiB), so a cap above this is a
-/// configuration the tools refuse as unavailable instead of building a package
-/// that may not fit its line.
+/// A rendered package is one text block on one reply line.
+/// `crate::protocol::MAX_LINE_BYTES` (1 MiB) is the cap on the lines this side
+/// reads; this cap bounds the package's text, whose JSON at most about doubles it
+/// (`render()` is scrubbed), so a cap above this is a configuration the tools
+/// refuse as unavailable instead of building a package that may not fit a line.
+/// The reply line also echoes the request's id, which nothing caps on the way
+/// out, and the lead records that for S2 and W0.
 pub const MAX_PACKAGE_REPLY_BYTES: usize = 262_144;
 
 /// The code of `RetrievalError::InvalidSearchQuery`: the one retrieval refusal an
@@ -447,11 +466,13 @@ pub(crate) fn retrieval_error(error: RetrievalError) -> HandlerError {
     }
 }
 
-/// The read lock of the shared inputs, held for the whole call, after the three
-/// checks of the module documentation: the lock is not poisoned, the inputs were
-/// built for the binding's product, and the cap is within
-/// [`crate::tools::memory::MAX_PACKAGE_REPLY_BYTES`].
-fn read_inputs<'a>(
+/// The read lock of the shared inputs, after two checks: the lock is not
+/// poisoned, and the inputs were built for the binding's product (AICD §25).
+///
+/// A handler that reads only the stage and builds no package takes this lock and
+/// makes no cap check. A handler that builds a package calls `read_inputs`, which
+/// adds the cap check.
+pub(crate) fn lock_inputs<'a>(
     shared: &'a SharedMemoryInputs,
     binding: &Binding,
 ) -> Result<RwLockReadGuard<'a, MemoryInputs>, HandlerError> {
@@ -459,6 +480,18 @@ fn read_inputs<'a>(
     if &inputs.product_id != binding.product_id() {
         return Err(unavailable(WHAT_OTHER_PRODUCT));
     }
+    Ok(inputs)
+}
+
+/// The read lock of the shared inputs, held for the whole call, after the three
+/// checks of the module documentation: the lock is not poisoned, the inputs were
+/// built for the binding's product (both by `lock_inputs`), and the cap is within
+/// [`crate::tools::memory::MAX_PACKAGE_REPLY_BYTES`].
+fn read_inputs<'a>(
+    shared: &'a SharedMemoryInputs,
+    binding: &Binding,
+) -> Result<RwLockReadGuard<'a, MemoryInputs>, HandlerError> {
+    let inputs = lock_inputs(shared, binding)?;
     if inputs.config.cap_bytes > MAX_PACKAGE_REPLY_BYTES {
         return Err(unavailable(WHAT_CONFIGURATION));
     }
@@ -524,11 +557,12 @@ impl ToolHandler for ContextHandler {
     ///
     /// # Errors
     ///
-    /// `Refused` for a scope refusal (AICD §25), or for a refusal of the
-    /// retrieval itself; `Port(Unavailable)` for inputs that are poisoned, built
-    /// for another product or over the reply cap, a configuration fault or an
-    /// infrastructure fault; `Port(Invalid)` for a call with no ticket, which S2's
-    /// checks make unreachable.
+    /// `Refused` for a scope refusal (AICD §25), a store fault the enforcer
+    /// meets (`log_unreadable`) included, or for a refusal of the retrieval
+    /// itself; `Port(Unavailable)` for inputs that are poisoned, built for another
+    /// product or over the reply cap, a configuration fault or a fault the
+    /// retrieval meets (`Oplog`, `Index`); `Port(Invalid)` for a call with no
+    /// ticket, which S2's checks make unreachable.
     fn call(
         &mut self,
         db: &mut ProductDb,
@@ -586,12 +620,13 @@ impl ToolHandler for SearchHandler {
     ///
     /// # Errors
     ///
-    /// `Refused` for a scope refusal (AICD §25), or for a refusal of the retrieval
+    /// `Refused` for a scope refusal (AICD §25), a store fault the enforcer
+    /// meets (`log_unreadable`) included, or for a refusal of the retrieval
     /// itself, including `invalid_search_query` for a query holding a NUL
     /// character; `Port(Unavailable)` for inputs that are poisoned, built for
-    /// another product or over the reply cap, a configuration fault or an
-    /// infrastructure fault; `Port(Invalid)` for a call whose query is not a
-    /// string, which S2's schema makes unreachable.
+    /// another product or over the reply cap, a configuration fault or a fault
+    /// the retrieval meets (`Oplog`, `Index`); `Port(Invalid)` for a call whose
+    /// query is not a string, which S2's schema makes unreachable.
     fn call(
         &mut self,
         db: &mut ProductDb,
@@ -1089,6 +1124,14 @@ mod tests {
     /// filed, so the query's own spelling is never in a rendering.
     const MARKER_AS_FILED: &str = "zebraquartz0181";
 
+    /// The rows of a call whose scope refusal the enforcer logged: the call's, the
+    /// enforcer's, and S2's failure.
+    const REFUSED_ROWS: [&str; 3] = [
+        "mcp.tool_called",
+        "memory.access_refused",
+        "mcp.tool_failed",
+    ];
+
     /// A coder bound to the ticket T, registered as a coder, with T filed and
     /// claiming a module.
     fn coder_world(label: &str) -> World {
@@ -1213,6 +1256,37 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // 1b. A non-coder reads the ticket it names
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0181_a_non_coder_bound_to_one_ticket_reads_the_ticket_it_names() {
+        // S2's check 7 does not tie a lead's argument to its bound ticket, so
+        // the handler must read the argument and never the binding's ticket.
+        let bound = id("TICKETA");
+        let mut world = Setup::new(Role::Lead, Some(bound.clone())).build("context-lead-bound");
+        let product = world.product.clone();
+        file_ticket(&mut world.db, &product, &bound);
+        file_ticket(&mut world.db, &product, &ticket_t());
+        let tip = world.tip();
+
+        let reply = context_call(&mut world);
+        assert!(!reply.close && reply.unrecorded.is_none());
+        assert!(wire(&reply)["result"].get("isError").is_none());
+        let text = text_of(&reply);
+
+        let rows = world.rows_since(tip);
+        assert_eq!(kinds(&rows), ["mcp.tool_called"]);
+        assert_eq!(rows[0].ticket_id(), Some(&ticket_t()), "the argument");
+        assert!(text.starts_with("context package\n"), "{text}");
+        assert!(
+            text.contains(&format!("ticket: {}\n", ticket_t())),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("ticket: {bound}\n")), "{text}");
+    }
+
+    // -------------------------------------------------------------------
     // 2. A scope refusal
     // -------------------------------------------------------------------
 
@@ -1300,14 +1374,18 @@ mod tests {
         );
 
         // The ticket is not filed.
+        let tip = world.tip();
         let reply = context_call(&mut world);
         assert_failure(&reply, &refused_object("ticket_not_in_product"));
+        assert_eq!(kinds(&world.rows_since(tip)), REFUSED_ROWS);
 
         // The ticket is filed: still refused, under another code.
         let product = world.product.clone();
         file_ticket(&mut world.db, &product, &ticket_t());
+        let tip = world.tip();
         let reply = context_call(&mut world);
         assert_failure(&reply, &refused_object("ticket_read_not_granted"));
+        assert_eq!(kinds(&world.rows_since(tip)), REFUSED_ROWS);
     }
 
     // -------------------------------------------------------------------
@@ -1396,6 +1474,13 @@ mod tests {
         let reply = search_call(&mut coder, &query);
         assert_failure(&reply, &refused_object("no_assignment"));
         assert!(!wire(&reply).to_string().contains(MARKER));
+        assert!(
+            !wire(&reply)
+                .to_string()
+                .to_lowercase()
+                .contains(MARKER_AS_FILED),
+            "the reply holds the query, lower-cased"
+        );
         let rows = coder.rows_since(tip);
         assert_eq!(
             kinds(&rows),
@@ -1414,7 +1499,72 @@ mod tests {
                 "a row holds the query: {}",
                 row.payload()
             );
+            assert!(
+                !row.payload().to_lowercase().contains(MARKER_AS_FILED),
+                "a row holds the query, lower-cased: {}",
+                row.payload()
+            );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // 5b. A query of only whitespace
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0181_a_whitespace_only_query_answers_with_the_empty_query_note() {
+        // S2's schema has a minimum length of one character, so "   " reaches
+        // the handler, and the retrieval answers it with a note, not an error.
+        let mut world = lead_world("search-whitespace");
+        let tip = world.tip();
+
+        let query = "   ";
+        let reply = search_call(&mut world, query);
+        assert!(!reply.close && reply.unrecorded.is_none());
+        let message = wire(&reply);
+        assert!(message["result"].get("isError").is_none(), "{message}");
+        assert!(message["result"].get("structuredContent").is_none());
+        let text = text_of(&reply);
+
+        let rows = world.rows_since(tip);
+        assert_eq!(kinds(&rows), ["mcp.tool_called"]);
+
+        // The package, recomputed with the principal and the request by hand.
+        let principal = Principal::authenticated(Actor::Agent(identity()));
+        let request = MemoryRequest::new(Query::Search {
+            text: query.to_owned(),
+            sources: Vec::new(),
+        });
+        let inputs = world.inputs.read().expect("the inputs");
+        let authorization = ScopeEnforcer::new(inputs.stage)
+            .authorize(
+                &mut world.db,
+                Timestamp::from_millis(START),
+                &principal,
+                &request,
+            )
+            .expect("the recomputation is granted");
+        let package = Retrieval::new(
+            &world.db,
+            &inputs.code_map,
+            inputs.code_map_built_at,
+            &inputs.freshness,
+            inputs.config,
+        )
+        .expect("a retrieval")
+        .search(&mut world.db, &authorization)
+        .expect("a package");
+        assert_eq!(text, package.render(), "byte for byte");
+        drop(inputs);
+
+        assert!(text.starts_with("search results\n"), "{text}");
+        assert!(text.contains("query: 3 characters\n"), "{text}");
+        assert!(text.contains("items: 0\n"), "{text}");
+        assert!(
+            text.contains("note: the query is empty; nothing was searched"),
+            "the empty-query note: {text}"
+        );
+        assert_eq!(world.tip(), tip + 1, "the recomputation appended nothing");
     }
 
     // -------------------------------------------------------------------
@@ -1439,8 +1589,10 @@ mod tests {
 
         // Bound to none: refused for want of an assignment.
         let mut unassigned = Setup::new(Role::Coder, None).build("search-coder-unassigned");
+        let tip = unassigned.tip();
         let reply = search_call(&mut unassigned, "widget");
         assert_failure(&reply, &refused_object("no_assignment"));
+        assert_eq!(kinds(&unassigned.rows_since(tip)), REFUSED_ROWS);
     }
 
     // -------------------------------------------------------------------
@@ -1500,6 +1652,18 @@ mod tests {
             &reply,
             &["the memory inputs", "memory inputs"],
         );
+
+        // Both tools read the inputs through the same checks: the lock stays
+        // poisoned, and `read_inputs` runs before the ticket is read, so the
+        // lead's ticket need not be filed.
+        let tip = world.tip();
+        let reply = context_call(&mut world);
+        assert_unavailable(
+            &mut world,
+            tip,
+            &reply,
+            &["the memory inputs", "memory inputs"],
+        );
     }
 
     #[test]
@@ -1510,6 +1674,14 @@ mod tests {
         let tip = world.tip();
         *world.inputs.write().expect("the inputs") = inputs_for(&product_b());
         let reply = search_call(&mut world, "widget");
+        assert_unavailable(
+            &mut world,
+            tip,
+            &reply,
+            &["memory inputs of another product"],
+        );
+        let tip = world.tip();
+        let reply = context_call(&mut world);
         assert_unavailable(
             &mut world,
             tip,
@@ -1528,6 +1700,9 @@ mod tests {
         let tip = world.tip();
         let reply = search_call(&mut world, "widget");
         assert_unavailable(&mut world, tip, &reply, &["the package configuration"]);
+        let tip = world.tip();
+        let reply = context_call(&mut world);
+        assert_unavailable(&mut world, tip, &reply, &["the package configuration"]);
 
         // The bound itself is served.
         let mut at_the_bound = inputs_for(&product);
@@ -1536,9 +1711,11 @@ mod tests {
             ..PackageConfig::default()
         };
         *world.inputs.write().expect("the inputs") = at_the_bound;
+        let tip = world.tip();
         let reply = search_call(&mut world, "widget");
         assert!(wire(&reply)["result"].get("isError").is_none());
         assert!(text_of(&reply).contains(&format!("cap: {MAX_PACKAGE_REPLY_BYTES} bytes\n")));
+        assert_eq!(kinds(&world.rows_since(tip)), ["mcp.tool_called"]);
     }
 
     // -------------------------------------------------------------------
