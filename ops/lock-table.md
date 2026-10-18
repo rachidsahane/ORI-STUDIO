@@ -1549,3 +1549,27 @@ A read-only map of what the memory tools S3, S7 and S8 need from `ori-memory` (f
 Claim 108 is disjoint from the held claims (20, 103, 105).
 
 **State after this section:** the claims held are 20, 103, 105 and 108. The next free identifier is ORI-T-0180.
+
+---
+
+## ORI-T-0174 reviewed; repair 1 dispatched on claim 103; ORI-T-0180 allocated
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**Review** of ORI-T-0174 at 527574e: three lenses, two skeptics per finding, 12 agents (`review-0174-full.json`). It was interrupted by the session's usage limit and resumed from cache. The new rule closes all five reproduced layouts (H2, H2b, H3, H3b, H4) and H4 on a second install, and opens no new gap; probes through `GitHooks::install` confirmed each refusal and each layout's premise. Four should-fix findings were confirmed:
+- **F1**, a per-process link through `/proc/self/cwd`. It predates the ticket, is reproduced at ff905b0 and lies outside its rule;
+- **F2**, the R1-F8 qualification contradicts bullets (a) and (b);
+- **F3**, the refusal's message is false for the new cause;
+- **F4**, the new macOS sentence on intermediate names misses the transient case that test 9 pins.
+
+Fifteen notes. The two the lead takes into code are F5, the race the resolver admits fails open (it now refuses), and F10, no test pins the rule to the hooks directory's own `ori-original/`.
+
+The integration of 527574e on the session head passed every check: 1568 workspace tests and the Windows simulation.
+
+**Repair 1** (attempt 2 of 3, Sonnet, the same coder, claim 103) answers F2 to F5 and F10, states F1 and the spool limit in the docs, and takes the notes F6, F8, F13, F14, F15, F18 and F19. **Not in this repair:** F1 (ORI-T-0180 below), F7 (a bind-mount alias, contrived), F9 (Unicode case folds and short names, pre-existing), F11, F12, and F17 (ORI-T-0159's test comments, which only a `test_modified` escalation could change).
+
+| Ticket | What | Modules | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0180 | Review finding 0174-F1: a hook link whose way runs through a per-process link (`/proc/self`, `/proc/thread-self`, `/dev/fd` on Linux) is judged from the installer's own process, not git's, so `post-checkout -> /proc/self/cwd/.git/hooks/post-merge` installs and every checkout records a false `post-merge`. Refuse any way that enters such a link, at every hop, not only on `NotFound`. **Must land before ORI-T-0055** | `crates/ori-watch/src/hooks.rs` | 1 | after ORI-T-0174 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 103 (repair 1), 105 (S2, under review) and 108 (PM3, under review). The next free identifier is ORI-T-0181.
