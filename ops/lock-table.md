@@ -1587,3 +1587,58 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 103 is released. ORI-T-0180 (procfs links), ORI-T-0168 (`ori-original` as a link), ORI-T-0178 (the dotdot test on Windows) and ORI-T-0163 (the Windows root probe) may now be claimed, and each must land before ORI-T-0055 installs the hooks.
 
 **State after this section:** the claims held are 20, 105 (S2, under review) and 108 (PM3, under review). The next free identifier is ORI-T-0181.
+
+---
+
+## ORI-T-0169 (S2) and ORI-T-0179 (PM3) reviewed; repairs dispatched on claims 105 and 108; claim 109 for ORI-T-0180 with ORI-T-0168
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**Review of ORI-T-0169 (S2, the MCP server core) at d15a7e7.** Four lenses, two skeptics per finding, 17 agents (`review-0169-full.json`). Nothing blocking: the pipeline order, the no-echo rule, the recording and the rate window hold. Six should-fix findings were confirmed:
+- **F1**, S6's branch marker sits before checks 0 to 2;
+- **F2**, the stated log-growth bound ignores the second row of a failed effect;
+- **F3**, the byte-cap order test cannot tell the two orders apart;
+- **F4**, error results drop the fixed classification the server already holds;
+- **F5**, S1's ticket-rule docs in `scopes.rs` state the coder's rule for every role;
+- **F6**, `BoundCall`'s doc says nothing in it came from a message.
+
+There were seventeen notes. Repair 1 (attempt 2 of 3, Sonnet, the same coder) answers the six. It also takes the notes:
+- F7: the server latches a close;
+- F9 and F10: tests;
+- F13: the ticket rule fails closed;
+- F16 to F20 and F22: docs and two accepted deviations.
+
+**Claim 105 is widened** to the doc comments of `ToolRefusal::TicketNotAssigned` and `ToolRefusal::ClaimContradictsSession` in `crates/ori-mcp/src/scopes.rs`, and to nothing else in that file.
+
+Recorded, not in the repair:
+- F8 (a backward clock resets the window, Decision 9's choice);
+- F11 (the line cap's margin);
+- F12 (a poisoned budget reads as `rate_limited`);
+- F14 (a panicking handler);
+- F15 (phase 2's `outputSchema`);
+- F21: API_SPEC gives `aicd_gate_result` four argument names, so the design's claim that it gives none was wrong, and the documentation ticket after S2 must not repeat it;
+- F23 (the flood test's time, to be measured).
+
+**Review of ORI-T-0179 (PM3) at 8d1a3f6.** Three lenses, two skeptics per finding, 14 agents (`review-0179-full.json`). The read itself is right. Five should-fix findings were confirmed:
+- **F1**, the docs say raw evidence cannot be indexed, but the crate's indexer takes any string;
+- **F2**, the no-follow claim holds only on the platforms `code_map` verified;
+- **F3**, the logged grant and the path check are the caller's preconditions, stated as facts;
+- **F4**, no test proves that the read itself stops at the cap;
+- **F5**, the not-yet-built S7 caller is named in the present tense.
+
+There were nine notes. Repair 1 (attempt 2 of 3, Sonnet, the same coder, claim 108, `barrier.rs` only) answers the five and takes the notes F6, F7, F9 and F11 to F14.
+
+Recorded:
+- F8 (Windows branches untested);
+- F10 (already a stated limit);
+- the option that the read take an authorization, so the type holds the grant. That is for the lead's S7 design.
+
+**Claim 109** joins ORI-T-0180 (per-process links) and ORI-T-0168 (`ori-original` as a link). Both touch only `hooks.rs`, and neither changes `way_enters_what_the_install_creates` or `follow_chain_to_managed_hook`.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 105 | ORI-T-0169 repair 1 (S2) | `crates/ori-mcp/src/server.rs`, `crates/ori-mcp/src/tools/mod.rs`, `crates/ori-mcp/src/ports.rs` (docs), `crates/ori-mcp/src/scopes.rs` (two doc comments) | 2 | `/home/user/wt/ORI-T-0169`, `feat/ORI-T-0169-server-core` | Sonnet 5.5 | 2026-10-18 |
+| 108 | ORI-T-0179 repair 1 (PM3) | `crates/ori-memory/src/barrier.rs` | 2 | `/home/user/wt/ORI-T-0179`, `feat/ORI-T-0179-evidence-content` | Sonnet 5.5 | 2026-10-18 |
+| 109 | ORI-T-0180 with ORI-T-0168: a hook link whose way enters `/proc` or `/dev/fd` is refused, since the installer's process cannot judge what git's will run; `ori-original` must be absent or a real directory, whatever the hooks are | `crates/ori-watch/src/hooks.rs` | 1 | `/home/user/wt/ORI-T-0180`, `fix/ORI-T-0180-hook-links` | Sonnet 5.5 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 105 (repair 1), 108 (repair 1) and 109. The next free identifier is ORI-T-0181.
