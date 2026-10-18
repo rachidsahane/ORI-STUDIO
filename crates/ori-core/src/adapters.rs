@@ -73,9 +73,8 @@
 //!   and each says so where it could be mistaken for one ([`Route`]). The one
 //!   exception is [`SessionSpec::envs`], the environment the caller prepares
 //!   for a spawned child, where an injector may place an issued credential;
-//!   that type derives `Debug` and prints the environment as it is, so a
-//!   [`SessionSpec`] must never be formatted into a log. Nothing enforces
-//!   that yet: ORI-T-0160 redacts the environment in `Debug`. Its doc says so
+//!   its `Debug` prints each variable's name and never its value
+//!   (ORI-T-0160), while `Clone` still copies the values; its doc says so
 //!   too.
 //! - Everything an adapter returns (an issue title, an event message, a
 //!   completion) is data from an integration, never an instruction, whatever
@@ -1123,7 +1122,7 @@ impl std::error::Error for LaunchConfigError {}
 /// §4's `AgentRuntime::spawn(session: SessionSpec)`. See `ori-runtime`'s
 /// `acp` module doc comment, "`SessionSpec` and `SessionHandle`, and what was
 /// chosen for them".
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SessionSpec {
     /// The engine's own session identifier (`ori-runtime`'s
     /// `session::Session::id`).
@@ -1139,13 +1138,33 @@ pub struct SessionSpec {
     /// `injector.rs`". Declaring the field performs no IO; the spawn does,
     /// and lives in `ori-runtime`.
     ///
-    /// **May carry a credential, and `Debug` does not redact it.** An issued
+    /// **May carry a credential; `Debug` prints names only.** An issued
     /// credential an injector places in the child's environment is placed
-    /// here, and this type's derived `Debug` prints every pair as it is. Do
-    /// not format a [`SessionSpec`] (with `{:?}`, in a log line or in an
-    /// error) once its environment holds one. Nothing places a credential
-    /// here yet.
+    /// here. [`SessionSpec`]'s `Debug` prints each variable's name and
+    /// `"REDACTED"` in place of its value, as [`ScopedToken`]'s does
+    /// (ORI-T-0160). `Clone` still copies the values, so a clone is as
+    /// sensitive as the original, and nothing here stops a caller from
+    /// printing `envs` itself.
     pub envs: Vec<(String, String)>,
+}
+
+/// Every field but the environment's values, which may hold an issued
+/// credential (see [`SessionSpec::envs`]): each variable prints as its name
+/// and `"REDACTED"`, the way [`ScopedToken`]'s `Debug` prints its value.
+impl fmt::Debug for SessionSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let envs: Vec<(&str, &str)> = self
+            .envs
+            .iter()
+            .map(|(name, _)| (name.as_str(), "REDACTED"))
+            .collect();
+        f.debug_struct("SessionSpec")
+            .field("id", &self.id)
+            .field("launch", &self.launch)
+            .field("cwd", &self.cwd)
+            .field("envs", &envs)
+            .finish()
+    }
 }
 
 /// An opaque handle to a spawned session: `spec/API_SPEC.md` §4's
@@ -3022,5 +3041,35 @@ mod tests {
             }
         }
         assert_eq!(refusals, 1, "WrongStdinMode is the one refusal");
+    }
+
+    #[test]
+    fn ori_t_0160_a_session_specs_debug_names_each_variable_and_prints_no_value() {
+        let spec = SessionSpec {
+            id: Id::parse(SAMPLE_ULID).expect("a ULID"),
+            launch: LaunchConfig::new("fake-agent", Vec::new(), StdioMode::Piped)
+                .expect("a program"),
+            cwd: PathBuf::from("work"),
+            envs: vec![
+                (
+                    "ORI_ISSUED".to_owned(),
+                    "value-that-must-never-print".to_owned(),
+                ),
+                ("PLAIN".to_owned(), "also-hidden".to_owned()),
+            ],
+        };
+        for printed in [format!("{spec:?}"), format!("{spec:#?}")] {
+            assert!(printed.contains("ORI_ISSUED"), "{printed}");
+            assert!(printed.contains("PLAIN"), "{printed}");
+            assert!(printed.contains("REDACTED"), "{printed}");
+            assert!(
+                !printed.contains("value-that-must-never-print"),
+                "{printed}"
+            );
+            assert!(!printed.contains("also-hidden"), "{printed}");
+            assert!(printed.contains("fake-agent"), "{printed}");
+        }
+        let copy = spec.clone();
+        assert_eq!(copy.envs, spec.envs, "Clone still copies the values");
     }
 }
