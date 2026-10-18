@@ -79,9 +79,13 @@
 //! managed hook at all: `post-checkout -> post-merge` would make every
 //! checkout record a false `post-merge` event into the spool the engine
 //! reads. Each hop is resolved against its own directory with the operating
-//! system's own reading of `..` and of links to directories (a directory that
-//! does not exist yet is read by its text instead, as the installer may create
-//! it), and a link to a same-named hook in some other directory (a team's
+//! system's own reading of `..` and of links to directories. A way that runs
+//! through `ori-original/`, which the installer creates, or through an entry of
+//! it named for a hook it replaces, before that is there is refused, whatever
+//! it would reach (the installer is not modelled, and `follow_chain_to_managed_hook`
+//! says why); any other directory that does not exist yet means the link
+//! reaches nothing, though its text is still read and refused if that reading
+//! reaches a hook. A link to a same-named hook in some other directory (a team's
 //! shared hooks) is not this. A link that cannot be read, or an entry that
 //! cannot be looked at for a reason other than not being there, refuses the
 //! installation as an IO error rather than passing it ([`HooksError::Io`]).
@@ -192,6 +196,7 @@
 //! - The scripts are POSIX `sh`. Git for Windows runs them with its bundled
 //!   shell; the executing tests below run on Unix only.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -330,10 +335,13 @@ pub enum HooksError {
     /// An entry of the hooks directory is a link that, directly or through
     /// other links, reaches a hook this installer also replaces
     /// (`post-merge -> post-commit`, `pre-push -> relay -> post-commit`,
-    /// `post-checkout -> post-merge`). Kept as a link, or left in place, it
-    /// would resolve to the engine's own script: the hook it stood for, a
-    /// `pre-push` veto included, would never run again, or an unrelated hook
-    /// would record events that never happened. Nothing was written.
+    /// `post-checkout -> post-merge`), or whose way runs through
+    /// `ori-original/` before this installer has made what it would reach
+    /// there (`ori-original/../post-merge`, which is the hooks directory's own
+    /// `post-merge` once the directory exists). Kept as a link, or left in
+    /// place, it would resolve to the engine's own script: the hook it stood
+    /// for, a `pre-push` veto included, would never run again, or an unrelated
+    /// hook would record events that never happened. Nothing was written.
     HookLinksToManagedHook {
         /// The entry that is a link.
         path: PathBuf,
@@ -469,9 +477,10 @@ impl fmt::Display for HooksError {
             .and_then(|()| cite(f, self)),
             Self::HookLinksToManagedHook { path, target } => write!(
                 f,
-                "refused: {} is a link to {}, which leads to a hook this installer replaces, so \
-                 the hook it stands for would stop running and the engine's own script would \
-                 run in its place; point it at a file of its own and install again",
+                "refused: {} is a link to {}, which leads to a hook this installer replaces, or \
+                 runs through ori-original/ before this installer has made it, so the hook it \
+                 stands for would stop running and the engine's own script would run in its \
+                 place; point it at a file of its own and install again",
                 path.display(),
                 target.display()
             )
@@ -975,12 +984,19 @@ impl GitHooks {
     /// A link made after this look is not seen by it, as with every decision
     /// made before the writes.
     ///
-    /// A directory a link goes through that does not exist yet is read by its
-    /// text, as the installer may create it (`ori-original/../post-merge`). A
-    /// failure to look at anything that is there, other than a missing entry,
-    /// refuses the installation as an IO error ([`HooksError::Io`]) and does
-    /// not pass it: a check that could not be made is not a check that found
-    /// nothing (AICD §14).
+    /// A way that first fails at `ori-original/`, which the installer creates,
+    /// or at an entry of it named for a hook it replaces, is refused whatever
+    /// it would reach (`ori-original/../post-merge`; `M/post-merge` where `M`
+    /// links to `ori-original/..`): what the install will make there is not
+    /// modelled, and refusing fails closed. A way that first fails at any other
+    /// missing directory reaches nothing, but its text is still read and the
+    /// link is refused if that reading reaches a hook, an over-refusal kept as
+    /// a second look (`follow_chain_to_managed_hook` gives both rules, and the
+    /// spool's future path, which is not modelled). A failure to look at
+    /// anything that is there, other than a missing entry, refuses the
+    /// installation as an IO error ([`HooksError::Io`]) and does not pass it: a
+    /// check that could not be made is not a check that found nothing
+    /// (AICD §14).
     fn refuse_if_a_link_reaches_a_managed_hook(&self, hooks_dir: &Path) -> Result<(), HooksError> {
         let listing = match fs::read_dir(hooks_dir) {
             Ok(listing) => listing,
@@ -1207,7 +1223,8 @@ fn is_same_directory(directory: &Path, hooks_dir: &Path, canonical_hooks: &Path)
 /// it to remove. It reads a directory that does not exist yet, where
 /// `canonicalize` has nothing to resolve; it is wrong for a `..` that follows
 /// a link to a directory, which is why it is used only for a directory that is
-/// not there.
+/// not there, and only after `way_enters_what_the_install_creates` has looked
+/// for one this install creates.
 fn lexically_normal(path: &Path) -> PathBuf {
     let mut parts: Vec<Component<'_>> = Vec::new();
     for component in path.components() {
@@ -1233,6 +1250,11 @@ fn lexically_normal(path: &Path) -> PathBuf {
 /// The entry is looked at without following it first, so a missing one is
 /// told from one that cannot be looked at, which is an error and not an
 /// absence (AICD §14).
+///
+/// It is reached only after `way_enters_what_the_install_creates` found that
+/// the way does not enter what the install creates. What it is given is the
+/// text's reading of the way (`lexically_normal`), which is not the way itself
+/// when a link comes before a `..`.
 fn existing_directory(path: &Path) -> io::Result<Option<PathBuf>> {
     let absent = |error: &io::Error| {
         matches!(
@@ -1258,6 +1280,150 @@ fn existing_directory(path: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
+/// One step of the way that `way_enters_what_the_install_creates` resolves.
+enum Step {
+    /// A prefix and root, or a root alone: the way restarts there.
+    Root(PathBuf),
+    /// `..`.
+    Parent,
+    /// A name.
+    Name(std::ffi::OsString),
+}
+
+/// Puts the steps of `path` in front of `pending`, in order. `.` is dropped.
+fn put_steps_in_front(pending: &mut VecDeque<Step>, path: &Path) {
+    let mut steps: Vec<Step> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => steps.push(Step::Parent),
+            Component::Normal(name) => steps.push(Step::Name(name.to_os_string())),
+            Component::Prefix(_) | Component::RootDir => match steps.last_mut() {
+                Some(Step::Root(root)) => root.push(component.as_os_str()),
+                _ => steps.push(Step::Root(PathBuf::from(component.as_os_str()))),
+            },
+        }
+    }
+    for step in steps.into_iter().rev() {
+        pending.push_front(step);
+    }
+}
+
+/// Whether `name` is `expected`, optionally ignoring ASCII case.
+fn is_named(name: &std::ffi::OsStr, expected: &str, fold_case: bool) -> bool {
+    name.to_str().is_some_and(|text| {
+        if fold_case {
+            text.eq_ignore_ascii_case(expected)
+        } else {
+            text == expected
+        }
+    })
+}
+
+/// Whether `path`, resolved one component at a time, first fails at something
+/// this install creates: AICD §13.
+///
+/// What the install creates, and which a link can run through before it exists,
+/// is `ori-original/` under the hooks directory (`PRESERVED_DIR`) and an entry
+/// of it named for a hook this installer replaces, which `preserve` makes for
+/// each foreign hook. The first is looked for at the hooks directory, the
+/// second in a `ori-original/` that is there under it.
+///
+/// The way is resolved as the operating system will once the install has run,
+/// and not by its text. A work list of the components starts at the current
+/// directory, or at the root a path begins with, canonicalized, so the
+/// directory the walk stands in (`current`) is always an existing one that holds
+/// no link, and its textual parent is its physical one. `.` is skipped. `..`
+/// goes up from `current`, and stays at a root. A name is looked at without
+/// following it:
+///
+/// - a link is read, and its target's components go to the front of the work
+///   list, so a `..` after it leaves from where the link led and not from the
+///   link; an absolute target restarts at its root, a relative one is read from
+///   `current`, the link's own directory. More than `LINK_HOPS_CAP` links in one
+///   call is an error, which refuses the install: no process could run it;
+/// - a directory becomes `current`;
+/// - anything else is a file, and the way meets a non-directory and reaches
+///   nothing: `false`;
+/// - an entry that is not there is the first missing component, and the answer
+///   is whether it is something the install creates: `ori-original` in the
+///   hooks directory, or, in a directory called `ori-original` that is under the
+///   hooks directory, a name of a hook this installer replaces. Anything else
+///   is `false`;
+/// - a name under a file is `false` as well; every other failure is returned.
+///
+/// If every component resolves, `false`: the directory was there after all.
+///
+/// # Errors
+///
+/// Anything other than a missing entry, or a name under a file, is returned,
+/// and the caller refuses the installation (AICD §14): a way that could not be
+/// resolved is not a way that was found to reach nothing.
+fn way_enters_what_the_install_creates(
+    path: &Path,
+    hooks_dir: &Path,
+    canonical_hooks: &Path,
+    fold_case: bool,
+) -> io::Result<bool> {
+    let mut pending: VecDeque<Step> = VecDeque::new();
+    put_steps_in_front(&mut pending, path);
+    let mut current = match pending.front() {
+        Some(Step::Root(_)) => match pending.pop_front() {
+            Some(Step::Root(root)) => fs::canonicalize(root)?,
+            _ => return Ok(false),
+        },
+        _ => fs::canonicalize(std::env::current_dir()?)?,
+    };
+    let mut hops = 0usize;
+    while let Some(step) = pending.pop_front() {
+        match step {
+            Step::Root(root) => current = fs::canonicalize(root)?,
+            Step::Parent => {
+                if let Some(parent) = current.parent() {
+                    current = parent.to_path_buf();
+                }
+            }
+            Step::Name(name) => {
+                let candidate = current.join(&name);
+                match fs::symlink_metadata(&candidate) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        hops += 1;
+                        if hops > LINK_HOPS_CAP {
+                            return Err(io::Error::other(format!(
+                                "more than {LINK_HOPS_CAP} links in the way {}",
+                                path.display()
+                            )));
+                        }
+                        let target = fs::read_link(&candidate)?;
+                        put_steps_in_front(&mut pending, &target);
+                    }
+                    Ok(metadata) if metadata.is_dir() => {
+                        current = fs::canonicalize(&candidate)?;
+                    }
+                    Ok(_) => return Ok(false),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        let preserved_dir = is_named(&name, PRESERVED_DIR, fold_case)
+                            && is_same_directory(&current, hooks_dir, canonical_hooks);
+                        let preserved_entry = names_a_managed_hook(&name, fold_case)
+                            && current
+                                .file_name()
+                                .is_some_and(|own| is_named(own, PRESERVED_DIR, fold_case))
+                            && current.parent().is_some_and(|above| {
+                                is_same_directory(above, hooks_dir, canonical_hooks)
+                            });
+                        return Ok(preserved_dir || preserved_entry);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// The first target of the link at `start`, as written, if following it and
 /// every link after it reaches the place of a hook this installer replaces in
 /// `hooks_dir`: AICD §13.
@@ -1273,22 +1439,50 @@ fn existing_directory(path: &Path) -> io::Result<Option<PathBuf>> {
 /// directory (a team's shared hooks, say) does not count, and neither does a
 /// chain longer than [`LINK_HOPS_CAP`], which no process could run either.
 ///
-/// A directory that does not exist yet cannot be resolved by the operating
-/// system, so it is read lexically (`lexically_normal`): `ori-original/` the
-/// installer creates later, and `ori-original/../post-merge` reaches
-/// `post-merge`. What that reading lands on is looked at. If it is the hooks
-/// directory, the link reaches a hook as before. If it is a directory that is
-/// there, the walk goes on from it as if the operating system had resolved
-/// the path to it, so a link in it is followed
-/// (`ori-original/../../shared/relay`, where `shared/relay` links to a hook).
-/// If it is not there, the chain ends, since there is nothing to follow, and
-/// so does a chain that ends at an entry that is not there (a dangling link
-/// reaches nothing).
+/// A directory that is not there cannot be resolved by the operating system,
+/// and the way through it may run through what this install creates. So that
+/// way is first resolved one component at a time
+/// (`way_enters_what_the_install_creates`: each link is followed where it
+/// stands, and each `..` is taken after the link before it), and what is done
+/// with it depends on where it first fails:
+///
+/// - (a) A way that first fails at `ori-original/` of the hooks directory, or
+///   at an entry of it named for a hook this installer replaces, is refused,
+///   whatever it would reach (`ori-original/../post-merge`; `M/post-merge`
+///   where `M` links to `ori-original/..`). `preserve` makes the directory for
+///   the first hook it keeps and an entry in it for each foreign hook, as a
+///   hard link or as a link re-pointed one level down. What it will make is
+///   not modelled: that would be a second implementation of `preserve`, and a
+///   hook that is a link to a directory, which `preserve` re-points, shows the
+///   two would differ. Refusing fails closed. It costs a link whose way runs
+///   through a missing `ori-original/` and would reach nothing, refused on a
+///   first install; no one writes one, since the directory is Ori's and is not
+///   there yet.
+/// - (b) Any other way that fails first at a directory that is not there
+///   reaches nothing on that way. It is still read by its text
+///   (`lexically_normal`) and refused if that reading reaches a hook
+///   (`nowhere/../post-merge`). That is an over-refusal, kept as defense in
+///   depth because it fails closed. What the text lands on is looked at: if it
+///   is the hooks directory, the link reaches a hook as before; if it is a
+///   directory that is there, the walk goes on from it and a link in it is
+///   followed (`nowhere/../../shared/relay`, where `shared/relay` links to a
+///   hook), though that directory is where the text puts the way and not
+///   necessarily where the way goes; if it is not there, the chain ends, as
+///   does a chain that ends at an entry that is not there (a dangling link
+///   reaches nothing).
+/// - (c) The spool directory is not modelled. `install` creates it, with any
+///   missing ancestors, after this check. A link whose way runs through the
+///   spool's future path before the first install is read by its text only,
+///   and a link inside that way is not followed. The spool is outside the
+///   repository ([`HooksError::SpoolInsideTree`]) and its path is the engine's
+///   choice.
 ///
 /// A link whose target cannot exist, because it goes through a regular file or
 /// carries a name too long for the file system, is not a missing entry: it
 /// refuses the installation as an IO error. That fails closed, and is
-/// accepted.
+/// accepted. It holds where the operating system's own resolution meets the
+/// regular file. Behind a missing directory, a way through a regular file is
+/// read as reaching nothing, and the link passes.
 ///
 /// # Errors
 ///
@@ -1322,10 +1516,23 @@ fn follow_chain_to_managed_hook(
         };
         let (directory, exists) = match fs::canonicalize(parent) {
             Ok(directory) => (directory, true),
-            // Not there yet: the installer may create it. Read it by its text,
-            // and if that reading is a directory that is there, go on from it:
-            // the system will resolve the path to it once the directory exists.
+            // A directory of the way is not there. If the way first fails at
+            // what this install creates, the link is refused, whatever it
+            // would reach: what the install makes there is not modelled.
+            // Otherwise the way reaches nothing, but its text is read as a
+            // second look that fails closed, and if that reading is a
+            // directory that is there, the walk goes on from it. That
+            // directory is where the text puts the way, which is not always
+            // where the way goes (a `..` after a link).
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if way_enters_what_the_install_creates(
+                    parent,
+                    hooks_dir,
+                    canonical_hooks,
+                    fold_case,
+                )? {
+                    return Ok(Some(written));
+                }
                 let lexical = lexically_normal(parent);
                 match existing_directory(&lexical)? {
                     Some(directory) => (directory, true),
@@ -2653,6 +2860,328 @@ mod tests {
                 "a link to a name this file system does not fold was moved"
             );
         }
+    }
+
+    /// Once `ori-original/` exists and `post-merge` is the engine's script,
+    /// `link` resolves to that `post-merge`: the premise of the tests below,
+    /// which a layout that did not reach it would make vacuous. Call it after
+    /// the refusal has been checked, since it makes both.
+    #[cfg(unix)]
+    fn assert_link_reaches_post_merge_once_ori_original_exists(hooks_dir: &Path, link: &Path) {
+        fs::create_dir(hooks_dir.join("ori-original")).unwrap();
+        fs::write(hooks_dir.join("post-merge"), "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            fs::canonicalize(link).unwrap(),
+            fs::canonicalize(hooks_dir).unwrap().join("post-merge"),
+            "the layout does not reach the engine's post-merge, so the test proves nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_link_through_a_dangling_link_into_ori_original_is_refused() {
+        // H2: `M -> ori-original/..` goes nowhere today, and is the hooks
+        // directory once the install has made `ori-original/`, so
+        // `post-checkout -> M/post-merge` would run the engine's script.
+        let scratch = Scratch::new("way-dangling-link");
+        let (repo, spool, hooks_dir, theirs) = repository_with_a_users_post_commit(&scratch);
+        std::os::unix::fs::symlink("ori-original/..", hooks_dir.join("M")).unwrap();
+        std::os::unix::fs::symlink("M/post-merge", hooks_dir.join("post-checkout")).unwrap();
+        assert!(!hooks_dir.join("ori-original").exists());
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("M/post-merge"),
+            &["M", "post-checkout", "post-commit"],
+        );
+        assert_eq!(
+            fs::read_to_string(hooks_dir.join("post-commit")).unwrap(),
+            theirs
+        );
+        assert_link_reaches_post_merge_once_ori_original_exists(
+            &hooks_dir,
+            &hooks_dir.join("post-checkout"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_dangling_link_into_ori_original_from_outside_the_hooks_directory_is_refused() {
+        // H2b: the link that goes nowhere is `.git/D`, outside `hooks/`.
+        let scratch = Scratch::new("way-dangling-link-outside");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        std::os::unix::fs::symlink("hooks/ori-original/..", repo.join(".git").join("D")).unwrap();
+        std::os::unix::fs::symlink("../D/post-merge", hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("../D/post-merge"),
+            &["post-checkout", "post-commit"],
+        );
+        assert_link_reaches_post_merge_once_ori_original_exists(
+            &hooks_dir,
+            &hooks_dir.join("post-checkout"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_link_whose_way_goes_up_through_a_linked_directory_is_refused() {
+        // H3: the way is `ori-original/../L/../../post-merge`, and once
+        // `ori-original/` exists `L/..` leaves from `x/y`, the directory `L`
+        // links to, so the way ends at `hooks/post-merge`. Read by its text
+        // it ends at `.git`.
+        let scratch = Scratch::new("way-up-through-link");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        fs::create_dir_all(hooks_dir.join("x").join("y")).unwrap();
+        std::os::unix::fs::symlink("x/y", hooks_dir.join("L")).unwrap();
+        std::os::unix::fs::symlink(
+            "ori-original/../L/../../post-merge",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("ori-original/../L/../../post-merge"),
+            &["L", "post-checkout", "post-commit", "x"],
+        );
+        assert_link_reaches_post_merge_once_ori_original_exists(
+            &hooks_dir,
+            &hooks_dir.join("post-checkout"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_link_whose_way_lands_beside_a_linked_directory_is_refused() {
+        // H3b: the way is `ori-original/../../x/L/../post-merge`, where
+        // `.git/x/L` links to `hooks/sub`. Read by its text it lands on
+        // `.git/x`, a directory that is there; the system lands on `hooks`.
+        let scratch = Scratch::new("way-beside-link");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        let git_dir = repo.join(".git");
+        fs::create_dir_all(hooks_dir.join("sub")).unwrap();
+        fs::create_dir_all(git_dir.join("x")).unwrap();
+        std::os::unix::fs::symlink("../hooks/sub", git_dir.join("x").join("L")).unwrap();
+        std::os::unix::fs::symlink(
+            "ori-original/../../x/L/../post-merge",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("ori-original/../../x/L/../post-merge"),
+            &["post-checkout", "post-commit", "sub"],
+        );
+        assert_link_reaches_post_merge_once_ori_original_exists(
+            &hooks_dir,
+            &hooks_dir.join("post-checkout"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_link_that_goes_up_from_a_linked_directory_to_a_missing_ori_original_is_refused()
+    {
+        // The H3 layout with the missing directory after the link and its
+        // `..`, so the resolver must follow `L` and take the `..` from where
+        // `L` leads to know where `ori-original` would be: `hooks/x/y`, up
+        // twice, is `hooks`. The text of `L/../..` is `.git`, where an
+        // `ori-original` is not the installer's.
+        let scratch = Scratch::new("way-up-from-link-then-missing");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        fs::create_dir_all(hooks_dir.join("x").join("y")).unwrap();
+        std::os::unix::fs::symlink("x/y", hooks_dir.join("L")).unwrap();
+        std::os::unix::fs::symlink(
+            "L/../../ori-original/../post-merge",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("L/../../ori-original/../post-merge"),
+            &["L", "post-checkout", "post-commit", "x"],
+        );
+        assert_link_reaches_post_merge_once_ori_original_exists(
+            &hooks_dir,
+            &hooks_dir.join("post-checkout"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_link_that_leaves_by_a_linked_directory_beside_the_hooks_to_a_missing_ori_original_is_refused()
+     {
+        // The H3b layout with the missing directory after the link: from
+        // `hooks`, up to `.git`, into `x`, through `L` to `hooks/sub`, and up
+        // from there to `hooks`. The text of `x/L/..` is `.git/x`.
+        let scratch = Scratch::new("way-beside-link-then-missing");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        let git_dir = repo.join(".git");
+        fs::create_dir_all(hooks_dir.join("sub")).unwrap();
+        fs::create_dir_all(git_dir.join("x")).unwrap();
+        std::os::unix::fs::symlink("../hooks/sub", git_dir.join("x").join("L")).unwrap();
+        std::os::unix::fs::symlink(
+            "../x/L/../ori-original/../post-merge",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("../x/L/../ori-original/../post-merge"),
+            &["post-checkout", "post-commit", "sub"],
+        );
+        assert_link_reaches_post_merge_once_ori_original_exists(
+            &hooks_dir,
+            &hooks_dir.join("post-checkout"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_link_through_a_hook_that_preserve_will_re_point_is_refused() {
+        // H4, with no user `post-commit`: `pre-push` links to the real
+        // directory `x`, so the install keeps it as `ori-original/pre-push`,
+        // a link to `../x`, and `post-checkout ->
+        // ori-original/pre-push/../post-merge` then goes through `x` and up to
+        // `hooks`. The text of the way is `hooks/ori-original`.
+        let scratch = Scratch::new("way-through-repointed-hook");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(hooks_dir.join("x")).unwrap();
+        std::os::unix::fs::symlink("x", hooks_dir.join("pre-push")).unwrap();
+        std::os::unix::fs::symlink(
+            "ori-original/pre-push/../post-merge",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("ori-original/pre-push/../post-merge"),
+            &["post-checkout", "pre-push", "x"],
+        );
+        // What the install would have made: `preserve` re-points the link.
+        fs::create_dir(hooks_dir.join("ori-original")).unwrap();
+        std::os::unix::fs::symlink("../x", hooks_dir.join("ori-original").join("pre-push"))
+            .unwrap();
+        fs::write(hooks_dir.join("post-merge"), "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            fs::canonicalize(hooks_dir.join("post-checkout")).unwrap(),
+            fs::canonicalize(&hooks_dir).unwrap().join("post-merge"),
+            "the layout does not reach the engine's post-merge, so the test proves nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_link_through_a_missing_hook_entry_of_an_existing_ori_original_is_refused() {
+        // After one install with a user's `post-commit`, `ori-original/`
+        // holds `post-commit` and `pre-push` is the engine's script.
+        // `pre-commit` is not a hook the installer replaces, so nothing of the
+        // engine's stands in its place. `ori-original/pre-push` is missing and
+        // is a hook's name, so the way is refused, whether or not this install
+        // would make it: it would, the moment a user's own `pre-push`
+        // replaced the engine's.
+        let scratch = Scratch::new("way-through-missing-entry");
+        let (repo, spool, hooks_dir, theirs) = repository_with_a_users_post_commit(&scratch);
+        GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+        assert_eq!(
+            fs::read_to_string(preserved(&repo, GitHook::PostCommit)).unwrap(),
+            theirs
+        );
+        assert!(fs::symlink_metadata(preserved(&repo, GitHook::PrePush)).is_err());
+        assert!(
+            fs::read_to_string(hooks_dir.join("pre-push"))
+                .unwrap()
+                .contains(MARKER)
+        );
+        std::os::unix::fs::symlink(
+            "ori-original/pre-push/../post-merge",
+            hooks_dir.join("pre-commit"),
+        )
+        .unwrap();
+        // The first install made the spool; the refused one must not make it
+        // again, which `expect_refused_link` looks for.
+        fs::remove_dir_all(&spool).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("pre-commit"),
+            Path::new("ori-original/pre-push/../post-merge"),
+            &[
+                "ori-original",
+                "post-commit",
+                "post-merge",
+                "post-rewrite",
+                "pre-commit",
+                "pre-push",
+            ],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_missing_entry_of_ori_original_that_is_not_a_hook_name_is_not_refused() {
+        // The same layout, but the missing entry is `notahook`, which the
+        // installer never makes in `ori-original/`: the way reaches nothing,
+        // and the link is left as it was.
+        let scratch = Scratch::new("way-through-missing-non-hook");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+        std::os::unix::fs::symlink("ori-original/notahook/x", hooks_dir.join("pre-commit"))
+            .unwrap();
+        let report = GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+        assert!(report.is_unchanged(), "{report:?}");
+        assert_eq!(
+            fs::read_link(hooks_dir.join("pre-commit")).unwrap(),
+            Path::new("ori-original/notahook/x")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_loop_where_a_missing_directory_is_read_by_its_text_refuses_the_install() {
+        // `nowhere` is not `ori-original`, so the way is not refused for
+        // entering what the install creates. Its text,
+        // `nowhere/../../loopdir`, lands on `.git/loopdir`, which links to
+        // itself: the landing cannot be resolved, and the reason is not that
+        // it is missing, so the install is refused as an IO error and not
+        // passed (AICD §14).
+        let scratch = Scratch::new("way-text-lands-on-a-loop");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        std::os::unix::fs::symlink("loopdir", repo.join(".git").join("loopdir")).unwrap();
+        std::os::unix::fs::symlink(
+            "nowhere/../../loopdir/relay",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+
+        let error = GitHooks::new(&repo, &spool).unwrap().install().unwrap_err();
+        match &error {
+            HooksError::Io { path, .. } => assert_eq!(path, &hooks_dir.join("post-checkout")),
+            other => panic!("expected an IO error naming the link, got {other}"),
+        }
+        assert_eq!(
+            hook_dir_names(&repo),
+            ["post-checkout", "post-commit"],
+            "a refused installation wrote into the hooks directory"
+        );
+        assert!(
+            !spool.exists(),
+            "the spool was created by a refused install"
+        );
     }
 
     #[cfg(unix)]
