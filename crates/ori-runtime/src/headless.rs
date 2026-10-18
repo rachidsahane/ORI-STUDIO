@@ -1727,12 +1727,21 @@ mod tests {
     /// million writes, many seconds at the speed a shell writes), so that a
     /// drain that never stops leaves an orphan that ends by itself rather
     /// than one that runs for ever.
+    ///
+    /// The empty `echo` to `/dev/null` just before the marker is for bash 3.2,
+    /// which is `/bin/sh` on macOS. When a write fails, bash 3.2 keeps the
+    /// bytes in its output buffer and sends them with its next `echo`, which
+    /// would put the failed `x` in front of `broken_pipe` in the marker. The
+    /// empty `echo` sends them to `/dev/null` instead. In a shell that keeps
+    /// nothing back, it writes one empty line to `/dev/null` and changes
+    /// nothing.
     #[cfg(unix)]
     const T0150_FLOODING_DESCENDANT: &str = "( trap '' PIPE; exec 1>/dev/null; n=0; \
          while echo x >&2; do \
            n=$((n+1)); \
            [ \"$n\" -lt 5000000 ] || { echo gave_up > \"$ORI_T_0150_MARKER\"; exit 0; }; \
          done; \
+         echo > /dev/null; \
          echo broken_pipe > \"$ORI_T_0150_MARKER\" ) & echo done";
 
     /// The session's standard-error stop flag, as a test holds it. The tests
