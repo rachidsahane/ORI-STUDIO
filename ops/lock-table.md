@@ -1867,3 +1867,35 @@ Recorded as follow-ups, not in this ticket:
 | 114 | ORI-T-0181, slices S3 (`aicd_context`) and S8 (`aicd_search`) | `crates/ori-mcp/src/tools/memory.rs` (new), `crates/ori-mcp/src/tools/mod.rs` (one module line) | 2 | `/home/user/wt/ORI-T-0181`, `feat/ORI-T-0181-memory-tools` | Sonnet 5.5 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 109, 112 and 114. The next free identifier is ORI-T-0184.
+
+---
+
+## ORI-T-0180 with ORI-T-0168 reviewed: one blocking finding, from a false premise in the lead's design; repair 1 dispatched on claim 109
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**The review** used three lenses, two skeptics per finding, 14 agents (`review-0180-full.json`). It reproduced **F1** with real git 2.43:
+- `post-checkout -> ../logs/` + 40 × `../` + `proc/self/cwd/.git/hooks/post-merge` installs in a fresh repository, and after the first commit every checkout records a false `post-merge`;
+- the same holds through `../rebase-merge/` on every rebase, and through a working-tree directory a checkout creates.
+
+The per-process walk stopped at the missing directory, and bullet (b)'s text reading then resolved `/proc/self` as the installer's process. The lead's package said "a way that does not exist reaches nothing for git either". That premise is false: git creates those directories itself, after the install and before it runs a hook. The lock-table row for ORI-T-0180 had asked for "every hop, not only on NotFound". The lead's package narrowed that without reason. Recorded as a lead error.
+
+Four should-fix findings were confirmed:
+- **F2**, links inside a real `ori-original/` are never judged, yet the scripts run them;
+- **F3**, `status()` reports a healthy chain when `ori-original` is made a link after an install;
+- **F4**, a false doc sentence on the hop cap;
+- **F5**, no test reaches the refusal off Linux.
+
+There were eight notes.
+
+**Repair 1** (attempt 2 of 3, Sonnet, the same coder):
+- the walk goes on past a missing component: by text until it climbs back to an existing directory, then physically;
+- the hook-named links inside `ori-original/` get the same two checks;
+- `status()` refuses a broken `ori-original` as `install` does;
+- the walk asks the predicate before canonicalizing, so a macOS `/dev/fd` test can run on CI;
+- a test pins that the walk runs before the chain check;
+- the notes F4, F6 (FUSE and user namespaces in the limits, FreeBSD's `/compat/linux/proc`), F7, F8, F9 and F13 are taken.
+
+Recorded, not changed: F11 (equivalent or masked mutants) and F12 (a way that only passes through `/proc` is refused, by design).
+
+**State after this section:** the claims held are 20, 109 (repair 1), 112 and 114. The next free identifier is ORI-T-0185 (ORI-T-0184, slice S7, is allocated, package under critique).
