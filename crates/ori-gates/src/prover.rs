@@ -100,10 +100,7 @@
 //! [`crate::prover::GATE_PROVEN_EVENT_KIND`], `gate.proven`, which `spec/LLD.md`
 //! section 4 gives as its example of the `domain.verb_past` naming rule and
 //! `spec/design/DESIGN.md` lists as the event the readiness screen subscribes
-//! to. `spec/API_SPEC.md` section 2 lists `gate.run` and `gate.inert` among the
-//! kinds and not `gate.proven`; the list there is introduced by "Kinds
-//! include", so it is not closed, but it is a gap in that document that this
-//! module reports rather than papers over.
+//! to. `spec/API_SPEC.md` section 2 lists it among the event kinds as well.
 //!
 //! A [`crate::prover::Proven`] holds everything the runbook's step 4, "Store the
 //! GateProof with both run references", needs: the proof with its two
