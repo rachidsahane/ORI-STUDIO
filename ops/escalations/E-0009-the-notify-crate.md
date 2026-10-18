@@ -34,3 +34,12 @@ CI on 3e53283, the first run to carry ORI-T-0054, failed gate 7: `windows-sys` i
 - With CI's own `cargo-deny` 0.20.2 (fetched by the pinned URL and checked against the pinned digest), run in a scratch directory against `feat/ORI-T-0054-watch`'s lock: `deny.toml` as it is fails bans; adding `[graph] targets` for the six supported triples still fails, because `cargo-deny` keeps an edge if any listed target matches it; one skip entry `{ crate = "windows-sys@0.61.2", reason = ... }` passes bans, licenses and sources.
 
 **Answered by the operator in session on 2026-10-12: one version-pinned skip entry**, `windows-sys@0.61.2`, with its reason written in `deny.toml` and here. It is pinned to the version, so any other duplicate, or a later bump of either `windows-sys`, is still refused. It is not a general relaxation of `multiple-versions = "deny"`. The entry lands with ORI-T-0054's repair (ORI-T-0159), never alone.
+
+## Correction: what the pinned skip refuses (2026-10-18)
+
+The sentence above, "any other duplicate, or a later bump of either `windows-sys`, is still refused", is half true, and the lead wrote it. A review of ORI-T-0159 (finding F5, confirmed by two skeptics against `cargo-deny`'s documented skip semantics) showed the gap. A skip pinned to `windows-sys@0.61.2` takes that version out of the duplicate count, so the skip still refuses:
+- a third `windows-sys`;
+- a change of 0.61.2 itself, because the skip no longer matches;
+- any other crate's duplicate.
+
+It does **not** refuse a bump of the 0.60 line alone, say 0.60.2 to 0.60.3 while `mio` stays on 0.61.2. Only one other version is left to count, so bans passes and gate 7 does not return the question. The operator's answer is unchanged. ORI-T-0159's repair corrects the comment in `deny.toml` to say this, and adds iOS to the targets on which `notify` takes `mio`.

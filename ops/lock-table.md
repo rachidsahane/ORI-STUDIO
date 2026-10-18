@@ -1173,3 +1173,38 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 97 is released.
 
 **State after this section:** the claims held are 20, 90, 94 (stopped), 95 (stopped) and 96. The next free identifier is ORI-T-0168.
+
+---
+
+## ORI-T-0159 reviewed; repair 1 dispatched on claim 90; ORI-T-0168 allocated; claim 96 under review
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**ORI-T-0159 review.** A four-lens adversarial review of ORI-T-0159's three commits (f8f86b2..f02e877) ran: correctness, security, tests and platform, with two skeptics per finding, 15 agents in all. The results are in the session scratchpad (`review-0159-full.json`). It confirmed four should-fix findings:
+
+| Finding | What | The lead's decision |
+|---|---|---|
+| F1 | macOS settle rule 3 counts a real deletion as transient. Case (a): `rm`, recreate, `mv` into an ignored directory. Case (a'): a recently written tracked file moved out of the root. Both reproduced through `translate` and the accumulator | Narrow rule 3: transient requires a creation, a departure, **no plain removal bit**, and **an accepted arrival in the window** (a new `Raw::Arrived` for the present half of an unpaired rename) |
+| F2 | No test pins the creation half of rule 3; a mutation dropping it passes all 90 tests | Five new tests, one per half and per F1 case, and mutation proof for each condition |
+| F4 | The three-hop chain test is masked by the two-hop link `a`, which sorts first; `LINK_HOPS_CAP = 2` passes every test | Rename the intermediates so the three-hop chain is the one refused, and prove a cap of 2 fails |
+| F5 | `deny.toml`'s comment, and the lead's own sentence in E-0009, say a later bump of either `windows-sys` is refused. A bump of the 0.60 line passes | Reword the comment; add iOS (note F14) to the reason. E-0009 corrected by the lead today |
+
+F3, the link scan failing open when `canonicalize` fails, was contested, and both skeptics rated it a note. The lead takes it all the same, with note F6, a link through `ori-original/` before the installer creates it. The fix fails closed on any error other than a missing entry, and reads a directory that does not exist yet lexically. Notes F9 and F10 (a deletion under a directory that became a file is dropped as rejected) and the documentation notes F7, F11 and F12 are also in the repair. The lead records the rest without action:
+- F8: Windows verbatim paths, covered by the lexical fallback for a missing entry only;
+- F15: the macOS rename-over test still needs both records in one window;
+- F16: ORI-T-0163;
+- F17: a failure message;
+- F18: a count in the coder's report;
+- F19: pre-existing.
+
+**ORI-T-0159, repair 1** (attempt 2 of 3), Sonnet 5.5, on claim 90. The scope is unchanged: `deny.toml` (comment and reason only), `crates/ori-watch/src/watcher.rs` and `crates/ori-watch/src/hooks.rs`. The package is the lead's design, decision by decision. Two of ORI-T-0159's own tests change. They have never reached `main`, the precedent of ORI-T-0054's macOS repair applies, and only the named lines change:
+- the temporary test pushes an arrival for the target;
+- the unpaired-rename test expects `Raw::Arrived` for the present half.
+
+| Ticket | What | Modules | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0168 | Review note 0159-F13, pre-existing and outside ORI-T-0159's diff: `ori-original` as a symbolic link is refused only when some hook is foreign. The new link scan treats it as a link to a directory, so the installed scripts can exec themselves without end. Refuse an `ori-original` that is a link whatever the hooks are | `crates/ori-watch/src/hooks.rs` | 1 | after ORI-T-0159 | 2026-10-18 |
+
+**Claim 96 (ORI-T-0166, slice S1) is built.** Two commits, 58fcd57 and 8214add. The coder reports 1379 workspace tests passing and hand mutations caught. The lead read the roles table cell by cell against the design, the order project, then reach, then role, and the sealing of `UserToolGrant`. The four-lens review is running.
+
+**State after this section:** the claims held are 20, 90 (repair 1 dispatched), 94 (stopped), 95 (stopped) and 96 (under review). The next free identifier is ORI-T-0169.
