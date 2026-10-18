@@ -1419,3 +1419,17 @@ Claim 101 is disjoint from the held claims (20, 90). Gate 5 is not wired into `s
 **ORI-T-0151 is folded into ORI-T-0149** rather than dispatched. Capping the transcript by dropping entries would break AICD §17's complete audit trail, and could drop the `session/request_permission` entry ORI-P1-039 inspects. Refusing at a cap needs a new `TranscriptError` variant, and that type is declared in `crates/ori-core/src/adapters.rs` (tier 2) under `spec/API_SPEC.md` section 4's contract. The in-place append that removes the per-entry clone and the cap's form (most likely a budget that ends the session, never a silent drop) are decided with ORI-T-0149's design of a production-fit `AcpClient`.
 
 **State after this section:** the claims held are 20, 90 (repair 2 handed back; integration built on `integ/ORI-T-0159`, under review) and 101. The next free identifier is ORI-T-0173.
+
+---
+
+## Claim 101 integrated: ORI-T-0171, gate 5's doc test fences
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 101 | ORI-T-0171, gate 5's `doc_tests()` tracks every fence and closes it as CommonMark 0.31 section 4.5 does; tilde fences are doc tests too (Haiku; the code and tests were the lead's) | The committed file is byte-identical to the lead's two edits applied to the base, which were proved in a copy before dispatch: five mutations each fail a new test. The twelve removed lines are the old `doc_tests` body; no test was changed or removed. The auto-mode classifier denied the coder's `cargo test -p ori-gates` as "Security Test Removal". The coder did not retry it or route around it, and reported it. The lead runs that suite on every integration as its own verification, and ran it here | Fast-forwarded as b326afb. `cargo test -p ori-gates --locked`: 194 passed, both new tests among them. The coder's fmt, clippy, strict doc and gate 13 runs exited 0 |
+
+Claim 101 is released.
+
+**State after this section:** the claims held are 20 and 90 (repair 2 handed back; integration built on `integ/ORI-T-0159`, under review). The next free identifier is ORI-T-0173.
