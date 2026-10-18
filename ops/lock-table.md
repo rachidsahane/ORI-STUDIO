@@ -1932,3 +1932,63 @@ Claim 109 is released.
 It must land before ORI-T-0055.
 
 **State after this section:** the claims held are 20, 112 and 114. The next free identifier is ORI-T-0186 (ORI-T-0184, slice S7, is allocated, its package under revision after its critique; ORI-T-0185 is allocated above).
+
+---
+
+## Paused at the operator's request: two reviews, the S7 package and the S4/S5/S9 brief recorded; nothing new dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]]. The operator asked for the work in flight to be finished and then everything paused. Nothing new was dispatched after that request. CI is green on `61d435a`, all 17 checks on Linux, macOS and Windows, including ORI-T-0180's macOS `/dev/fd` test.
+
+**ORI-T-0163 reviewed (claim 112 held; repair 1 to design).** The review used three lenses, two skeptics per finding, 20 agents. It found nothing blocking. Confirmed:
+- **F1** (should-fix). When `mark_reconciled` finds the root gone, no batch ever reports `RootGone`: `root_gone_known` then drops the backend's own report. The docs still say the state is delivered in a batch and held only until reconciliation. Reproduced with real inotify, including the documented order (drain, take the token, the root removed during the comparison). The fix is a pending flag so the next batch carries `RootGone` without a second health record, or docs that say this loss is held in health only, for good.
+- **F2** (should-fix). On Windows, a root whose deletion is still pending passes the look: std's `symlink_metadata` falls back to `FindFirstFileExW` on `ERROR_ACCESS_DENIED`, so the removal is never recorded.
+- **F3** (should-fix). Once 16 distinct reasons are held, `health()` never names `RootGone`. The watcher then refuses reconciliation for ever, and nothing public says why.
+- **F6** (should-fix). No test pins that a watcher whose root is gone is never reconciled. The mutation that drops the rule survives on every platform.
+- **F7** (should-fix). `mark_reconciled`'s doc and the module doc disagree on whether Windows can tell a replaced root apart.
+- **F5** (note). No Windows test checks that `mark_reconciled` looks at the root.
+- **F8** (note). The comment above ORI-T-0054's Windows-gated root-removal test is now false. That is a `test_modified` follow-up, not this ticket's.
+
+F4 was refuted, and there were ten notes. The result is `review-0163-full.json` in the session scratchpad. The coder's branch `fix/ORI-T-0163-root-probe` (at `fd5ee06`) exists only in this container.
+
+**ORI-T-0181, slices S3 and S8, reviewed (claim 114 held; repair 1 to design).** The review used four lenses, 13 agents. It found nothing blocking. Confirmed:
+- **F1** (should-fix). No test pins that `aicd_context` reads the ticket argument rather than the binding's ticket. A lead bound to A that asks for B would be served A while `mcp.tool_called` records B, and all 13 tests pass. Reproduced with a probe and a mutation.
+- **F2** (should-fix). The poison, product and cap checks are tested only through `aicd_search`.
+- **F3** (should-fix). The event table says an infrastructure fault is answered `unavailable`, but a store fault the enforcer meets is answered as a scope refusal, `log_unreadable`.
+- **F4** (should-fix and note). The `ProductMismatch`/`SeamBroken` row gives the wrong reason for their being unreachable.
+
+There were 18 notes. F5 (the private lock-and-product check) is settled on S7's side. The result is `review-0181-full.json`. The branch `feat/ORI-T-0181-memory-tools` (at `a576fbe`) exists only in this container.
+
+**ORI-T-0184, slice S7, package ready.** A 29-agent critique of the first draft verified three blocking design errors of the lead's:
+- a link at an evidence file is refused by the enforcer as `log_unreadable` before any read;
+- the budget rule needed a size it forbade itself to read;
+- no shared helper existed for the input checks.
+
+The revision decides each of them:
+- read, then measure, with a budget of 336 KiB that holds `aicd_report`'s largest record whole;
+- the split `lock_inputs` in `memory.rs`, with no cap check;
+- the two lockout causes pinned;
+- twelve tests and ten mutations.
+
+A 6-agent re-critique found three should-fix issues, all applied:
+- `REPORT_FIELDS_MAX` would be dead code, so a third const assert now uses it;
+- test 1's planted payload must be built with `json!`, because of Windows paths;
+- each field of a test record needs a distinct name.
+
+The package is committed as `ops/tickets/ORI-T-0184-s7-aicd-evidence.md`. It is dispatched once S3's repair is integrated, on a new claim. **A constraint it records for S4:** `aicd_report` files one `NewReportField` per `content` entry, with `raw_text` unchanged, or S7's constants must be revisited.
+
+**Slices S4, S5 and S9 mapped.** A read-only mapping used 4 agents. Its brief is committed as `ops/tickets/batch-10-s4-s5-s9-brief.md`. Readiness:
+- **S5** (`aicd_ticket_upgrade`, `aicd_spec_propose`) is dispatchable now against fake desks;
+- **S4** (`aicd_report`) is dispatchable for `closing` and `blocked`. `qa_run` and `drift_audit` are refused by a fixed code until a template names their fields. It must check that the ticket exists (S2-F12) and append nothing between the barrier's rows;
+- **S9** (`aicd_plan_submit`, `aicd_escalate`) waits on the lead's decisions D1 to D6 and on new `PlanDesk` and `EscalationDesk` ports.
+
+The brief recommends this order: S3 integrated first, then S5 and S4 in parallel, then S9.
+
+**When the session resumes, in this order:**
+1. Design and dispatch ORI-T-0181 repair 1 (claim 114, attempt 2 of 3), then integrate S3 and S8.
+2. Design and dispatch ORI-T-0163 repair 1 (claim 112, attempt 2 of 3).
+3. Dispatch ORI-T-0184 (S7) from its committed package.
+4. Write the S5 and S4 packages from the brief, critique them, and dispatch them in parallel. Then S9.
+5. Write ORI-T-0185's package, which includes the lead's decision on hook links whose way enters the working tree.
+6. The operator's open items: ORI-T-0165, ORI-T-0135, ORI-T-0131, ORI-T-0154, ORI-T-0164.
+
+**State after this section:** the claims held are 20, 112 and 114. The next free identifier is ORI-T-0186 (ORI-T-0184 and ORI-T-0185 are allocated).
