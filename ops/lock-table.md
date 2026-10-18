@@ -1383,3 +1383,9 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 98 is released. Slice S8 (`aicd_search`) now has its prerequisite, once S2 and S3 land.
 
 **State after this section:** the claims held are 20 and 90 (repair 2, the last attempt). The next free identifier is ORI-T-0173.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 100 | ORI-T-0139, code docs quoting the superseded `system` rule ("only for scheduled triggers and watchers") quote the current one (`spec/DATA_MODEL.md` section 4, with "the engine's recovery after a restart"). Five doc passages; every edit written by the lead | `crates/ori-core/src/types.rs`, `crates/ori-core/src/ticket.rs`, `crates/ori-store/src/event_log.rs`, `crates/ori-memory/src/barrier.rs`, `crates/ori-memory/src/scope.rs` (doc comments only) | 2 | Haiku 5.5 | `docs/ORI-T-0139-system-actor-rule` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 100 is disjoint from the held claims (20, 90). Two passages the ticket named are left as they are. `ticket.rs`'s module doc already says `system` is also the recovery's actor. `barrier.rs`'s quote sits in a test's doc comment, which gate 5's detector reads as part of the test, so it is recorded, not edited.
