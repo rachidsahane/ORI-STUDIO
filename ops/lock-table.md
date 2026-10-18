@@ -1992,3 +1992,46 @@ The brief recommends this order: S3 integrated first, then S5 and S4 in parallel
 6. The operator's open items: ORI-T-0165, ORI-T-0135, ORI-T-0131, ORI-T-0154, ORI-T-0164.
 
 **State after this section:** the claims held are 20, 112 and 114. The next free identifier is ORI-T-0186 (ORI-T-0184 and ORI-T-0185 are allocated).
+
+---
+
+## Resumed: both repairs dispatched, a Windows compile check for every coder, S5 and S4 designed
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]]. The operator said to continue. The coder branches of ORI-T-0163 and ORI-T-0181 survived the pause.
+
+**Repair 1 of ORI-T-0181, slices S3 and S8** (claim 114, attempt 2 of 3, Sonnet, `ticket-0181-r1.md`):
+- F1: a test that a non-coder bound to one ticket gets the context of the ticket it names;
+- F2: both handlers are pinned through the input checks, and `read_inputs` is split, so `lock_inputs` (`pub(crate)`, the lock and product checks only) serves S7;
+- F3 and F4: the event table and the unreachability reasons corrected;
+- the notes F6, F7, F11 to F13, F15 and F17 to F21.
+
+Recorded, not taken:
+- **F8:** the claim's reading in `scope.rs`;
+- **F10:** tests that the stage and the code map pass through;
+- **F20:** S2's own doc;
+- **F22:** the Windows simulation has nothing to rewrite in `ori-mcp`;
+- **F7's other half:** nothing caps an outbound line or an agent-chosen request id. That is an S2 and W0 follow-up.
+
+**Repair 1 of ORI-T-0163** (claim 112, attempt 2 of 3, Sonnet, `ticket-0163-r1.md`):
+- `RootGone` is exempt from the reason cap and counted once (F3, F9, F10);
+- a loss found by `mark_reconciled` is held at once and delivered in the next batch (F1);
+- on Windows the look also opens the root, which fails on a delete-pending directory: std's `metadata` falls back to the parent's listing on access denied (F2);
+- a test pins that a gone root is never reconciled, even when it comes back (F6);
+- doc corrections, F7 and F11 to F17.
+
+The ORI-T-0054 comment F8 names stays a `test_modified` follow-up, as recorded before.
+
+**A Windows compile check for every coder.** The lead installed the `x86_64-pc-windows-gnu` standard library and the mingw C compiler (for `libsqlite3-sys`) in this container. `cargo clippy --workspace --all-targets --locked --target x86_64-pc-windows-gnu -- -D warnings` exits 0 on `546bb4f`. It compile-checks the Windows-only code that the cfg simulation never compiles. Windows tests still run only on CI. The check is in the coders' standing gate list. It lives in this container only; a new container needs the two installs again.
+
+**Slices S5 and S4 designed** from the brief in `ops/tickets/batch-10-s4-s5-s9-brief.md`. Both are dispatched once S3 is integrated, which they build on, after their pre-dispatch critique.
+- **ORI-T-0186, slice S5** (`aicd_ticket_upgrade`, `aicd_spec_propose`, `tools/desk.rs`, tier 2). Two handlers pass the call to their desks, holding them as `Box<dyn TicketDesk + Send>` and `Box<dyn SpecDesk + Send>`, with no rule of their own. The pull request reference a desk returns is integration data: it is shown only if it is 1 to 512 ASCII graphic characters, otherwise the call is `unavailable`. The content is never echoed.
+- **ORI-T-0187, slice S4** (`aicd_report`, `tools/report.rs`, tier 2):
+  - the role-and-kind table;
+  - `qa_run` and `drift_audit` refused `report_kind_not_available` until a template names their fields;
+  - the content held to the kind's constant field list, never the map's keys;
+  - the ticket checked as filed for every role (S2-F12);
+  - identifiers drawn only after every check;
+  - one `NewReportField` per field with the raw text unchanged, the constraint S7 recorded;
+  - no row between the barrier's rows, pinned by an evidence grant in a test.
+
+**State after this section:** the claims held are 20, 112 (repair 1) and 114 (repair 1). The next free identifier is ORI-T-0188 (ORI-T-0184 to ORI-T-0187 are allocated).
