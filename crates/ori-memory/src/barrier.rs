@@ -1003,9 +1003,14 @@ impl EvidenceBlob {
 /// only for a type that does not implement [`Indexable`]: if one did, both
 /// impls below would apply to it and the trait's parameter could not be
 /// inferred (E0283). It is refused for [`SanitizedField`], which does
-/// implement it (the control):
+/// implement it. The fence is a plain `compile_fail`, because rustdoc does not
+/// check an error code on the stable toolchain (a fence naming a code that
+/// does not exist passes just the same), so it would pass for any compile
+/// error; the plain fence after it, the identical probe against
+/// [`EvidenceContent`], must compile, which is what shows the refusal is the
+/// type's and not the probe's:
 ///
-/// ```compile_fail,E0283
+/// ```compile_fail
 /// trait AmbiguousIfIndexable<A> {
 ///     fn probe() {}
 /// }
@@ -1015,7 +1020,7 @@ impl EvidenceBlob {
 /// let _ = <ori_memory::barrier::SanitizedField as AmbiguousIfIndexable<_>>::probe;
 /// ```
 ///
-/// and it compiles for [`EvidenceContent`]:
+/// Against [`EvidenceContent`] the same probe compiles:
 ///
 /// ```
 /// trait AmbiguousIfIndexable<A> {
