@@ -1303,3 +1303,20 @@ Claim 95's branch had no commit. It was fast-forwarded to the session branch, so
 Claim 99 is disjoint from every held claim.
 
 **State after this section:** the claims held are 20, 90, 94 (extended by [[R46]]), 95 (retried), 96, 98 and 99. The next free identifier is ORI-T-0173.
+
+---
+
+## Claims 96 and 99 integrated; claim 95 handed to the operator and released
+
+Written by the lead on 2026-10-18 under [[R31]], [[R44]] and [[R46]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 96 | ORI-T-0166, batch 10 slice S1: `ToolScopes`, the sealed `UserToolGrant` and the first four ports, with repair 1 (Sonnet, the lead's design) | Reviewed 2026-10-18 (19 agents); repair 1 answers the six confirmed findings. The lead read the decisions in the diff: the host takes the grant by value in both methods; `Caller` carries the identity; the docs say three checks and put the text-only rule on the proxy (S6); the seal's four `compile_fail` fences are bare, single-reason, with a passing control for the use-after-move fence. Under `RUSTC_BOOTSTRAP=1` each fence fails with exactly its one error code (the coder's run). Changed lines of S1's own tests are listed in the coder's report; none ever reached `main` | `cargo test --workspace --locked --no-fail-fast`: 1388 passed, 0 failed, 9 ignored. Workspace clippy, strict doc, fmt, secret scan and gate 13 clean |
+| 99 | ORI-T-0172, ORI-P1-038 pins the order of the project and role checks ([[R46]] point 3; Haiku, documentation role) | One line, exactly the package's replacement | `cargo test -p ori-gates`: 192 passed; gate 13 clean |
+
+Claims 96 and 99 are released. Slice S2 (ORI-T-0169) can now start, once its design critique is answered.
+
+**Claim 95, ORI-T-0165: the permission classifier refused the write a second time**, this time as "Instruction Poisoning". The documentation agent first stopped on its role rules (the `docs/` branch and a missing `aicd_spec_propose`). The lead answered from the standing facts, E-0005 and the `docs/` precedent, and it went on. Its apply script was then refused before it ran. The worktree is unchanged at 826289e (checked by the lead, read-only). As [[R46]] point 2 provides, the lead gives the operator the three exact replacements (`ticket-0165.md` in the session scratchpad) and stops. Neither the lead nor any agent will make this edit by another route. Claim 95 is released: the operator may commit the text on any branch.
+
+**State after this section:** the claims held are 20, 90 (repair 1 under review), 94 (repair 1; [[R46]] patch to follow) and 98 (under review). The next free identifier is ORI-T-0173.
