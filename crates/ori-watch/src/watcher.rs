@@ -80,13 +80,17 @@
 //! that can write inside the root and races the watcher can swap a directory
 //! for a link between the last look and the listing of a new directory (or
 //! between an event and the ancestor check). The scan then lists the link's
-//! target and reports the names in it as `Created`, under an in-root path.
-//! Nothing is opened and no file content is read, so nothing leaves the
-//! target but names, and the names are not attributed to anything. This is
-//! the threat model `code_map.rs` documents in its module doc ("Threat
-//! model"): a hostile repository that holds still is in scope, and a live
-//! writer racing the walk is not claimed. Neither this module nor the
-//! backend opens a reported path or reads a file's content from the tree.
+//! target and reports the names in it as `Created`, under an in-root path (on
+//! macOS they are settled like every other path, so a name that exists is
+//! `Modified`). Nothing is opened and no file content is read, so nothing
+//! leaves the target but names, and the names are not attributed to anything.
+//! The settle step on macOS has a check-then-use window of its own: the tree is
+//! looked at once per path when the batch is settled, and a change after that
+//! look is the next batch's. All of this is the threat model `code_map.rs`
+//! documents in its module doc ("Threat model"): a hostile repository that
+//! holds still is in scope, and a live writer racing the walk is not claimed.
+//! Neither this module nor the backend opens a reported path or reads a file's
+//! content from the tree.
 //!
 //! # What is ignored, and why
 //!
@@ -205,14 +209,32 @@
 //!    a creation bit, and a deletion lost as "created and removed, so
 //!    nothing" is the miss ORI-P1-014 exists to catch; a temporary reported as
 //!    removed is noise. The ambiguity is resolved towards reporting.
-//! 3. The one exception is a temporary: a path whose events include a creation
-//!    and a rename away from it (`Raw::Departed`: the old name of a rename,
-//!    which FSEvents sends as a `RenameMode::Any` event on a path that no
-//!    longer exists) and which does not exist is transient,
-//!    counted in [`Batch::transient`] and not reported. That is an editor's
-//!    save and `sed -i`: the content survives under the new name, which is
-//!    reported. The order of the events does not matter, because FSEvents does
-//!    not keep it.
+//! 3. The one exception is a temporary, which is transient: counted in
+//!    [`Batch::transient`] and not reported. A path is transient if and only if
+//!    it does not exist and all four of these hold for the window being
+//!    settled:
+//!    1. a creation was seen for it;
+//!    2. a rename away from it was seen (`Raw::Departed`: the old name of a
+//!       rename, which FSEvents sends as a `RenameMode::Any` event on a path
+//!       that no longer exists);
+//!    3. no plain removal was seen for it. FSEvents sets its removal bit on a
+//!       path that was deleted, and a temporary that was renamed away carries
+//!       no such bit; without this condition a file that was deleted,
+//!       written again and then moved out would read as a temporary and its
+//!       deletion would be lost;
+//!    4. the window saw at least one accepted arrival (`Raw::Arrived`: the new
+//!       name of an unpaired rename, which FSEvents sends as a
+//!       `RenameMode::Any` event on a path that exists), anywhere in the root,
+//!       not ignored and not the root itself. The content of a temporary
+//!       survives under a new name that this window reports. When no accepted
+//!       arrival was seen, the new name is ignored or outside the root, so the
+//!       content did not survive anywhere this watcher reports, and the old
+//!       name's disappearance is reported as a removal. Without this condition
+//!       a file written moments before (FSEvents' stale creation bit) and then
+//!       moved out of the root would be counted as nothing.
+//!
+//!    That is an editor's save and `sed -i`. The order of the events does not
+//!    matter, because FSEvents does not keep it.
 //! 4. A path whose creation and removal cancelled but which exists is
 //!    `Modified`: it was replaced.
 //!
@@ -227,10 +249,18 @@
 //! What macOS still does not give: a new file reads as `Modified`; a file
 //! created and deleted inside one window, and not renamed, reads as `Removed`
 //! (reported, not counted as transient) even if it never outlived the window;
-//! a file created moments before and renamed away is read as a temporary (its
-//! old name is counted, its new name reported); and a temporary whose creation
-//! and rename reach the watcher more than the quiet window apart is reported,
-//! as a removal, in each batch.
+//! and a temporary whose creation and rename away reach the watcher more than
+//! the quiet window apart is reported, as a removal, in each batch. Two limits
+//! of rule 3 remain:
+//!
+//! - FSEvents gives no pairing (`fsevent.rs`, line 192), so condition 4 is a
+//!   fact about the window, not about this path. An unrelated arrival in the
+//!   same window still lets a created-and-departed path with no removal bit
+//!   read as transient: its old name is counted, and the arrival the window
+//!   did see is reported, whether or not it is that path's new name.
+//! - A temporary whose arrival reaches a later window than its departure is
+//!   reported as `Removed`: noise, the direction rule 2 already chooses.
+//!
 //! **None of this has been run on macOS.** The rules are reasoned from the
 //! source above and exercised on Linux by feeding the backend's own event
 //! sequences to the accumulator in its macOS mode (the tests in the `coalesced`
@@ -774,6 +804,15 @@ enum Raw {
         path: PathBuf,
         at: Timestamp,
     },
+    /// The new name of a rename that arrived unpaired: a creation, and in
+    /// [`Fidelity::Coalesced`] also the evidence that content arrived under a
+    /// new name in this window. FSEvents sends it as `RenameMode::Any` on a
+    /// path that exists. Where the backend's kinds are exact it is read as the
+    /// plain creation it is.
+    Arrived {
+        path: PathBuf,
+        at: Timestamp,
+    },
     Missed(MissedReason, Timestamp),
 }
 
@@ -1124,6 +1163,10 @@ fn translate(
         path: path.clone(),
         at,
     };
+    let arrival = |path: &PathBuf| Raw::Arrived {
+        path: path.clone(),
+        at,
+    };
     match event.kind {
         EventKind::Create(_) => {
             raws.extend(
@@ -1171,12 +1214,13 @@ fn translate(
                 }
             }
             // An unspecific rename names a path that now exists (the new
-            // name) or does not (the old one). FSEvents sends both halves
-            // like this, unpaired (`fsevent.rs`, line 192).
+            // name, an arrival) or does not (the old one, a departure).
+            // FSEvents sends both halves like this, unpaired (`fsevent.rs`,
+            // line 192).
             RenameMode::Any | RenameMode::Other => {
                 for path in &event.paths {
                     if fs::symlink_metadata(path).is_ok() {
-                        raws.push(change(path, ChangeKind::Created));
+                        raws.push(arrival(path));
                     } else {
                         raws.push(departure(path));
                     }
@@ -1327,9 +1371,10 @@ struct Entry {
 enum Look {
     /// Something that is not a directory is there.
     Present,
-    /// Nothing is there, or a directory is where a file was.
+    /// Nothing is there, a directory is where a file was, or an ancestor is
+    /// not a directory (so nothing can be under it).
     Absent,
-    /// An ancestor is a link, or has stopped being a directory.
+    /// An ancestor is a link.
     Refused,
     /// The look failed for a reason other than absence.
     Unknown,
@@ -1353,6 +1398,14 @@ struct Accumulator<'a> {
     /// Paths seen leaving by a rename in this window ([`Raw::Departed`]). Kept
     /// for [`Fidelity::Coalesced`] only.
     departed: BTreeSet<PathBuf>,
+    /// Paths a plain removal was seen for in this window: a removal that is
+    /// not the old name of a rename ([`Raw::Departed`]). A deleted file carries
+    /// FSEvents' removal bit and a temporary that was renamed away does not.
+    /// Kept for [`Fidelity::Coalesced`] only.
+    removed: BTreeSet<PathBuf>,
+    /// Whether this window saw an arrival ([`Raw::Arrived`]) that `observe`
+    /// accepted, anywhere in the root. Kept for [`Fidelity::Coalesced`] only.
+    arrived: bool,
     /// Paths whose creation and removal cancelled, with the time of the
     /// creation. Kept for [`Fidelity::Coalesced`] only, which counts them as
     /// transient once it knows what became of them (an exact backend counts
@@ -1376,6 +1429,8 @@ impl<'a> Accumulator<'a> {
             fidelity: Fidelity::Exact,
             created: BTreeSet::new(),
             departed: BTreeSet::new(),
+            removed: BTreeSet::new(),
+            arrived: false,
             cancelled: BTreeMap::new(),
         }
     }
@@ -1397,7 +1452,19 @@ impl<'a> Accumulator<'a> {
         match raw {
             Raw::Missed(reason, at) => self.miss(reason, at),
             Raw::Change { path, kind, at } => self.change(&path, kind, at),
-            Raw::Departed { path, at } => self.observe(&path, ChangeKind::Removed, at, true),
+            Raw::Departed { path, at } => {
+                self.observe(&path, ChangeKind::Removed, at, true);
+            }
+            // Read as a creation. Where the kinds are not exact, an arrival
+            // that was accepted is also the evidence that content arrived
+            // under a new name in this window (rule 3 of
+            // `settle_against_the_tree`).
+            Raw::Arrived { path, at } => {
+                let accepted = self.observe(&path, ChangeKind::Created, at, false);
+                if accepted && self.fidelity == Fidelity::Coalesced {
+                    self.arrived = true;
+                }
+            }
         }
     }
 
@@ -1406,11 +1473,14 @@ impl<'a> Accumulator<'a> {
     }
 
     /// Takes one event for `path`; `departed` says the removal is the old name
-    /// of a rename.
-    fn observe(&mut self, path: &Path, kind: ChangeKind, at: Timestamp, departed: bool) {
+    /// of a rename. Returns whether the event was accepted: it was inside the
+    /// root and not the root itself, not ignored, and its ancestors were real
+    /// directories (a directory that appeared counts, though it is scanned and
+    /// not reported as itself).
+    fn observe(&mut self, path: &Path, kind: ChangeKind, at: Timestamp, departed: bool) -> bool {
         let Some(relative) = relative_inside(self.root, path) else {
             self.rejected += 1;
-            return;
+            return false;
         };
         if relative.as_os_str().is_empty() {
             // The root itself: its removal is the watch dying; anything else
@@ -1418,17 +1488,17 @@ impl<'a> Accumulator<'a> {
             if kind == ChangeKind::Removed {
                 self.miss(MissedReason::RootGone, at);
             }
-            return;
+            return false;
         }
         if is_ignored(&relative, self.rules) {
             self.ignored += 1;
-            return;
+            return false;
         }
         if !self.entries.contains_key(&relative)
             && !ancestors_are_real_directories(self.root, &relative)
         {
             self.rejected += 1;
-            return;
+            return false;
         }
         if kind != ChangeKind::Removed
             && let Ok(metadata) = fs::symlink_metadata(self.root.join(&relative))
@@ -1439,12 +1509,17 @@ impl<'a> Accumulator<'a> {
             if kind == ChangeKind::Created {
                 self.scans.insert((relative, at));
             }
-            return;
+            return true;
         }
-        if departed && self.fidelity == Fidelity::Coalesced {
-            self.departed.insert(relative.clone());
+        if self.fidelity == Fidelity::Coalesced && kind == ChangeKind::Removed {
+            if departed {
+                self.departed.insert(relative.clone());
+            } else {
+                self.removed.insert(relative.clone());
+            }
         }
         self.add(relative, kind, at);
+        true
     }
 
     fn add(&mut self, relative: PathBuf, kind: ChangeKind, at: Timestamp) {
@@ -1484,7 +1559,14 @@ impl<'a> Accumulator<'a> {
     ///
     /// 1. a path that exists is `Modified`;
     /// 2. a path that does not exist is `Removed`;
-    /// 3. unless it was created and renamed away, which is transient;
+    /// 3. unless it is a temporary, which is transient: all four of these hold
+    ///    for the window being settled. A creation was seen for the path. A
+    ///    rename away from it was seen ([`Raw::Departed`]). No plain removal
+    ///    was seen for it (a deleted file carries FSEvents' removal bit and a
+    ///    temporary renamed away does not). And the window saw at least one
+    ///    accepted arrival ([`Raw::Arrived`]), the new name the temporary's
+    ///    content survives under; with none, the content survived nowhere this
+    ///    watcher reports, and the old name's disappearance is a removal;
     /// 4. a path whose creation and removal cancelled but which exists was
     ///    replaced, and is `Modified`.
     ///
@@ -1504,7 +1586,10 @@ impl<'a> Accumulator<'a> {
                 (Some(only), None) | (None, Some(only)) => only,
                 (None, None) => continue,
             };
-            let transient = self.created.contains(&relative) && self.departed.contains(&relative);
+            let transient = self.created.contains(&relative)
+                && self.departed.contains(&relative)
+                && !self.removed.contains(&relative)
+                && self.arrived;
             let settled = match self.look(&relative) {
                 Look::Refused => {
                     self.entries.remove(&relative);
@@ -1538,9 +1623,28 @@ impl<'a> Accumulator<'a> {
     }
 
     /// What `relative` is at this moment, looked at without following links.
+    ///
+    /// Each proper ancestor below the root is looked at first. A link refuses
+    /// the path. An ancestor that is a file, or anything else that is not a
+    /// directory, or that is not there, means the path cannot exist, which is
+    /// absence: a file deleted under a directory that was then replaced by a
+    /// file is a removal, not a path to drop. An ancestor that cannot be looked
+    /// at for any other reason leaves the path unknown.
     fn look(&self, relative: &Path) -> Look {
-        if !ancestors_are_real_directories(self.root, relative) {
-            return Look::Refused;
+        let mut current = self.root.to_path_buf();
+        let mut components = relative.components().peekable();
+        while let Some(component) = components.next() {
+            if components.peek().is_none() {
+                break;
+            }
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => return Look::Refused,
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Look::Absent,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Look::Absent,
+                Err(_) => return Look::Unknown,
+            }
         }
         match fs::symlink_metadata(self.root.join(relative)) {
             Ok(metadata) if metadata.is_dir() => Look::Absent,
@@ -3792,6 +3896,13 @@ mod tests {
             }
         }
 
+        fn arrival(root: &Path, name: &str) -> Raw {
+            Raw::Arrived {
+                path: root.join(name),
+                at: stamp(),
+            }
+        }
+
         fn run(root: &Path, fidelity: Fidelity, events: Vec<Raw>) -> Batch {
             let rules = WatchConfig::default().ignore;
             let mut accumulator = Accumulator::new(root, &rules).with_fidelity(fidelity);
@@ -3909,7 +4020,7 @@ mod tests {
                     });
                 }
                 // The target is the other half of the rename, and exists.
-                events.push(event(&root, "target.txt", ChangeKind::Created));
+                events.push(arrival(&root, "target.txt"));
                 let batch = run(&root, Fidelity::Coalesced, events);
                 assert_eq!(
                     kinds(&batch),
@@ -3918,6 +4029,253 @@ mod tests {
                 );
                 assert_eq!(batch.transient, 1, "order {order:?}: {batch:?}");
             }
+        }
+
+        #[test]
+        fn ori_t_0159_a_departure_alone_is_a_removal_on_macos() {
+            let scratch = Scratch::new("settle-departure-alone");
+            let root = scratch.dir("root");
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![departure(&root, "moved.rs")],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![("moved.rs".to_owned(), ChangeKind::Removed)],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 0, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_a_departure_and_a_modification_are_a_removal_on_macos() {
+            let scratch = Scratch::new("settle-departure-modified");
+            let root = scratch.dir("root");
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![
+                    departure(&root, "moved.rs"),
+                    event(&root, "moved.rs", ChangeKind::Modified),
+                ],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![("moved.rs".to_owned(), ChangeKind::Removed)],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 0, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_a_deleted_file_recreated_and_moved_into_an_ignored_directory_is_a_removal_on_macos()
+         {
+            // `rm src/lib.rs; printf x > src/lib.rs; mv src/lib.rs target/lib.rs`:
+            // `target` is ignored by the default rules, so the arrival there is
+            // not one this watcher reports.
+            let scratch = Scratch::new("settle-deleted-moved-ignored");
+            let root = scratch.dir("root");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join("target")).unwrap();
+            fs::write(root.join("target").join("lib.rs"), b"x").unwrap();
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![
+                    event(&root, "src/lib.rs", ChangeKind::Removed),
+                    event(&root, "src/lib.rs", ChangeKind::Created),
+                    departure(&root, "src/lib.rs"),
+                    arrival(&root, "target/lib.rs"),
+                ],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![("src/lib.rs".to_owned(), ChangeKind::Removed)],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 0, "{batch:?}");
+            assert_eq!(batch.ignored, 1, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_a_recent_file_moved_out_of_the_root_is_a_removal_on_macos() {
+            // A tracked file written shortly before (FSEvents' stale creation
+            // bit) and then moved out of the root: nothing arrived anywhere
+            // this watcher reports.
+            let scratch = Scratch::new("settle-recent-moved-out");
+            let root = scratch.dir("root");
+            fs::create_dir_all(root.join("src")).unwrap();
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![
+                    event(&root, "src/lib.rs", ChangeKind::Created),
+                    departure(&root, "src/lib.rs"),
+                ],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![("src/lib.rs".to_owned(), ChangeKind::Removed)],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 0, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_a_recent_file_moved_into_an_ignored_directory_or_out_of_the_root_is_a_removal_on_macos()
+         {
+            // No removal bit here, so the arrival decides: an arrival the
+            // accumulator did not accept (ignored, or outside the root) is no
+            // evidence that the content survived anywhere this watcher
+            // reports.
+            let scratch = Scratch::new("settle-arrival-not-accepted");
+            let root = scratch.dir("root");
+            let outside = scratch.dir("outside");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir_all(root.join("target")).unwrap();
+            fs::write(root.join("target").join("lib.rs"), b"x").unwrap();
+            fs::write(outside.join("lib.rs"), b"x").unwrap();
+            let outside_arrival = Raw::Arrived {
+                path: outside.join("lib.rs"),
+                at: stamp(),
+            };
+            for (arrival, ignored, rejected) in [
+                (arrival(&root, "target/lib.rs"), 1, 0),
+                (outside_arrival, 0, 1),
+            ] {
+                let batch = run(
+                    &root,
+                    Fidelity::Coalesced,
+                    vec![
+                        event(&root, "src/lib.rs", ChangeKind::Created),
+                        departure(&root, "src/lib.rs"),
+                        arrival,
+                    ],
+                );
+                assert_eq!(
+                    kinds(&batch),
+                    vec![("src/lib.rs".to_owned(), ChangeKind::Removed)],
+                    "{batch:?}"
+                );
+                assert_eq!(batch.transient, 0, "{batch:?}");
+                assert_eq!(batch.ignored, ignored, "{batch:?}");
+                assert_eq!(batch.rejected, rejected, "{batch:?}");
+            }
+        }
+
+        #[test]
+        fn ori_t_0159_an_arrival_that_is_a_directory_is_still_the_new_name_on_macos() {
+            // A temporary renamed to a directory (or a directory moved in): a
+            // directory is not reported as itself, but it is where the
+            // content arrived.
+            let scratch = Scratch::new("settle-arrival-directory");
+            let root = scratch.dir("root");
+            fs::create_dir_all(root.join("moved-in")).unwrap();
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![
+                    event(&root, "a.tmp", ChangeKind::Created),
+                    departure(&root, "a.tmp"),
+                    arrival(&root, "moved-in"),
+                ],
+            );
+            assert!(batch.changes.is_empty(), "{batch:?}");
+            assert_eq!(batch.transient, 1, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_a_departure_with_a_removal_bit_is_a_removal_even_beside_an_arrival_on_macos()
+        {
+            let scratch = Scratch::new("settle-removal-bit");
+            let root = scratch.dir("root");
+            fs::write(root.join("b.txt"), b"x").unwrap();
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![
+                    event(&root, "a.tmp", ChangeKind::Created),
+                    departure(&root, "a.tmp"),
+                    event(&root, "a.tmp", ChangeKind::Removed),
+                    arrival(&root, "b.txt"),
+                ],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![
+                    ("a.tmp".to_owned(), ChangeKind::Removed),
+                    ("b.txt".to_owned(), ChangeKind::Modified),
+                ],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 0, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_an_exact_backend_reads_an_arrival_as_the_plain_creation_it_is() {
+            let scratch = Scratch::new("settle-exact-arrival");
+            let root = scratch.dir("root");
+            fs::write(root.join("new.txt"), b"x").unwrap();
+            // Nothing is looked up: the arrival is a creation, the departure a
+            // removal, and a path created and departed cancels as before.
+            let batch = run(
+                &root,
+                Fidelity::Exact,
+                vec![
+                    arrival(&root, "new.txt"),
+                    event(&root, "a.tmp", ChangeKind::Created),
+                    departure(&root, "a.tmp"),
+                ],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![("new.txt".to_owned(), ChangeKind::Created)],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 1, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_a_file_whose_directory_became_a_file_is_a_removal_on_macos() {
+            let scratch = Scratch::new("settle-directory-became-file");
+            let root = scratch.dir("root");
+            fs::create_dir_all(root.join("src")).unwrap();
+            let rules = WatchConfig::default().ignore;
+            let mut accumulator =
+                Accumulator::new(&root, &rules).with_fidelity(Fidelity::Coalesced);
+            accumulator.push(event(&root, "src/lib.rs", ChangeKind::Removed));
+            // Between the event and the settling, `src` is replaced by a
+            // regular file, so nothing can be under it.
+            fs::remove_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("src"), b"x").unwrap();
+            let batch = accumulator.finish();
+            assert_eq!(
+                kinds(&batch),
+                vec![("src/lib.rs".to_owned(), ChangeKind::Removed)],
+                "{batch:?}"
+            );
+            assert_eq!(batch.rejected, 0, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0159_a_directory_where_a_file_was_reads_as_absent_on_macos() {
+            let scratch = Scratch::new("settle-file-became-directory");
+            let root = scratch.dir("root");
+            fs::write(root.join("data.txt"), b"x").unwrap();
+            let rules = WatchConfig::default().ignore;
+            let mut accumulator =
+                Accumulator::new(&root, &rules).with_fidelity(Fidelity::Coalesced);
+            accumulator.push(event(&root, "data.txt", ChangeKind::Modified));
+            // Between the event and the settling, a directory takes its place.
+            fs::remove_file(root.join("data.txt")).unwrap();
+            fs::create_dir_all(root.join("data.txt")).unwrap();
+            let batch = accumulator.finish();
+            assert_eq!(
+                kinds(&batch),
+                vec![("data.txt".to_owned(), ChangeKind::Removed)],
+                "{batch:?}"
+            );
         }
 
         #[test]
@@ -3991,7 +4349,7 @@ mod tests {
         }
 
         #[test]
-        fn ori_t_0159_the_two_halves_of_an_unpaired_rename_are_a_creation_and_a_departure() {
+        fn ori_t_0159_the_two_halves_of_an_unpaired_rename_are_an_arrival_and_a_departure() {
             let scratch = Scratch::new("settle-translate");
             let root = scratch.dir("root");
             fs::write(root.join("new.txt"), b"x").unwrap();
@@ -4008,7 +4366,7 @@ mod tests {
             assert!(
                 matches!(
                     raws.as_slice(),
-                    [Raw::Change { path, kind: ChangeKind::Created, .. }] if path == &root.join("new.txt")
+                    [Raw::Arrived { path, .. }] if path == &root.join("new.txt")
                 ),
                 "{raws:?}"
             );
