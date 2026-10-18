@@ -1701,3 +1701,23 @@ No existing test changes. Two tests check the phrase "the tracker gave no verifi
 | 111 | ORI-T-0182 | `crates/ori-memory/src/retrieval.rs`: the eight edits of the lead's package only | 1 | `/home/user/wt/ORI-T-0182`, `fix/ORI-T-0182-label-drift-text` | Haiku 5.5 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 105, 108, 109 and 111. ORI-T-0181 is allocated and not yet claimed. The next free identifier is ORI-T-0183.
+
+---
+
+## Claim 111 integrated: ORI-T-0182, a drift divergence's description is labeled untrusted; ORI-T-0180 with ORI-T-0168 under review
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 111 | ORI-T-0182: `stale_reason` writes a divergence's description last on the verification line, after a label saying it is untrusted text to the end of the line; the stale line puts its date before the reason | Haiku 5.5 applied the lead's eight edits. Before dispatch, the lead proved them in a copy: `ori-memory` 532 passed, `ori-gates` 194 passed, clippy, strict doc and rustfmt clean, and two mutants each fail the new test. The coder's checks: fmt, clippy, tests (532 passed), strict doc and gate 13 exit 0 | The commit's tree equals the base with the lead's eight edits applied, byte for byte (checked by script). Fast-forwarded onto the session head (6e43bfc). fmt and gate 13 exit 0 |
+
+Claim 111 is released.
+
+**ORI-T-0180 with ORI-T-0168 (claim 109)** came back at 15b2b57: two commits, ten new tests, every gate green. The Windows simulation passes both as specified and with `cfg!(unix)` also rewritten. The coder corrected the lead's mutation list in two places, both undercounts:
+- m3 also fails `ori_t_0159_a_link_that_cannot_be_followed_refuses_the_install_as_an_io_error`;
+- m4 also fails test 5.
+
+The lead read the code change. A three-lens review is running.
+
+**State after this section:** the claims held are 20, 105, 108 and 109. The next free identifier is ORI-T-0183.
