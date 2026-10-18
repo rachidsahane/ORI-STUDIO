@@ -1086,3 +1086,19 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]]. Not on `main`; clai
 Claim 95 is disjoint from every held claim (20, 89, 90, 93, 94).
 
 **State after this section:** the claims held are 20, 89, 90, 93, 94 and 95. The next free identifier is ORI-T-0166.
+
+---
+
+## Claim 89 integrated; a decision for slice H2; a disk note
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]]. Not on `main`; tier 1.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 89 | ORI-T-0158, the shared MCP wire (batch 10 slice W0), with repair 1 (Sonnet, the lead's design) | Reviewed 2026-10-12; repair 1 fixed the three confirmed findings and nine notes. The lead read the decoders and re-ran `cargo test -p ori-mcp` on the branch: 54 passed. Decoding is by value through `serde_json::from_value`, pinned by pointer-equality tests with controls. The request and notification decoders take a `Direction`: from server to client only `ping` is a request, and anything else is -32601 with its id. The cap's justification no longer leans on the proxy's output cap. Deviations accepted: the coder corrected the lead's constant name (`MAX_DETAIL_CHARS`, 256, not `MAX_ECHO_CHARS`); it removed one more copy (`ContentBlock` took the text by clone); and it wrote the memory paragraph more precisely than the lead asked (an array is rebuilt whole) | workspace clippy, strict doc and fmt clean; `cargo test --workspace`: **1340 passed, 0 failed**; secret scan clean; gate 13 clean |
+
+**Decision for slice H2 (the host client), asked by ORI-T-0158's coder:** in phase 1 the host's `initialize` declares **no client capabilities** (`capabilities: {}`). It offers no sampling, roots, elicitation or tasks, which is why a server's request other than `ping` is "method not found".
+
+**Disk.** During this integration the session's disk allowance ran out (rustc and the secret scan failed with "No space left on device"). The lead removed the `target/` build directories of twelve finished worktrees (git-ignored build output; their reports were already captured) and re-ran every check. Agents running at that moment may report build failures that are environmental.
+
+**State after this section:** the claims held are 20, 90, 93, 94 and 95. The next free identifier is ORI-T-0166.
