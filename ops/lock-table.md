@@ -1830,3 +1830,40 @@ The coder reported one stale comment: above `tests::ori_t_0054_the_removal_of_th
 | 105 | ORI-T-0169 repair 2 (docs and test comments only) | `crates/ori-mcp/src/server.rs`, `crates/ori-mcp/src/scopes.rs` (two doc comments), `crates/ori-mcp/src/tools/mod.rs` (two doc comments): the lead's twelve edits only | 2 | `/home/user/wt/ORI-T-0169-r2`, `docs/ORI-T-0169-r2` | Haiku 5.5 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 105 (repair 2), 109 and 112. The next free identifier is ORI-T-0184.
+
+---
+
+## Claim 105 integrated and released: S2's repair 2; CI green on all platforms with S2; claim 114 for ORI-T-0181 (S3 with S8)
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**CI run 180 on b16c1e9 is green on all 17 checks**, the Windows test leg included. It is the first full three-platform pass with S2, PM3, PM4 and ORI-T-0182 integrated.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 105 | ORI-T-0169 repair 2 (attempt 3 of 3): twelve doc and comment corrections from the repair's review | Haiku 5.5 applied the lead's edits. Before dispatch, the lead proved them in a copy: fmt, clippy, strict doc, `ori-mcp` 201 passed, `ori-gates` 194. The coder's six checks exit 0 | Each file's tree equals b16c1e9 with the lead's edits applied, byte for byte (checked by script). Fast-forwarded onto the session head (4ad67a8) |
+
+Claim 105 is released, and ORI-T-0169 (S2) is complete on this branch. Tier 2: the operator merges, with the rest of the pull request.
+
+**ORI-T-0181 (claim 114)**, slices S3 and S8, is dispatched. A 21-agent pre-dispatch critique of the package's first draft verified eighteen issues, and every one is decided in the revised package (`ticket-0181.md`):
+- the row bound these tools add is three times the window's limit plus one row per connection;
+- the times the rows carry: `memory.access_refused` has `mcp.tool_called`'s time, and `mcp.tool_failed` has its own;
+- `product_signal`'s two refusal codes;
+- a mandatory, assertion-exact test of a refusal the enforcer could not record, plus one of the accepted gap where only the enforcer's row is lost;
+- fixtures pinned to scope.rs's helpers, ticket column included;
+- replies compared byte for byte with `render()`;
+- `MemoryInputs` carries its product and is checked;
+- a cap on the rendered package;
+- configuration faults mapped to unavailable;
+- the shared helpers and fixtures made `pub(crate)` for S7.
+
+Recorded as follow-ups, not in this ticket:
+- **The accepted gap.** When only the enforcer's `memory.access_refused` append fails, nobody is told. `HandlerError` has no variant for a refusal whose record was lost, which is S2's to add.
+- **A ticket-existence oracle.** The enforcer checks that a ticket is filed before it checks the ticket read, so `product_signal` learns from the refusal code whether a ticket id is filed. That is scope.rs's to reorder.
+- **The migration column.** ENV_SETUP section 7's column is not enforced by the enforcer; that is an ori-memory scope ticket.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 114 | ORI-T-0181, slices S3 (`aicd_context`) and S8 (`aicd_search`) | `crates/ori-mcp/src/tools/memory.rs` (new), `crates/ori-mcp/src/tools/mod.rs` (one module line) | 2 | `/home/user/wt/ORI-T-0181`, `feat/ORI-T-0181-memory-tools` | Sonnet 5.5 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 109, 112 and 114. The next free identifier is ORI-T-0184.
