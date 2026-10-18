@@ -284,11 +284,40 @@
 //!
 //! - **Documents**: what the product's index returns for the trimmed query,
 //!   in the index's own order (best score first, then path), at most
-//!   [`SEARCH_HIT_LIMIT`] of them. The index is asked for one hit more, and a
-//!   hit beyond the limit is a [`SearchNote::LimitReached`]. The index cannot
-//!   be limited to a source, so for a reader who may read only some document
-//!   sources the hits of the others count against that limit before the
-//!   filter drops them, as they do for [`Retrieval::assemble`].
+//!   [`SEARCH_HIT_LIMIT`] of them. The index cannot be limited to a source, so
+//!   what a search does with its hits depends on whether the reader may read
+//!   all five document sources (canonical sections, ADRs, criteria, the brief
+//!   and runbooks):
+//!   - **A reader of all five** (the rule that shows
+//!     [`SearchPackage::documents_covered`]) asks the index for one hit more
+//!     than the limit, and a hit beyond the limit is a
+//!     [`SearchNote::LimitReached`]. Every hit is a document this reader may
+//!     read, so the limit says nothing about a document it may not. An index
+//!     that holds no document is a [`SearchNote::IndexEmpty`].
+//!   - **Any other reader** (operations, who read the runbooks; product
+//!     signal, who read the brief; a lead who named some sources) is given no
+//!     limit counted on the index's hits. Such a limit would tell it, for any
+//!     term it chose, whether [`SEARCH_HIT_LIMIT`] or more documents it may not
+//!     read match that term, and a readable document ranked below them would be
+//!     lost. The index is asked for [`PARTIAL_READER_DOCUMENT_WINDOW`] hits,
+//!     the candidates are admitted one at a time in the index's order, and the
+//!     first [`SEARCH_HIT_LIMIT`] admitted are kept.
+//!     [`SearchNote::LimitReached`] is made only when one more admitted
+//!     document than that exists, as for records and modules.
+//!     [`SearchNote::IndexEmpty`] is never made: an empty index and an index
+//!     that holds nothing this reader may read look the same to it. What the
+//!     window itself leaves out is said, whatever the data, in one
+//!     [`SearchNote::DocumentWindow`], made whenever the document path ran for
+//!     such a reader. It names the window and carries nothing from a source
+//!     the reader may not read, so it is the same for an index that holds such
+//!     documents and for one that holds none. A document this reader may read
+//!     that ranks below the window is not returned, and the note says so.
+//!
+//!   [`Retrieval::assemble`] does not need this split: it asks the index only
+//!   with a focus (the declared modules of the authorization), which only a
+//!   coder has, and a coder reads all five document sources, so no hit it
+//!   counts is of a source its reader may not read. A search is the first path
+//!   that can be asked by a reader of fewer than five.
 //! - **Operational records**: a record matches when the lower-cased query is a
 //!   substring of the lower-cased text of any of its structured fields (never
 //!   of a field's name, and never of raw evidence, which a search never
@@ -314,10 +343,22 @@
 //! A query that is empty after trimming reads no source at all and is
 //! answered with a [`SearchNote::EmptyQuery`].
 //!
+//! **A search's time grows with the records that match its text.** Every
+//! record whose structured text contains the query, the reader's or not, is
+//! admitted one at a time through the filter before it is kept or dropped, so
+//! the time a search takes grows with how many records match, including
+//! records the reader may not read (code map modules whose path contains the
+//! query are admitted the same way). This is recorded here as a limit and is
+//! not fixed: a caller that must not let its reader observe that time has to
+//! deal with it outside this function.
+//!
 //! Items are ordered documents, then records, then modules, and the package
-//! cap cuts from the end of that order, with every item left out counted in a
-//! [`Cut`]: [`SearchPackage::size_bytes`] never exceeds the cap. A search
-//! builds no evidence candidate: raw evidence is never a source of a search
+//! cap is applied in that order: items are taken one after another, an item
+//! that does not fit is left out whole and counted in a [`Cut`], and a later,
+//! smaller item may still be kept. If the cut notices then push the rendering
+//! past the cap, items are given up from the end until it fits.
+//! [`SearchPackage::size_bytes`] never exceeds the cap. A search builds no
+//! evidence candidate: raw evidence is never a source of a search
 //! authorization.
 //!
 //! # Inspectable without the query
@@ -405,6 +446,18 @@ pub const MAX_SEARCH_QUERY_BYTES: usize = 1024;
 /// modules) a [`SearchPackage`] holds before it says the limit was reached
 /// ([`SearchNote::LimitReached`]): AICD §25, "Context packages are bounded".
 pub const SEARCH_HIT_LIMIT: usize = 50;
+
+/// How many hits [`Retrieval::search`] asks the index for when its reader may
+/// not read all five document sources: AICD §25, "Context packages are
+/// bounded".
+///
+/// The index cannot be limited to a source, so for such a reader the hits are
+/// admitted one at a time and the first [`SEARCH_HIT_LIMIT`] admitted are
+/// kept; the window bounds how far down the index's order that goes. A
+/// readable document ranked below the window is not returned, and every
+/// search by such a reader says so in a [`SearchNote::DocumentWindow`], whatever
+/// the data. See the module doc, "Search".
+pub const PARTIAL_READER_DOCUMENT_WINDOW: usize = 200;
 
 /// The bytes reserved at the end of a bounded body for the line saying what
 /// was cut.
@@ -1267,7 +1320,7 @@ pub enum SearchNote {
     /// source was read.
     EmptyQuery,
     /// More results of one kind matched than the package holds, so the rest
-    /// were not read.
+    /// are not returned.
     LimitReached {
         /// The kind of result: `documents`, `records` or `modules`.
         kind: &'static str,
@@ -1279,8 +1332,21 @@ pub enum SearchNote {
         sources: Vec<Source>,
     },
     /// The product's index was searched and holds no document, so no document
-    /// can be returned until it is built.
+    /// can be returned until it is built. Made only for a reader of all five
+    /// document sources: to any other reader an empty index and an index with
+    /// nothing it may read look the same.
     IndexEmpty,
+    /// The documents of a reader who may not read all five document sources
+    /// are drawn from the index's best `window` matches across every document
+    /// source, so a document the reader may read that ranked below them is not
+    /// returned. Made whenever the document path ran for such a reader, and
+    /// the same whatever the data, so it carries nothing from a source the
+    /// reader may not read.
+    DocumentWindow {
+        /// The number of matches the index was asked for:
+        /// [`PARTIAL_READER_DOCUMENT_WINDOW`].
+        window: usize,
+    },
 }
 
 impl SearchNote {
@@ -1290,13 +1356,16 @@ impl SearchNote {
                 "note: the query is empty; nothing was searched and no source was read".to_owned()
             }
             Self::LimitReached { kind } => format!(
-                "note: more {kind} matched than the limit of {SEARCH_HIT_LIMIT}; the rest were not read"
+                "note: more {kind} matched than the limit of {SEARCH_HIT_LIMIT}; the rest are not returned"
             ),
             Self::NoProducer { sources } => format!(
                 "note: {} readable by this reader but no module of this crate produces it yet; nothing of it is in these results",
                 source_list(sources)
             ),
             Self::IndexEmpty => "note: the repository index holds no document; no document can be returned until it is built".to_owned(),
+            Self::DocumentWindow { window } => format!(
+                "note: document results are drawn from the index's best {window} matches across every document source; a document you may read ranked below them is not returned"
+            ),
         }
     }
 }
@@ -2098,7 +2167,9 @@ impl<'a> Retrieval<'a> {
     /// before any source is read and is never put in an error, a note or the
     /// package. Appends nothing to the log. It opens the product's index when
     /// the authorization allows a document source, which creates an empty
-    /// index file when none exists yet, and says so ([`SearchNote::IndexEmpty`]).
+    /// index file when none exists yet, and says so to a reader of all five
+    /// document sources ([`SearchNote::IndexEmpty`]); to any other reader an
+    /// empty index and one with nothing it may read look the same.
     ///
     /// # Errors
     ///
@@ -2153,6 +2224,18 @@ impl<'a> Retrieval<'a> {
             .iter()
             .any(|source| authorization.allows(*source))
         {
+            // A reader of all five document sources is the one the count of
+            // the whole index is shown to; for any other reader the index
+            // holds documents it may not read, and nothing that depends on
+            // them may reach the package: see the module doc, "Search".
+            let all_five = DOCUMENT_SOURCES
+                .iter()
+                .all(|source| authorization.allows(*source));
+            let asked = if all_five {
+                SEARCH_HIT_LIMIT.saturating_add(1)
+            } else {
+                PARTIAL_READER_DOCUMENT_WINDOW
+            };
             // The index is opened from `db` and dropped before the log is
             // read; the corpus is read after the search, as `gather_documents`
             // reads it, so a sync between the two reads a document as changed
@@ -2160,26 +2243,26 @@ impl<'a> Retrieval<'a> {
             // against.
             let (mut hits, covered, read) = {
                 let index = Indexer::open(db)?;
-                let report = index.search(query, SEARCH_HIT_LIMIT.saturating_add(1))?;
+                let report = index.search(query, asked)?;
                 let read = index.freshness_corpus()?;
                 (report.hits, report.documents_covered, read)
             };
             corpus = read;
-            if hits.len() > SEARCH_HIT_LIMIT {
-                hits.truncate(SEARCH_HIT_LIMIT);
-                notes.push(SearchNote::LimitReached { kind: "documents" });
-            }
-            if covered == 0 {
-                notes.push(SearchNote::IndexEmpty);
-            }
-            // The count covers every document of the index, whatever its
-            // source: shown only to a reader who may read all five.
-            if DOCUMENT_SOURCES
-                .iter()
-                .all(|source| authorization.allows(*source))
-            {
+            if all_five {
+                // Every hit is a document this reader may read, so the
+                // limit may be counted on the hits.
+                if hits.len() > SEARCH_HIT_LIMIT {
+                    hits.truncate(SEARCH_HIT_LIMIT);
+                    notes.push(SearchNote::LimitReached { kind: "documents" });
+                }
+                if covered == 0 {
+                    notes.push(SearchNote::IndexEmpty);
+                }
+                // The count covers every document of the index, whatever its
+                // source: shown only to a reader who may read all five.
                 package.documents_covered = Some(covered);
             }
+            let mut kept = 0_usize;
             for hit in hits {
                 let origin = Origin::Index {
                     path: hit.path.clone(),
@@ -2188,13 +2271,26 @@ impl<'a> Retrieval<'a> {
                     product_id: authorization.product_id().clone(),
                     hit,
                 };
-                items.extend(self.admit_one(
-                    authorization,
-                    candidate,
-                    origin,
-                    GROUP_DOCUMENTS,
-                    &corpus,
-                )?);
+                let Some(item) =
+                    self.admit_one(authorization, candidate, origin, GROUP_DOCUMENTS, &corpus)?
+                else {
+                    continue;
+                };
+                // Any other reader: the limit counts what it may read, as
+                // for records and modules, never the hits it may not.
+                if !all_five && kept == SEARCH_HIT_LIMIT {
+                    notes.push(SearchNote::LimitReached { kind: "documents" });
+                    break;
+                }
+                items.push(item);
+                kept += 1;
+            }
+            if !all_five {
+                // Whatever the data: it names the window and nothing of a
+                // source this reader may not read.
+                notes.push(SearchNote::DocumentWindow {
+                    window: PARTIAL_READER_DOCUMENT_WINDOW,
+                });
             }
         }
 
@@ -5985,6 +6081,338 @@ mod tests {
         );
     }
 
+    /// `count` documents that neither operations nor product signal may read
+    /// (canonical sections and ADRs, alternately), each holding `term` in its
+    /// title, which the index weighs above a term in a body.
+    fn unreadable_documents(term: &str, count: usize) -> Vec<IndexableDocument> {
+        (0..count)
+            .map(|n| {
+                if n % 2 == 0 {
+                    IndexableDocument::new(
+                        spec_doc("WINDOW.md", &format!("s{n}")),
+                        DocumentKind::Section,
+                        format!("{term} section {n}"),
+                        "an unrelated body",
+                    )
+                } else {
+                    IndexableDocument::new(
+                        spec_path(&format!("adr/ADR-{}-window.md", 9100 + n)),
+                        DocumentKind::Adr,
+                        format!("{term} decision {n}"),
+                        "an unrelated body",
+                    )
+                }
+            })
+            .collect()
+    }
+
+    /// A runbook, which operations may read, holding `term` only in its body.
+    fn readable_runbook(term: &str, n: usize) -> IndexableDocument {
+        IndexableDocument::new(
+            spec_doc(&format!("runbooks/window{n:03}.md"), "steps"),
+            DocumentKind::Section,
+            "Steps",
+            format!("to recover, see {term} here"),
+        )
+    }
+
+    /// The paths the index returns for `term`, in its order, at most 1000.
+    fn index_order(w: &World, term: &str) -> Vec<String> {
+        let index = Indexer::open(&w.p.db).expect("the index opens");
+        index
+            .search(term, 1000)
+            .expect("the index searches")
+            .hits
+            .into_iter()
+            .map(|hit| hit.path)
+            .collect()
+    }
+
+    fn has_limit_note(package: &SearchPackage) -> bool {
+        package
+            .notes()
+            .iter()
+            .any(|note| matches!(note, SearchNote::LimitReached { .. }))
+    }
+
+    #[test]
+    fn ori_t_0170_a_partial_document_reader_gets_no_note_from_documents_it_may_not_read() {
+        let mut w = world("t0170-partial-window");
+        let term = "windowmark";
+        let runbook = readable_runbook(term, 0);
+
+        // Sixty documents operations may not read rank above the one runbook
+        // it may.
+        let mut documents = unreadable_documents(term, 60);
+        documents.push(runbook.clone());
+        build_index(&w.p, &documents);
+        let order = index_order(&w, term);
+        assert_eq!(order.len(), 61);
+        assert_eq!(
+            order.last(),
+            Some(&runbook.path),
+            "the fixture ranks the runbook below all sixty unreadable documents"
+        );
+
+        let with_unreadable = search_as(&mut w, Role::Operations, term);
+        assert_eq!(
+            search_document_paths(with_unreadable.items()),
+            std::slice::from_ref(&runbook.path),
+            "the runbook ranked below fifty unreadable documents is returned"
+        );
+        assert!(
+            !has_limit_note(&with_unreadable),
+            "no note tells operations that more than {SEARCH_HIT_LIMIT} documents it may not read matched: {:?}",
+            with_unreadable.notes()
+        );
+        assert!(
+            with_unreadable
+                .notes()
+                .contains(&SearchNote::DocumentWindow { window: 200 }),
+            "{:?}",
+            with_unreadable.notes()
+        );
+        assert!(with_unreadable.render().contains(
+            "note: document results are drawn from the index's best 200 matches across every document source; a document you may read ranked below them is not returned"
+        ));
+        assert_eq!(with_unreadable.documents_covered(), None);
+
+        // The same reader, the same package notes, when the sixty are absent
+        // and when so many are present that the runbook ranks past the window:
+        // nothing in the notes depends on the documents it may not read.
+        let notes_of = |w: &mut World, role: Role| {
+            let package = search_as(w, role, term);
+            assert!(!has_limit_note(&package), "{role:?}: {:?}", package.notes());
+            assert_eq!(package.documents_covered(), None, "{role:?}");
+            (
+                package.notes().to_vec(),
+                package.sources().to_vec(),
+                package.cuts().to_vec(),
+                package.log_tip_seq(),
+                search_document_paths(package.items()),
+            )
+        };
+        let operations_with = notes_of(&mut w, Role::Operations);
+        let signal_with = notes_of(&mut w, Role::ProductSignal);
+        assert_eq!(
+            signal_with.4,
+            Vec::<String>::new(),
+            "product signal reads the brief only, and no brief matches"
+        );
+
+        build_index(&w.p, std::slice::from_ref(&runbook));
+        let operations_without = notes_of(&mut w, Role::Operations);
+        let signal_without = notes_of(&mut w, Role::ProductSignal);
+        assert_eq!(operations_without, operations_with);
+        assert_eq!(signal_without, signal_with);
+        assert_eq!(operations_without.4, std::slice::from_ref(&runbook.path));
+
+        let mut crowded = unreadable_documents(term, PARTIAL_READER_DOCUMENT_WINDOW + 5);
+        crowded.push(runbook.clone());
+        build_index(&w.p, &crowded);
+        assert_eq!(
+            index_order(&w, term)
+                .iter()
+                .position(|path| *path == runbook.path),
+            Some(PARTIAL_READER_DOCUMENT_WINDOW + 5),
+            "the fixture ranks the runbook past the window"
+        );
+        let operations_past = notes_of(&mut w, Role::Operations);
+        let signal_past = notes_of(&mut w, Role::ProductSignal);
+        assert_eq!(
+            (&operations_past.0, &operations_past.1, &operations_past.2),
+            (&operations_with.0, &operations_with.1, &operations_with.2),
+            "only the item list differs"
+        );
+        assert_eq!(signal_past, signal_with);
+        assert_eq!(
+            operations_past.4,
+            Vec::<String>::new(),
+            "a runbook ranked below the window is not returned, and the note says so"
+        );
+
+        // A reader of all five document sources is unchanged: the limit is
+        // counted on the hits, and no window is said.
+        let mut documents = unreadable_documents(term, 60);
+        documents.push(runbook);
+        build_index(&w.p, &documents);
+        let lead = search_as(&mut w, Role::Lead, term);
+        assert!(
+            lead.notes()
+                .contains(&SearchNote::LimitReached { kind: "documents" })
+        );
+        assert!(
+            !lead
+                .notes()
+                .iter()
+                .any(|note| matches!(note, SearchNote::DocumentWindow { .. })),
+            "{:?}",
+            lead.notes()
+        );
+        assert_eq!(lead.documents_covered(), Some(61));
+        assert_eq!(search_document_paths(lead.items()).len(), SEARCH_HIT_LIMIT);
+    }
+
+    #[test]
+    fn ori_t_0170_a_partial_document_reader_is_noted_only_when_a_51st_readable_document_exists() {
+        let mut w = world("t0170-partial-limit");
+        let term = "limitwindow";
+        for (readable, limited) in [
+            (SEARCH_HIT_LIMIT - 1, false),
+            (SEARCH_HIT_LIMIT, false),
+            (SEARCH_HIT_LIMIT + 1, true),
+            (SEARCH_HIT_LIMIT + 7, true),
+        ] {
+            // Sixty documents operations may not read rank above the readable
+            // runbooks and are no part of the count.
+            let mut documents = unreadable_documents(term, 60);
+            documents.extend((0..readable).map(|n| readable_runbook(term, n)));
+            build_index(&w.p, &documents);
+            let expected: Vec<String> = index_order(&w, term)
+                .into_iter()
+                .filter(|path| path.starts_with("spec/runbooks/"))
+                .take(SEARCH_HIT_LIMIT)
+                .collect();
+            let package = search_as(&mut w, Role::Operations, term);
+            assert_eq!(
+                search_document_paths(package.items()),
+                expected,
+                "{readable} readable documents: the first {SEARCH_HIT_LIMIT} the reader may read, in the index's order"
+            );
+            assert_eq!(expected.len(), readable.min(SEARCH_HIT_LIMIT));
+            assert_eq!(
+                package
+                    .notes()
+                    .contains(&SearchNote::LimitReached { kind: "documents" }),
+                limited,
+                "{readable} readable documents: {:?}",
+                package.notes()
+            );
+            assert!(
+                package
+                    .notes()
+                    .contains(&SearchNote::DocumentWindow { window: 200 }),
+                "{readable} readable documents: {:?}",
+                package.notes()
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0170_an_empty_index_is_said_only_to_a_reader_of_all_five_document_sources() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Reach {
+            AllFive,
+            SomeOfFive,
+            NoDocumentSource,
+        }
+        let mut w = world("t0170-empty-index");
+        let all_five = ["canonical_section", "adr", "criterion", "brief", "runbook"];
+        let cases = [
+            (
+                Role::Lead,
+                search_request("pipeline"),
+                Reach::AllFive,
+                "the lead",
+            ),
+            (Role::Qa, search_request("pipeline"), Reach::AllFive, "qa"),
+            (
+                Role::Coder,
+                search_request("pipeline"),
+                Reach::AllFive,
+                "the coder",
+            ),
+            (
+                Role::Lead,
+                named_search_request("pipeline", &all_five),
+                Reach::AllFive,
+                "the lead naming all five",
+            ),
+            (
+                Role::Lead,
+                named_search_request("pipeline", &["adr", "runbook"]),
+                Reach::SomeOfFive,
+                "the lead naming two",
+            ),
+            (
+                Role::Operations,
+                search_request("pipeline"),
+                Reach::SomeOfFive,
+                "operations",
+            ),
+            (
+                Role::ProductSignal,
+                search_request("pipeline"),
+                Reach::SomeOfFive,
+                "product signal",
+            ),
+            (
+                Role::Lead,
+                named_search_request("pipeline", &["code_map"]),
+                Reach::NoDocumentSource,
+                "the lead naming only the code map",
+            ),
+        ];
+        let window = SearchNote::DocumentWindow { window: 200 };
+
+        build_index(&w.p, &[]);
+        let mut empty_notes: Vec<Vec<SearchNote>> = Vec::new();
+        for (role, request, reach, label) in &cases {
+            let (_, outcome) = search_with(&mut w, *role, request, PackageConfig::default());
+            let package = outcome.unwrap_or_else(|err| panic!("{label}: {err}"));
+            let said = package.notes().contains(&SearchNote::IndexEmpty);
+            let rendered = package.render();
+            assert!(package.items().is_empty(), "{label}");
+            assert_eq!(
+                said,
+                *reach == Reach::AllFive,
+                "{label}: {:?}",
+                package.notes()
+            );
+            assert_eq!(
+                rendered.contains("the repository index holds no document"),
+                *reach == Reach::AllFive,
+                "{label}"
+            );
+            assert_eq!(
+                package.notes().contains(&window),
+                *reach == Reach::SomeOfFive,
+                "{label}: {:?}",
+                package.notes()
+            );
+            assert_eq!(
+                package.documents_covered(),
+                (*reach == Reach::AllFive).then_some(0),
+                "{label}"
+            );
+            empty_notes.push(package.notes().to_vec());
+        }
+
+        // To a reader of some of the five, an empty index and an index that
+        // holds only documents it may not read are the same package.
+        build_index(
+            &w.p,
+            &[IndexableDocument::new(
+                spec_doc("WINDOW.md", "unreadable"),
+                DocumentKind::Section,
+                "A canonical section about the pipeline",
+                "no reader of some of the five document sources may read it",
+            )],
+        );
+        for ((role, request, reach, label), before) in cases.iter().zip(&empty_notes) {
+            if *reach != Reach::SomeOfFive {
+                continue;
+            }
+            let (_, outcome) = search_with(&mut w, *role, request, PackageConfig::default());
+            let package = outcome.unwrap_or_else(|err| panic!("{label}: {err}"));
+            assert!(
+                package.items().is_empty(),
+                "{label}: nothing it may read matches"
+            );
+            assert_eq!(package.notes(), before.as_slice(), "{label}");
+        }
+    }
+
     #[test]
     fn ori_t_0170_unproduced_sources_are_noted_and_an_empty_index_is_said() {
         let mut w = world("t0170-notes");
@@ -6181,7 +6609,7 @@ mod tests {
     }
 
     #[test]
-    fn ori_t_0170_the_render_never_contains_the_query_text() {
+    fn ori_t_0170_the_header_notes_and_cuts_never_contain_the_query_text() {
         let mut w = world("t0170-render-query");
         let marker = "zephyrquuxmarker";
         let marked = IndexableDocument::new(
