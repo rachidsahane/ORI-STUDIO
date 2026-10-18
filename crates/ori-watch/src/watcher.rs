@@ -92,6 +92,16 @@
 //! Neither this module nor the backend opens a reported path or reads a file's
 //! content from the tree.
 //!
+//! **A limit that holds on every platform.** Layer 3 is applied to an event
+//! before the event is accepted (`Accumulator::observe`), and it refuses a
+//! path whose ancestor is a file as well as one whose ancestor is a link. A
+//! deletion whose directory became a file before the event was observed, which
+//! is the order a branch switch is delivered in, is therefore dropped and
+//! counted in [`Batch::rejected`], whatever the backend's fidelity, and no
+//! look at the tree settles it afterwards, unless an earlier event for that
+//! path in the same window was accepted: the check is skipped for a path the
+//! window already holds an entry for, and the deletion is reported.
+//!
 //! # What is ignored, and why
 //!
 //! - **`.git`, at any depth, in any letter case.** The repository's own
@@ -216,17 +226,18 @@
 //!    1. a creation was seen for it, other than an arrival of its own: the new
 //!       name of an unpaired rename is read as a creation for every other
 //!       purpose but is not one of this path's. Without this, a file saved by
-//!       a rename (`sed -i`) and then moved out of the root in the same window
-//!       would count its own arrival as its creation, and its deletion would be
-//!       lost;
+//!       a rename (`sed -i`) and then moved out of the root, in a window that
+//!       also saw another path's arrival, would count its own arrival as its
+//!       creation, and its deletion would be lost;
 //!    2. a rename away from it was seen (`Raw::Departed`: the old name of a
 //!       rename, which FSEvents sends as a `RenameMode::Any` event on a path
 //!       that no longer exists);
 //!    3. no plain removal was seen for it. FSEvents sets its removal bit on a
 //!       path that was deleted, and a temporary that was renamed away carries
 //!       no such bit; without this condition a file that was deleted,
-//!       written again and then moved out would read as a temporary and its
-//!       deletion would be lost;
+//!       written again and then moved out, in a window that also saw another
+//!       path's arrival, would read as a temporary and its deletion would be
+//!       lost;
 //!    4. the window saw an accepted arrival of some other path (`Raw::Arrived`:
 //!       the new name of an unpaired rename, which FSEvents sends as a
 //!       `RenameMode::Any` event on a path that exists), anywhere in the root,
@@ -256,16 +267,19 @@
 //! What macOS still does not give: a new file reads as `Modified`; a file
 //! created and deleted inside one window, and not renamed, reads as `Removed`
 //! (reported, not counted as transient) even if it never outlived the window;
+//! a name that arrived by a rename and left by another inside one window (an
+//! intermediate name, or a directory moved in and out) reads as `Removed`;
 //! and a temporary whose creation and rename away reach the watcher more than
-//! the quiet window apart is reported, as a removal, in each batch. Two limits
-//! of rule 3 remain:
+//! the quiet window apart is reported, as a removal, in each batch. Three
+//! limits of rule 3 remain:
 //!
 //! - FSEvents gives no pairing (`fsevent.rs`, line 192), so condition 4 is a
-//!   fact about the window, not about this path. An unrelated arrival in the
-//!   same window, of any other path, can still let a created-and-departed path
-//!   with no removal bit read as transient, whether or not that arrival is the
-//!   path's new name: its old name is counted, and the arrival may be of a
-//!   path that was reported or one that was not (the next limit).
+//!   fact about the window, not about this path beyond excluding its own
+//!   arrival. An unrelated arrival in the same window, of any other path, can
+//!   still let a created-and-departed path with no removal bit read as
+//!   transient, whether or not that arrival is the path's new name: its old
+//!   name is counted, and the arrival may be of a path that was reported or one
+//!   that was not (the next limit).
 //! - A directory counts as an arrival for condition 4 but is never reported as
 //!   itself: it is scanned, and what the scan finds is reported, within the
 //!   scan's budget. A temporary whose window holds no other arrival than a
@@ -273,10 +287,6 @@
 //!   directory.
 //! - A temporary whose arrival reaches a later window than its departure is
 //!   reported as `Removed`: noise, the direction rule 2 already chooses.
-//! - A deletion whose directory became a file before the event was observed,
-//!   which is the order a branch switch is delivered in, is still dropped as
-//!   rejected: `Accumulator::observe` refuses a path whose ancestor is not a
-//!   real directory, before any look at the tree settles it.
 //!
 //! **None of this has been run on macOS.** The rules are reasoned from the
 //! source above and exercised on Linux by feeding the backend's own event
@@ -4245,6 +4255,36 @@ mod tests {
                 "{batch:?}"
             );
             assert_eq!(batch.transient, 0, "{batch:?}");
+        }
+
+        #[test]
+        fn ori_t_0174_a_created_file_with_its_own_arrival_beside_another_arrival_is_transient_on_macos()
+         {
+            // A creation bit (FSEvents' stale one), the file's own arrival and
+            // its departure, and the arrival of `src/main.rs`, which exists.
+            // Condition 4 asks for an arrival of some other path, and there is
+            // one, so `src/lib.rs` is transient: the stricter reading, "some
+            // arrival and none of its own", would report it as removed.
+            let scratch = Scratch::new("settle-own-arrival-beside-another");
+            let root = scratch.dir("root");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("src").join("main.rs"), b"x").unwrap();
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![
+                    event(&root, "src/lib.rs", ChangeKind::Created),
+                    arrival(&root, "src/lib.rs"),
+                    departure(&root, "src/lib.rs"),
+                    arrival(&root, "src/main.rs"),
+                ],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![("src/main.rs".to_owned(), ChangeKind::Modified)],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 1, "{batch:?}");
         }
 
         #[test]
