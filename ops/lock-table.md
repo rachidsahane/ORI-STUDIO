@@ -1066,3 +1066,23 @@ Next tickets, each designed by the lead before dispatch ([[R44]]):
 Disjoint from each other and from every held claim (20, 87, 88, 89, 90). ORI-T-0149 and ORI-T-0151 also change `acp.rs` and `transcript.rs`; they wait on claim 93. ORI-T-0139 (docs in five files, `barrier.rs` among them) waits on claim 94.
 
 **State after this section:** the claims held are 20, 87 to 90, and 92 to 94. The next free identifier is ORI-T-0165.
+
+---
+
+## Claims 87, 88 and 92 integrated; claim 95 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]]. Not on `main`; claims 87 and 92 are tier 2, and claim 88 rides with claim 87.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 87 | ORI-T-0156, the batch 10 answers in the specification, with repair 1 (Sonnet, the lead's list) and repair 2 (Haiku, two sentences the lead wrote), and ORI-T-0152 folded in | The lead read every changed statement. R45 points 1, 2 and 4 are written as decided. The confirmed findings 0156-F1, F3, F5 and F9 are closed, and so are the contested F2 and F8 and the notes F11 to F14, F16 and F17. Repair 1's agent left five points open, and the lead decided them: (1) its `acknowledged_reach` input and `McpServer` field, accepted; (2) a refused call records only `mcp.tool_refused`, written by repair 2; (3) ADR-0002's conduct rules stay, and SECURITY_NOTES now says that after an acknowledgement they are the only barrier, written by repair 2; (4) PRD F-03, CI_CD section 1 and ARCHITECTURE section 9 still read as unqualified, so they become ORI-T-0165; (5) ADR-0002's "any widening of permissions" bullet stays, with ENV_SETUP reconciled as decided | workspace clippy, strict doc and fmt clean; `cargo test --workspace`: **1286 passed, 0 failed**; gate 13 clean |
+| 88 | ORI-T-0157, gate 12 restates the `ori-mcp` tier 2 row | The lead read the diff and re-ran `cargo test -p ori-gates` on its branch: 192 passed. It uses the existing `Boundary` form, and the unresolved count stays three | as above |
+| 92 | ORI-T-0160, `SessionSpec`'s `Debug` prints names, never values (Haiku; the code was the lead's) | The lead read the diff: exactly the package's five edits, plus a `cargo fmt` reflow of two test lines. The test fails against the derived `Debug`, which printed every value | as above |
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 95 | ORI-T-0165, PRD F-03, CI_CD section 1 and ARCHITECTURE section 9 say "Ori's own merge path" (text written by the lead) | `spec/PRD.md`, `spec/CI_CD.md`, `spec/ARCHITECTURE.md` | 1 | Haiku 5.5 (documentation) | `docs/ORI-T-0165-own-merge-path` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 95 is disjoint from every held claim (20, 89, 90, 93, 94).
+
+**State after this section:** the claims held are 20, 89, 90, 93, 94 and 95. The next free identifier is ORI-T-0166.
