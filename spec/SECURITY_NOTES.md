@@ -7,7 +7,7 @@ Who may do what, where input is validated, how failure is handled. Names the tie
 1. **Operator ↔ engine.** Local clients authenticate to the engine with a per-installation token stored in the keychain; remote (phase 4) with a token the operator issues. Every RPC call is an event with a human actor.
 2. **Engine ↔ agent sessions.** Sessions are separate processes in worktrees and containers. They talk to the engine only through the MCP server and ACP. They receive credentials at spawn, scoped and expiring; they never receive the operator's tokens.
 3. **Engine ↔ integrations and providers.** Outbound only, to user-configured endpoints, with credentials from the broker per call. Inbound webhooks are verified by signature and treated as untrusted data.
-4. **Engine ↔ repository.** The engine reads the whole tree; humans write `spec/` only; agents write their worktree only; the merge queue alone merges.
+4. **Engine ↔ repository.** The engine reads the whole tree; humans write `spec/` only; agents write their worktree only, which holds for Ori's own tools: a proxied tool the operator exposed may reach further (API_SPEC section 3, "Proxied tools"); the merge queue alone merges, on Ori's own merge path: it alone calls `VcsHost::merge`, with Ori's credentials, and an operator-exposed server acting with its own credentials is outside that guarantee.
 
 ### Boundary 2 in phase 1: binding an MCP connection to a session
 
@@ -26,11 +26,13 @@ Agents are launched in their runtime's non-interactive mode and never see a perm
 
 | Instead of a prompt asking... | The control is |
 |---|---|
-| "may this agent run this command?" | The container and worktree: the command runs, and can only affect what the identity can reach |
-| "may this agent access this file?" | Mounts and the memory scope enforcer |
+| "may this agent run this command?" | The container and worktree: the command runs, and can only affect what the identity can reach (for Ori's own tools; a proxied tool's server is not bound by them) |
+| "may this agent access this file?" | Mounts and the memory scope enforcer (for Ori's own tools; not a proxied tool's server) |
 | "may this agent use this credential?" | The broker issued only the credentials the role needs, expiring with the session |
-| "may this agent merge, push or deploy?" | It cannot: it never held that credential; the merge queue alone merges |
+| "may this agent merge, push or deploy?" | It cannot: it never held that credential; the merge queue alone merges, on Ori's own merge path, where it alone calls `VcsHost::merge` with Ori's credentials. An operator-exposed server acting with its own credentials is outside this row (API_SPEC section 3, "Proxied tools") |
 | "is this output correct?" | Gates proven on planted defects, the lead's adversarial review, tiers, the operator's decision at the control points |
+
+The container, worktree, mounts and memory scope bound what Ori's own tools can affect, and the broker issues Ori's own credentials only; none of these bounds a proxied tool's server. Its reach is the operator's decision, taken when the operator acknowledged it on exposing the server and recorded in `mcp.server_added` (API_SPEC section 3, "Proxied tools"). That acknowledgement is not one of the controls in the table, and the forbidden-action test does not exercise a proxied tool's reach (ENV_SETUP section 6).
 
 Ori Studio itself holds full rights on the project's repository (through the app-scoped host identity) and on the local machine; it is the trusted component, and everything it delegates is scoped.
 
@@ -46,7 +48,7 @@ Permissions are a function of (actor, role, resource, action) evaluated in `ori-
 
 - All RPC parameters validated against the API schema before dispatch.
 - All MCP tool inputs validated and length-capped; free text from agents passes the sanitization barrier before storage.
-- Agent free text reaches storage through one public entry of the sanitization barrier, which returns a sealed sanitized field. The ports of `ori-mcp` accept that type and no plain string, so a plan, the question, recommendation and evidence of an escalation, and the content of a report cannot reach storage without passing the barrier, and code that skips the barrier does not compile. The sanitizer of a single field stays private to the barrier, so nothing else can make the sealed type.
+- Agent free text that `ori-mcp` stores through a port (a plan's content; an escalation's question, recommendation and evidence) reaches the port as the barrier's sealed sanitized type, which only `barrier.rs` produces, so the compiler checks passage through the barrier at that port. Report content goes through `barrier::submit_report`. Identifiers, triggers, declared-scope paths and specification content (`aicd_spec_propose`, which goes to a human pull request) are validated and length-capped, not sanitized. The ports do not constrain what `ori-mcp` appends to its own `mcp.*` events: that rule is API_SPEC section 3's, which keeps agent free text out of them.
 - All integration payloads (webhooks, polled data) parsed into typed structures; unparseable fields are dropped and counted, never stored raw except as evidence blobs.
 - Paths from any caller are canonicalized and checked against the product root; no path escapes.
 - Terminal input is passed to the PTY unmodified but logged; the terminal is a human surface, not an agent one.
@@ -70,9 +72,9 @@ Permissions are a function of (actor, role, resource, action) evaluated in `ori-
 | `ori-core` (state machines, the permission function) | Control structure and the authorization decision itself |
 | `ori-core::adapters` (`adapters.rs`, `adapters/identity.rs`) | Identities and how they are created, the scoped credential type (`ScopedToken`) an adapter receives per call, and the adapter traits, among them the contract of `VcsHost::merge` |
 | `ori-broker` (all) | Credentials and identities |
-| `ori-orchestrator::merge_queue` | The only merge path |
+| `ori-orchestrator::merge_queue` | Ori's own merge path: the only caller of `VcsHost::merge` |
 | `ori-orchestrator::lifecycle` (tier and category rules) | Control structure |
-| `ori-mcp::tool_scopes` (server tool scopes) | What agents can do |
+| `ori-mcp::scopes`, `ori-mcp::ports`, `ori-mcp::server`, `ori-mcp::tools` | What agents can do |
 | `ori-memory::barrier`, `ori-memory::scope` | Injection and scope boundaries |
 | `ori-runtime::container`, `ori-runtime::injector` | Isolation and credential injection |
 | `ori-watch::attribution` | Detection of unattributed changes |
