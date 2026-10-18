@@ -1,7 +1,8 @@
 //! Model Context Protocol host and server: AICD §8, AICD §25.
 //!
 //! Owns `Host` (client to the user's servers), `Server` (the tools in
-//! `spec/API_SPEC.md` section 3) and `ToolScopes` (`spec/LLD.md` section 2).
+//! `spec/API_SPEC.md` section 3), `ToolScopes` and the ports
+//! (`spec/LLD.md` section 2).
 //!
 //! The methodology names the shape, not the protocol. AICD §8 puts a memory
 //! service on top of the four layers and exposes it to the agents as a tool
@@ -19,11 +20,14 @@
 //! MCP as the protocol that realizes the tool connection AICD §8 requires. The
 //! methodology binds the shape and the scopes; the ADR binds the wire format.
 //!
-//! Must not: expose a tool not in `spec/API_SPEC.md` (`spec/LLD.md` section 2).
+//! Must not: expose a tool outside what `spec/LLD.md` section 2 allows. Ori's own
+//! tools are the eleven of `spec/API_SPEC.md` section 3, and a proxied tool is
+//! exposed only on the conditions of that section's "Proxied tools".
 
 /// What the server reaches through the engine: the traits `ori-engine`
-/// implements for identifiers, ticket upgrades, specification proposals and the
-/// operator's MCP servers, and the error they share (AICD §17). Tier 2.
+/// implements for identifiers, ticket upgrades, specification proposals, the
+/// operator's MCP servers, the time and a session's state, and the error they
+/// share (AICD §17). Tier 2.
 pub mod ports;
 
 /// The MCP wire both halves of this crate share: JSON-RPC 2.0 framing and
@@ -36,3 +40,12 @@ pub mod protocol;
 /// only way to an operator's server: `ToolScopes`, the refusals, the proxied
 /// tool name rule (AICD §17, AICD §25, AICD §26, AICD §27). Tier 2.
 pub mod scopes;
+
+/// The transport-agnostic core of the agent-facing MCP server: the connection
+/// lifecycle, the per-call pipeline that decides, records and dispatches every
+/// `tools/call`, and the session binding (AICD §8, AICD §17). Tier 2.
+pub mod server;
+
+/// The tool catalogue with its input schemas, the validator generated from
+/// them, and the handler seam each tool plugs into (AICD §17, AICD §27). Tier 2.
+pub mod tools;

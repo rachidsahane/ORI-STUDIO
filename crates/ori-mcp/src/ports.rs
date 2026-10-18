@@ -4,29 +4,33 @@
 //! # Why traits here
 //!
 //! The server core (slice S2) must reach a ticket's category, a specification
-//! pull request, a source of identifiers and the operator's MCP servers, and
-//! `spec/LLD.md` section 2 draws no edge from `ori-mcp` to `ori-orchestrator`,
-//! `ori-flows` or `ori-broker`, and none is added (`ops/batch-10-plan.md`,
-//! decision D1). The edge the graph does draw is `ENG --> MCP`: `ori-engine`
+//! pull request, a source of identifiers, the operator's MCP servers, the time
+//! and the state of the session it serves, and `spec/LLD.md` section 2 draws no
+//! edge from `ori-mcp` to `ori-orchestrator`, `ori-flows` or `ori-broker`, and
+//! none is added (`ops/batch-10-plan.md`, decision D1). The edge the graph does draw is `ENG --> MCP`: `ori-engine`
 //! depends on this crate, so a trait declared here and implemented there adds no
 //! edge. These are not the adapter traits of `spec/API_SPEC.md` section 4, and
 //! nothing is added to `ori-core` for them.
 //!
 //! ```mermaid
 //! flowchart LR
-//!   ENG["ori-engine"] -- "depends on" --> MCP["ori-mcp: Server, ToolScopes, ports"]
+//!   ENG["ori-engine"] -- "depends on" --> MCP["ori-mcp: Server, ToolScopes, six ports"]
 //!   ENG -- "depends on" --> ORCH["ori-orchestrator"]
 //!   ENG -- "depends on" --> BRK["ori-broker"]
-//!   ENG -. "implements the ports with what it holds" .-> MCP
+//!   ENG -. "implements IdSource, TicketDesk, SpecDesk, UserToolHost, Clock and SessionDesk with what it holds" .-> MCP
 //!   MCP -. "never" .-> ORCH
 //!   MCP -. "never" .-> BRK
 //! ```
 //!
 //! # What is declared, and what waits
 //!
-//! Four ports: [`crate::ports::IdSource`], [`crate::ports::TicketDesk`],
-//! [`crate::ports::SpecDesk`] and [`crate::ports::UserToolHost`].
-//! `PlanDesk` and `EscalationDesk` are not here. Each takes agent text that must
+//! Six ports: [`crate::ports::IdSource`], [`crate::ports::TicketDesk`],
+//! [`crate::ports::SpecDesk`], [`crate::ports::UserToolHost`],
+//! [`crate::ports::Clock`] and [`crate::ports::SessionDesk`]. The first four
+//! are slice S1's; the last two are slice S2's, and the server core calls them
+//! itself: [`crate::ports::Clock`] stamps every event the server appends, and
+//! [`crate::ports::SessionDesk`] says whether the session the connection serves
+//! may still act. `PlanDesk` and `EscalationDesk` are not here. Each takes agent text that must
 //! pass the sanitization barrier first, and what they need is the barrier's
 //! sealed sanitized type, which `ori-memory` does not export yet (escalation
 //! E-0012's public entry, plan prerequisite PM2). They arrive with slice S9, so
@@ -50,6 +54,11 @@
 //!   host call consumes, so no call reaches an operator's server without a
 //!   decision of `scopes.rs` made for that call.
 //!
+//! [`crate::ports::Clock`] and [`crate::ports::SessionDesk`] are `Send`, which
+//! the first four are not required to be: the server holds them as trait
+//! objects and is itself `Send`, so the engine can build it on one thread and
+//! hand it to the product's writer task.
+//!
 //! A port also receives the [`crate::scopes::Caller`] that the server core built
 //! from the session binding, never an identity read from a tool argument. The
 //! caller carries the agent identity of the session, and a port that writes
@@ -65,11 +74,12 @@
 use core::fmt;
 
 use ori_core::error::{Error, MethodologyRef};
-use ori_core::types::{Category, Id};
+use ori_core::types::{Category, Id, Timestamp};
 use ori_store::db::ProductDb;
 
 use crate::protocol::{CallToolResult, JsonObject, Tool};
 use crate::scopes::{Caller, UserToolGrant};
+use crate::server::Binding;
 
 /// Why a port could not do what it was asked: AICD §17.
 ///
@@ -284,6 +294,49 @@ pub trait UserToolHost {
         tool: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, PortError>;
+}
+
+/// The engine's clock: AICD §17.
+///
+/// Every event the server appends takes its `at` from here, **never from a
+/// message**: an agent cannot choose the time of its own audit trail, and the
+/// call budget's window runs on this clock too. `ori-core` has no clock
+/// (`Timestamp` is built from a value the caller has), so the engine, which has
+/// one, implements this.
+///
+/// Takes no `ProductDb` and writes nothing; no credential passes through this
+/// port. The server reads it once at the entry of every call, which is the
+/// call's own time, and once more when it records a failure. `Send`, because the
+/// server that holds it is handed to the product's writer task.
+pub trait Clock: Send {
+    /// The current time. It may step backwards (a clock set back by an
+    /// operator): the call budget starts a new window when it does.
+    fn now(&mut self) -> Timestamp;
+}
+
+/// Whether the session a connection serves may still act: AICD §17.
+///
+/// A connection grants what the session behind it holds, and nothing once that
+/// session is not active (suspended for an escalation, ended, revoked). The
+/// server asks before it looks at what a call names, and closes the connection
+/// on a refusal, so a session that is over cannot probe the tool surface.
+///
+/// The caller holds the single `ProductDb` writer ([`crate::ports`]'s "What
+/// every port promises"): an implementation reads the session's state through
+/// the handle it is given and opens none of its own. No credential passes
+/// through this port. `Send`, because the server that holds it is handed to the
+/// product's writer task.
+pub trait SessionDesk: Send {
+    /// Whether the session `binding` names is active.
+    ///
+    /// `binding` is the engine's own record of the session the connection
+    /// serves; the implementation answers for that session and for no other.
+    ///
+    /// # Errors
+    ///
+    /// [`PortError::Unavailable`] when the session's state could not be read.
+    /// The server refuses the call and closes the connection: it fails closed.
+    fn is_active(&mut self, db: &mut ProductDb, binding: &Binding) -> Result<bool, PortError>;
 }
 
 #[cfg(test)]
