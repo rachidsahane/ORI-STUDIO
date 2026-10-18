@@ -1587,7 +1587,11 @@ impl Fit for SearchPackage {
 /// a control character, the Unicode line and paragraph separators, and the
 /// characters that set text direction (the embeddings and overrides, the
 /// isolates, the left and right marks and the Arabic letter mark).
-fn is_unsafe_char(ch: char) -> bool {
+///
+/// The barrier quotes an evidence blob's content with the same rule
+/// (`crate::barrier::EvidenceContent::quoted`), so the two never disagree on
+/// what untrusted text may not carry onto the page.
+pub(crate) fn is_unsafe_char(ch: char) -> bool {
     ch.is_control()
         || matches!(
             ch,
