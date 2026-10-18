@@ -69,11 +69,20 @@
 //! the installer refuses ([`HooksError::PreservedNameTaken`]) rather than
 //! choose which of two hooks to lose. `ori-original/` is the installer's, so an
 //! `ori-original` that is a link, or not a directory, refuses the install
-//! ([`HooksError::HooksDirNotADirectory`]) whatever the hooks are. A link would
-//! make the scripts run whatever it leads to, themselves included.
+//! ([`HooksError::HooksDirNotADirectory`]) whatever the hooks are. A link in
+//! its place would make the scripts run whatever it leads to, themselves
+//! included. The entries inside it that the scripts run, those named for a hook
+//! this installer replaces, are judged like an entry of the hooks directory
+//! (below) when they are links; a link kept by a first install passes again,
+//! since it was judged where it stood before.
 //!
-//! **One arrangement is refused, and it is looked for in every entry of the
-//! hooks directory, not only the four hooks.** A link that, followed to its
+//! **Two arrangements are refused, and each is looked for in every entry of the
+//! hooks directory, not only the four hooks**, and in the links of
+//! `ori-original/` named for a hook the installer replaces: a link that reaches
+//! a hook the installer replaces, and a link whose way enters a directory where
+//! a path names something different for each process, whatever it would reach.
+//!
+//! The first: a link that, followed to its
 //! end, reaches the place of a hook the installer replaces cannot be kept
 //! safely. `post-merge -> post-commit` once kept would resolve to the engine's
 //! own script, so the hook it stood for, a `pre-push` veto included, would
@@ -92,17 +101,25 @@
 //! link to a same-named hook in some other directory (a team's
 //! shared hooks) is not this. A link that cannot be read, or an entry that
 //! cannot be looked at for a reason other than not being there, refuses the
-//! installation as an IO error rather than passing it ([`HooksError::Io`]). A
-//! link whose way enters `/proc` or `/dev/fd`, where a path names something
-//! different for each process, is refused
-//! ([`HooksError::HookLinkDependsOnProcess`]), because the installer's process
-//! cannot judge what git's will run.
+//! installation as an IO error rather than passing it ([`HooksError::Io`]).
 //! On macOS and Windows, whose file systems are case-insensitive by
 //! default, names are compared without regard to ASCII case, so a link to
 //! `Post-Commit` counts; a case-sensitive volume there is refused where it
 //! need not be, which is the safe side of the choice
 //! (`CASE_INSENSITIVE_NAMES`). That installation fails
 //! ([`HooksError::HookLinksToManagedHook`]) and writes nothing.
+//!
+//! The second: a link whose way enters `/proc` or `/dev/fd`, where a path names
+//! something different for each process, is refused
+//! ([`HooksError::HookLinkDependsOnProcess`]) whatever it reaches, because the
+//! installer's process cannot judge what git's will run: git runs a hook with
+//! its working directory at the worktree's root. Git also makes directories
+//! after the install and before it runs a hook (`logs/` at the first commit,
+//! `rebase-merge/` during a rebase, a worktree directory a checkout creates),
+//! so past a component that is not there the way is followed by its text, until
+//! a `..` climbs back to a directory that is there, and then physically again.
+//! It assumes that a directory made later is a real directory. That installation
+//! fails and writes nothing.
 //!
 //! The installation is built so that a hook of someone else's is not lost
 //! to a failure or to a second installer running at the same time:
@@ -616,7 +633,10 @@ pub struct HookStatus {
     /// How it stands.
     pub state: HookState,
     /// Whether a preserved hook from before the engine sits beside it and is
-    /// run after recording.
+    /// run after recording. It is computed only once `ori-original/` has been
+    /// found to be absent or a real directory: [`GitHooks::status`] refuses
+    /// ([`HooksError::HooksDirNotADirectory`]) before it reports anything
+    /// otherwise.
     pub chains_to_original: bool,
 }
 
@@ -721,9 +741,9 @@ impl GitHooks {
     /// file since [`GitHooks::new`], [`HooksError::ConfigNotReadable`] and
     /// [`HooksError::HooksPathConfigured`] when `.git/config` cannot be read or
     /// sets `core.hooksPath`, [`HooksError::HooksDirNotADirectory`] when the
-    /// hooks directory, or the `ori-original` in it, is a link or not a
-    /// directory (whatever the hooks are: a link there would make every script
-    /// run whatever it leads to, itself included),
+    /// hooks directory is a link or not a directory, or when the
+    /// `ori-original` in it is (whatever the hooks are: a link there would make
+    /// every script run whatever it leads to, itself included),
     /// [`HooksError::HookNotAFile`], [`HooksError::HookLinksToManagedHook`],
     /// [`HooksError::HookLinkDependsOnProcess`] and
     /// [`HooksError::PreservedNameTaken`] when what is in the hooks
@@ -748,26 +768,12 @@ impl GitHooks {
             }
         }
         // `ori-original/` is the installer's: absent, or a real directory,
-        // whatever the hooks are. The scripts run
+        // whatever the hooks are, and the links in it that the scripts run
+        // (those named for a hook this installer replaces) are judged below
+        // like the entries of the hooks directory. The scripts run
         // `ori-original/<their own name>` when it is executable, so a link
         // there (`ori-original -> .`) makes each script run itself.
-        let preserved_dir = hooks_dir.join(PRESERVED_DIR);
-        match fs::symlink_metadata(&preserved_dir) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(HooksError::HooksDirNotADirectory {
-                        path: preserved_dir,
-                    });
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(HooksError::Io {
-                    path: preserved_dir,
-                    source,
-                });
-            }
-        }
+        refuse_a_preserved_dir_that_is_not_ours(&hooks_dir)?;
         // Decide every hook before writing any.
         self.refuse_if_a_link_reaches_a_managed_hook(&hooks_dir)?;
         let mut plans = Vec::new();
@@ -799,11 +805,15 @@ impl GitHooks {
     ///
     /// [`HooksError::GitDirNotADirectory`] when `.git` has become a link or a
     /// file since [`GitHooks::new`], [`HooksError::HookNotAFile`] when a
-    /// directory sits where a hook belongs, [`HooksError::Io`] when a hook
-    /// file cannot be examined.
+    /// directory sits where a hook belongs, [`HooksError::HooksDirNotADirectory`]
+    /// when the `ori-original` in the hooks directory is a link or not a
+    /// directory (as for [`GitHooks::install`]: each script would run itself, or
+    /// whatever the link leads to, and a report that every hook is installed
+    /// would be false), [`HooksError::Io`] when a hook file cannot be examined.
     pub fn status(&self) -> Result<Vec<HookStatus>, HooksError> {
         check_git_dir(&self.git_dir)?;
         let hooks_dir = self.hooks_dir();
+        refuse_a_preserved_dir_that_is_not_ours(&hooks_dir)?;
         let mut statuses = Vec::new();
         for hook in GitHook::ALL {
             let path = hooks_dir.join(hook.file_name());
@@ -1054,6 +1064,14 @@ impl GitHooks {
     /// A link made after this look is not seen by it, as with every decision
     /// made before the writes.
     ///
+    /// The entries of `ori-original/` that the installed scripts run, which are
+    /// those named for a hook this installer replaces, are looked at too when
+    /// `ori-original/` is a real directory (`install` refused it otherwise):
+    /// each that is a link goes through the same two checks, the per-process
+    /// walk and then the chain, and a refusal names that entry. A link a first
+    /// install kept there was judged where it stood in the hooks directory, so it
+    /// passes again.
+    ///
     /// A way that first fails at `ori-original/`, which the installer creates,
     /// or at an entry of it named for a hook it replaces, is refused whatever
     /// it would reach (`ori-original/../post-merge`; `M/post-merge` where `M`
@@ -1090,6 +1108,10 @@ impl GitHooks {
             }
         }
         links.sort();
+        // The entries of `ori-original/` that the scripts run, when it is a
+        // real directory, are judged by the same two checks, after those of
+        // the hooks directory.
+        links.extend(preserved_links_named_for_a_managed_hook(hooks_dir)?);
         // The directory was just listed, so failing to resolve it is not
         // absence: the check cannot be made, and the install is refused
         // (AICD §14).
@@ -1154,6 +1176,88 @@ impl GitHooks {
             None => Ok(()),
         }
     }
+}
+
+/// Refuses `ori-original/` in `hooks_dir` unless it is absent or a real
+/// directory: AICD §13.
+///
+/// The installed scripts run `ori-original/<their own name>` when it is
+/// executable, so a link there (`ori-original -> .`) makes each script find
+/// itself and run itself, and a link out of the repository makes them run
+/// whatever it leads to. A file there is not a directory a hook can be kept in.
+/// This is looked at whatever the hooks are, by [`GitHooks::install`] before
+/// anything is decided and by [`GitHooks::status`] before anything is
+/// reported.
+///
+/// # Errors
+///
+/// [`HooksError::HooksDirNotADirectory`] naming `ori-original` when it is a link
+/// or not a directory, [`HooksError::Io`] when it cannot be looked at for a
+/// reason other than not being there.
+fn refuse_a_preserved_dir_that_is_not_ours(hooks_dir: &Path) -> Result<(), HooksError> {
+    let preserved_dir = hooks_dir.join(PRESERVED_DIR);
+    match fs::symlink_metadata(&preserved_dir) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(HooksError::HooksDirNotADirectory {
+                    path: preserved_dir,
+                });
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(HooksError::Io {
+            path: preserved_dir,
+            source,
+        }),
+    }
+}
+
+/// The links in `hooks_dir/ori-original/` that are named for a hook this
+/// installer replaces, sorted: the entries the installed scripts run.
+///
+/// Only a real directory is listed; a link or a file there was refused by
+/// `refuse_a_preserved_dir_that_is_not_ours` before this is reached, and an
+/// absent one has no entries. Anything that cannot be looked at, other than a
+/// missing directory, is an IO error and refuses the install (AICD §14).
+fn preserved_links_named_for_a_managed_hook(hooks_dir: &Path) -> Result<Vec<PathBuf>, HooksError> {
+    let directory = hooks_dir.join(PRESERVED_DIR);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(HooksError::Io {
+                path: directory,
+                source,
+            });
+        }
+    }
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(HooksError::Io {
+                path: directory,
+                source,
+            });
+        }
+    };
+    let io_error = |source| HooksError::Io {
+        path: directory.clone(),
+        source,
+    };
+    let mut links = Vec::new();
+    for entry in listing {
+        let entry = entry.map_err(io_error)?;
+        if names_a_managed_hook(&entry.file_name(), CASE_INSENSITIVE_NAMES)
+            && entry.file_type().map_err(io_error)?.is_symlink()
+        {
+            links.push(entry.path());
+        }
+    }
+    links.sort();
+    Ok(links)
 }
 
 /// Creates `path`, which must not exist, writes `bytes` and makes it
@@ -1588,11 +1692,17 @@ fn way_enters_what_the_install_creates(
 ///   as the installer's own process sees it, which is not what git's process
 ///   sees when it runs the hook. Such a link is refused before this walk, by
 ///   `way_enters_a_per_process_directory`
-///   ([`HooksError::HookLinkDependsOnProcess`]). That walk follows the way
-///   physically up to its first missing component. Beyond a missing
-///   component, the text reading of bullet (b) is not walked for this rule. A
-///   way that does not exist reaches nothing for git either, except through
-///   the spool's future path, bullet (c), whose limit applies here too.
+///   ([`HooksError::HookLinkDependsOnProcess`]). Git makes directories after the
+///   install and before it runs a hook (`logs/` at the first commit,
+///   `rebase-merge/` during a rebase, a worktree directory a checkout creates),
+///   so a way that does not exist now may reach `/proc` then: past a missing
+///   component that walk follows the text of the way until a `..` climbs back to
+///   a directory that is there, and walks on physically from it. It assumes a
+///   directory made later is a real directory. The spool's future path is one
+///   such directory, and bullet (c)'s limit does not apply to this rule. The
+///   text reading of bullet (b) still resolves a `/proc/self` as the
+///   installer's own process does, which is not git's; it does not decide a way
+///   of this kind, because the per-process walk has refused it first.
 ///
 /// A link whose target cannot exist, because it goes through a regular file or
 /// carries a name too long for the file system, is not a missing entry: it
@@ -1687,16 +1797,18 @@ fn follow_chain_to_managed_hook(
 /// something different for each process that follows it: AICD §13.
 ///
 /// Those are `/proc` and everything under it (procfs, with `/proc/self`,
-/// `/proc/thread-self` and `/proc/<pid>`), and `/dev/fd` and everything under
-/// it (fdescfs on macOS and the BSDs). On Linux `/dev/fd`, `/dev/stdin`,
-/// `/dev/stdout` and `/dev/stderr` are links into `/proc/self`; they are
-/// followed there, so they count through `/proc`.
+/// `/proc/thread-self` and `/proc/<pid>`), `/dev/fd` and everything under it
+/// (fdescfs on macOS and the BSDs), and `/compat/linux/proc` and everything
+/// under it (FreeBSD's linprocfs, which its Linux emulation mounts there). On
+/// Linux `/dev/fd`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are links into
+/// `/proc/self`; they are followed there, so they count through `/proc`.
 ///
 /// It is the text of `directory` alone, and no file is looked at: the
-/// components must begin with the root and then `proc`, or the root, `dev`,
-/// `fd`. A relative path and a path with a Windows prefix never match, and
-/// neither does `/procfs`, `/dev`, `/dev/null` or `/home/proc`. It is `false`
-/// everywhere but on Unix, which is the only family with such a directory.
+/// components must begin with the root and then `proc`; or the root, `dev`,
+/// `fd`; or the root, `compat`, `linux`, `proc`. A relative path and a path
+/// with a Windows prefix never match, and neither does `/procfs`, `/dev`,
+/// `/dev/null`, `/compat/linux` or `/home/proc`. It is `false` everywhere but on
+/// Unix, which is the only family with such a directory.
 fn is_per_process_directory(directory: &Path, fold_case: bool) -> bool {
     if !cfg!(unix) {
         return false;
@@ -1705,45 +1817,85 @@ fn is_per_process_directory(directory: &Path, fold_case: bool) -> bool {
     if !matches!(components.next(), Some(Component::RootDir)) {
         return false;
     }
-    match components.next() {
-        Some(Component::Normal(first)) if is_named(first, "proc", fold_case) => true,
-        Some(Component::Normal(first)) if is_named(first, "dev", fold_case) => matches!(
-            components.next(),
-            Some(Component::Normal(second)) if is_named(second, "fd", fold_case)
-        ),
+    let mut names = components.map_while(|component| match component {
+        Component::Normal(name) => Some(name),
+        _ => None,
+    });
+    match names.next() {
+        Some(first) if is_named(first, "proc", fold_case) => true,
+        Some(first) if is_named(first, "dev", fold_case) => names
+            .next()
+            .is_some_and(|second| is_named(second, "fd", fold_case)),
+        Some(first) if is_named(first, "compat", fold_case) => {
+            names
+                .next()
+                .is_some_and(|second| is_named(second, "linux", fold_case))
+                && names
+                    .next()
+                    .is_some_and(|third| is_named(third, "proc", fold_case))
+        }
         _ => false,
     }
 }
 
 /// The per-process directory the way `path` enters, if it enters one,
-/// followed physically one component at a time: AICD §13.
+/// followed one component at a time, physically while every directory is
+/// there and by its text past the first that is not: AICD §13.
 ///
 /// It walks as `way_enters_what_the_install_creates` does, with the same
 /// steps, and starts at the canonical root `path` begins with, or at the
 /// canonical current directory. After every change of the directory the walk
-/// stands in (the start, a root, a `..`, a directory entered) it asks
-/// `is_per_process_directory`, and on a yes returns that directory. So the
-/// walk stops on entering such a directory, before it reads any link inside it:
-/// `/proc/self` and `/proc/self/cwd` are never read or followed, because what
-/// they lead to is what this process is, and not what git's process would find.
-/// A name is looked at without following it:
+/// stands in (the start, a root, a `..`, a name entered, whether it is there
+/// or not) it asks `is_per_process_directory`, and on a yes returns that
+/// directory. So the walk stops on entering such a directory, before it reads
+/// any link inside it: `/proc/self` and `/proc/self/cwd` are never read or
+/// followed, because what they lead to is what this process is, and not what
+/// git's process would find. A directory is asked about before it is
+/// canonicalized, so the platform's `realpath` is never called on a per-process
+/// file system.
+///
+/// While every directory the walk has entered is there, a name is looked at
+/// without following it:
 ///
 /// - a link is read, and its target's steps go to the front of the work list,
 ///   so one call follows a whole chain, through links inside the hooks
 ///   directory and outside it;
 /// - a directory becomes the directory the walk stands in;
-/// - anything else is a file, and the way reaches nothing: `Ok(None)`.
+/// - a name that is not there, and a file that has more steps after it, are
+///   where the walk leaves the file system (below); a file at the last step ends
+///   the way: `Ok(None)`.
 ///
-/// These end the walk with `Ok(None)` too: an entry that is not there, a name
-/// under a file, every component resolved, and more than `LINK_HOPS_CAP`
-/// links. The last is not an error: no process can follow such a way, and
-/// `follow_chain_to_managed_hook` reads it the same way. Beyond a missing
-/// component nothing is walked, and the text is not read.
+/// **Past a component that is not there.** Git makes directories after the
+/// install and before it runs a hook: `logs/` at the first commit,
+/// `rebase-merge/` during every rebase, a worktree directory that a checkout
+/// creates. A way that does not exist now can therefore reach `/proc` then
+/// (`../logs/` followed by enough `../` and `proc/self/cwd/...`), and the walk
+/// does not stop at it. It keeps the directory it stands in as a path, with a
+/// count of the trailing names of it that are not there. A name met while that
+/// count is above 0 is added to the path, and the count grows; nothing is looked
+/// at, because its parent is not there, and so no link is read. A `..` with the
+/// count above 0 removes the last name by its text and lowers the count, since a
+/// directory git makes is a real directory and `..` from it returns where it was;
+/// at 0 it is the physical parent. A root restarts physically. A file that has
+/// steps after it is treated like a missing directory: it could be replaced by
+/// one. The walk assumes that a directory made later is a real directory: that
+/// is the limit of this rule. The spool's future path is one such directory.
+///
+/// The walk ends with `Ok(None)` when the steps run out, and when more than
+/// `LINK_HOPS_CAP` links have been read. That is not an error: no process can
+/// follow such a way. `follow_chain_to_managed_hook` reads a chain of more than
+/// `LINK_HOPS_CAP` final hops as no, and a loop it meets while resolving a
+/// directory as an IO error, which refuses the install. The walk reads both as
+/// no, because the chain check that follows refuses the second. The cap counts
+/// every link read and none is read past a missing component, so the walk always
+/// ends (`L -> missing/../L` reaches the cap).
 ///
 /// What it does not recognise:
 ///
 /// - a procfs or fdescfs mounted anywhere else, or bind-mounted, is not
-///   recognised: only an administrator can make one;
+///   recognised. An ordinary user can make one: FUSE (`fusermount` is setuid)
+///   and unprivileged user namespaces let a user mount a per-process file
+///   system, or bind-mount `/proc`, in directories of their own;
 /// - Windows has no such directory, and a drive letter that differs for each
 ///   logon session (`subst`, a mapped drive) in an absolute target is not
 ///   judged;
@@ -1768,14 +1920,27 @@ fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Resul
     if is_per_process_directory(&current, fold_case) {
         return Ok(Some(current));
     }
+    // The trailing names of `current` that are not there. It is 0 while the
+    // walk is physical, and `current` is then canonical.
+    let mut missing_depth = 0usize;
     let mut hops = 0usize;
     while let Some(step) = pending.pop_front() {
         match step {
-            Step::Root(root) => current = fs::canonicalize(root)?,
+            Step::Root(root) => {
+                current = fs::canonicalize(root)?;
+                missing_depth = 0;
+            }
             Step::Parent => {
-                if let Some(parent) = current.parent() {
+                if missing_depth > 0 {
+                    current.pop();
+                    missing_depth -= 1;
+                } else if let Some(parent) = current.parent() {
                     current = parent.to_path_buf();
                 }
+            }
+            Step::Name(name) if missing_depth > 0 => {
+                current.push(&name);
+                missing_depth += 1;
             }
             Step::Name(name) => {
                 let candidate = current.join(&name);
@@ -1791,16 +1956,31 @@ fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Resul
                         continue;
                     }
                     Ok(metadata) if metadata.is_dir() => {
+                        // Before `canonicalize`, which is never called on a
+                        // per-process file system. `current` is canonical and
+                        // the entry is a real directory, so `candidate` is
+                        // already the path, up to case, which the question
+                        // folds.
+                        if is_per_process_directory(&candidate, fold_case) {
+                            return Ok(Some(candidate));
+                        }
                         current = fs::canonicalize(&candidate)?;
                     }
-                    Ok(_) => return Ok(None),
+                    // A file at the last step ends the way; with steps after
+                    // it, it is read like a directory that is not there.
+                    Ok(_) if pending.is_empty() => return Ok(None),
+                    Ok(_) => {
+                        current = candidate;
+                        missing_depth = 1;
+                    }
                     Err(error)
                         if matches!(
                             error.kind(),
                             io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                         ) =>
                     {
-                        return Ok(None);
+                        current = candidate;
+                        missing_depth = 1;
                     }
                     Err(error) => return Err(error),
                 }
@@ -4341,7 +4521,7 @@ mod tests {
         assert_eq!(
             walk(&past_the_cap).unwrap(),
             None,
-            "a chain past the cap is no answer of an error"
+            "a chain past the cap is no, not an error"
         );
 
         // A link to itself.
@@ -4358,20 +4538,36 @@ mod tests {
     #[test]
     fn ori_t_0180_which_directories_are_per_process() {
         for fold_case in [false, true] {
-            for path in ["/proc", "/proc/1/cwd", "/dev/fd", "/dev/fd/3"] {
+            for path in [
+                "/proc",
+                "/proc/1/cwd",
+                "/dev/fd",
+                "/dev/fd/3",
+                "/compat/linux/proc",
+                "/compat/linux/proc/1/cwd",
+            ] {
                 assert!(
                     is_per_process_directory(Path::new(path), fold_case),
                     "{path} (fold_case {fold_case}) is per-process"
                 );
             }
-            for path in ["/dev", "/dev/null", "/procfs", "/home/proc", "proc"] {
+            for path in [
+                "/dev",
+                "/dev/null",
+                "/procfs",
+                "/home/proc",
+                "proc",
+                "/compat",
+                "/compat/linux",
+                "/compat/linux/procfs",
+            ] {
                 assert!(
                     !is_per_process_directory(Path::new(path), fold_case),
                     "{path} (fold_case {fold_case}) is not per-process"
                 );
             }
         }
-        for path in ["/PROC", "/DEV/FD"] {
+        for path in ["/PROC", "/DEV/FD", "/COMPAT/LINUX/PROC"] {
             assert!(
                 !is_per_process_directory(Path::new(path), false),
                 "{path} is not per-process where names are exact"
@@ -4508,6 +4704,342 @@ mod tests {
                 "{hook:?} changed under a refused installation"
             );
         }
+    }
+
+    // ---- ORI-T-0180, repair 1: ways through directories that are not there yet ----
+
+    /// The text of a link whose way climbs out of what is there, goes on past
+    /// `prefix` (a way through directories that are not there, which git
+    /// makes later) and ends at the engine's `post-merge` through the working
+    /// directory of whatever process follows it: `prefix`, forty `../`, then
+    /// `proc/self/cwd/.git/hooks/post-merge`.
+    #[cfg(target_os = "linux")]
+    fn way_through_proc_after(prefix: &str) -> String {
+        format!(
+            "{prefix}{}proc/self/cwd/.git/hooks/post-merge",
+            "../".repeat(40)
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_a_way_through_a_directory_git_creates_later_is_still_judged() {
+        // `.git/logs` is made by the first commit. Until then the way stops at
+        // it, and the text of what follows used to be read as the installer's
+        // process sees `/proc/self`.
+        let scratch = Scratch::new("later-logs");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        assert!(!repo.join(".git").join("logs").exists());
+        let link = hooks_dir.join("post-checkout");
+        let written = way_through_proc_after("../logs/");
+        let target = Path::new(&written);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+
+        // The premise: the chain check alone passes it.
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let reached = follow_chain_to_managed_hook(&hooks_dir, &canonical, &link, false);
+        assert!(
+            matches!(reached, Ok(None)),
+            "the premise fails: the chain check alone does not pass this link, so the test \
+             proves nothing about the walk past a missing component: {reached:?}"
+        );
+
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_a_way_through_a_missing_worktree_directory_is_still_judged() {
+        // A checkout of a branch that tracks `d/f` makes `d/`, in the working
+        // tree, and runs `post-checkout` after it.
+        let scratch = Scratch::new("later-worktree-dir");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        assert!(!repo.join("d").exists());
+        let link = hooks_dir.join("post-checkout");
+        let written = way_through_proc_after("../../d/");
+        let target = Path::new(&written);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_a_way_that_descends_into_missing_names_and_climbs_back_is_judged() {
+        // The text climbs back through two missing levels, and then through
+        // forty more `..`, which are physical again.
+        let scratch = Scratch::new("later-descends");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        let written = way_through_proc_after("../logs/a/b/../../../");
+        let target = Path::new(&written);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_the_walk_past_a_missing_component_follows_the_text_and_ends() {
+        let scratch = Scratch::new("later-walk");
+        let (repo, _) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let walk = |name: &str| way_enters_a_per_process_directory(&hooks_dir.join(name), false);
+
+        // Names that stay missing reach nothing, however deep.
+        std::os::unix::fs::symlink("missing/a/b", hooks_dir.join("stays-missing")).unwrap();
+        assert_eq!(walk("stays-missing").unwrap(), None);
+        // A `..` that climbs only to a name that is not there does not reach
+        // the root, so it does not reach `/proc`.
+        std::os::unix::fs::symlink(
+            "missing/../../../../../../../../../../nowhere/proc",
+            hooks_dir.join("not-a-proc"),
+        )
+        .unwrap();
+        assert_eq!(walk("not-a-proc").unwrap(), None);
+
+        // A link back to itself through a missing name: the cap ends it, and
+        // it is no answer of an error.
+        std::os::unix::fs::symlink("missing/../loop", hooks_dir.join("loop")).unwrap();
+        assert_eq!(walk("loop").unwrap(), None);
+
+        // A file that has steps after it is read like a directory that is not
+        // there: it could be replaced by one.
+        fs::write(hooks_dir.join("file.sh"), "#!/bin/sh\n").unwrap();
+        let through_a_file = way_through_proc_after("file.sh/../");
+        std::os::unix::fs::symlink(&through_a_file, hooks_dir.join("through-a-file")).unwrap();
+        assert_eq!(
+            walk("through-a-file").unwrap(),
+            Some(PathBuf::from("/proc"))
+        );
+        // At the last step a file ends the way.
+        std::os::unix::fs::symlink("file.sh", hooks_dir.join("to-file")).unwrap();
+        assert_eq!(walk("to-file").unwrap(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_the_per_process_walk_runs_before_the_chain_check() {
+        // `/proc/self/root` is `/` for every process, so the chain check alone
+        // resolves this way to the hooks directory and refuses it as reaching
+        // `post-merge`. The way enters `/proc`, though, and what is said about it
+        // is that it depends on the process.
+        let scratch = Scratch::new("walk-first");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        std::os::unix::fs::symlink("/proc/self/root", repo.join(".git").join("x")).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        let written = format!("../x{}/.git/hooks/post-merge", repo.display());
+        let target = Path::new(&written);
+        std::os::unix::fs::symlink(target, &link).unwrap();
+
+        // The premise: the chain check alone does refuse it.
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let reached = follow_chain_to_managed_hook(&hooks_dir, &canonical, &link, false);
+        assert!(
+            matches!(&reached, Ok(Some(seen)) if seen == target),
+            "the premise fails: the chain check alone does not refuse this link, so the order \
+             is not what the test pins: {reached:?}"
+        );
+
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn ori_t_0180_a_hook_link_to_dev_fd_is_refused() {
+        // `/dev/fd` is a directory there (fdescfs): the walk asks about it
+        // before it asks the platform to resolve it. This runs on the macOS leg
+        // of CI.
+        let scratch = Scratch::new("dev-fd");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        let target = Path::new("/dev/fd");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        let error = GitHooks::new(&repo, &spool).unwrap().install().unwrap_err();
+        match &error {
+            HooksError::HookLinkDependsOnProcess {
+                path,
+                target: seen,
+                through,
+            } => {
+                assert_eq!(path, &link);
+                assert_eq!(seen, target);
+                assert_eq!(through, Path::new("/dev/fd"));
+            }
+            other => panic!("expected HookLinkDependsOnProcess, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+        assert_nothing_written(&repo, &spool, &["post-checkout"]);
+    }
+
+    // ---- ORI-T-0168, repair 1: the entries of ori-original the scripts run ----
+
+    /// A repository whose hooks directory holds a real `ori-original/`, in
+    /// which the link `post-commit -> target` has been put by hand, and nothing
+    /// else.
+    #[cfg(unix)]
+    fn repository_with_a_link_in_ori_original(
+        scratch: &Scratch,
+        target: &str,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let (repo, spool, hooks_dir) = repository_with_an_empty_hooks_directory(scratch);
+        let kept = hooks_dir.join("ori-original");
+        fs::create_dir(&kept).unwrap();
+        let link = kept.join("post-commit");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        (repo, spool, link)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0168_a_link_inside_ori_original_that_reaches_a_replaced_hook_is_refused() {
+        // The scripts run `ori-original/post-commit`; through this link that is
+        // the engine's own `post-merge`.
+        let scratch = Scratch::new("kept-link-to-hook");
+        let (repo, spool, link) = repository_with_a_link_in_ori_original(&scratch, "../post-merge");
+        expect_refused_link(
+            &repo,
+            &spool,
+            &link,
+            Path::new("../post-merge"),
+            &["ori-original"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0168_a_link_inside_ori_original_to_its_own_hook_is_refused() {
+        // `ori-original/post-commit -> ../post-commit`: the engine's script
+        // would run itself a second time.
+        let scratch = Scratch::new("kept-link-to-itself");
+        let (repo, spool, link) =
+            repository_with_a_link_in_ori_original(&scratch, "../post-commit");
+        expect_refused_link(
+            &repo,
+            &spool,
+            &link,
+            Path::new("../post-commit"),
+            &["ori-original"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_a_link_inside_ori_original_through_proc_is_refused() {
+        let scratch = Scratch::new("kept-link-through-proc");
+        let target = "/proc/self/cwd/.git/hooks/post-merge";
+        let (repo, spool, link) = repository_with_a_link_in_ori_original(&scratch, target);
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            Path::new(target),
+            Path::new("/proc"),
+            &["ori-original"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0168_a_preserved_link_passes_a_second_install() {
+        // A link that the first install kept, re-pointed one level down to the
+        // same target, was judged where it stood, and is judged again.
+        let scratch = Scratch::new("kept-link-again");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let script = repo.join(".git").join("shared-hook.sh");
+        fs::write(&script, "#!/bin/sh\necho shared\n").unwrap();
+        std::os::unix::fs::symlink("../shared-hook.sh", hooks_dir.join("post-commit")).unwrap();
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        let kept = preserved(&repo, GitHook::PostCommit);
+        assert_eq!(
+            fs::read_link(&kept).unwrap(),
+            Path::new("../../shared-hook.sh")
+        );
+        let names = hook_dir_names(&repo);
+        let installed: Vec<Vec<u8>> = GitHook::ALL
+            .iter()
+            .map(|hook| fs::read(hook_path(&repo, *hook)).unwrap())
+            .collect();
+
+        let report = hooks.install().unwrap();
+        assert!(report.is_unchanged(), "{report:?}");
+        assert_eq!(hook_dir_names(&repo), names);
+        assert_eq!(
+            fs::read_link(&kept).unwrap(),
+            Path::new("../../shared-hook.sh")
+        );
+        for (hook, before) in GitHook::ALL.iter().zip(&installed) {
+            assert_eq!(&fs::read(hook_path(&repo, *hook)).unwrap(), before);
+        }
+        assert_eq!(
+            fs::read_to_string(&kept).unwrap(),
+            "#!/bin/sh\necho shared\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0168_status_refuses_an_ori_original_made_a_link_after_an_install() {
+        let scratch = Scratch::new("status-ori-original");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        assert!(
+            hooks
+                .status()
+                .unwrap()
+                .iter()
+                .all(|status| status.state == HookState::Installed)
+        );
+        let preserved_dir = repo.join(".git").join("hooks").join("ori-original");
+        std::os::unix::fs::symlink(".", &preserved_dir).unwrap();
+
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HooksDirNotADirectory { path } => assert_eq!(path, &preserved_dir),
+            other => panic!("expected HooksDirNotADirectory, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
     }
 
     // ---- the scripts, run by a real shell and by real git ----
