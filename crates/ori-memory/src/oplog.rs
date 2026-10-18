@@ -437,6 +437,12 @@ mod tests {
 
     fn file(p: &mut Product, label: &str, kind: RecordKind, ticket: Option<&Id>) -> Id {
         let record_id = id(label);
+        // An evidence id names a file and is never reused (ORI-T-0161), so
+        // each call's is new even when `label`, the record id, is reused.
+        let tip = EventLog::verify(p.db.connection())
+            .expect("the log verifies")
+            .tip_seq
+            .unwrap_or(0);
         submit_report(
             &mut p.db,
             at(200),
@@ -448,7 +454,7 @@ mod tests {
                 fields: vec![NewReportField {
                     name: FieldName::parse("summary").expect("a field name"),
                     raw_text: format!("report {label}"),
-                    evidence_id: id(&format!("EV{label}")),
+                    evidence_id: id(&format!("EV{label}AT{tip}")),
                 }],
             },
             &BarrierConfig::default(),
