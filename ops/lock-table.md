@@ -1334,3 +1334,38 @@ Written by the lead on 2026-10-18 under [[R31]], [[R44]] and [[R46]].
 Claim 94 is released. ORI-T-0139 (the documentation of five files, `scope.rs` among them) no longer waits on it.
 
 **State after this section:** the claims held are 20, 90 (repair 1 under review) and 98 (under review). The next free identifier is ORI-T-0173.
+
+---
+
+## ORI-T-0170 and ORI-T-0159 repair 1 reviewed; repairs dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**ORI-T-0170 (PM1) review**, three lenses, 8 agents, `review-0170-full.json`. Two findings confirmed:
+- F1 traces to the lead's own Decision 2: the document hit limit was counted before the filter, an oracle for a reader of only some document sources and a loss of its readable results.
+- F2: a false doc sentence about how the cap cuts.
+
+**Repair 1** (attempt 2 of 3), Sonnet, claim 98:
+- a reader of all five document sources is unchanged;
+- any other reader gets a 200-hit window and counts only admitted documents, with a static note (`DocumentWindow`) that carries nothing from sources it may not read;
+- `IndexEmpty` is shown only to a reader of all five;
+- the docs are corrected.
+
+**ORI-T-0159 repair 1 review**, three lenses, 14 agents, `review-0159-r1-full.json`. One blocking and four should-fix findings confirmed:
+- **R1-F1, blocking:** the coder's test-only helper is used only under `cfg(unix)`, so it is dead code on Windows, the class of defect CI caught this morning. Reproduced by simulation.
+- **R1-F2:** a path's own arrival satisfied the narrowed rule's conditions, so `sed -i` then `mv` out of the root is still lost.
+- **R1-F3:** no test for the missing-ancestor arm of `look`.
+- **R1-F4:** a lexical reading that lands on an existing directory stopped the walk.
+- **R1-F5:** E-0009's premise, `mio` as 0.61.2's only dependent, is not enforced, and `winapi-util` could take 0.61.2 on a lock refresh.
+
+**Repair 2** (attempt 3 of 3, the last), Sonnet, claim 90:
+- the helper is gated and fails on an error;
+- a path's own arrival counts for neither condition;
+- the missing test is added;
+- a lexical reading that lands on an existing directory is followed;
+- one `deny` entry with `wrappers = ["mio"]` enforces E-0009's premise (it tightens and relaxes nothing; a fallback to a stated blind spot if cargo-deny 0.20.2 refuses the syntax);
+- three doc notes.
+
+The Windows simulation (`cfg(unix)` switched off in a copy, clippy and tests) is a required check of this attempt.
+
+**State after this section:** the claims held are 20, 90 (repair 2, the last attempt) and 98 (repair 1). The next free identifier is ORI-T-0173.
