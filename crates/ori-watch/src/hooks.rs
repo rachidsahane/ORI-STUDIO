@@ -92,7 +92,11 @@
 //! link to a same-named hook in some other directory (a team's
 //! shared hooks) is not this. A link that cannot be read, or an entry that
 //! cannot be looked at for a reason other than not being there, refuses the
-//! installation as an IO error rather than passing it ([`HooksError::Io`]).
+//! installation as an IO error rather than passing it ([`HooksError::Io`]). A
+//! link whose way enters `/proc` or `/dev/fd`, where a path names something
+//! different for each process, is refused
+//! ([`HooksError::HookLinkDependsOnProcess`]), because the installer's process
+//! cannot judge what git's will run.
 //! On macOS and Windows, whose file systems are case-insensitive by
 //! default, names are compared without regard to ASCII case, so a link to
 //! `Post-Commit` counts; a case-sensitive volume there is refused where it
@@ -354,6 +358,20 @@ pub enum HooksError {
         /// chain.
         target: PathBuf,
     },
+    /// An entry of the hooks directory is a link whose way, followed
+    /// physically, enters a directory where a path names something different
+    /// for each process (`post-checkout -> /proc/self/cwd/.git/hooks/post-merge`).
+    /// The installer resolves it as its own process sees it; git's process,
+    /// which runs the hook from the worktree's root, may see the engine's own
+    /// script. Nothing was written.
+    HookLinkDependsOnProcess {
+        /// The entry that is a link.
+        path: PathBuf,
+        /// What that link says it points at, as written.
+        target: PathBuf,
+        /// The per-process directory the way entered, as the walk resolved it.
+        through: PathBuf,
+    },
     /// A hook appeared, or changed, between deciding what to do and doing it.
     /// Nothing was overwritten; running the installation again decides afresh.
     HookAppeared {
@@ -408,6 +426,7 @@ impl HooksError {
             | Self::PreservedNameTaken { .. }
             | Self::HookAppeared { .. }
             | Self::HookLinksToManagedHook { .. }
+            | Self::HookLinkDependsOnProcess { .. }
             | Self::SpoolLogNotAFile { .. } => 13,
             Self::Root { .. } | Self::Io { .. } => return None,
         };
@@ -488,6 +507,21 @@ impl fmt::Display for HooksError {
                  for; point it at a file of its own and install again",
                 path.display(),
                 target.display()
+            )
+            .and_then(|()| cite(f, self)),
+            Self::HookLinkDependsOnProcess {
+                path,
+                target,
+                through,
+            } => write!(
+                f,
+                "refused: {} is a link to {}, whose way runs through {}, where a path names \
+                 something different for each process that follows it, so what git's process \
+                 would run cannot be judged from the installer's; point it at a file of its own \
+                 and install again",
+                path.display(),
+                target.display(),
+                through.display()
             )
             .and_then(|()| cite(f, self)),
             Self::HookAppeared { path } => write!(
@@ -690,8 +724,9 @@ impl GitHooks {
     /// hooks directory, or the `ori-original` in it, is a link or not a
     /// directory (whatever the hooks are: a link there would make every script
     /// run whatever it leads to, itself included),
-    /// [`HooksError::HookNotAFile`], [`HooksError::HookLinksToManagedHook`]
-    /// and [`HooksError::PreservedNameTaken`] when what is in the hooks
+    /// [`HooksError::HookNotAFile`], [`HooksError::HookLinksToManagedHook`],
+    /// [`HooksError::HookLinkDependsOnProcess`] and
+    /// [`HooksError::PreservedNameTaken`] when what is in the hooks
     /// directory cannot be kept safely, [`HooksError::HookAppeared`] when a
     /// hook appeared or changed while installing, or [`HooksError::Io`].
     pub fn install(&self) -> Result<InstallReport, HooksError> {
@@ -1002,7 +1037,12 @@ impl GitHooks {
     /// replaces: AICD §13.
     ///
     /// Every entry is looked at, not only the four hooks, and a chain is
-    /// followed, not one link (`follow_chain_to_managed_hook`). Two arrangements
+    /// followed, not one link (`follow_chain_to_managed_hook`). For each link
+    /// the per-process walk comes first
+    /// (`way_enters_a_per_process_directory`): a link whose way enters `/proc`
+    /// or `/dev/fd` is refused ([`HooksError::HookLinkDependsOnProcess`])
+    /// before the chain is read, since the chain is read as the installer's
+    /// process sees the way and not as git's does. Two arrangements
     /// get through a check of one link on the four names. `pre-push -> relay
     /// -> post-commit`: once `pre-push` is kept, its link still ends at
     /// `post-commit`, which is now the engine's script, so the veto it stood
@@ -1055,6 +1095,25 @@ impl GitHooks {
         // (AICD §14).
         let canonical_hooks = fs::canonicalize(hooks_dir).map_err(io_error)?;
         for link in links {
+            // First, whether the way depends on the process that follows it:
+            // if it does, the chain below, which is the installer's process's
+            // reading, could judge it wrongly.
+            let through = way_enters_a_per_process_directory(&link, CASE_INSENSITIVE_NAMES)
+                .map_err(|source| HooksError::Io {
+                    path: link.clone(),
+                    source,
+                })?;
+            if let Some(through) = through {
+                let target = fs::read_link(&link).map_err(|source| HooksError::Io {
+                    path: link.clone(),
+                    source,
+                })?;
+                return Err(HooksError::HookLinkDependsOnProcess {
+                    path: link,
+                    target,
+                    through,
+                });
+            }
             let reached = follow_chain_to_managed_hook(
                 hooks_dir,
                 &canonical_hooks,
@@ -1527,8 +1586,13 @@ fn way_enters_what_the_install_creates(
 /// - (d) A link whose meaning depends on the process that follows it, on Linux
 ///   one through `/proc/self`, `/proc/thread-self` or `/dev/fd`, is resolved
 ///   as the installer's own process sees it, which is not what git's process
-///   sees when it runs the hook. Such a link is not judged correctly;
-///   ORI-T-0180 refuses it.
+///   sees when it runs the hook. Such a link is refused before this walk, by
+///   `way_enters_a_per_process_directory`
+///   ([`HooksError::HookLinkDependsOnProcess`]). That walk follows the way
+///   physically up to its first missing component. Beyond a missing
+///   component, the text reading of bullet (b) is not walked for this rule. A
+///   way that does not exist reaches nothing for git either, except through
+///   the spool's future path, bullet (c), whose limit applies here too.
 ///
 /// A link whose target cannot exist, because it goes through a regular file or
 /// carries a name too long for the file system, is not a missing entry: it
@@ -1615,6 +1679,136 @@ fn follow_chain_to_managed_hook(
         }
         target = fs::read_link(&next)?;
         link = next;
+    }
+    Ok(None)
+}
+
+/// Whether `directory` is, or is under, a directory where a path names
+/// something different for each process that follows it: AICD §13.
+///
+/// Those are `/proc` and everything under it (procfs, with `/proc/self`,
+/// `/proc/thread-self` and `/proc/<pid>`), and `/dev/fd` and everything under
+/// it (fdescfs on macOS and the BSDs). On Linux `/dev/fd`, `/dev/stdin`,
+/// `/dev/stdout` and `/dev/stderr` are links into `/proc/self`; they are
+/// followed there, so they count through `/proc`.
+///
+/// It is the text of `directory` alone, and no file is looked at: the
+/// components must begin with the root and then `proc`, or the root, `dev`,
+/// `fd`. A relative path and a path with a Windows prefix never match, and
+/// neither does `/procfs`, `/dev`, `/dev/null` or `/home/proc`. It is `false`
+/// everywhere but on Unix, which is the only family with such a directory.
+fn is_per_process_directory(directory: &Path, fold_case: bool) -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
+    let mut components = directory.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    match components.next() {
+        Some(Component::Normal(first)) if is_named(first, "proc", fold_case) => true,
+        Some(Component::Normal(first)) if is_named(first, "dev", fold_case) => matches!(
+            components.next(),
+            Some(Component::Normal(second)) if is_named(second, "fd", fold_case)
+        ),
+        _ => false,
+    }
+}
+
+/// The per-process directory the way `path` enters, if it enters one,
+/// followed physically one component at a time: AICD §13.
+///
+/// It walks as `way_enters_what_the_install_creates` does, with the same
+/// steps, and starts at the canonical root `path` begins with, or at the
+/// canonical current directory. After every change of the directory the walk
+/// stands in (the start, a root, a `..`, a directory entered) it asks
+/// `is_per_process_directory`, and on a yes returns that directory. So the
+/// walk stops on entering such a directory, before it reads any link inside it:
+/// `/proc/self` and `/proc/self/cwd` are never read or followed, because what
+/// they lead to is what this process is, and not what git's process would find.
+/// A name is looked at without following it:
+///
+/// - a link is read, and its target's steps go to the front of the work list,
+///   so one call follows a whole chain, through links inside the hooks
+///   directory and outside it;
+/// - a directory becomes the directory the walk stands in;
+/// - anything else is a file, and the way reaches nothing: `Ok(None)`.
+///
+/// These end the walk with `Ok(None)` too: an entry that is not there, a name
+/// under a file, every component resolved, and more than `LINK_HOPS_CAP`
+/// links. The last is not an error: no process can follow such a way, and
+/// `follow_chain_to_managed_hook` reads it the same way. Beyond a missing
+/// component nothing is walked, and the text is not read.
+///
+/// What it does not recognise:
+///
+/// - a procfs or fdescfs mounted anywhere else, or bind-mounted, is not
+///   recognised: only an administrator can make one;
+/// - Windows has no such directory, and a drive letter that differs for each
+///   logon session (`subst`, a mapped drive) in an absolute target is not
+///   judged;
+/// - the variant links of DragonFly BSD are not judged;
+/// - git run in another mount namespace is outside the model.
+///
+/// # Errors
+///
+/// Anything other than a missing entry or a name under a file is returned, and
+/// the caller refuses the installation (AICD §14): a way that could not be
+/// looked at is not a way that was found to enter nothing.
+fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Result<Option<PathBuf>> {
+    let mut pending: VecDeque<Step> = VecDeque::new();
+    put_steps_in_front(&mut pending, path);
+    let mut current = match pending.front() {
+        Some(Step::Root(_)) => match pending.pop_front() {
+            Some(Step::Root(root)) => fs::canonicalize(root)?,
+            _ => return Ok(None),
+        },
+        _ => fs::canonicalize(std::env::current_dir()?)?,
+    };
+    if is_per_process_directory(&current, fold_case) {
+        return Ok(Some(current));
+    }
+    let mut hops = 0usize;
+    while let Some(step) = pending.pop_front() {
+        match step {
+            Step::Root(root) => current = fs::canonicalize(root)?,
+            Step::Parent => {
+                if let Some(parent) = current.parent() {
+                    current = parent.to_path_buf();
+                }
+            }
+            Step::Name(name) => {
+                let candidate = current.join(&name);
+                match fs::symlink_metadata(&candidate) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        hops += 1;
+                        if hops > LINK_HOPS_CAP {
+                            return Ok(None);
+                        }
+                        let target = fs::read_link(&candidate)?;
+                        put_steps_in_front(&mut pending, &target);
+                        // The directory the walk stands in did not change.
+                        continue;
+                    }
+                    Ok(metadata) if metadata.is_dir() => {
+                        current = fs::canonicalize(&candidate)?;
+                    }
+                    Ok(_) => return Ok(None),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if is_per_process_directory(&current, fold_case) {
+            return Ok(Some(current));
+        }
     }
     Ok(None)
 }
@@ -3946,7 +4140,7 @@ mod tests {
         assert_eq!(second.events[0].fields, vec!["e", "f"]);
     }
 
-    // ---- ORI-T-0168: ori-original is absent or a real directory ----
+    // ---- ORI-T-0180 and ORI-T-0168: what depends on the process, and ori-original ----
 
     /// What a refused installation must leave behind it: the entries of the
     /// hooks directory as they were, and no spool.
@@ -3960,6 +4154,233 @@ mod tests {
             !spool.exists(),
             "the spool was created by a refused install"
         );
+    }
+
+    /// Installs and expects `HookLinkDependsOnProcess` for `link`, as written
+    /// `target`, through `through`, and that nothing was written.
+    #[cfg(target_os = "linux")]
+    fn expect_refused_for_the_process(
+        repo: &Path,
+        spool: &Path,
+        link: &Path,
+        target: &Path,
+        through: &Path,
+        names_before: &[&str],
+    ) {
+        let error = GitHooks::new(repo, spool).unwrap().install().unwrap_err();
+        match &error {
+            HooksError::HookLinkDependsOnProcess {
+                path,
+                target: seen,
+                through: entered,
+            } => {
+                assert_eq!(path, link);
+                assert_eq!(seen, target);
+                assert_eq!(entered, through);
+            }
+            other => panic!("expected HookLinkDependsOnProcess, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+        let text = error.to_string();
+        assert!(
+            text.contains(&through.display().to_string()) && text.ends_with("(AICD §13)"),
+            "{text}"
+        );
+        assert_nothing_written(repo, spool, names_before);
+        assert_eq!(fs::read_link(link).unwrap(), target);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_a_hook_link_through_proc_self_is_refused() {
+        let scratch = Scratch::new("proc-self");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        let target = Path::new("/proc/self/cwd/.git/hooks/post-merge");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+
+        // The premise: the installer resolves the link from its own working
+        // directory, the package directory, which has no `.git`, so the check
+        // that reads the chain passes it. For git, whose working directory is
+        // the worktree's root, it is the engine's own `post-merge`.
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let reached = follow_chain_to_managed_hook(&hooks_dir, &canonical, &link, false);
+        assert!(
+            matches!(reached, Ok(None)),
+            "the premise fails: the chain check alone does not pass this link from the test \
+             process's working directory, so the test proves nothing about the new walk: \
+             {reached:?}"
+        );
+
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_a_hook_link_through_a_link_to_proc_is_refused() {
+        // `.git/x` is outside the hooks directory, so it is not scanned
+        // itself; the link in the hooks directory goes through it.
+        let scratch = Scratch::new("proc-through-link");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        std::os::unix::fs::symlink("/proc/self/cwd", repo.join(".git").join("x")).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        let target = Path::new("../x/.git/hooks/post-merge");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_a_hook_link_to_dev_stdin_is_refused() {
+        // On Linux `/dev/stdin` is a link into `/proc/self`: it is followed
+        // there, so it counts through `/proc`.
+        if fs::symlink_metadata("/dev/stdin").is_err() {
+            eprintln!("/dev/stdin is not here, so the case is not exercised");
+            return;
+        }
+        let scratch = Scratch::new("dev-stdin");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        let target = Path::new("/dev/stdin");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0180_a_hook_link_to_dev_null_is_kept() {
+        // A common way to disable a hook, and the same for every process.
+        let scratch = Scratch::new("dev-null");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+        GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new("/dev/null"),
+            "a link to /dev/null was moved or replaced"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        for hook in GitHook::ALL {
+            assert!(is_ours(
+                &fs::read_to_string(hook_path(&repo, hook)).unwrap()
+            ));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0180_the_per_process_walk_stops_at_the_first_per_process_directory() {
+        let scratch = Scratch::new("per-process-walk");
+        let (repo, _) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let walk = |name: &str| way_enters_a_per_process_directory(&hooks_dir.join(name), false);
+
+        // A link to `/proc` enters it; the walk stops there.
+        std::os::unix::fs::symlink("/proc", hooks_dir.join("to-proc")).unwrap();
+        assert_eq!(walk("to-proc").unwrap(), Some(PathBuf::from("/proc")));
+
+        // `/procx` is not `/proc`, and it is not there.
+        assert!(!Path::new("/procx").exists());
+        std::os::unix::fs::symlink("/procx", hooks_dir.join("to-procx")).unwrap();
+        assert_eq!(walk("to-procx").unwrap(), None);
+
+        // The cap is `LINK_HOPS_CAP` links: a chain of that many that ends at
+        // `/proc` is followed to it, and one link more is not an error but a
+        // way no process can follow, which enters nothing.
+        let chain = |prefix: &str, links: usize| {
+            for number in 1..=links {
+                let target = if number == links {
+                    "/proc".to_owned()
+                } else {
+                    format!("{prefix}{}", number + 1)
+                };
+                std::os::unix::fs::symlink(target, hooks_dir.join(format!("{prefix}{number}")))
+                    .unwrap();
+            }
+            format!("{prefix}1")
+        };
+        let at_the_cap = chain("at-", LINK_HOPS_CAP);
+        assert_eq!(walk(&at_the_cap).unwrap(), Some(PathBuf::from("/proc")));
+        let past_the_cap = chain("past-", LINK_HOPS_CAP + 1);
+        assert_eq!(
+            walk(&past_the_cap).unwrap(),
+            None,
+            "a chain past the cap is no answer of an error"
+        );
+
+        // A link to itself.
+        std::os::unix::fs::symlink("self-loop", hooks_dir.join("self-loop")).unwrap();
+        assert_eq!(walk("self-loop").unwrap(), None);
+
+        // A link into a per-process directory's own links is not read: the
+        // walk stops on entering `/proc`, before `self`.
+        std::os::unix::fs::symlink("/proc/self/cwd", hooks_dir.join("to-cwd")).unwrap();
+        assert_eq!(walk("to-cwd").unwrap(), Some(PathBuf::from("/proc")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0180_which_directories_are_per_process() {
+        for fold_case in [false, true] {
+            for path in ["/proc", "/proc/1/cwd", "/dev/fd", "/dev/fd/3"] {
+                assert!(
+                    is_per_process_directory(Path::new(path), fold_case),
+                    "{path} (fold_case {fold_case}) is per-process"
+                );
+            }
+            for path in ["/dev", "/dev/null", "/procfs", "/home/proc", "proc"] {
+                assert!(
+                    !is_per_process_directory(Path::new(path), fold_case),
+                    "{path} (fold_case {fold_case}) is not per-process"
+                );
+            }
+        }
+        for path in ["/PROC", "/DEV/FD"] {
+            assert!(
+                !is_per_process_directory(Path::new(path), false),
+                "{path} is not per-process where names are exact"
+            );
+            assert!(
+                is_per_process_directory(Path::new(path), true),
+                "{path} is per-process where names fold case"
+            );
+        }
     }
 
     /// The repository for the `ori-original` tests: a hooks directory and
