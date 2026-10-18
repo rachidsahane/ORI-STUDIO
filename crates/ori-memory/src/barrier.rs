@@ -251,14 +251,24 @@
 //!    caller a list that looks complete, so "no evidence for this record"
 //!    and "evidence hidden by a refusal" could not be told apart: that is
 //!    "present but reporting nothing". A payload that does not parse already
-//!    fails the call the same way. The cost is that one bad event makes the
-//!    product's evidence unreadable until a human looks at it, and the
-//!    error names the event (`seq`, blob id and the offending string, cut to
-//!    256 characters and quoted) so that is quick.
+//!    fails the call the same way. The cost, which the operator accepted
+//!    for now (ruling R45, point 3), is that one bad event makes every
+//!    explicit evidence request in the product refuse (through `scope.rs`'s
+//!    `attributed_evidence`), whichever record it names. For
+//!    [`EvidenceRefFault::NotThisBlobsFile`], and for a payload that does
+//!    not parse, that is **permanent**: the log is append-only and nothing
+//!    can supersede or quarantine an event, so looking at it does not
+//!    restore access. A [`EvidenceRefFault::SymbolicLink`] or
+//!    [`BarrierError::Io`] refusal ends when the link is removed or the
+//!    file system is repaired. The error names the event (`seq`, blob id and
+//!    the offending string, cut to 256 characters and quoted) so a human can
+//!    find it; a recovery path (a per-record read, or a quarantine event
+//!    kind) is ORI-T-0164.
 //! 7. **Unchanged.** [`submit_report`] writes what it wrote before, and the
 //!    event log is never updated. It still writes through a link already
-//!    standing at `<ID>.txt`; that is out of this ticket's scope and is
-//!    recorded in its report.
+//!    standing at `<ID>.txt` or at `evidence/`, and overwrites the file of a
+//!    reused evidence id; that is out of this ticket's scope, and ORI-T-0161
+//!    refuses both at write time.
 //!
 //! ```mermaid
 //! flowchart TD
