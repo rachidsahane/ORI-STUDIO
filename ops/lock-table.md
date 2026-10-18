@@ -1493,3 +1493,24 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claims 102 and 104 are released.
 
 **State after this section:** the claims held are 20, 103 (ORI-T-0174) and 105 (ORI-T-0169, S2). The next free identifier is ORI-T-0176.
+
+---
+
+## CI red on ff905b0 (run 166): claim 106 dispatched for two Windows tests of ORI-T-0054; claim 107 dispatched for PM2
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+Run 166 is the first CI run of the restored watcher. Sixteen jobs passed, among them `test (macos-latest)` with every watcher and hooks test, and gate 7 with `notify` in the lock. `test (windows-latest)` failed two tests of ORI-T-0054, both test-portability defects:
+- `ori_t_0054_a_spool_inside_the_working_tree_is_refused` builds its `..` spool with `join`. On Windows the scratch path is verbatim (`\\?\`), and `PathBuf::push` normalizes `..` away on a verbatim path, so the test judged a plain sibling directory, and `Ok` was the right answer for that. The production check is sound.
+- `ori_t_0054_an_edit_inside_a_linked_worktree_is_reported_relative_to_the_worktree` hands git a verbatim path, which git for Windows cannot take ("could not create leading directories of '//?/C:/...'").
+
+Both tests are ORI-T-0054's own and have never reached `main`. The fix follows ORI-T-0167's precedent: lead-written edits, applied by Haiku, with no assertion removed or loosened.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 106 | ORI-T-0177, the two tests build their paths portably: the spool path as text, so its `..` survives, and every path git sees stripped of the verbatim prefix. Proved on Linux in a copy (both pass, clippy clean); the Windows half is reasoned and CI's next run decides it | `crates/ori-watch/src/hooks.rs` and `crates/ori-watch/src/watcher.rs`, the two named tests only | 1 | Haiku 5.5 | `fix/ORI-T-0177-windows-watch-tests` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+| 107 | ORI-T-0176, batch 10 prerequisite PM2 ([[E-0012]]): `barrier::sanitize_text(raw, cap_chars)`, the barrier's public entry for agent text kept outside a memory record. It returns the sealed `SanitizedField` and a truncation flag, through the same transform `submit_report` applies. Code, two tests, a doc test and a compile-fail fence written by the lead and proved in a copy: clippy and strict doc clean, `ori-memory` 531 and `ori-gates` 194 pass, and three mutations (no neutralization, no cap, the truncation flag lost) each fail both new tests | `crates/ori-memory/src/barrier.rs` | 2 | Haiku 5.5 | `feat/ORI-T-0176-sanitize-text` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 106 overlaps claim 103's files (ORI-T-0174 holds `hooks.rs` and `watcher.rs`) in two existing tests that ORI-T-0174 does not touch. The lead grants the overlap because the pull request's CI is red, and will apply ORI-T-0174 on top of it at integration. Claim 107 is disjoint from every held claim.
+
+**State after this section:** the claims held are 20, 103, 105, 106 and 107. The next free identifier is ORI-T-0178.
