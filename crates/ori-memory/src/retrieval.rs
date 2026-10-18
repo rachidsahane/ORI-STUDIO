@@ -1601,7 +1601,6 @@ fn is_unsafe_char(ch: char) -> bool {
         )
 }
 
-/// `text` with every unsafe character replaced by a space.
 /// The label before a divergence's description in a verification line.
 const UNTRUSTED_TO_END_OF_LINE: &str =
     "its description, untrusted text to the end of this line, follows: ";
@@ -1641,6 +1640,7 @@ fn stale_reason(reason: &StaleReason) -> String {
     }
 }
 
+/// `text` with every unsafe character replaced by a space.
 fn scrub(text: &str) -> String {
     text.chars()
         .map(|ch| if is_unsafe_char(ch) { ' ' } else { ch })
