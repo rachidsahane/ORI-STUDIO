@@ -1478,3 +1478,18 @@ Three findings were refuted (S2-F6, F7, F20). One was contested: S2-F8, a proxy 
 - `ops/batch-10-plan.md`'s queue-file list gains `crates/ori-mcp/src/tools/mod.rs`, module lines only (S2-F40). It is recorded here; the plan itself is unchanged.
 
 **State after this section:** the claims held are 20, 102, 103, 104 and 105. The next free identifier is ORI-T-0176.
+
+---
+
+## Claims 102 and 104 integrated: ORI-T-0173 and ORI-T-0175
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 102 | ORI-T-0173, gate 7 enforces E-0009's premise: `deny = [{ crate = "windows-sys@0.61", wrappers = ["mio"] }]` beside the skip, and the skip's comment says so (Haiku; the text was the lead's) | The committed `deny.toml` is byte-identical to the lead's edit applied to the base, which the lead had run through CI's cargo-deny 0.20.2 in a copy: it passes on the current lock, and fails with a wrong wrapper and with `winapi-util` given 0.61.2 in the lock. The coder's own runs agree: exit 0 on the committed file, exit 2 with a wrong wrapper (`crate 'windows-sys = 0.61.2' is explicitly banned`). The coder ran gate 13 with `TMPDIR` under its worktree's `target/`, so the script's temporary files stayed there; accepted | Fast-forwarded as a000155. cargo-deny 0.20.2 on the session branch: `bans ok, licenses ok, sources ok`; gate 13 clean |
+| 104 | ORI-T-0175, W0's doc on `CallToolParams.task` says a server that did not declare tasks processes the call normally and ignores the field (Haiku; the sentence was the lead's) | Byte-identical to the lead's edit; one doc comment, no code | Cherry-picked as 7c10ebe. fmt, strict doc of `ori-mcp`, `cargo test -p ori-gates` (194 passed) and gate 13 clean |
+
+Claims 102 and 104 are released.
+
+**State after this section:** the claims held are 20, 103 (ORI-T-0174) and 105 (ORI-T-0169, S2). The next free identifier is ORI-T-0176.
