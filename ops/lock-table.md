@@ -1282,3 +1282,24 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 **ORI-T-0161 repair 1** (attempt 2 of 3), Sonnet 5.5, on claim 94, `barrier.rs` only. The repair also takes notes F8, F10 and F12. The two existing tests in `scope.rs` and `oplog.rs` still fail with the fix, as before. Changing them is the operator's decision (`test_modified`), and the lead asks for it now. The patch keeps every `refused(...)` assertion. It changes one assertion's message only, which review note F15 says now checks the fixture rather than the barrier. With the log check of repair 1, the reviewers' alternative for the reused-id case (note F16) no longer works, so the patch's planted events stay.
 
 **State after this section:** the claims held are 20, 90 (repair 1 under review), 94 (repair 1; `test_modified` with the operator), 95 (stopped), 96 (repair 1) and 98 (under review). The next free identifier is ORI-T-0172.
+
+---
+
+## R46 recorded; claim 95 dispatched again; claim 99 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]], [[R44]] and [[R46]].
+
+The operator answered three questions as recommended ([[R46]]):
+- ORI-T-0161's `test_modified` is authorized, and claim 94 extends to the two test modules and `scope.rs`'s stale doc paragraph. The change is applied once repair 1 lands.
+- ORI-T-0165 is retried once, citing the answer.
+- ORI-P1-038 gains the case that pins the order of the checks.
+
+Claim 95's branch had no commit. It was fast-forwarded to the session branch, so its base is current; nothing was rewritten.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 99 | ORI-T-0172, ORI-P1-038's row gains "coder in B refused (project, before its role is looked at)" ([[R46]] point 3) | `spec/criteria/phase-1.md` (that row only) | 1 | Haiku 5.5 (documentation role) | `docs/ORI-T-0172-p1-038-order` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 99 is disjoint from every held claim.
+
+**State after this section:** the claims held are 20, 90, 94 (extended by [[R46]]), 95 (retried), 96, 98 and 99. The next free identifier is ORI-T-0173.
