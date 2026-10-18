@@ -59,6 +59,9 @@
 //! Tier 2: `spec/RISK_MAP.md` lists `crates/ori-mcp/src/tools/` (a directory
 //! module, so that gate 12 tiers it), "What agents can do".
 
+/// The memory tools `aicd_context` and `aicd_search` (AICD §25). Tier 2.
+pub mod memory;
+
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
