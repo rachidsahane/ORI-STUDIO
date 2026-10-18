@@ -4805,6 +4805,41 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn ori_t_0180_a_way_that_climbs_back_from_a_missing_name_goes_on_physically() {
+        // `..` after a missing name returns to the directory that is there, and
+        // the next name is looked at there: here it is a link, which the walk
+        // must read. Read as text alone, `.git/x/.git/hooks` is not
+        // anything, and the way would pass.
+        let scratch = Scratch::new("later-climbs-back");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        std::os::unix::fs::symlink("/proc/self/cwd", repo.join(".git").join("x")).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        let target = Path::new("../logs/../x/.git/hooks/post-merge");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+
+        // The premise: the chain check alone passes it.
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let reached = follow_chain_to_managed_hook(&hooks_dir, &canonical, &link, false);
+        assert!(
+            matches!(reached, Ok(None)),
+            "the premise fails: the chain check alone does not pass this link, so the test \
+             proves nothing about the walk: {reached:?}"
+        );
+
+        expect_refused_for_the_process(
+            &repo,
+            &spool,
+            &link,
+            target,
+            Path::new("/proc"),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn ori_t_0180_the_walk_past_a_missing_component_follows_the_text_and_ends() {
         let scratch = Scratch::new("later-walk");
         let (repo, _) = skeleton(&scratch);
