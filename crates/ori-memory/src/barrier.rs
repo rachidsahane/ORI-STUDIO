@@ -2149,6 +2149,8 @@ mod tests {
     }
 
     /// The `seq` of the first `memory.evidence_stored` event in `db`'s log.
+    /// Only the symbolic link tests use it, and they run on Unix only.
+    #[cfg(unix)]
     fn first_evidence_seq(db: &mut ProductDb) -> u64 {
         read_all_events(db)
             .expect("the log reads")
@@ -2247,8 +2249,15 @@ mod tests {
             )
         });
         // The directory under another name, or the product under another.
+        // Built with `join`, not by replacing "/evidence/" in `own_file`: on
+        // Windows the separator is `\`, so the replacement found nothing and
+        // the planted path was this blob's own file.
         assert_not_this_blobs_file("near5", |db| {
-            own_file(db, "EVIDENCE0144").replace("/evidence/", "/sessions/")
+            db.dir()
+                .join("sessions")
+                .join(blob_file_name())
+                .display()
+                .to_string()
         });
         assert_not_this_blobs_file("near6", |db| {
             own_file(db, "EVIDENCE0144")
