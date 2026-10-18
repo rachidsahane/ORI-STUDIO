@@ -684,7 +684,10 @@ impl Pointer {
 /// The sentence every description ends with, for a cap of `max_arguments_bytes`
 /// bytes: "Arguments over 512 KiB serialized are refused." at the default.
 ///
-/// A cap that is a whole number of KiB is written in KiB, any other in bytes.
+/// The sentence follows the **configured** cap, not a constant, so that a
+/// description never misstates the limit in force; at the default it is the
+/// sentence the catalogue's decision gives. A cap that is a whole number of KiB
+/// is written in KiB, any other in bytes.
 #[must_use]
 pub fn cap_sentence(max_arguments_bytes: usize) -> String {
     if max_arguments_bytes != 0 && max_arguments_bytes.is_multiple_of(1024) {
@@ -758,7 +761,11 @@ impl ToolSpec {
     }
 
     /// The MCP definition `tools/list` returns for this tool, whose description
-    /// ends with the cap sentence for `max_arguments_bytes`.
+    /// is the tool's effect followed by the cap sentence for
+    /// `max_arguments_bytes` ([`cap_sentence`]). The cap sentence follows the
+    /// configured `max_arguments_bytes`; at the default it is the sentence the
+    /// catalogue's decision gives, "Arguments over 512 KiB serialized are
+    /// refused."
     ///
     /// `destructive_hint` is `false` for every tool, and `output_schema` is
     /// absent in phase 1.
@@ -1110,19 +1117,31 @@ impl std::error::Error for HandlerError {
 
 /// What a handler knows of the call it is serving: AICD §17.
 ///
-/// Everything here came from the engine's binding, the engine's clock and the
-/// server's own events, never from a message.
+/// Where each field came from:
+///
+/// - `binding`, `called_seq` and `at` are the engine's and the server's: the
+///   engine's binding, the `seq` the server's own append returned, and the
+///   engine's clock;
+/// - `tool` is the catalogue entry the message's name selected, never the name's
+///   text;
+/// - `ticket_id` is the agent's argument, validated and canonical. For a coder it
+///   equals the bound ticket (check 7). For every other role the server checked
+///   it against nothing, and the handler that acts on it must: slice S4 checks
+///   that the ticket exists in this product, slice S3 the memory scope, slice S9
+///   the escalation desk.
 #[derive(Clone, Copy, Debug)]
 pub struct BoundCall<'a> {
-    /// The session the connection serves.
+    /// The session the connection serves: the engine's binding.
     pub binding: &'a Binding,
-    /// The tool called.
+    /// The tool called: the catalogue entry the message's name selected.
     pub tool: Tool,
     /// The `seq` of the `mcp.tool_called` event appended for this call.
     pub called_seq: u64,
     /// The call's time: the engine's clock, read once at call entry.
     pub at: Timestamp,
-    /// The validated, canonical `ticket_id` argument, for a tool that has one.
+    /// The validated, canonical `ticket_id` argument, for a tool that has one:
+    /// the agent's own claim, which the handler that acts on it checks for every
+    /// role but the coder.
     pub ticket_id: Option<&'a Id>,
 }
 
@@ -2174,5 +2193,151 @@ mod tests {
         // And a schema whose maxima were raised past the cap is caught.
         let too_big = Schema::object(vec![Property::required("a", Schema::string(1, 90_000))]);
         assert!(too_big.worst_case_bytes() > crate::server::DEFAULT_MAX_ARGUMENTS_BYTES);
+    }
+
+    /// The keywords the validator enforces for a node of this kind, read from
+    /// `Schema::walk`: what a published node of that kind carries, exactly,
+    /// besides its annotations.
+    ///
+    /// - A fixed-property object: `type`, `properties`, `additionalProperties`
+    ///   (it refuses an unlisted key), and `required` when a property is required.
+    /// - A map: `type`, `propertyNames` (its keys' length), `additionalProperties`
+    ///   (its value schema) and `maxProperties`.
+    /// - A string and an identifier: `type`, `minLength` and `maxLength`.
+    /// - An enum: `type` and `enum`.
+    /// - An array: `type`, `items`, `minItems` and `maxItems`.
+    fn enforced_keywords(kind: &SchemaKind) -> BTreeSet<&'static str> {
+        let words: &[&'static str] = match kind {
+            SchemaKind::Object { properties } => {
+                if properties.iter().any(|property| property.required) {
+                    &["type", "properties", "additionalProperties", "required"]
+                } else {
+                    &["type", "properties", "additionalProperties"]
+                }
+            }
+            SchemaKind::Map { .. } => &[
+                "type",
+                "propertyNames",
+                "additionalProperties",
+                "maxProperties",
+            ],
+            SchemaKind::String { .. } | SchemaKind::Id => &["type", "minLength", "maxLength"],
+            SchemaKind::Enum { .. } => &["type", "enum"],
+            SchemaKind::Array { .. } => &["type", "items", "minItems", "maxItems"],
+        };
+        words.iter().copied().collect()
+    }
+
+    fn kind_name(kind: &SchemaKind) -> &'static str {
+        match kind {
+            SchemaKind::Object { .. } => "fixed-property object",
+            SchemaKind::String { .. } => "string",
+            SchemaKind::Enum { .. } => "enum",
+            SchemaKind::Id => "identifier",
+            SchemaKind::Array { .. } => "array",
+            SchemaKind::Map { .. } => "map",
+        }
+    }
+
+    /// Checks one published node against its tree node, then its children, by the
+    /// kind of each.
+    fn check_per_kind(schema: &Schema, node: &JsonObject, path: &str) -> Result<(), String> {
+        let published: BTreeSet<&str> = node
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !ANNOTATIONS.contains(key))
+            .collect();
+        let enforced = enforced_keywords(schema.kind());
+        if published != enforced {
+            return Err(format!(
+                "{path}: a {} node publishes {published:?} and the validator enforces {enforced:?}",
+                kind_name(schema.kind())
+            ));
+        }
+        let child = |value: Option<&Value>, at: &str| -> Result<(), String> {
+            let Some(Value::Object(inner)) = value else {
+                return Err(format!("{path}: no schema object at {at}"));
+            };
+            match schema.kind() {
+                SchemaKind::Array { items, .. } => {
+                    check_per_kind(items, inner, &format!("{path}/[]"))
+                }
+                SchemaKind::Map { value, .. } => check_per_kind(value, inner, &format!("{path}/*")),
+                _ => Ok(()),
+            }
+        };
+        match schema.kind() {
+            SchemaKind::Object { properties } => {
+                let Some(Value::Object(published_properties)) = node.get("properties") else {
+                    return Err(format!("{path}: no properties"));
+                };
+                for property in properties {
+                    let Some(Value::Object(inner)) = published_properties.get(property.name) else {
+                        return Err(format!("{path}: {} is not published", property.name));
+                    };
+                    check_per_kind(
+                        &property.schema,
+                        inner,
+                        &format!("{path}/{}", property.name),
+                    )?;
+                }
+                Ok(())
+            }
+            SchemaKind::Array { .. } => child(node.get("items"), "items"),
+            SchemaKind::Map { .. } => {
+                let Some(Value::Object(names)) = node.get("propertyNames") else {
+                    return Err(format!("{path}: no propertyNames"));
+                };
+                let keys: BTreeSet<&str> = names.keys().map(String::as_str).collect();
+                if keys != BTreeSet::from(["minLength", "maxLength"]) {
+                    return Err(format!("{path}: propertyNames publishes {keys:?}"));
+                }
+                child(node.get("additionalProperties"), "additionalProperties")
+            }
+            SchemaKind::String { .. } | SchemaKind::Enum { .. } | SchemaKind::Id => Ok(()),
+        }
+    }
+
+    #[test]
+    fn ori_t_0169_each_schema_node_publishes_only_the_keywords_the_validator_enforces_for_its_kind()
+    {
+        for spec in catalogue() {
+            let schema = spec.schema();
+            let published = schema.to_json();
+            if let Err(why) = check_per_kind(schema, &published, spec.tool().wire_name()) {
+                panic!("{why}");
+            }
+        }
+        // The check is not vacuous: a keyword of another kind on a node is caught,
+        // at the root and below it.
+        let schema = spec(Tool::Report).schema();
+        let mut planted = schema.to_json();
+        planted.insert("maxProperties".to_owned(), Value::from(3));
+        let error = check_per_kind(schema, &planted, "report").expect_err("a stray keyword");
+        assert!(error.contains("maxProperties"), "{error}");
+        let mut planted = schema.to_json();
+        let Some(Value::Object(properties)) = planted.get_mut("properties") else {
+            panic!("properties");
+        };
+        let Some(Value::Object(content)) = properties.get_mut("content") else {
+            panic!("content");
+        };
+        content.remove("maxProperties");
+        assert!(
+            check_per_kind(schema, &planted, "report").is_err(),
+            "a keyword the validator enforces and the node does not publish"
+        );
+        let mut planted = schema.to_json();
+        let Some(Value::Object(properties)) = planted.get_mut("properties") else {
+            panic!("properties");
+        };
+        let Some(Value::Object(kind)) = properties.get_mut("kind") else {
+            panic!("kind");
+        };
+        kind.insert("minLength".to_owned(), Value::from(1));
+        assert!(
+            check_per_kind(schema, &planted, "report").is_err(),
+            "an enum node publishing a string's keyword"
+        );
     }
 }

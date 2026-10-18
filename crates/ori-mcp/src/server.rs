@@ -59,8 +59,11 @@
 //! MCP 2025-11-25's tasks page: "Receivers that do not declare the task
 //! capability for a request type MUST process requests of that type normally,
 //! ignoring any task-augmentation metadata if present." The server declares no
-//! `tasks` capability, so it reads `task` only to drop it: it is never recorded
-//! or echoed, and the reply is a `CallToolResult`, never a task result. The
+//! `tasks` capability, so it reads `task` only to drop it: an object-valued `task`
+//! is dropped, never recorded or echoed, and the reply is a `CallToolResult`,
+//! never a task result. A `task`, `_meta` or `arguments` that is not an object is
+//! refused by W0's decode (-32602), whose `data.detail` quotes serde's text, cut
+//! by W0 to 256 characters; that reply is W0's (below), and it is not a call. The
 //! documentation on `CallToolParams.task` in `protocol.rs` says the opposite
 //! ("refuse rather than silently ignore it"), which is wrong on this point and is
 //! corrected by a separate ticket, because that file is another slice's.
@@ -74,9 +77,11 @@
 //! server issues none. `tools/list` is not a call and is not recorded.
 //!
 //! **Proxied tools are slice S6's.** S6 edits this file at two documented
-//! points: where `list` appends its tools, and where `call` classifies the
-//! requested name, where it adds its branch before `Tool::from_wire_name` (the
-//! pipeline's check 3). At the append point S6 must keep two things. The server
+//! points: where `list` appends its tools, and check 3 of the pipeline, where it
+//! adds its branch for a proxied name **after checks 0 to 2** and before the
+//! `unknown_tool` refusal. `Tool::from_wire_name` stays at the start of a call,
+//! because it is pure and a refusal's record needs its answer; the branch point
+//! is not there. At the append point S6 must keep two things. The server
 //! declares `listChanged: false`, so S6 either snapshots the proxied tools at
 //! connection start or switches the capability to `true` and sends
 //! `notifications/tools/list_changed`. And S6 drops or refuses a proxied name
@@ -130,15 +135,24 @@
 //! The codes -32010 and -32011 are Ori's own, from the implementation-defined
 //! range -32000 to -32099, chosen to avoid -32042, which is MCP's. Checks 1 and 2
 //! come first because they reveal nothing and cost no more than one read. Closing
-//! on them bounds the log's growth to the window's limit plus one row per
-//! connection. The endpoint bounds the connection rate (prerequisite PE1).
+//! on them, and the server's latch on a close (below), bound the server's own
+//! `mcp.*` rows in one window to **at most twice the window's limit plus one row
+//! per connection**: every call is charged to the window, an admitted call whose
+//! effect fails appends two rows (`mcp.tool_called` then `mcp.tool_failed`) and
+//! the connection stays open, and the refusal that closes a connection is its one
+//! further row. A handler's own rows (slices S3 to S9) come on top of that, so
+//! each slice states the rows its handler appends. The endpoint bounds the
+//! connection rate (prerequisite PE1).
 //!
 //! **Refusals 0 to 5 and 8 are JSON-RPC error responses** with the request's id,
 //! the code above, a message that is the refusal's `Display`, and `data` of
 //! `{"reason", "methodology_ref"}`. **Refusals 6 and 7 are `CallToolResult`s**
 //! with `isError` true: MCP's tools page puts a tool's own failures in `isError`
 //! results, and a bad argument is the tool's. Their `structuredContent` is
-//! `{"reason", "methodology_ref"}` (and `"field"` for `invalid_arguments`), and
+//! `{"reason", "methodology_ref"}`, plus `"field"` and `"why"` for
+//! `invalid_arguments` (`why` is the violation's fixed text, one of the `WHY_*`
+//! constants, so an agent can tell an over-cap call from a stray key, a missing
+//! value or a too-short one; the `mcp.tool_refused` event does not carry it), and
 //! their single text block is that `structuredContent` serialized. **No reply to
 //! a refusal echoes agent free text**: not the tool name, not an argument key,
 //! not a free-text value. A validated, canonical identifier is not free text, so
@@ -215,16 +229,30 @@
 //! call. That is both halves of `ori-memory`'s `RefusedUnlogged`: the request is
 //! refused, and the logging failure goes to the caller. A call whose
 //! `mcp.tool_called` cannot be appended is refused `call_not_recorded`, so no
-//! effect happens without its record.
+//! effect happens without its record. The server then attempts to append
+//! `mcp.tool_refused` for it; if that cannot be written either, `unrecorded` still
+//! names `mcp.tool_called`, the first failure, and the log is to be treated as
+//! stopped.
+//!
+//! **A close is final.** Once a reply has `close` set, the engine stops reading
+//! the connection and drops the lines it has buffered. The server also latches
+//! the close: from then on every `receive` returns no message and `close` true,
+//! and records nothing, charges nothing and reads no port. So the bound above does
+//! not rest on the engine alone: the server refuses to process any more lines on a
+//! closed connection either way.
 //!
 //! # After `mcp.tool_called`
 //!
 //! A handler that returns an `Ok` result that is not an error is answered as it
 //! is. A handler that returns an error, or `Ok` with `isError`, gets `mcp.tool_failed`
 //! appended (with the clock read a second time), and the reply is an error
-//! **result** whose `structuredContent` is chosen by this table and whose single
-//! text block is that `structuredContent` serialized (a handler's own error
-//! result is passed through as it is):
+//! **result** whose `structuredContent` is `{"failure", "reason",
+//! "methodology_ref", "field"}`, with `failure` always present (the same fixed
+//! value, `refused`, `invalid` or `unavailable`, that the `mcp.tool_failed` event
+//! records, so an agent can tell "retry later" from "fix the call") and each other
+//! key only when this table gives it a value, and whose single text block is that
+//! `structuredContent` serialized (a handler's own error result is passed through
+//! as it is, unchanged):
 //!
 //! | The handler returned | `failure` | `reason` | `methodology_ref` |
 //! |---|---|---|---|
@@ -239,10 +267,11 @@
 //! A refusal inside the effect (the memory scope enforcer, the evidence lockout,
 //! `E_SCOPE_LOCKED`, `E_UPGRADE_ONLY`) is therefore `mcp.tool_called` then
 //! `mcp.tool_failed`, and its reply is an error result, not a JSON-RPC error. A
-//! reference that does not resolve is never written: it is an implementation
-//! defect and is reported as `invalid`. If the `mcp.tool_failed` append fails, the
-//! reply is unchanged, `Reply::unrecorded` carries the failure, and the connection
-//! closes.
+//! reference that does not resolve is an implementation defect, and the table's
+//! "always" yields to it: the failure is recorded as `invalid`, with neither code
+//! nor reference, so an unresolvable section is never written. If the
+//! `mcp.tool_failed` append fails, the reply is unchanged, `Reply::unrecorded`
+//! carries the failure, and the connection closes.
 //!
 //! # How the engine drives it
 //!
@@ -285,8 +314,8 @@ use crate::protocol::{
 };
 use crate::scopes::{Caller, Tool, ToolRefusal, ToolScopes};
 use crate::tools::{
-    self, BoundCall, HandlerError, Handlers, TICKET_ARGUMENT, WHY_NOT_AN_IDENTIFIER,
-    WHY_NOT_AN_OBJECT,
+    self, BoundCall, HandlerError, Handlers, TICKET_ARGUMENT, WHY_MISSING_PROPERTY,
+    WHY_NOT_A_STRING, WHY_NOT_AN_IDENTIFIER, WHY_NOT_AN_OBJECT,
 };
 
 /// The JSON-RPC code of a call refused `rate_limited`: Ori's own, from the
@@ -546,11 +575,20 @@ pub enum CallRefusal {
         /// An RFC 6901 pointer built only from schema property names and array
         /// indices; `""` is the root.
         field: String,
-        /// A fixed description of what is wrong at `field`.
+        /// A fixed description of what is wrong at `field`: one of the `WHY_*`
+        /// constants of `crate::tools` or [`WHY_ARGUMENTS_TOO_LARGE`], a
+        /// `&'static str`, never agent text. It is written into the reply's
+        /// `structuredContent`, so an agent can tell which rule failed; the
+        /// `mcp.tool_refused` event does not carry it.
         why: &'static str,
     },
     /// `mcp.tool_called` could not be appended, so the call is not made.
     /// AICD §17.
+    ///
+    /// The server then attempts to append `mcp.tool_refused` for the call. If that
+    /// cannot be written either, [`Reply::unrecorded`] still names
+    /// `mcp.tool_called`, the first failure, and the log is to be treated as
+    /// stopped. The connection closes.
     CallNotRecorded,
 }
 
@@ -638,8 +676,10 @@ impl CallRefusal {
         }
     }
 
-    /// The `{"reason", "methodology_ref"}` object of a reply, and `"field"` for
-    /// `invalid_arguments`.
+    /// The `{"reason", "methodology_ref"}` object of a reply, and `"field"` and
+    /// `"why"` for `invalid_arguments`. `field` is a pointer built only from
+    /// schema names, and `why` is one of the fixed `WHY_*` texts: neither is agent
+    /// text.
     fn structured(&self) -> JsonObject {
         let mut object = JsonObject::new();
         object.insert("reason".to_owned(), Value::from(self.code()));
@@ -647,8 +687,9 @@ impl CallRefusal {
             "methodology_ref".to_owned(),
             methodology_ref_json(&self.methodology_ref()),
         );
-        if let Self::InvalidArguments { field, .. } = self {
+        if let Self::InvalidArguments { field, why } = self {
             object.insert("field".to_owned(), Value::from(field.as_str()));
+            object.insert("why".to_owned(), Value::from(*why));
         }
         object
     }
@@ -718,7 +759,9 @@ impl AuditEvent {
 pub struct AuditFailure {
     /// Which event could not be written.
     pub event: AuditEvent,
-    /// The store error's own text, never agent text.
+    /// The store error's own text or, for refusal 0 (a database that is not the
+    /// bound product's), the fixed sentence the server writes there; never agent
+    /// text.
     pub detail: String,
 }
 
@@ -739,7 +782,13 @@ impl fmt::Display for AuditFailure {
 pub struct Reply {
     /// The message to write back, if the item is answered.
     pub message: Option<Message>,
-    /// Whether the connection closes once `message` has been written.
+    /// Whether the connection closes once `message` has been written. A close is
+    /// final: the engine stops reading the connection and drops the lines it has
+    /// buffered, and the server also latches it, so that every later
+    /// [`Server::receive`] returns no message and `close` true, and records
+    /// nothing, charges nothing and reads no port. The server refuses to process
+    /// any more lines on a closed connection either way, so the bound on the
+    /// log's growth does not rest on the engine alone.
     pub close: bool,
     /// An event the server could not append. The engine reports it; the reply is
     /// not changed by it.
@@ -835,8 +884,11 @@ impl Failure {
         }
     }
 
-    /// A refusal inside the effect, only when its reference resolves: a
-    /// reference that does not is an implementation defect, never written.
+    /// A refusal inside the effect, only when its reference resolves. A reference
+    /// that does not resolve is an implementation defect: the failure is recorded
+    /// as `invalid`, with neither code nor reference, so an unresolvable section
+    /// is never written. This is a deviation from the failure table's "always":
+    /// ORI-P1-033 forbids shipping a reference that does not resolve.
     fn refused(code: &'static str, reference: MethodologyRef) -> Self {
         if reference.resolves() {
             Self {
@@ -874,9 +926,20 @@ impl Failure {
         }
     }
 
-    /// The `{"reason", "methodology_ref", "field"}` object, each key only when
-    /// the mapping gives it a value.
+    /// The reply's `structuredContent`: `"failure"`, always, then `"reason"`,
+    /// `"methodology_ref"` and `"field"`, each only when the mapping gives it a
+    /// value. `failure` is the same fixed value the `mcp.tool_failed` event
+    /// records, so an agent can tell "retry later" from "fix the call".
     fn structured(&self) -> JsonObject {
+        let mut object = JsonObject::new();
+        object.insert("failure".to_owned(), Value::from(self.failure));
+        object.extend(self.details());
+        object
+    }
+
+    /// The `{"reason", "methodology_ref", "field"}` object, each key only when
+    /// the mapping gives it a value: what the event adds to its own `failure`.
+    fn details(&self) -> JsonObject {
         let mut object = JsonObject::new();
         if let Some(reason) = self.reason {
             object.insert("reason".to_owned(), Value::from(reason));
@@ -972,6 +1035,8 @@ pub struct Server {
     sessions: Box<dyn SessionDesk>,
     handlers: Handlers,
     budget: Arc<Mutex<RateWindow>>,
+    /// Set when a reply with `close` set was returned: nothing more is processed.
+    closed: bool,
 }
 
 impl fmt::Debug for Server {
@@ -1009,6 +1074,7 @@ impl Server {
             sessions,
             handlers,
             budget,
+            closed: false,
         }
     }
 
@@ -1018,7 +1084,33 @@ impl Server {
     /// the end of input). The reply says what to write, whether to close the
     /// connection after writing it, and which event, if any, could not be
     /// recorded. The engine takes the database writer for this call only.
+    ///
+    /// **After a reply with `close` set the server answers nothing**: every later
+    /// call returns no message and `close` true, and records nothing, charges
+    /// nothing and reads no port. The engine stops reading a closed connection
+    /// and drops what it had buffered; the server refuses to process more lines
+    /// on it either way, so the log's bound does not rest on the engine alone.
     pub fn receive(
+        &mut self,
+        db: &mut ProductDb,
+        received: Result<Message, ReceiveError>,
+    ) -> Reply {
+        if self.closed {
+            return Reply {
+                message: None,
+                close: true,
+                unrecorded: None,
+            };
+        }
+        let reply = self.receive_open(db, received);
+        if reply.close {
+            self.closed = true;
+        }
+        reply
+    }
+
+    /// [`Server::receive`] on a connection that is not closed.
+    fn receive_open(
         &mut self,
         db: &mut ProductDb,
         received: Result<Message, ReceiveError>,
@@ -1218,11 +1310,14 @@ impl Server {
     fn call(&mut self, db: &mut ProductDb, id: RequestId, params: CallToolParams) -> Reply {
         let now = self.clock.now();
         let within_budget = self.budget_admits(now);
-        // S6 POINT 2: slice S6 adds its branch for a proxied name before this
-        // classification, which is check 3.
+        // `Tool::from_wire_name` is pure, and a refusal's record needs its answer
+        // (`tool` in the event), so it is read here. S6's branch point is not
+        // here: it is check 3 of `admit`, after checks 0 to 2.
         let named = Tool::from_wire_name(&params.name);
         let name_chars = params.name.chars().count();
-        // `task` and `_meta` are dropped here: never recorded and never echoed.
+        // An object-valued `task` and `_meta` are dropped here: never recorded and
+        // never echoed. One that is not an object never gets here: W0's decode
+        // refused the request (-32602), which is W0's reply and not a call.
         let CallToolParams { arguments, .. } = params;
 
         let accepted = match self.admit(db, within_budget, named, arguments) {
@@ -1324,6 +1419,9 @@ impl Server {
             Err(_) => return Err(CallRefusal::SessionStateUnavailable),
         }
         // 3: one of Ori's tools.
+        //
+        // S6 POINT 2: slice S6 adds its branch for a proxied name here, after
+        // checks 0 to 2 and before the `unknown_tool` refusal.
         let Some(tool) = named else {
             return Err(CallRefusal::UnknownTool);
         };
@@ -1358,7 +1456,12 @@ impl Server {
                 why: WHY_NOT_AN_OBJECT,
             });
         };
-        // 7: the ticket rule, on the validated, canonical argument.
+        // 7: the ticket rule, on the validated, canonical argument. It fails
+        // closed in every case: a tool that takes a ticket and has none, or one
+        // that is not a string, is refused. Both refusals are unreachable through
+        // today's catalogue, because check 6 has run and every ticket property is
+        // a required identifier; they stand so that a catalogue change cannot
+        // open the rule.
         let ticket = match (spec.takes_ticket(), arguments.get(TICKET_ARGUMENT)) {
             (true, Some(Value::String(text))) => match Id::parse(text) {
                 Ok(ticket) => Some(ticket),
@@ -1369,7 +1472,19 @@ impl Server {
                     });
                 }
             },
-            _ => None,
+            (true, Some(_)) => {
+                return Err(CallRefusal::InvalidArguments {
+                    field: format!("/{TICKET_ARGUMENT}"),
+                    why: WHY_NOT_A_STRING,
+                });
+            }
+            (true, None) => {
+                return Err(CallRefusal::InvalidArguments {
+                    field: format!("/{TICKET_ARGUMENT}"),
+                    why: WHY_MISSING_PROPERTY,
+                });
+            }
+            (false, _) => None,
         };
         if let Some(ticket) = &ticket {
             ticket_rule(&self.binding, ticket).map_err(CallRefusal::Tool)?;
@@ -1520,7 +1635,7 @@ impl Server {
         payload.insert("tool".to_owned(), Value::from(tool.wire_name()));
         payload.insert("called_seq".to_owned(), Value::from(called_seq));
         payload.insert("failure".to_owned(), Value::from(failure.failure));
-        for (key, value) in failure.structured() {
+        for (key, value) in failure.details() {
             payload.insert(key, value);
         }
         Value::Object(payload).to_string()
@@ -1891,6 +2006,14 @@ mod tests {
             world
         }
 
+        /// A new connection of the same session, after a close: a new server on
+        /// the same database, budget and clock, handshaken. The old server
+        /// answers nothing once it has closed.
+        fn reconnect(&mut self) {
+            self.server = another_connection(self);
+            self.handshake();
+        }
+
         fn send(&mut self, message: Message) -> Reply {
             self.server.receive(&mut self.db, Ok(message))
         }
@@ -2038,18 +2161,54 @@ mod tests {
         let result = &message["result"];
         assert_eq!(result["isError"], true, "{message}");
         let mut expected = json!({"reason": reason, "methodology_ref": methodology(section)});
+        let mut actual = result["structuredContent"].clone();
         if let Some(field) = field {
             expected["field"] = json!(field);
+            // `invalid_arguments` also carries the violation's fixed `why`; the
+            // tests that tell the rules apart assert which, and this helper
+            // asserts that it is one of the fixed texts.
+            let why = actual
+                .as_object_mut()
+                .and_then(|object| object.remove("why"))
+                .expect("invalid_arguments carries a why");
+            assert!(
+                known_whys().contains(&why.as_str().expect("a string")),
+                "{why} is not one of the fixed texts"
+            );
         }
-        assert_eq!(result["structuredContent"], expected, "{message}");
+        assert_eq!(actual, expected, "{message}");
         let blocks = result["content"].as_array().expect("content");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "text");
         let text: Value =
             serde_json::from_str(blocks[0]["text"].as_str().expect("text")).expect("JSON text");
-        assert_eq!(text, expected, "the text block is the structured content");
+        assert_eq!(
+            text, result["structuredContent"],
+            "the text block is the structured content"
+        );
         assert_no_marker(&message.to_string(), "the reply");
         message
+    }
+
+    /// Every fixed text a violation can carry.
+    fn known_whys() -> Vec<&'static str> {
+        vec![
+            WHY_ARGUMENTS_TOO_LARGE,
+            tools::WHY_NOT_AN_OBJECT,
+            tools::WHY_NOT_A_STRING,
+            tools::WHY_NOT_AN_ARRAY,
+            tools::WHY_UNEXPECTED_PROPERTY,
+            tools::WHY_MISSING_PROPERTY,
+            tools::WHY_TOO_SHORT,
+            tools::WHY_TOO_LONG,
+            tools::WHY_NOT_AN_ALLOWED_VALUE,
+            tools::WHY_NOT_AN_IDENTIFIER,
+            tools::WHY_TOO_FEW_ITEMS,
+            tools::WHY_TOO_MANY_ITEMS,
+            tools::WHY_TOO_MANY_PROPERTIES,
+            tools::WHY_PROPERTY_NAME_TOO_SHORT,
+            tools::WHY_PROPERTY_NAME_TOO_LONG,
+        ]
     }
 
     fn payload(event: &Event) -> Value {
@@ -2689,8 +2848,11 @@ mod tests {
         assert_eq!(world.ran.load(Ordering::SeqCst), 0);
         let events = world.mcp_events();
         assert_eq!(payload(&events[0])["field"], "");
-        // The cap comes before the schema: an object that is both too large and
-        // not valid reports the root and the size, not a property.
+        // An object that is both too large and not valid. Both orders report the
+        // root for this one (an unexpected key is reported at the root too), so
+        // this half cannot tell the cap's place from the schema's;
+        // `tests::ori_t_0169_refusal_6_the_byte_cap_is_reported_before_a_schema_fault_below_the_root`
+        // does.
         let mut world = Setup::new().max_arguments_bytes(4).build("refusal-6-order");
         world.handshake();
         let reply = world.call("aicd_search", json!({"nope": 1}));
@@ -3137,8 +3299,9 @@ mod tests {
     }
 
     /// Asserts `mcp.tool_called` then `mcp.tool_failed` with this failure and
-    /// these optional keys, and an error result whose structured content is the
-    /// keys and whose single text block is that object serialized.
+    /// these optional keys, and an error result whose structured content is
+    /// `failure` and the keys and whose single text block is that object
+    /// serialized.
     fn assert_failure(world: &mut World, reply: &Reply, failure: &str, structured: &Value) {
         let events = world.mcp_events();
         let kinds: Vec<&str> = events.iter().map(Event::kind).collect();
@@ -3168,12 +3331,16 @@ mod tests {
             "an error result, not a JSON-RPC error"
         );
         assert_eq!(message["result"]["isError"], true);
-        assert_eq!(message["result"]["structuredContent"], *structured);
+        // The reply's structured content is the failure's kind and the keys the
+        // event adds to it.
+        let mut in_reply = structured.clone();
+        in_reply["failure"] = json!(failure);
+        assert_eq!(message["result"]["structuredContent"], in_reply);
         let blocks = message["result"]["content"].as_array().expect("content");
         assert_eq!(blocks.len(), 1);
         let text: Value =
             serde_json::from_str(blocks[0]["text"].as_str().expect("text")).expect("JSON text");
-        assert_eq!(&text, structured);
+        assert_eq!(text, in_reply);
         assert!(
             !reply.close,
             "a failed effect does not close the connection"
@@ -3305,7 +3472,7 @@ mod tests {
         assert_failure(&mut world, &reply, "unavailable", &json!({}));
         assert_eq!(
             wire(&reply)["result"]["content"][0]["text"],
-            "{}",
+            r#"{"failure":"unavailable"}"#,
             "the text is the structured content serialized"
         );
         assert_no_marker(&wire(&reply).to_string(), "the reply");
@@ -3435,7 +3602,10 @@ mod tests {
         // The reply is still the error result.
         let message = wire(&reply);
         assert_eq!(message["result"]["isError"], true);
-        assert_eq!(message["result"]["structuredContent"], json!({}));
+        assert_eq!(
+            message["result"]["structuredContent"],
+            json!({"failure": "unavailable"})
+        );
         // The only event is the call's.
         assert_eq!(world.kinds(), ["mcp.tool_called"]);
         // The failure is reported, and the connection closes.
@@ -3762,10 +3932,13 @@ mod tests {
         assert_eq!(kinds.last().map(String::as_str), Some("mcp.tool_refused"));
         assert_eq!(world.ran.load(Ordering::SeqCst), 120);
         // Still refused one millisecond before the window ends, and passes at its
-        // end: a fixed window of 60 000 ms from its first call.
+        // end: a fixed window of 60 000 ms from its first call. Each refusal
+        // closes its connection, so each of these is a new one.
         world.clock.store(START + 59_999, Ordering::SeqCst);
+        world.reconnect();
         assert!(!is_done(&search(&mut world)));
         world.clock.store(START + 60_000, Ordering::SeqCst);
+        world.reconnect();
         assert!(is_done(&search(&mut world)));
         // The new window began at its first call: 120 calls from there.
         for _ in 0..119 {
@@ -3780,6 +3953,8 @@ mod tests {
         world.handshake();
         assert!(is_done(&search(&mut world)));
         for _ in 0..5 {
+            // Each refusal closes its connection: the next call is a new one.
+            world.reconnect();
             assert!(!is_done(&search(&mut world)));
         }
         assert_eq!(
@@ -3797,7 +3972,9 @@ mod tests {
         }
         assert!(!is_done(&search(&mut world)), "the window is spent");
         // The clock steps back before the window's start: a new window begins.
+        // The refusal closed the connection, so this is a new one.
         world.clock.store(START - 1, Ordering::SeqCst);
+        world.reconnect();
         assert!(is_done(&search(&mut world)));
         // And that window runs from the earlier time.
         world.clock.store(START - 1 + 59_999, Ordering::SeqCst);
@@ -3881,6 +4058,10 @@ mod tests {
         assert!(reply.close);
     }
 
+    /// Every handler here succeeds, so an admitted call appends one row and the
+    /// bound is the window's limit plus one row per connection. When the effect
+    /// of an admitted call fails it appends two rows: the other case is
+    /// `tests::ori_t_0169_failing_calls_over_successive_connections_append_twice_the_limit_plus_one_row_each`.
     #[test]
     fn ori_t_0169_calls_over_successive_connections_append_at_most_the_limit_plus_one_row_each() {
         let mut world = Setup::new().build("rate-flood");
@@ -4386,6 +4567,8 @@ mod tests {
             assert_eq!(reason_of(&reply), "product_database_mismatch");
             assert!(reply.close);
             assert!(reply.unrecorded.is_some());
+            // Each of these closes its connection: the next call is a new one.
+            world.reconnect();
         }
         assert!(world.events().is_empty());
         assert_eq!(world.ran.load(Ordering::SeqCst), 0);
@@ -4550,5 +4733,353 @@ mod tests {
         );
         assert!(std::error::Error::source(&refused).is_none());
         assert_eq!(ServerConfig::default().max_arguments_bytes, 524_288);
+    }
+
+    // -------------------------------------------------------------------
+    // Repair 1: the review's findings
+    // -------------------------------------------------------------------
+
+    /// A connection of the same session whose handlers are `handlers`: another
+    /// server on the same database, budget and clock.
+    fn connection_with(world: &World, handlers: Handlers) -> Server {
+        Server::new(
+            world.binding.clone(),
+            ServerConfig::default(),
+            Arc::clone(&world.budget),
+            Box::new(FakeClock {
+                now: Arc::clone(&world.clock),
+                step: 0,
+                reads: Arc::clone(&world.reads),
+            }),
+            Box::new(FakeDesk {
+                mode: Arc::clone(&world.desk),
+                asked: Arc::clone(&world.desk_asked),
+            }),
+            handlers,
+        )
+    }
+
+    /// Handlers for every phase 1 tool whose effect fails as unavailable.
+    fn failing_handlers(ran: &Arc<AtomicUsize>) -> Handlers {
+        let mut handlers = Handlers::new();
+        for tool in Tool::ALL {
+            if tool.in_phase_1() {
+                handlers
+                    .register(
+                        tool,
+                        answering(
+                            Err(HandlerError::Port(PortError::Unavailable {
+                                what: "the desk".to_owned(),
+                            })),
+                            ran,
+                        ),
+                    )
+                    .expect("one handler per tool");
+            }
+        }
+        handlers
+    }
+
+    #[test]
+    fn ori_t_0169_a_name_no_tool_has_meets_checks_0_to_2_before_check_3() {
+        // The proxied-shaped name of a server the operator might add. Slice S6
+        // claims `<server>__<tool>` names at check 3; a branch placed before
+        // checks 0 to 2 would let such a name past the database, budget and
+        // session checks, and fail this test.
+        const NAME: &str = "ops__do_thing";
+        let reason = |setup: Setup, label: &str| {
+            let mut world = setup.build(label);
+            world.handshake();
+            let reply = world.call(NAME, json!({"anything": MARKER_TEXT}));
+            reason_of(&reply)
+        };
+        assert_eq!(
+            reason(Setup::new().db_product(product_b()), "meets-0"),
+            "product_database_mismatch"
+        );
+        assert_eq!(reason(Setup::new().max_calls(0), "meets-1"), "rate_limited");
+        assert_eq!(
+            reason(Setup::new().desk(DeskMode::Inactive), "meets-2a"),
+            "session_not_active"
+        );
+        assert_eq!(
+            reason(Setup::new().desk(DeskMode::Unreadable), "meets-2b"),
+            "session_state_unavailable"
+        );
+        assert_eq!(reason(Setup::new(), "meets-3"), "unknown_tool");
+    }
+
+    #[test]
+    fn ori_t_0169_failing_calls_over_successive_connections_append_twice_the_limit_plus_one_row_each()
+     {
+        // An admitted call whose effect fails appends two rows and leaves the
+        // connection open, so the bound is twice the limit plus one row per
+        // connection, not the limit.
+        let mut world = Setup::new()
+            .max_calls(5)
+            .handlers(failing_handlers)
+            .build("rate-flood-failing");
+        world.handshake();
+        let (mut connections, mut limited) = (1_usize, 0_usize);
+        for call in 1..=60 {
+            let reply = world.call("aicd_search", json!({"query": "q"}));
+            if reply.close {
+                assert_eq!(reason_of(&reply), "rate_limited", "call {call}");
+                limited += 1;
+                if call < 60 {
+                    // The close is final: the next call is a new connection.
+                    let server = connection_with(&world, failing_handlers(&world.ran));
+                    world.server = server;
+                    world.handshake();
+                    connections += 1;
+                }
+            } else {
+                assert!(call <= 5, "only the first five calls are admitted");
+                assert_eq!(
+                    wire(&reply)["result"]["structuredContent"]["failure"],
+                    "unavailable"
+                );
+            }
+        }
+        let kinds = world.kinds();
+        let count = |kind: &str| kinds.iter().filter(|k| *k == kind).count();
+        assert_eq!(count("mcp.tool_called"), 5);
+        assert_eq!(count("mcp.tool_failed"), 5);
+        assert_eq!(count("mcp.tool_refused"), limited);
+        // Ten rows from the first connection's five admitted calls, plus one
+        // `rate_limited` row for each connection that saw one.
+        assert_eq!(kinds.len(), 10 + limited);
+        assert_eq!(
+            limited, 55,
+            "calls 6 to 60 are each refused and each closes"
+        );
+        assert_eq!(connections, 55);
+        assert!(
+            kinds.len() <= 2 * 5 + connections,
+            "{} rows for {connections} connections",
+            kinds.len()
+        );
+        assert_eq!(world.ran.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn ori_t_0169_refusal_6_the_byte_cap_is_reported_before_a_schema_fault_below_the_root() {
+        // A number where a string belongs, under a cap the object exceeds. The cap
+        // first reports the root and the size; the schema first would report
+        // `/query` and the type. The two orders differ here, and only here.
+        let mut world = Setup::new().max_arguments_bytes(4).build("refusal-6-first");
+        world.handshake();
+        let reply = world.call("aicd_search", json!({"query": 1}));
+        assert_result_refusal(&reply, 2, "invalid_arguments", 27, Some(""));
+        let structured = &wire(&reply)["result"]["structuredContent"];
+        assert_eq!(structured["field"], "");
+        assert_eq!(structured["why"], WHY_ARGUMENTS_TOO_LARGE);
+        // The same object under the default cap is the schema's to refuse.
+        let mut world = World::ready("refusal-6-schema");
+        let reply = world.call("aicd_search", json!({"query": 1}));
+        let structured = &wire(&reply)["result"]["structuredContent"];
+        assert_eq!(structured["field"], "/query");
+        assert_eq!(structured["why"], tools::WHY_NOT_A_STRING);
+    }
+
+    #[test]
+    fn ori_t_0169_an_invalid_arguments_result_says_which_rule_failed() {
+        let why_of = |cap: usize, arguments: Value, label: &str| {
+            let mut world = Setup::new().max_arguments_bytes(cap).build(label);
+            world.handshake();
+            let reply = world.call("aicd_search", arguments);
+            let message = wire(&reply);
+            assert_eq!(message["result"]["isError"], true);
+            let structured = message["result"]["structuredContent"].clone();
+            assert_eq!(structured["reason"], "invalid_arguments");
+            // The event does not carry it.
+            let events = world.mcp_events();
+            assert!(payload(&events[0]).get("why").is_none());
+            (
+                structured["field"].as_str().expect("a field").to_owned(),
+                structured["why"].as_str().expect("a why").to_owned(),
+            )
+        };
+        let default = DEFAULT_MAX_ARGUMENTS_BYTES;
+        // Over the cap, and a stray top-level key: both at the root, told apart by
+        // the why.
+        let over = why_of(15, json!({"query": "aaaa"}), "why-cap");
+        let stray = why_of(default, json!({"query": "q", "stray": 1}), "why-stray");
+        assert_eq!(over, (String::new(), WHY_ARGUMENTS_TOO_LARGE.to_owned()));
+        assert_eq!(
+            stray,
+            (String::new(), tools::WHY_UNEXPECTED_PROPERTY.to_owned())
+        );
+        // A missing value and a too-short value, both at one field.
+        let missing = why_of(default, json!({}), "why-missing");
+        let short = why_of(default, json!({"query": ""}), "why-short");
+        assert_eq!(
+            missing,
+            ("/query".to_owned(), tools::WHY_MISSING_PROPERTY.to_owned())
+        );
+        assert_eq!(
+            short,
+            ("/query".to_owned(), tools::WHY_TOO_SHORT.to_owned())
+        );
+        let all = [over.1, stray.1, missing.1, short.1];
+        for (index, why) in all.iter().enumerate() {
+            assert!(known_whys().contains(&why.as_str()), "{why}");
+            assert!(
+                !all[index + 1..].contains(why),
+                "two different rules gave the same why: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0169_a_failed_effect_says_which_kind_of_failure_it_was() {
+        let structured = |outcome: Result<CallToolResult, HandlerError>, label: &str| {
+            let (_world, reply) = failing_world(outcome, label);
+            let message = wire(&reply);
+            let structured = message["result"]["structuredContent"].clone();
+            // The text block is that object serialized.
+            let text: Value = serde_json::from_str(
+                message["result"]["content"][0]["text"]
+                    .as_str()
+                    .expect("text"),
+            )
+            .expect("JSON text");
+            assert_eq!(text, structured);
+            structured
+        };
+        // Unavailable: "retry later", and no other key.
+        assert_eq!(
+            structured(
+                Err(HandlerError::Port(PortError::Unavailable {
+                    what: MARKER_TEXT.to_owned(),
+                })),
+                "kind-unavailable"
+            ),
+            json!({"failure": "unavailable"})
+        );
+        // Invalid: "fix the call", with the constant field.
+        assert_eq!(
+            structured(
+                Err(HandlerError::Port(PortError::Invalid {
+                    field: "ticket_id",
+                    why: MARKER_TEXT.to_owned(),
+                })),
+                "kind-invalid"
+            ),
+            json!({"failure": "invalid", "field": "ticket_id"})
+        );
+        // Refused: the reason and the reference.
+        assert_eq!(
+            structured(
+                Err(HandlerError::Refused {
+                    code: "source_not_in_scope",
+                    methodology_ref: reference(25),
+                }),
+                "kind-refused"
+            ),
+            json!({
+                "failure": "refused",
+                "reason": "source_not_in_scope",
+                "methodology_ref": methodology(25),
+            })
+        );
+    }
+
+    #[test]
+    fn ori_t_0169_after_a_close_the_server_answers_nothing_and_records_nothing() {
+        let mut world = Setup::new().max_calls(1).build("latched");
+        world.handshake();
+        assert!(is_done(&search(&mut world)));
+        let reply = search(&mut world);
+        assert_rpc_refusal(&reply, world.next_id, RATE_LIMITED_CODE, "rate_limited", 22);
+        assert!(reply.close);
+
+        let rows = world.events().len();
+        let charged = world.budget.lock().expect("the budget").calls_in_window;
+        let reads = world.reads.load(Ordering::SeqCst);
+        let asked = world.desk_asked.load(Ordering::SeqCst);
+        let ran = world.ran.load(Ordering::SeqCst);
+        let silent = Reply {
+            message: None,
+            close: true,
+            unrecorded: None,
+        };
+        // A valid call, a ping, a request that would not decode, and a frame error
+        // all get nothing.
+        assert_eq!(search(&mut world), silent);
+        assert_eq!(world.send(request(70, "ping", None)), silent);
+        assert_eq!(world.send(request(71, "tools/list", None)), silent);
+        assert_eq!(world.send(initialized_notification()), silent);
+        let reply = world.server.receive(
+            &mut world.db,
+            Err(ReceiveError::Frame(FrameError::TooLong { limit: 64 })),
+        );
+        assert_eq!(reply, silent);
+        // Nothing was recorded, charged, read or run.
+        assert_eq!(world.events().len(), rows);
+        assert_eq!(
+            world.budget.lock().expect("the budget").calls_in_window,
+            charged
+        );
+        assert_eq!(world.reads.load(Ordering::SeqCst), reads);
+        assert_eq!(world.desk_asked.load(Ordering::SeqCst), asked);
+        assert_eq!(world.ran.load(Ordering::SeqCst), ran);
+        // A new connection of the same session is a new server, and is served.
+        world
+            .clock
+            .store(START + RATE_WINDOW_MILLIS, Ordering::SeqCst);
+        world.reconnect();
+        assert!(is_done(&search(&mut world)));
+    }
+
+    #[test]
+    fn ori_t_0169_a_failed_call_of_a_non_coder_records_the_argument_ticket() {
+        // A lead bound to ticket A names ticket B: check 7 lets it pass, so the
+        // call is the argument's, and so is its failure.
+        let mut world = Setup::new()
+            .role(Role::Lead)
+            .ticket(Some(ticket_1()))
+            .handlers(|ran| {
+                let mut handlers = Handlers::new();
+                handlers
+                    .register(
+                        Tool::Context,
+                        answering(
+                            Err(HandlerError::Port(PortError::Unavailable {
+                                what: "the memory".to_owned(),
+                            })),
+                            ran,
+                        ),
+                    )
+                    .expect("registers");
+                handlers
+            })
+            .build("failed-lead");
+        world.handshake();
+        let reply = world.call("aicd_context", json!({"ticket_id": ticket_2().as_str()}));
+        assert_eq!(wire(&reply)["result"]["isError"], true);
+        let events = world.mcp_events();
+        let kinds: Vec<&str> = events.iter().map(Event::kind).collect();
+        assert_eq!(kinds, ["mcp.tool_called", "mcp.tool_failed"]);
+        assert_eq!(events[0].ticket_id(), Some(&ticket_2()));
+        assert_eq!(
+            events[1].ticket_id(),
+            Some(&ticket_2()),
+            "the failed row names the argument's ticket, not the binding's"
+        );
+    }
+
+    #[test]
+    fn ori_t_0169_a_check_7_refusal_records_the_binding_ticket() {
+        // A coder bound to ticket A names ticket B: refused, and the refusal's row
+        // is the binding's, never the claim's.
+        let mut world = World::ready("check-7-column");
+        let reply = world.call("aicd_plan_submit", plan_arguments(&ticket_2()));
+        assert_eq!(reason_of(&reply), "claim_contradicts_session");
+        let events = world.mcp_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind(), "mcp.tool_refused");
+        assert_eq!(events[0].ticket_id(), Some(&ticket_1()));
+        assert_no_marker(events[0].payload(), "the event");
     }
 }
