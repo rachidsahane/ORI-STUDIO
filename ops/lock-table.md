@@ -1642,3 +1642,22 @@ Recorded:
 | 109 | ORI-T-0180 with ORI-T-0168: a hook link whose way enters `/proc` or `/dev/fd` is refused, since the installer's process cannot judge what git's will run; `ori-original` must be absent or a real directory, whatever the hooks are | `crates/ori-watch/src/hooks.rs` | 1 | `/home/user/wt/ORI-T-0180`, `fix/ORI-T-0180-hook-links` | Sonnet 5.5 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 105 (repair 1), 108 (repair 1) and 109. The next free identifier is ORI-T-0181.
+
+---
+
+## Claim 110: ORI-T-0178 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+The lead wrote the edit and proved it in a copy of a8a3a11:
+- the test passes;
+- clippy and rustfmt are clean;
+- a mutant whose spelled root loses its `..` fails the new guard.
+
+The spelled root is built as text, without the verbatim prefix. On Windows `join` resolves a `..` away on a verbatim path, so the test would have judged the root itself. No assertion is removed or changed; one is added. This follows the ORI-T-0167 precedent for a test of ORI-T-0054 that is not yet on `main`.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 110 | ORI-T-0178 | `crates/ori-watch/src/watcher.rs`: the test `ori_t_0054_a_root_spelled_with_dotdot_is_canonicalised_before_paths_are_judged` only | 1 | `/home/user/wt/ORI-T-0178`, `fix/ORI-T-0178-dotdot-root-test` | Haiku 5.5 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 105, 108, 109 and 110. The next free identifier is ORI-T-0181.
