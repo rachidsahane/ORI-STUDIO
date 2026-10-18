@@ -622,16 +622,17 @@ pub enum ToolRefusal {
     /// The call names a ticket, and the session is a coder's with no ticket
     /// bound. AICD §7.
     ///
-    /// The rule slice S2 applies, for a tool whose arguments name a
-    /// `ticket_id`:
+    /// The rule slice S2 applies, to a **coder** session, for a tool whose
+    /// arguments name a `ticket_id`:
     ///
-    /// - when the session is bound to a ticket and the argument names another,
+    /// - when the coder is bound to a ticket and the argument names another,
     ///   [`ToolRefusal::ClaimContradictsSession`];
-    /// - when the session has no ticket and the role is `coder`, this refusal:
-    ///   the lead assigns tickets to coders and a coder takes one validated
-    ///   ticket (AICD §7), so a coder with none has been assigned nothing;
-    /// - otherwise the argument passes the server core, and what a role may do
-    ///   with a ticket it is not bound to is the downstream control's.
+    /// - when the coder has no ticket, this refusal: the lead assigns tickets to
+    ///   coders and a coder takes one validated ticket (AICD §7), so a coder with
+    ///   none has been assigned nothing;
+    /// - any other role's ticket argument passes slice S2, whatever ticket the
+    ///   session is bound to, and the tool's own control checks it (the
+    ///   ticket-rule table in `server.rs`'s module documentation).
     TicketNotAssigned {
         /// The ticket the call named.
         ticket: Id,
@@ -639,10 +640,12 @@ pub enum ToolRefusal {
     /// A claim in the call contradicts the session the engine registered.
     /// AICD §25.
     ///
-    /// The rule slice S2 applies, for a tool whose arguments name a
-    /// `ticket_id`: when the session is bound to a ticket and the argument names
-    /// another, this refusal; the other two cases are those of
-    /// [`ToolRefusal::TicketNotAssigned`]. The binding wins, and the call is
+    /// The rule slice S2 applies, to a **coder** session, for a tool whose
+    /// arguments name a `ticket_id`: when the coder is bound to a ticket and the
+    /// argument names another, this refusal; the other cases are those of
+    /// [`ToolRefusal::TicketNotAssigned`], and any other role's ticket argument
+    /// passes slice S2 and is checked by the tool's own control. The binding
+    /// wins, and the call is
     /// refused rather than quietly corrected, as the scope enforcer of AICD §25
     /// refuses a request outside its scope. `claim` names the field, a constant
     /// of the server core, never the agent's value.

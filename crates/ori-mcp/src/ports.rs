@@ -59,8 +59,13 @@
 //! objects and is itself `Send`, so the engine can build it on one thread and
 //! hand it to the product's writer task.
 //!
-//! A port also receives the [`crate::scopes::Caller`] that the server core built
-//! from the session binding, never an identity read from a tool argument. The
+//! The desks of the effect, [`crate::ports::TicketDesk`] and
+//! [`crate::ports::SpecDesk`], which slices S3 to S9 call, receive the
+//! [`crate::scopes::Caller`] that the server core built from the session binding,
+//! never an identity read from a tool argument. The other ports take something
+//! else: [`crate::ports::IdSource`] and [`crate::ports::Clock`] take nothing,
+//! [`crate::ports::UserToolHost`] takes a [`crate::scopes::UserToolGrant`], and
+//! [`crate::ports::SessionDesk`] takes the [`crate::server::Binding`] itself. The
 //! caller carries the agent identity of the session, and a port that writes
 //! records its write under it. A desk never assumes that the server core's scope
 //! check ran: it makes the checks of the component it routes the change through,
