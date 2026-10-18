@@ -4186,6 +4186,31 @@ mod tests {
         }
 
         #[test]
+        fn ori_t_0159_a_departure_without_a_creation_is_a_removal_even_beside_an_arrival_on_macos()
+        {
+            // `mv moved.rs new.rs` of a file that has been there a while: the
+            // old name left, the new one arrived, and the old name was never
+            // created in this window, so it is not a temporary.
+            let scratch = Scratch::new("settle-rename-of-an-old-file");
+            let root = scratch.dir("root");
+            fs::write(root.join("new.rs"), b"x").unwrap();
+            let batch = run(
+                &root,
+                Fidelity::Coalesced,
+                vec![departure(&root, "moved.rs"), arrival(&root, "new.rs")],
+            );
+            assert_eq!(
+                kinds(&batch),
+                vec![
+                    ("moved.rs".to_owned(), ChangeKind::Removed),
+                    ("new.rs".to_owned(), ChangeKind::Modified),
+                ],
+                "{batch:?}"
+            );
+            assert_eq!(batch.transient, 0, "{batch:?}");
+        }
+
+        #[test]
         fn ori_t_0159_a_departure_with_a_removal_bit_is_a_removal_even_beside_an_arrival_on_macos()
         {
             let scratch = Scratch::new("settle-removal-bit");
