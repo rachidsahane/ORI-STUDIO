@@ -2928,6 +2928,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ori_t_0174_a_dangling_link_with_an_absolute_target_into_ori_original_is_refused() {
+        // H2 with the link in the way written as an absolute path: the way
+        // restarts at the root and comes down to `ori-original/` again.
+        let scratch = Scratch::new("way-dangling-absolute-link");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        std::os::unix::fs::symlink(
+            hooks_dir.join("ori-original").join(".."),
+            hooks_dir.join("M"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("M/post-merge", hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("M/post-merge"),
+            &["M", "post-checkout", "post-commit"],
+        );
+        assert_link_reaches_post_merge_once_ori_original_exists(
+            &hooks_dir,
+            &hooks_dir.join("post-checkout"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ori_t_0174_a_link_whose_way_goes_up_through_a_linked_directory_is_refused() {
         // H3: the way is `ori-original/../L/../../post-merge`, and once
         // `ori-original/` exists `L/..` leaves from `x/y`, the directory `L`
