@@ -98,9 +98,9 @@
 //! deletion whose directory became a file before the event was observed, which
 //! is the order a branch switch is delivered in, is therefore dropped and
 //! counted in [`Batch::rejected`], whatever the backend's fidelity, and no
-//! look at the tree settles it afterwards, unless an earlier event for that
-//! path in the same window was accepted: the check is skipped for a path the
-//! window already holds an entry for, and the deletion is reported.
+//! look at the tree settles it afterwards, unless the window already holds an
+//! entry for that path, from an earlier accepted event that has not cancelled:
+//! the check is skipped for it, and the deletion is reported.
 //!
 //! # What is ignored, and why
 //!
@@ -125,7 +125,8 @@
 //!   [`TreeWatcher::watch_with`].
 //! - **Directories.** A directory is not a change git can see; the files in it
 //!   are. A directory that appears is scanned for the files already in it
-//!   (below), and an event on a directory itself is dropped.
+//!   (below), and an event on a directory itself, other than its removal, is
+//!   dropped.
 //!
 //! # How a burst is coalesced
 //!
@@ -268,10 +269,11 @@
 //! created and deleted inside one window, and not renamed, reads as `Removed`
 //! (reported, not counted as transient) even if it never outlived the window;
 //! a name that arrived by a rename and left by another inside one window (an
-//! intermediate name, or a directory moved in and out) reads as `Removed`;
-//! and a temporary whose creation and rename away reach the watcher more than
-//! the quiet window apart is reported, as a removal, in each batch. Three
-//! limits of rule 3 remain:
+//! intermediate name, or a directory moved in and out) reads as `Removed`,
+//! unless a creation was also seen for it and another path arrived, which makes
+//! it transient (the first limit); and a temporary whose creation and rename
+//! away reach the watcher more than the quiet window apart is reported, as a
+//! removal, in each batch. Three limits of rule 3 remain:
 //!
 //! - FSEvents gives no pairing (`fsevent.rs`, line 192), so condition 4 is a
 //!   fact about the window, not about this path beyond excluding its own
@@ -281,10 +283,11 @@
 //!   name is counted, and the arrival may be of a path that was reported or one
 //!   that was not (the next limit).
 //! - A directory counts as an arrival for condition 4 but is never reported as
-//!   itself: it is scanned, and what the scan finds is reported, within the
-//!   scan's budget. A temporary whose window holds no other arrival than a
-//!   directory's is counted as transient with no change reported for that
-//!   directory.
+//!   itself when it arrives (a directory moved in and out inside one window
+//!   reads as `Removed`): it is scanned, and what the scan finds is reported,
+//!   within the scan's budget. A temporary whose window holds no other arrival
+//!   than a directory's is counted as transient with no change reported for
+//!   that directory.
 //! - A temporary whose arrival reaches a later window than its departure is
 //!   reported as `Removed`: noise, the direction rule 2 already chooses.
 //!
