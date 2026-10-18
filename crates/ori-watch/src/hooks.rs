@@ -3186,6 +3186,150 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ori_t_0174_a_way_through_more_links_than_any_process_follows_is_an_error() {
+        // A link to itself in the way: the resolver follows links itself, so
+        // it needs a bound of its own, and a way it cannot finish is an error
+        // that refuses the install (AICD §14), not an answer of "no".
+        let scratch = Scratch::new("way-link-cap");
+        let (repo, _) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        std::os::unix::fs::symlink("loop", hooks_dir.join("loop")).unwrap();
+        let error = way_enters_what_the_install_creates(
+            &hooks_dir.join("loop").join("x"),
+            &hooks_dir,
+            &canonical,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(&LINK_HOPS_CAP.to_string()),
+            "the error does not name the cap: {error}"
+        );
+
+        // The bound is the cap and not another number: a chain of exactly
+        // that many links, ending at a real directory, is followed to its end
+        // (the way then fails at `x`, which is not the installer's), and one
+        // more is an error.
+        let chain = |prefix: &str, links: usize| {
+            fs::create_dir(hooks_dir.join(format!("{prefix}-dir"))).unwrap();
+            for number in 1..=links {
+                let target = if number == links {
+                    format!("{prefix}-dir")
+                } else {
+                    format!("{prefix}{}", number + 1)
+                };
+                std::os::unix::fs::symlink(target, hooks_dir.join(format!("{prefix}{number}")))
+                    .unwrap();
+            }
+            hooks_dir.join(format!("{prefix}1")).join("x")
+        };
+        let at_the_cap = chain("a", LINK_HOPS_CAP);
+        assert!(
+            !way_enters_what_the_install_creates(&at_the_cap, &hooks_dir, &canonical, false)
+                .unwrap()
+        );
+        let past_the_cap = chain("b", LINK_HOPS_CAP + 1);
+        assert!(
+            way_enters_what_the_install_creates(&past_the_cap, &hooks_dir, &canonical, false)
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_what_the_install_creates_is_named_without_regard_to_case_where_names_fold_case() {
+        // Both readings, whatever this platform's file system does: the
+        // comparison is a parameter so each is tested everywhere. `ORI-ORIGINAL`
+        // is a different directory where names are exact, and the way through
+        // it reaches nothing.
+        let scratch = Scratch::new("way-case");
+        let (repo, _) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let enters = |path: PathBuf, fold_case: bool| {
+            way_enters_what_the_install_creates(&path, &hooks_dir, &canonical, fold_case).unwrap()
+        };
+
+        // The directory itself.
+        assert!(enters(hooks_dir.join("ORI-ORIGINAL"), true));
+        assert!(!enters(hooks_dir.join("ORI-ORIGINAL"), false));
+        assert!(enters(hooks_dir.join("ori-original"), false));
+
+        // A hook's name in a directory called `ori-original` that is there.
+        fs::create_dir(hooks_dir.join("ori-original")).unwrap();
+        assert!(enters(
+            hooks_dir.join("ori-original").join("PRE-PUSH"),
+            true
+        ));
+        assert!(!enters(
+            hooks_dir.join("ori-original").join("PRE-PUSH"),
+            false
+        ));
+        assert!(enters(
+            hooks_dir.join("ori-original").join("pre-push"),
+            false
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_relative_way_is_resolved_from_the_current_directory() {
+        // The installer passes absolute paths, but the resolver takes any: a
+        // relative one starts at the current directory. This one climbs to
+        // the root (a `..` there stays) and comes down to the hooks directory,
+        // without the test changing the directory of the process. The same
+        // way with one climb too few starts in an ancestor of the current
+        // directory that is not the root, so it does not come down to the
+        // hooks directory and is not the installer's.
+        let scratch = Scratch::new("way-relative");
+        let (repo, _) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let depth = std::env::current_dir().unwrap().components().count();
+        let up: PathBuf = std::iter::repeat_n("..", depth + 1).collect();
+        let relative = |tail: &str| up.join(canonical.strip_prefix("/").unwrap()).join(tail);
+        assert!(
+            way_enters_what_the_install_creates(
+                &relative("ori-original"),
+                &hooks_dir,
+                &canonical,
+                false
+            )
+            .unwrap()
+        );
+        assert!(
+            !way_enters_what_the_install_creates(
+                &relative("nowhere"),
+                &hooks_dir,
+                &canonical,
+                false
+            )
+            .unwrap()
+        );
+        if depth > 1 {
+            let short: PathBuf = std::iter::repeat_n("..", depth - 2).collect();
+            let one_climb_short = short
+                .join(canonical.strip_prefix("/").unwrap())
+                .join("ori-original");
+            assert!(
+                !way_enters_what_the_install_creates(
+                    &one_climb_short,
+                    &hooks_dir,
+                    &canonical,
+                    false
+                )
+                .unwrap(),
+                "a relative way did not start at the current directory"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ori_t_0054_a_git_dir_replaced_by_a_link_after_the_installer_was_built_is_refused() {
         let scratch = Scratch::new("hooksgitswap");
         let (repo, spool) = skeleton(&scratch);
