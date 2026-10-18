@@ -1042,3 +1042,27 @@ ORI-T-0157 and ORI-T-0159 were built during the pause and never reviewed. ORI-T-
 | ORI-T-0164 | A recovery path for a product whose evidence is locked by one refused evidence event (R45 point 3): a per-record evidence read that refuses only the records a bad event touches, or a quarantine event kind the operator appends, with `read_evidence` honouring it. A design decision; the lead brings options to the operator | `crates/ori-memory/src/barrier.rs`, `scope.rs` | 2 | **needs planning** | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 81, 86, 87, 88, 89, 90 and 91. The next free identifier is ORI-T-0165.
+
+---
+
+## Claims 81, 86 and 91 integrated; claims 92 to 94 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]]. Not on `main`; all three integrations are tier 2 by their paths, so the operator merges them with the pull request.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 86 | ORI-T-0141, `AgentRuntime` and its signature types in `ori-core`, with repair 1 (Haiku) | Reviewed 2026-10-12: R42 conformity confirmed, only the authorized test edits; one should-fix (0141-F1, the `Debug` of `SessionSpec`) became ORI-T-0160. The lead read repair 1's diff: exactly the three replacements the package gave | workspace clippy, strict doc and fmt clean; `cargo test --workspace`: **1284 passed, 0 failed** |
+| 81 | ORI-T-0144, evidence `content_ref` confined, with repair 1 (Haiku) | Reviewed 2026-10-12; the one confirmed should-fix (0144-F1) was the doc's promise of a remedy that does not exist. The lead read repair 1's diff: exactly the two replacements the package gave, stating the lockout as permanent and product-wide ([[R45]] point 3) | as above |
+| 91 | ORI-T-0146, the `prover.rs` sentence ORI-T-0133 made false (Haiku) | The lead read the diff: the one replacement the package gave | as above |
+
+Next tickets, each designed by the lead before dispatch ([[R44]]):
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 92 | ORI-T-0160, `SessionSpec`'s `Debug` prints names, never values (code written by the lead in the package) | `crates/ori-core/src/adapters.rs` | 2 | Haiku 5.5 | `fix/ORI-T-0160-redact-session-env` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+| 93 | ORI-T-0150, the headless adapter stops draining standard error when its run is over; `acp.rs`'s `drain_stderr` wrapper removed, since it would have no caller | `crates/ori-runtime/src/headless.rs`, `crates/ori-runtime/src/acp.rs` (the wrapper and its docs only) | 1 | Sonnet 5.5 | `fix/ORI-T-0150-headless-stderr-stop` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+| 94 | ORI-T-0161, the evidence write refuses a link, an existing file and a linked evidence directory, and writes every file before appending any event | `crates/ori-memory/src/barrier.rs` | 2 | Sonnet 5.5 | `fix/ORI-T-0161-evidence-write` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Disjoint from each other and from every held claim (20, 87, 88, 89, 90). ORI-T-0149 and ORI-T-0151 also change `acp.rs` and `transcript.rs`; they wait on claim 93. ORI-T-0139 (docs in five files, `barrier.rs` among them) waits on claim 94.
+
+**State after this section:** the claims held are 20, 87 to 90, and 92 to 94. The next free identifier is ORI-T-0165.
