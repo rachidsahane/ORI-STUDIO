@@ -2463,6 +2463,23 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0159_a_link_that_cannot_be_read_is_an_error_and_not_a_no() {
+        let scratch = Scratch::new("chain-unreadable-start");
+        let (repo, _) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        // Not a link: reading it as one fails, and the failure is the answer.
+        let plain = hooks_dir.join("plain");
+        fs::write(&plain, "#!/bin/sh\n").unwrap();
+        assert!(follow_chain_to_managed_hook(&hooks_dir, &canonical, &plain, false).is_err());
+        // Not there at all.
+        let missing = hooks_dir.join("missing");
+        assert!(follow_chain_to_managed_hook(&hooks_dir, &canonical, &missing, false).is_err());
+    }
+
     #[test]
     fn ori_t_0159_a_path_is_read_by_its_text_without_rising_above_the_root() {
         for (written, expected) in [
