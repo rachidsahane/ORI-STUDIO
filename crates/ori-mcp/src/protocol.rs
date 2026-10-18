@@ -97,12 +97,16 @@
 //!   [`crate::protocol::ResultResponse::into_result`]) through
 //!   `serde_json::from_value`, which moves each string and each object key out
 //!   of the tree into the typed value instead of copying it. The peak for one
-//!   message is then the parsed tree plus a transient (the containers being
-//!   rebuilt at that moment), not twice the tree. Deserializing from `&Value`,
-//!   which [`crate::protocol::Request::params_as`] and
-//!   [`crate::protocol::ResultResponse::result_as`] do, copies every string,
-//!   map and nested value out of the tree and would cost about a second tree;
-//!   those two are for a message this side built, never for a peer's. The one
+//!   message is then the parsed tree plus a transient: the containers being
+//!   rebuilt at that moment. An object is rebuilt entry by entry as the original
+//!   is consumed; an array is rebuilt whole while the original is still held, so
+//!   the transient is as large as the largest array and equals the tree only
+//!   for a message that is one flat array. It is never a second copy of every
+//!   string and map, which is what deserializing from `&Value` costs
+//!   ([`crate::protocol::Request::params_as`] and
+//!   [`crate::protocol::ResultResponse::result_as`] do that, copying each string,
+//!   map and nested value out of the tree, about a second tree in all); those
+//!   two are for a message this side built, never for a peer's. The one
 //!   thing a test can pin without measuring memory is pinned: a large string
 //!   reaches the typed value at the address it had in the tree. The host reads
 //!   operator results, the large case, and pays this figure for every
