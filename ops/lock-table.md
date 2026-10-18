@@ -1122,3 +1122,40 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 96 is disjoint from every held claim (20, 90, 94, 95). Claim 90 (ORI-T-0159, on `feat/ORI-T-0054-watch`) touches no `ori-mcp` path. `PlanDesk` and `EscalationDesk` are left to slice S9, because they need the barrier's sealed entry (E-0012, plan prerequisite PM2).
 
 **State after this section:** the claims held are 20, 90, 94, 95 and 96. The next free identifier is ORI-T-0167.
+
+---
+
+## CI red on the session branch; claim 97 dispatched; claim 94 stopped on `test_modified`
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+CI on f73365c, 25da4a6 and d0c8309, the first runs to carry ORI-T-0144 and then ORI-T-0150, failed three checks. Every Linux check passed, and the lead's local runs were on Linux.
+
+| Check | What failed | Whose |
+|---|---|---|
+| clippy (windows-latest) | `barrier::tests::first_evidence_seq` is never used: its only callers are the `#[cfg(unix)]` symbolic link tests, so on Windows it is dead code and `-D warnings` refuses it | ORI-T-0144 |
+| test (windows-latest) | `ori_t_0144_another_blobs_file_and_near_miss_file_names_are_refused`, case `near5`. It built the planted path by replacing `/evidence/` with `/sessions/` in the blob's own path. A Windows path is written with `\`, so the replacement found nothing and the planted path was the blob's own file, which `read_evidence` rightly accepts | ORI-T-0144 |
+| test (macos-latest) | `ori_t_0150_a_descendant_writing_to_stderr_is_no_longer_drained_once_the_run_is_over`: the marker read `x`, a newline, then `broken_pipe`, where the test expects `broken_pipe` alone. The drain did stop, because the descendant's write failed with a broken pipe. `/bin/sh` on macOS is bash 3.2, which keeps a failed write's bytes in its output buffer and flushes them with its next `echo`, and the next `echo` is the one that writes the marker | ORI-T-0150 |
+
+None of the three is a defect in the code under test. All three are in tests of tickets integrated on this branch on 2026-10-18, and none of those tests has reached `main`.
+
+**Why the lead treats this as a repair and not as `test_modified`.** The precedent is ORI-T-0054's repair for macOS (section "Claim 64 withdrawn from the session branch and held again"): a ticket's own tests that have not reached `main` are repaired as part of that ticket's work. The lead applies the condition of [[R40]] to [[R42]] all the same:
+- no assertion is removed, loosened or changed;
+- the two test changes alter only how an input is built: a path built with `join`, and one `echo` to `/dev/null` in a shell script;
+- the number of assertion lines in each changed test is the same before and after.
+
+Each fix is its own commit and can be reverted alone. The operator may overrule.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 97 | ORI-T-0167, CI portability of a test helper and two tests of ORI-T-0144 and ORI-T-0150 (every edit written by the lead) | `crates/ori-memory/src/barrier.rs` (test module only: `first_evidence_seq` and case `near5`), `crates/ori-runtime/src/headless.rs` (test module only: `T0150_FLOODING_DESCENDANT` and its doc) | 2 | Haiku 5.5 | `fix/ORI-T-0167-ci-portability` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+**Claim 97 overlaps claim 94 on `barrier.rs`, and the lead grants it.** Claim 94 (ORI-T-0161) holds that file, but its coder has stopped (below) and writes nothing more. Its one commit, 20c38b0, changes the write path and appends tests at the end of the file. It touches none of the lines claim 97 changes. ORI-T-0161 will be integrated on top of claim 97's commit.
+
+**Claim 94, ORI-T-0161, is stopped on `test_modified`.** The coder implemented the decisions as written, in one commit (20c38b0, `barrier.rs` only), and the workspace is green except for two existing tests. Both are on `main` and outside the claim:
+- `oplog::tests::ori_t_0039_the_operational_log_filters_by_ticket_kind_and_id_without_dropping_a_reused_id` fails because of decision 3. Its helper derives the evidence id from the record label, the test reuses a label on purpose, and `create_new` now refuses the reused evidence id.
+- `scope::tests::ori_t_0038_evidence_is_only_the_blobs_stored_with_the_record` fails because of decisions 3 and 4. It builds through `submit_report` states that `submit_report` can no longer produce: an orphan evidence event, a reused evidence id, a failed resubmission under the same record id, and one evidence id twice in one record.
+
+The coder proposes planting those events by hand, with an exact patch it verified but did not apply. The lead reviews the patch before putting the question to the operator.
+
+**State after this section:** the claims held are 20, 90, 94 (stopped), 95 (stopped), 96 and 97. The next free identifier is ORI-T-0168.
