@@ -2366,7 +2366,11 @@ fn open_regular_file_following(path: &Path) -> io::Result<fs::File> {
 /// `follow_final_symlink` is `true` only for an entry the walk classified as
 /// a symlink and the caller has just re-validated; everything else is opened
 /// refusing one.
-fn open_regular_file(
+///
+/// The sanitization barrier also uses this open, for its one read of an
+/// evidence blob's raw content (`crate::barrier::read_evidence_content`),
+/// always with `false`.
+pub(crate) fn open_regular_file(
     path: &Path,
     follow_final_symlink: bool,
 ) -> std::result::Result<(fs::File, fs::Metadata), SkipReason> {
@@ -2453,7 +2457,10 @@ fn open_failure_reason(path: &Path, follow_final_symlink: bool, err: &io::Error)
 /// replaced. A length
 /// that lies costs at most one `cap + 1` allocation; it is never what
 /// decides anything.
-fn read_capped(opened: fs::File, cap: u64, stated_len: u64) -> io::Result<Vec<u8>> {
+///
+/// The sanitization barrier also uses this read, for its one read of an
+/// evidence blob's raw content (`crate::barrier::read_evidence_content`).
+pub(crate) fn read_capped(opened: fs::File, cap: u64, stated_len: u64) -> io::Result<Vec<u8>> {
     let limit = cap.saturating_add(1);
     let mut bytes = Vec::with_capacity(usize::try_from(stated_len.min(limit)).unwrap_or(0));
     opened.take(limit).read_to_end(&mut bytes)?;
