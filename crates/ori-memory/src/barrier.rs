@@ -146,16 +146,18 @@
 //! outside this module (the `sealed` submodule's own trait closes that),
 //! and cannot usefully implement it from inside this module either, because
 //! there is no raw text on the type to hand back: an indexer that wanted
-//! `EvidenceBlob` content would have to open and read the file at
-//! `content_ref` itself, by hand, which is a visible, deliberate act in a
-//! diff and a code review, never a call its own "index this record" entry
-//! point could make by accident. This satisfies ORI-P1-021's second clause
-//! ("raw content only in an evidence blob, not in the index") as a fact
-//! about the type graph, not as a promise the indexer's own author has to
-//! remember to keep. The one read that does exist, [`read_evidence_content`]
-//! ("Reading one blob's content, for one explicit request", below), is for an
-//! explicit evidence request, and what it returns, [`EvidenceContent`], does
-//! not implement [`Indexable`] either.
+//! `EvidenceBlob` content would have to call [`read_evidence_content`] and put
+//! its text into an `IndexableDocument` itself, one visible call, which review
+//! refuses, never a call its own "index this record" entry point could make by
+//! accident. The type graph keeps raw evidence out of the index as far as it
+//! reaches, and no further: nothing raw can be passed where `&impl Indexable`
+//! is required, but the crate's indexer takes an `IndexableDocument`, whose
+//! body is any string, so for ORI-P1-021's second clause ("raw content only in
+//! an evidence blob, not in the index") review is the rest of the guard (see
+//! [`EvidenceContent`]). The one read that does exist,
+//! [`read_evidence_content`] ("Reading one blob's content, for one explicit
+//! request", below), is for an explicit evidence request, and what it returns,
+//! [`EvidenceContent`], does not implement [`Indexable`] either.
 //!
 //! ```mermaid
 //! sequenceDiagram
@@ -187,8 +189,9 @@
 //! (`spec/LLD.md` section 2, this crate's own doc comment). Nothing in this
 //! module returns a raw field into a record or a package;
 //! [`MemoryRecord::structured`] only ever holds [`SanitizedField`] values. The
-//! one function that returns raw text, [`read_evidence_content`], answers an
-//! explicit evidence request and nothing else.
+//! one function that returns raw text, [`read_evidence_content`], is for an
+//! explicit evidence request and nothing else, and it is the caller's to see
+//! that the request was granted first (its documentation says how).
 //!
 //! # Reading a blob back: `content_ref` is checked, then replaced (ORI-T-0144)
 //!
@@ -252,11 +255,14 @@
 //!    the blob's file in it, is a symbolic link (`std::fs::symlink_metadata`,
 //!    which does not follow). An absent file is not a link and is not
 //!    refused: whether the content is still there is for the module that
-//!    opens it. A file system that cannot be examined is
+//!    opens it, which is this one, in [`read_evidence_content`] ("Reading one
+//!    blob's content, for one explicit request", below). A file system that
+//!    cannot be examined is
 //!    [`BarrierError::Io`], fail closed. **What this does not catch:** a
 //!    link made after the check (time of check to time of use: a projection
-//!    made now and a file opened later by another module are two moments,
-//!    and a reader that must be safe opens without following links itself);
+//!    made now and a file opened later, by [`read_evidence_content`] in this
+//!    module, are two moments, and a reader that must be safe opens without
+//!    following links itself);
 //!    a hard link or a bind mount; a link in `<product dir>` itself or above
 //!    it, which is the root the engine chose and which may legitimately be a
 //!    link to another disk; a directory, FIFO or device where the file
@@ -265,7 +271,8 @@
 //!    as a link, so it is refused like a symbolic link (no test shows it, the
 //!    link tests are Unix only). Nothing in this decision opens the file;
 //!    [`read_evidence_content`] does, later and on request, without following a
-//!    link at the file.
+//!    link at the file on the platforms its open has verified ("Reading one
+//!    blob's content, for one explicit request", below).
 //! 6. **One refused event fails the whole call.** [`read_evidence`] is
 //!    all-or-error. Skipping the event and returning the rest would hand the
 //!    caller a list that looks complete, so "no evidence for this record"
@@ -396,60 +403,99 @@
 //! `spec/API_SPEC.md` section 3 says `aicd_evidence` returns "Raw evidence,
 //! returned labeled untrusted", so something has to read the file a blob
 //! names. [`read_evidence_content`] is that read, and the only read of
-//! evidence content in the workspace: the tool in `ori-mcp` calls it and never
-//! opens a path by hand. It belongs here, next to the type whose content it
-//! reads. The decisions, each with its reason:
+//! evidence content in the workspace. `aicd_evidence` does not exist yet
+//! (escalation E-0005); slice S7's handler for it in `ori-mcp`, not built yet,
+//! is to call this function, and never to open a path by hand. The read
+//! belongs here, next to the type whose content it reads. The decisions, each
+//! with its reason:
 //!
-//! 1. **The result is not [`Indexable`], and must never be.**
-//!    [`EvidenceContent`] holds raw bytes, so the seam above ("Raw evidence,
-//!    and the seam that keeps it out of the index") stays closed: the sealed
-//!    trait is implemented for [`SanitizedField`] alone, and a test asserts at
-//!    compile time that [`EvidenceContent`] has no such impl. An indexer that
-//!    takes `&impl Indexable` cannot be handed raw evidence.
-//! 2. **The open is `code_map`'s.** `crate::code_map::open_regular_file`,
-//!    which refuses a link at the final component, does not block in the open
-//!    on the verified platforms (a FIFO with no writer would otherwise hold a
-//!    caller in `open(2)` for ever), and decides on the opened handle that the
-//!    file is a regular file, so a swap between a check and the open decides
-//!    nothing. The platform detail, and what it does not promise on a platform
-//!    outside the verified set, are in that function's documentation and in
-//!    `crate::code_map`'s own threat model; they are not restated here.
-//!    `crate::code_map::read_capped` is the read.
+//! 1. **The result is not [`Indexable`], and that is all the type holds.**
+//!    [`EvidenceContent`] holds raw bytes and does not implement
+//!    [`Indexable`]: the sealed trait is implemented for [`SanitizedField`]
+//!    alone, and a test asserts at compile time that [`EvidenceContent`] has
+//!    no such impl, so it cannot be passed where `&impl Indexable` is
+//!    required. The crate's indexer does not require that today: `Indexer`
+//!    takes an `IndexableDocument`, whose body is any string. Keeping
+//!    [`EvidenceContent::bytes`] and [`EvidenceContent::text_lossy`] out of
+//!    one is a review guard, as keeping `content_ref` out of one already is.
+//! 2. **The open is `code_map`'s, and what it refuses depends on the
+//!    platform.** `crate::code_map::open_regular_file`, called with the
+//!    link-following parameter `false`. On the platforms `crate::code_map` has
+//!    verified (macOS, and Linux on x86_64 and aarch64, through `O_NOFOLLOW`
+//!    and `O_NONBLOCK`; Windows, through the open of the reparse point
+//!    itself) the open refuses a link at the final component and does not
+//!    block (a FIFO with no writer would otherwise hold a caller in `open(2)`
+//!    for ever), and the file is decided to be a regular file on the opened
+//!    handle, so a swap between a check and the open decides nothing. On every
+//!    other unix target it looks at the path (`symlink_metadata`) and then
+//!    opens it with a plain `File::open`, which follows a link: a link renamed
+//!    into the path between the two is followed, and its target's bytes are
+//!    returned if that is a regular file, and a FIFO swapped in between the
+//!    two can block the open. The rest of the platform detail is in that
+//!    function's documentation and in `crate::code_map`'s own threat model;
+//!    it is not restated here. `crate::code_map::read_capped` is the read.
 //! 3. **A refusal is decided from the path, after the open has failed.** The
 //!    open reports a missing file only as a text, in the same reason it gives
 //!    for any other open failure, so `std::fs::symlink_metadata` (which does
 //!    not follow a link) looks at the path again: nothing there is
-//!    [`EvidenceReadFault::Missing`]; a link, a directory, a FIFO or a device
-//!    is [`EvidenceReadFault::NotARegularFile`]; anything else is
+//!    [`EvidenceReadFault::Missing`]; a link, a directory, a FIFO, a socket or
+//!    a device is [`EvidenceReadFault::NotARegularFile`]; anything else is
 //!    [`BarrierError::Io`], carrying the open's own text. Both faults are
 //!    refusals under AICD §8 and carry it through
-//!    [`BarrierError::methodology_ref`].
+//!    [`BarrierError::methodology_ref`]. A file standing where `evidence/`
+//!    belongs makes the open fail, on Windows, as not found (not observed
+//!    here: nothing in this repository ran on Windows), so it reads as
+//!    [`EvidenceReadFault::Missing`] there; on unix it fails as
+//!    `NotADirectory`, so it reads as [`BarrierError::Io`]. Both refuse and
+//!    read nothing.
 //! 4. **The read is capped, and a cut is said.** At most `cap_bytes` bytes are
 //!    returned and [`EvidenceContent::truncated`] says whether the file held
 //!    more, decided on the bytes read (one past the cap is read to tell), never
 //!    on a size the file system stated. A cut counts bytes, so it can split a
-//!    UTF-8 sequence: [`EvidenceContent::text_lossy`] shows that as U+FFFD.
-//! 5. **Nothing is appended, and the path is not checked again.** The read of
-//!    evidence is logged before this is called, as `memory.evidence_accessed`
-//!    (`scope.rs`, AICD §8). [`read_evidence`] checked `content_ref` against
-//!    the product directory when it built the blob (ORI-T-0144); the open that
-//!    refuses a link at the file is what keeps a link swapped in since from
-//!    being read through.
+//!    UTF-8 sequence: [`EvidenceContent::text_lossy`] shows that as U+FFFD. A
+//!    read error after the open is [`BarrierError::Io`].
+//! 5. **Nothing is appended, and the grant and the path are the caller's
+//!    preconditions.** The caller must hold the grant of
+//!    `ScopeEnforcer::authorize`, which appends `memory.evidence_accessed`
+//!    before any content is read (AICD §8). This function enforces none of
+//!    that: it takes no authorization and no database, and logs nothing.
+//!    `read_evidence`, `Submission::evidence` and `Authorization::evidence` all
+//!    hand out blobs, and only review holds a caller to the enforcer
+//!    (`scope.rs`'s module doc, "The seam the retrieval stands on", the passage
+//!    "What the compiler holds, and what only ORI-T-0039's review can").
+//!    The path: [`read_evidence`] checked `content_ref` against the product
+//!    directory when it built the blob (ORI-T-0144), and a blob from
+//!    [`Submission::evidence`] was checked when its file was written. A blob is
+//!    `Clone` and can be kept, so the path may have changed since, and this
+//!    read does not check it again. What this read itself adds is the open
+//!    that refuses a link at the file, on the verified platforms (decision 2),
+//!    which keeps a link swapped in since from being read through there.
 //!
-//! **What this does not catch:** a link in a directory above the file (the
-//! `evidence/` directory, or the product directory). `read_evidence` refused
-//! a link at `evidence/` when it built the blob, and nothing here looks again,
-//! so one swapped in after that, and before the open, is followed, as for
-//! writing (decision 7, "What this does not catch"). A hard link, which is a
-//! regular file, and a bind mount. Content that changes while it is read: the
-//! bytes returned are what the handle held as it was read, and nothing makes
-//! them one consistent snapshot.
+//! **What this does not catch:**
+//!
+//! - A link in a directory above the file (the `evidence/` directory, or the
+//!   product directory). `read_evidence` refused a link at `evidence/` when it
+//!   built the blob, and nothing here looks again, so one swapped in after
+//!   that, and before the open, is followed, as for writing (decision 7,
+//!   "What this does not catch").
+//! - On every unix target outside the verified set (decision 2), a link
+//!   renamed into the path between the look and the open: the open follows it,
+//!   and its target's bytes are returned if that is a regular file.
+//! - On Windows, the open takes every reparse point itself, not only links. A
+//!   file that is a cloud placeholder, or a deduplicated or compressed file (a
+//!   reparse tag that is not a name surrogate), is opened as itself: its bytes
+//!   may be a stub, or the read may fail as [`BarrierError::Io`].
+//! - A hard link, which is a regular file, and a bind mount.
+//! - Content that changes while it is read: the bytes returned are what the
+//!   handle held as it was read, and nothing makes them one consistent
+//!   snapshot.
 //!
 //! ```mermaid
 //! flowchart TD
-//!   A[EvidenceBlob from read_evidence] --> B[open_regular_file at content_ref, a link at the file refused]
+//!   A["EvidenceBlob (from read_evidence, Submission::evidence() or an authorization)"] --> B[open_regular_file at content_ref, a link at the file refused on the verified platforms]
 //!   B -- opened, a regular file --> C[read_capped, at most cap_bytes plus one byte]
-//!   C --> D[EvidenceContent: bytes cut to cap_bytes, truncated, never Indexable]
+//!   C -- read ok --> D[EvidenceContent: bytes cut to cap_bytes, truncated, not Indexable]
+//!   C -- read failed --> X4[Io, no refusal]
 //!   B -- failed --> E{symlink_metadata of content_ref}
 //!   E -- not found --> X1[EvidenceReadRefused: Missing, AICD §8]
 //!   E -- a link or not a regular file --> X2[EvidenceReadRefused: NotARegularFile, AICD §8]
@@ -898,7 +944,11 @@ impl EvidenceBlob {
     /// and nothing more: it was checked for links when it was read, and
     /// nothing keeps it from being replaced by a link afterwards, so a
     /// reader that must not follow one opens it without following links.
-    /// [`read_evidence_content`] is that reader.
+    /// [`read_evidence_content`] is that reader: it does not follow a link at
+    /// the file, on the platforms its open has verified (see its
+    /// documentation). It does follow links in the directories above the file,
+    /// which the module doc comment, "Reading one blob's content, for one
+    /// explicit request", states under "What this does not catch".
     #[must_use]
     pub fn content_ref(&self) -> &Path {
         &self.content_ref
@@ -936,11 +986,46 @@ impl EvidenceBlob {
 ///
 /// **It does not implement [`Indexable`], and must not.** The module doc
 /// comment's seam ("Raw evidence, and the seam that keeps it out of the
-/// index") is that the index reads [`Indexable`] values only, and
-/// [`SanitizedField`] is the only one: ORI-P1-021's second clause, "raw
-/// content only in an evidence blob, not in the index". A test asserts at
-/// compile time that this type has no such impl; an indexer takes
-/// `&impl Indexable`, so it cannot be handed raw evidence.
+/// index") has [`SanitizedField`] as the only [`Indexable`] value. A test
+/// asserts at compile time that this type has no such impl, so it cannot be
+/// passed where `&impl Indexable` is required.
+///
+/// **What that does not keep out of the index.** The crate's indexer does not
+/// require `&impl Indexable` today: `Indexer::add_or_replace`, `full_rebuild`
+/// and `incremental_sync` take an `IndexableDocument`, whose body is any
+/// string, so [`EvidenceContent::text_lossy`] put into one reaches the index.
+/// Keeping [`EvidenceContent::bytes`] and [`EvidenceContent::text_lossy`] out
+/// of an `IndexableDocument` is a review guard, as keeping
+/// [`EvidenceBlob::content_ref`] out of one already is: ORI-P1-021's second
+/// clause, "raw content only in an evidence blob, not in the index".
+///
+/// The seam is also pinned from outside the crate, by a probe that compiles
+/// only for a type that does not implement [`Indexable`]: if one did, both
+/// impls below would apply to it and the trait's parameter could not be
+/// inferred (E0283). It is refused for [`SanitizedField`], which does
+/// implement it (the control):
+///
+/// ```compile_fail,E0283
+/// trait AmbiguousIfIndexable<A> {
+///     fn probe() {}
+/// }
+/// impl<T: ?Sized> AmbiguousIfIndexable<()> for T {}
+/// impl<T: ?Sized + ori_memory::barrier::Indexable> AmbiguousIfIndexable<u8> for T {}
+///
+/// let _ = <ori_memory::barrier::SanitizedField as AmbiguousIfIndexable<_>>::probe;
+/// ```
+///
+/// and it compiles for [`EvidenceContent`]:
+///
+/// ```
+/// trait AmbiguousIfIndexable<A> {
+///     fn probe() {}
+/// }
+/// impl<T: ?Sized> AmbiguousIfIndexable<()> for T {}
+/// impl<T: ?Sized + ori_memory::barrier::Indexable> AmbiguousIfIndexable<u8> for T {}
+///
+/// let _ = <ori_memory::barrier::EvidenceContent as AmbiguousIfIndexable<_>>::probe;
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvidenceContent {
     evidence_id: Id,
@@ -1063,10 +1148,12 @@ impl fmt::Display for EvidenceWriteFault {
 }
 
 /// What a read of one evidence blob's file found, once the open had failed:
-/// AICD §8 (raw evidence is read only for an explicit request, from the file a
-/// blob names, and never through a link). The read-content counterpart of
-/// [`EvidenceRefFault`] and [`EvidenceWriteFault`]. See the module doc
-/// comment, "Reading one blob's content, for one explicit request".
+/// AICD §8 (raw evidence is "shown to a human or an agent only on explicit
+/// request for that ticket, quoted and labeled as untrusted"). The rule that
+/// no link is followed at the file is this module's own. The read-content
+/// counterpart of [`EvidenceRefFault`] and [`EvidenceWriteFault`]. See the
+/// module doc comment, "Reading one blob's content, for one explicit
+/// request".
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum EvidenceReadFault {
@@ -1074,7 +1161,7 @@ pub enum EvidenceReadFault {
     /// removed since.
     Missing,
     /// Something other than a regular file is at the path: a link (dangling
-    /// or not, and never followed), a FIFO, a directory or a device.
+    /// or not, and never followed), a FIFO, a socket, a directory or a device.
     NotARegularFile,
 }
 
@@ -1083,7 +1170,7 @@ impl fmt::Display for EvidenceReadFault {
         f.write_str(match self {
             Self::Missing => "nothing is at this blob's evidence file path",
             Self::NotARegularFile => {
-                "something other than a regular file is at this blob's evidence file path (a link, a directory, a FIFO or a device), and it is not read"
+                "something other than a regular file is at this blob's evidence file path (a link, a directory, a FIFO, a socket or a device), and only a regular file is ever read"
             }
         })
     }
@@ -1173,7 +1260,8 @@ pub enum BarrierError {
     },
     /// [`read_evidence_content`] did not read an evidence file because
     /// nothing is at its path, or because something other than a regular file
-    /// is: a refusal under AICD §8. Nothing was read, and no event was
+    /// (a link, a directory, a FIFO, a socket or a device) is: a refusal under
+    /// AICD §8. Nothing was read, and no event was
     /// appended. See the module doc comment, "Reading one blob's content, for
     /// one explicit request".
     EvidenceReadRefused {
@@ -1197,10 +1285,11 @@ impl BarrierError {
     }
 
     /// The methodology section a refusal is made under, for the refusals
-    /// [`EventLogError`] carries, and for [`BarrierError::EvidenceRefRefused`],
-    /// [`BarrierError::EvidenceWriteRefused`] and
-    /// [`BarrierError::EvidenceReadRefused`] (all AICD §8, "referenced from
-    /// the record by identifier"), and for nothing else: see
+    /// [`EventLogError`] carries, and for [`BarrierError::EvidenceRefRefused`]
+    /// and [`BarrierError::EvidenceWriteRefused`] (both AICD §8, "referenced
+    /// from the record by identifier"), and for
+    /// [`BarrierError::EvidenceReadRefused`] (AICD §8, raw evidence shown "only
+    /// on explicit request for that ticket"), and for nothing else: see
     /// [`EventLogError`]'s own `methodology_ref`.
     #[must_use]
     pub const fn methodology_ref(&self) -> Option<ori_core::error::MethodologyRef> {
@@ -2095,48 +2184,64 @@ pub fn read_evidence(db: &mut ProductDb) -> Result<Vec<EvidenceBlob>, BarrierErr
         .collect()
 }
 
-/// Reads the file `blob.content_ref()` names, never following a link at it and
-/// never blocking in the open, deciding on the opened handle that it is a
-/// regular file, and reading at most `cap_bytes`: AICD §8.
+/// Reads the file `blob.content_ref()` names: on the platforms
+/// `crate::code_map` has verified, no link at it is followed and the open does
+/// not block; the opened handle decides that it is a regular file; at most
+/// `cap_bytes` are read: AICD §8.
 ///
 /// **This is the only read of evidence content in the workspace.** It is for an
 /// explicit evidence request (`aicd_evidence`, `spec/API_SPEC.md` section 3),
-/// whose grant `scope.rs` has already logged as `memory.evidence_accessed`;
-/// nothing is appended here, and `content_ref` is not checked against the
-/// product directory again, because [`read_evidence`] did that when it built
-/// `blob` (ORI-T-0144). No caller opens a path by hand to read evidence.
+/// and the caller must have the grant first: `ScopeEnforcer::authorize` appends
+/// `memory.evidence_accessed` before any content is read. This function
+/// enforces none of that. It takes no authorization and no database, checks no
+/// role, and appends nothing; `read_evidence`, `Submission::evidence` and
+/// `Authorization::evidence` all hand out blobs, and only review holds a
+/// caller to the enforcer (`scope.rs`'s module doc, "The seam the retrieval
+/// stands on"). Nor does it check `content_ref` against the product directory:
+/// [`read_evidence`] did that when it built `blob` (ORI-T-0144), and a blob can
+/// be kept, so the path may have changed since. No caller opens a path by hand
+/// to read evidence.
 ///
-/// **The open.** It never follows a link at the file, never blocks in the open
-/// on the platforms `crate::code_map` has verified (a FIFO with no writer would
-/// otherwise hold the caller in `open(2)`), and decides on the opened handle,
-/// not on the path, that the file is a regular file. That is
+/// **The open.** On the platforms `crate::code_map` has verified (macOS, and
+/// Linux on x86_64 and aarch64; Windows opens the reparse point itself) it does
+/// not follow a link at the file and does not block in the open (a FIFO with no
+/// writer would otherwise hold the caller in `open(2)`), and it decides on the
+/// opened handle, not on the path, that the file is a regular file. That is
 /// `crate::code_map::open_regular_file` with the link-following parameter
-/// `false`; the platform detail, and what that open does not promise on a
-/// platform outside the verified set (a stat before a blocking open, so a
-/// FIFO swapped in between the two can still block it), are in its
-/// documentation and in the threat model of `crate::code_map`. A link in a
-/// directory above the file is followed: see the module doc comment, "Reading
-/// one blob's content, for one explicit request".
+/// `false`. **On every other unix target** it looks at the path and then opens
+/// it with a plain open, so a link swapped in between the two is followed (its
+/// target's bytes are returned if that is a regular file), and a FIFO swapped
+/// in between can block the open. The rest of the platform detail is in that
+/// function's documentation and in the threat model of `crate::code_map`. A
+/// link in a directory above the file is followed on every platform: see the
+/// module doc comment, "Reading one blob's content, for one explicit request",
+/// "What this does not catch".
 ///
 /// **The content is raw agent text and untrusted.** The caller labels it as
 /// such and never indexes it: [`EvidenceContent`] does not implement
-/// [`Indexable`], and cannot.
+/// [`Indexable`]; see its documentation for what that does and does not keep
+/// out of the index.
 ///
 /// **The cap.** At most `cap_bytes` bytes are returned, and
 /// [`EvidenceContent::truncated`] says whether the file held more. The cap
 /// counts bytes, so a cut can split a UTF-8 sequence, which
-/// [`EvidenceContent::text_lossy`] shows as U+FFFD.
+/// [`EvidenceContent::text_lossy`] shows as U+FFFD. `cap_bytes` is also the
+/// read's memory bound: at most `cap_bytes + 1` bytes are buffered, so the
+/// caller chooses a fixed cap, and it is never a number an agent supplied.
 ///
 /// # Errors
 ///
 /// [`BarrierError::EvidenceReadRefused`] (carrying AICD §8 through
 /// [`BarrierError::methodology_ref`]) with [`EvidenceReadFault::Missing`] when
 /// nothing is at the path, or with [`EvidenceReadFault::NotARegularFile`] when
-/// a link (dangling or not), a directory, a FIFO or a device is. The path is
-/// examined, without following it, only after the open has failed, because the
-/// open reports a missing file as text alone. [`BarrierError::Io`] for any
-/// other failure of the open or of the read, carrying its text; and for a path
-/// that was not a regular file when it was opened and is one when it is
+/// a link (dangling or not), a directory, a FIFO, a socket or a device is. The
+/// path is examined, without following it, only after the open has failed,
+/// because the open reports a missing file as text alone. On Windows, a file
+/// standing where `evidence/` belongs makes the open fail as not found, so it
+/// reads as `Missing`; on unix it is `NotADirectory`, so it reads as
+/// [`BarrierError::Io`]. Both refuse and read nothing. [`BarrierError::Io`]
+/// for any other failure of the open or of the read, carrying its text; and for
+/// a path that was not a regular file when it was opened and is one when it is
 /// examined (it changed in between).
 pub fn read_evidence_content(
     blob: &EvidenceBlob,
@@ -4302,7 +4407,7 @@ mod tests {
     //
     // Criteria: ORI-P1-021 (raw content is only in an evidence blob, never
     // in the index: the read returns bytes for an explicit request, and what
-    // it returns cannot be indexed) and ORI-P1-033 (the refusal carries a
+    // it returns is not `Indexable`) and ORI-P1-033 (the refusal carries a
     // MethodologyRef that resolves). The blobs below are the ones
     // `read_evidence` projects back from a report `submit_report` stored,
     // which is how a caller of `aicd_evidence` gets one.
@@ -4453,6 +4558,39 @@ mod tests {
         let content = content_of("c-cap-empty", "", 0);
         assert!(content.bytes().is_empty());
         assert!(!content.truncated());
+    }
+
+    /// Every other cap test looks at the bytes returned, which are taken after
+    /// the truncate: a read of the whole file followed by the same truncate
+    /// would pass them all. This file is a tebibyte, a sparse file with
+    /// nothing written to it, so a read of all of it cannot finish: the read
+    /// itself has to stop at the cap.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ori_t_0179_the_read_stops_at_the_cap_on_a_file_far_larger_than_memory() {
+        let (_scratch, mut db) = fresh("c-sparse");
+        let blob = stored_blob(&mut db, "RECORDBIG", "EVIDENCEBIG", "raw text");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(blob.content_ref())
+            .expect("the evidence file opens for writing");
+        if let Err(err) = file.set_len(1 << 40) {
+            eprintln!(
+                "this file system cannot extend a file to one tebibyte ({err}); \
+                 the read-stops-at-the-cap case is not exercised here"
+            );
+            return;
+        }
+        drop(file);
+
+        let content = read_evidence_content(&blob, 1_024)
+            .expect("a read of a file far larger than memory stops at the cap");
+        assert_eq!(content.bytes().len(), 1_024, "exactly the cap, no more");
+        assert!(content.truncated());
+        assert!(
+            content.bytes().starts_with(b"raw text"),
+            "the front of the file, as it was written"
+        );
     }
 
     #[test]
