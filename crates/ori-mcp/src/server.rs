@@ -1186,7 +1186,9 @@ impl Server {
                     && ToolScopes::permits(role, *tool)
                     && self.handlers.is_registered(*tool)
             })
-            .map(|tool| tools::spec(tool).definition(self.config.max_arguments_bytes))
+            .filter_map(|tool| {
+                tools::spec(tool).map(|spec| spec.definition(self.config.max_arguments_bytes))
+            })
             .collect();
         // S6 POINT 1: slice S6 appends the operator's proxied tools to `listed`
         // here. It must keep two things. The server declares `listChanged:
@@ -1333,7 +1335,9 @@ impl Server {
         ToolScopes::authorize(self.binding.role(), tool).map_err(CallRefusal::Tool)?;
         // 6: the byte cap, then the schema. Absent arguments are the empty
         // object.
-        let spec = tools::spec(tool);
+        let Some(spec) = tools::spec(tool) else {
+            return Err(CallRefusal::ToolNotAvailable);
+        };
         let mut value = Value::Object(arguments.unwrap_or_default());
         let arguments_bytes = serialized_len(&value);
         if arguments_bytes > self.config.max_arguments_bytes {
@@ -2014,6 +2018,7 @@ mod tests {
             text.starts_with(&format!("refused under AICD §{section}: ")),
             "{text}"
         );
+        assert_no_marker(&message.to_string(), "the reply");
         message
     }
 
@@ -2043,6 +2048,7 @@ mod tests {
         let text: Value =
             serde_json::from_str(blocks[0]["text"].as_str().expect("text")).expect("JSON text");
         assert_eq!(text, expected, "the text block is the structured content");
+        assert_no_marker(&message.to_string(), "the reply");
         message
     }
 
@@ -2054,11 +2060,14 @@ mod tests {
         Actor::Agent(identity())
     }
 
+    /// Valid arguments of `aicd_plan_submit`, with the planted marker as the free
+    /// text of the plan and of the scope, so that every test that sends them also
+    /// checks that nothing of them is echoed or recorded.
     fn plan_arguments(ticket: &Id) -> Value {
         json!({
             "ticket_id": ticket.as_str(),
-            "plan": "a plan",
-            "declared_scope": ["crates/ori-mcp"],
+            "plan": MARKER_TEXT,
+            "declared_scope": [MARKER_TEXT],
         })
     }
 
@@ -2070,6 +2079,7 @@ mod tests {
         let event = events.into_iter().next().expect("one event");
         assert_eq!(event.kind(), "mcp.tool_refused");
         assert_eq!(payload(&event), expected);
+        assert_no_marker(event.payload(), "the event");
         assert_eq!(event.actor(), &agent());
         assert_eq!(event.product_id(), &product_a());
         event
@@ -2386,7 +2396,9 @@ mod tests {
         ];
         assert_eq!(tools.len(), lead_tools.len());
         for (listed, tool) in tools.iter().zip(lead_tools) {
-            let definition = tools::spec(tool).definition(DEFAULT_MAX_ARGUMENTS_BYTES);
+            let definition = tools::spec(tool)
+                .expect("every tool has an entry")
+                .definition(DEFAULT_MAX_ARGUMENTS_BYTES);
             assert_eq!(
                 listed,
                 &serde_json::to_value(&definition).expect("serializes")
@@ -2567,14 +2579,7 @@ mod tests {
                 "tool_not_available",
                 17,
                 json!({}),
-            )
-            .as_object()
-            .map(|object| {
-                let mut object = object.clone();
-                object.insert("session_id".to_owned(), json!(session().as_str()));
-                Value::Object(object)
-            })
-            .expect("an object"),
+            ),
         );
         assert_eq!(world.ran.load(Ordering::SeqCst), 0, "never dispatched");
     }
@@ -3148,6 +3153,10 @@ mod tests {
             expected[key] = value.clone();
         }
         assert_eq!(payload(&events[1]), expected);
+        for event in &events {
+            assert_no_marker(event.payload(), "an event");
+        }
+        assert_no_marker(&wire(reply).to_string(), "the reply");
         assert_eq!(events[1].actor(), &agent());
         assert_eq!(events[1].ticket_id(), Some(&ticket_1()));
         assert_eq!(events[1].at(), Timestamp::from_millis(START + 10));
@@ -4488,7 +4497,7 @@ mod tests {
     fn ori_t_0169_the_largest_valid_arguments_of_every_phase_1_tool_pass_check_6() {
         let bound = Id::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("an id");
         for tool in Tool::ALL.into_iter().filter(|tool| tool.in_phase_1()) {
-            let schema = tools::spec(tool).schema();
+            let schema = tools::spec(tool).expect("every tool has an entry").schema();
             let arguments = tools::largest_valid_arguments(schema);
             let role = Role::ALL
                 .iter()

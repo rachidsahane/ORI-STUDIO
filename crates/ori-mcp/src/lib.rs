@@ -20,9 +20,9 @@
 //! MCP as the protocol that realizes the tool connection AICD §8 requires. The
 //! methodology binds the shape and the scopes; the ADR binds the wire format.
 //!
-//! Must not: expose a tool outside what `spec/LLD.md` section 2 allows. Ori's own
-//! tools are the eleven of `spec/API_SPEC.md` section 3, and a proxied tool is
-//! exposed only on the conditions of that section's "Proxied tools".
+//! Must not (`spec/LLD.md` section 2): expose an Ori tool beyond the eleven of
+//! `spec/API_SPEC.md` section 3, or expose a proxied tool except on the
+//! conditions of that section's "Proxied tools".
 
 /// What the server reaches through the engine: the traits `ori-engine`
 /// implements for identifiers, ticket upgrades, specification proposals, the

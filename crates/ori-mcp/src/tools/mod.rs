@@ -1047,15 +1047,12 @@ pub fn catalogue() -> &'static [ToolSpec] {
     CATALOGUE.get_or_init(|| Tool::ALL.map(build))
 }
 
-/// The catalogue entry of one tool.
-///
-/// # Panics
-///
-/// Never in practice: the catalogue is built from [`Tool::ALL`] and indexed by
-/// an exhaustive `match`, and a test pins that the two agree.
+/// The catalogue entry of one tool, or `None` if the catalogue and
+/// [`Tool::ALL`] disagree on its position, which a test pins cannot happen. The
+/// server treats `None` as a tool that is not available, so no path panics.
 #[must_use]
-pub fn spec(tool: Tool) -> &'static ToolSpec {
-    &catalogue()[position(tool)]
+pub fn spec(tool: Tool) -> Option<&'static ToolSpec> {
+    catalogue().get(position(tool))
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,6 +1307,11 @@ mod tests {
 
     /// The annotations a schema may carry: never constraints.
     const ANNOTATIONS: [&str; 2] = ["description", "title"];
+
+    /// The catalogue entry of a tool, which every tool has.
+    fn spec(tool: Tool) -> &'static ToolSpec {
+        super::spec(tool).expect("every tool has an entry")
+    }
 
     fn checked(schema: &Schema, value: Value) -> Result<Value, Violation> {
         let mut value = value;
@@ -2160,8 +2162,9 @@ mod tests {
     }
 
     #[test]
-    fn ori_t_0169_the_worst_case_of_the_larger_tools_is_what_the_decisions_computed() {
-        // Computed by hand from the decided maxima at 6 bytes per character.
+    fn ori_t_0169_a_maximum_raised_past_the_cap_is_caught_by_the_worst_case() {
+        // The larger tools' worst cases are at least their text alone at 6 bytes
+        // per character.
         let worst = |tool: Tool| spec(tool).schema().worst_case_bytes();
         // plan 65 536 characters, 64 scope entries of 256, one id.
         assert!(worst(Tool::PlanSubmit) > 65_536 * 6 + 64 * 256 * 6);
