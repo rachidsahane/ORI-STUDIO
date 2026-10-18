@@ -3423,6 +3423,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ori_t_0174_an_ori_original_that_is_not_the_hooks_directorys_own_is_not_what_the_install_creates()
+     {
+        // The install creates the hooks directory's own `ori-original/` and a
+        // hook's name in it, and nothing else, so a missing directory of that
+        // name elsewhere, or a hook's name missing from a directory that is
+        // not that one, is not refused by the rule. Each case below is made so
+        // that one narrowing condition alone separates it from the controls.
+        let scratch = Scratch::new("way-not-the-hooks-own");
+        let (repo, _) = skeleton(&scratch);
+        let git_dir = repo.join(".git");
+        let hooks_dir = git_dir.join("hooks");
+        fs::create_dir_all(hooks_dir.join("sub").join("ori-original")).unwrap();
+        fs::create_dir_all(git_dir.join("x").join("ori-original")).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let enters = |path: PathBuf| {
+            way_enters_what_the_install_creates(&path, &hooks_dir, &canonical, false).unwrap()
+        };
+
+        // The first clause needs the missing `ori-original` to be under the
+        // hooks directory: here it would be under `.git`.
+        assert!(!enters(git_dir.join("ori-original").join("..")));
+        // The second clause needs the directory to be named `ori-original`:
+        // here the missing hook is in `hooks/sub`, whose parent is `hooks`.
+        assert!(!enters(hooks_dir.join("sub").join("pre-push")));
+        // And needs that directory to be under the hooks directory: these two
+        // are named `ori-original`, but under `.git/x` and under `hooks/sub`.
+        assert!(!enters(
+            git_dir.join("x").join("ori-original").join("pre-push")
+        ));
+        assert!(!enters(
+            hooks_dir.join("sub").join("ori-original").join("pre-push")
+        ));
+
+        // The controls: the hooks directory's own, missing and then there.
+        assert!(enters(hooks_dir.join("ori-original").join("..")));
+        fs::create_dir(hooks_dir.join("ori-original")).unwrap();
+        assert!(enters(hooks_dir.join("ori-original").join("pre-push")));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ori_t_0054_a_git_dir_replaced_by_a_link_after_the_installer_was_built_is_refused() {
         let scratch = Scratch::new("hooksgitswap");
         let (repo, spool) = skeleton(&scratch);
