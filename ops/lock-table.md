@@ -1661,3 +1661,17 @@ The spelled root is built as text, without the verbatim prefix. On Windows `join
 | 110 | ORI-T-0178 | `crates/ori-watch/src/watcher.rs`: the test `ori_t_0054_a_root_spelled_with_dotdot_is_canonicalised_before_paths_are_judged` only | 1 | `/home/user/wt/ORI-T-0178`, `fix/ORI-T-0178-dotdot-root-test` | Haiku 5.5 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 105, 108, 109 and 110. The next free identifier is ORI-T-0181.
+
+---
+
+## Claim 110 integrated: ORI-T-0178, the dotdot root test spelled as Windows keeps it
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 110 | ORI-T-0178: `ori_t_0054_a_root_spelled_with_dotdot_is_canonicalised_before_paths_are_judged` builds its spelled root as text, without the verbatim prefix, and asserts that it keeps its `..` | Haiku 5.5 applied the lead's edit. Before dispatch, the lead proved the edit in a copy: the test passes, clippy and rustfmt are clean, and a mutant whose spelled root loses its `..` fails the new assertion. The coder's checks: fmt, clippy and gate 13 exit 0; `cargo test -p ori-watch` passed 129 | The commit's tree equals the base with the lead's find and replace applied, byte for byte (checked by script). Fast-forwarded onto the session head (376b255). fmt and gate 13 exit 0. Windows is proved by CI's `test (windows-latest)` |
+
+Claim 110 is released.
+
+**State after this section:** the claims held are 20, 105, 108 and 109. The next free identifier is ORI-T-0181.
