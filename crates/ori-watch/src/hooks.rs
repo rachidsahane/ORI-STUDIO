@@ -1226,6 +1226,38 @@ fn lexically_normal(path: &Path) -> PathBuf {
     parts.iter().collect()
 }
 
+/// `path` resolved by the operating system, if it is a directory that is
+/// there; `None` if it is missing, a link that goes nowhere, or not a
+/// directory.
+///
+/// The entry is looked at without following it first, so a missing one is
+/// told from one that cannot be looked at, which is an error and not an
+/// absence (AICD §14).
+fn existing_directory(path: &Path) -> io::Result<Option<PathBuf>> {
+    let absent = |error: &io::Error| {
+        matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        )
+    };
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if absent(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let directory = match fs::canonicalize(path) {
+        Ok(directory) => directory,
+        Err(error) if absent(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match fs::metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() => Ok(Some(directory)),
+        Ok(_) => Ok(None),
+        Err(error) if absent(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// The first target of the link at `start`, as written, if following it and
 /// every link after it reaches the place of a hook this installer replaces in
 /// `hooks_dir`: AICD §13.
@@ -1242,12 +1274,21 @@ fn lexically_normal(path: &Path) -> PathBuf {
 /// chain longer than [`LINK_HOPS_CAP`], which no process could run either.
 ///
 /// A directory that does not exist yet cannot be resolved by the operating
-/// system, so it is read lexically (`lexically_normal`) and compared with the
-/// hooks directory as before: `ori-original/../post-merge`, whose
-/// `ori-original/` the installer creates later, reaches `post-merge`. A chain
-/// that goes through a directory that is not there ends, since there is
-/// nothing to follow, and so does one that ends at an entry that is not there
-/// (a dangling link reaches nothing).
+/// system, so it is read lexically (`lexically_normal`): `ori-original/` the
+/// installer creates later, and `ori-original/../post-merge` reaches
+/// `post-merge`. What that reading lands on is looked at. If it is the hooks
+/// directory, the link reaches a hook as before. If it is a directory that is
+/// there, the walk goes on from it as if the operating system had resolved
+/// the path to it, so a link in it is followed
+/// (`ori-original/../../shared/relay`, where `shared/relay` links to a hook).
+/// If it is not there, the chain ends, since there is nothing to follow, and
+/// so does a chain that ends at an entry that is not there (a dangling link
+/// reaches nothing).
+///
+/// A link whose target cannot exist, because it goes through a regular file or
+/// carries a name too long for the file system, is not a missing entry: it
+/// refuses the installation as an IO error. That fails closed, and is
+/// accepted.
 ///
 /// # Errors
 ///
@@ -1281,9 +1322,15 @@ fn follow_chain_to_managed_hook(
         };
         let (directory, exists) = match fs::canonicalize(parent) {
             Ok(directory) => (directory, true),
-            // Not there yet: the installer may create it. Read it by its text.
+            // Not there yet: the installer may create it. Read it by its text,
+            // and if that reading is a directory that is there, go on from it:
+            // the system will resolve the path to it once the directory exists.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                (lexically_normal(parent), false)
+                let lexical = lexically_normal(parent);
+                match existing_directory(&lexical)? {
+                    Some(directory) => (directory, true),
+                    None => (lexical, false),
+                }
             }
             Err(error) => return Err(error),
         };
@@ -1769,9 +1816,12 @@ mod tests {
         (repo, spool)
     }
 
-    /// `follow_chain_to_managed_hook` read as a yes or a no, an error read as
-    /// a no: the shape the first tests of the chain check were written
-    /// against. The installer itself refuses on an error.
+    /// `follow_chain_to_managed_hook` read as a yes or a no: the shape the
+    /// first tests of the chain check were written against. An error fails
+    /// the test and is not read as a no, so a walk that could not be made
+    /// cannot pass for one that found nothing. It exists on Unix only, where
+    /// its test does: elsewhere it would be dead code.
+    #[cfg(unix)]
     fn chain_reaches_managed_hook(
         hooks_dir: &Path,
         canonical_hooks: &Path,
@@ -1779,8 +1829,7 @@ mod tests {
         fold_case: bool,
     ) -> Option<PathBuf> {
         follow_chain_to_managed_hook(hooks_dir, canonical_hooks, start, fold_case)
-            .ok()
-            .flatten()
+            .expect("the walk does not fail here")
     }
 
     /// Where the installer keeps the hook that was in `hook`'s place before.
@@ -2391,6 +2440,61 @@ mod tests {
             &hooks_dir.join("pre-push"),
             Path::new("ori-original/../post-merge"),
             &["pre-push"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0159_a_link_through_a_missing_directory_onto_an_existing_one_is_followed() {
+        // `ori-original/` is not there yet, but the user's `post-commit` is
+        // kept, so the install creates it, and `ori-original/../../shared/relay`
+        // is then `.git/shared/relay`. The operating system cannot resolve the
+        // path today, and its text lands on `.git/shared`, a directory that is
+        // there: the walk goes on from it and meets `relay`, which links to a
+        // hook the installer replaces.
+        let scratch = Scratch::new("chain-lexical-onto-existing");
+        let (repo, spool, hooks_dir, theirs) = repository_with_a_users_post_commit(&scratch);
+        let shared = repo.join(".git").join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        std::os::unix::fs::symlink("../hooks/post-merge", shared.join("relay")).unwrap();
+        std::os::unix::fs::symlink(
+            "ori-original/../../shared/relay",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+        assert!(!hooks_dir.join("ori-original").exists());
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("ori-original/../../shared/relay"),
+            &["post-checkout", "post-commit"],
+        );
+        assert_eq!(
+            fs::read_to_string(hooks_dir.join("post-commit")).unwrap(),
+            theirs
+        );
+
+        // The same when the reading lands on a link to a directory, which is
+        // a directory that is there: it is followed through the link.
+        let scratch = Scratch::new("chain-lexical-onto-a-linked-directory");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        let git_dir = repo.join(".git");
+        let shared = git_dir.join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        std::os::unix::fs::symlink("../hooks/post-merge", shared.join("relay")).unwrap();
+        std::os::unix::fs::symlink("shared", git_dir.join("shared-link")).unwrap();
+        std::os::unix::fs::symlink(
+            "ori-original/../../shared-link/relay",
+            hooks_dir.join("post-checkout"),
+        )
+        .unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new("ori-original/../../shared-link/relay"),
+            &["post-checkout", "post-commit"],
         );
     }
 
