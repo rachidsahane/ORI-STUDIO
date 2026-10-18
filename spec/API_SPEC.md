@@ -22,7 +22,7 @@ Naming: `domain.verb`. Every request carries `product_id` unless global. Every m
 
 ### project configuration
 - `project.providers.override({product_id, provider, secret, roles?})`, `project.providers.clearOverride({product_id, provider})`
-- `project.mcp.add({product_id, name, transport, config, secret?, exposed_to_roles})`, `project.mcp.list({product_id})`, `project.mcp.remove({product_id, id})`, `project.mcp.test({product_id, id})`
+- `project.mcp.add({product_id, name, transport, config, secret?, exposed_to_roles, acknowledged_reach?})` (`name` matches `[a-z][a-z0-9-]{0,31}` and does not begin with `aicd`; `transport` is `stdio` only in phase 1; a server added without `acknowledged_reach: true` is exposed to no role; all three as under section 3, "Proxied tools"), `project.mcp.list({product_id})`, `project.mcp.remove({product_id, id})`, `project.mcp.test({product_id, id})`
 - `project.integrations.set({product_id, slot, adapter, config, secret?})`, `project.integrations.health({product_id})`
 - `project.seats.set({product_id, seat, holder})`, `project.classification.set({product_id, rules})`
 
@@ -96,7 +96,7 @@ Cards: `card.confirmation` carries `{card_id, kind, question, recommendation, ev
 
 ## 3. Agent-facing MCP server
 
-Exposed to each agent session under its identity's scopes. Every call is an `Event` with the identity as actor (`mcp.tool_called`, `mcp.tool_refused` or `mcp.tool_failed`; section 2). Tools:
+Exposed to each agent session under its identity's scopes. Every call is recorded as `Event`s with the identity as actor (section 2 lists the kinds). `mcp.tool_called` is appended before the effect. `mcp.tool_refused` is appended when the call is refused, and `mcp.tool_failed` when an allowed effect fails. A call whose `mcp.tool_called` cannot be appended is refused, so no effect happens without its record. The `mcp.*` events carry identifiers and lengths, never agent free text: the content of a call is recorded through the sanitization barrier (SECURITY_NOTES, "Input validation"), not in the event. Tools:
 
 | Tool | Roles | Effect | Phase 1 |
 |---|---|---|---|
@@ -112,7 +112,7 @@ Exposed to each agent session under its identity's scopes. Every call is an `Eve
 | `aicd_spec_propose(document_id, content)` | documentation | Opens a specification PR | Yes |
 | `aicd_gate_result(gate_id, pr_id, status, output)` | qa (test env), system | Records a run | No |
 
-Agents never receive file write tools to `spec/` or `ops/`, never receive the merge operation, and never receive credentials through MCP.
+Agents never receive file write tools to `spec/` or `ops/`, never receive the merge operation, and never receive credentials through MCP. These three promises bind Ori's own tools and Ori's own credentials; "Proxied tools" below says what they do not bind.
 
 ### Phase 1
 
@@ -148,14 +148,17 @@ The field names of `qa_run` and `drift_audit` are not defined anywhere yet. No f
 
 ### Proxied tools
 
-The eleven tools above are Ori's own, and the table is the whole of them. The operator may also expose tools of the operator's own MCP servers to roles, and the server proxies them to the session. Four conditions bound this:
+The eleven tools above are Ori's own, and the table is the whole of them. The operator may also expose tools of the operator's own MCP servers to roles, and the server proxies them to the session. The conditions of this section bound this:
 
-1. Only servers the operator added to the project (`project.mcp.add`) are proxied, and each only to the roles in its `exposed_to_roles`. A call from a role that is not listed, or from a session of another project, is refused (ORI-P1-038).
-2. A proxied tool is named `<server>__<tool>`: `<server>` is the `name` given when the server was added, and `<tool>` is the name the server gives the tool.
-3. A proxied tool returns text blocks only, and every block is untrusted (SECURITY_NOTES, "Injection").
+1. Only servers the operator added to the project (`project.mcp.add`) are proxied, each only to the roles in its `exposed_to_roles`, and only if the operator acknowledged the reach described below (condition 5). A call from a role that is not listed, or from a session of another project, is refused (ORI-P1-038).
+2. A proxied tool is named `<server>__<tool>`: `<server>` is the `name` given when the server was added, and `<tool>` is the name the server gives the tool. A server's `name` matches `[a-z][a-z0-9-]{0,31}` and does not begin with `aicd`, and `project.mcp.add` accepts no other. A name has no underscore, so the first `__` in a proxied tool's name always splits the server from the tool, whatever underscores the tool's own name holds, and a proxied name has one reading. A name does not begin with `aicd`, so a proxied tool's name never begins as the name of one of Ori's own tools does.
+3. A proxied tool returns text blocks only, and every block is untrusted (SECURITY_NOTES, "Injection"). The `<tool>` part of its name and its description come from the operator's server, and are untrusted data too, like the blocks it returns.
 4. A proxied tool never carries a credential of Ori's. A server's own secret (`MCP_<SERVER>_*`, ENV_SETUP section 4) stays with the engine, which connects to the server itself, and an agent is never given a server's configuration.
+5. Exposing a server to a role requires the operator's explicit acknowledgement of the reach described below, recorded as `acknowledged_reach`, true, in the server's `mcp.server_added` event. A server added without it is exposed to no role.
 
-The first of the three rules above, that agents never receive file write tools to `spec/` or `ops/`, binds Ori's own tools. It cannot bind a proxied tool, because Ori cannot tell what a tool of the operator's server writes, and what a server says about its own tools (that one is read-only, say) is a hint from an untrusted party that Ori does not rely on. A proxied tool's reach is therefore the operator's decision, taken when the server is added and exposed to roles, and recorded as an event: `mcp.server_added` records the roles the server is exposed to (section 2). ENV_SETUP section 5 states what that means for the permission manifest.
+The three promises under the tool table above (no file write tools to `spec/` or `ops/`, never the merge operation, never credentials through MCP) bind Ori's own tools and Ori's own credentials. They cannot bind a proxied tool, because Ori cannot tell what a tool of the operator's server does, and what a server says about its own tools (that one is read-only, say) is a hint from an untrusted party that Ori does not rely on. An operator's server may hold its own credentials, and tools that act with them outside Ori's merge queue, and Ori cannot tell which tools those are. A proxied tool's reach is therefore the operator's decision. Exposing a server to a role requires the operator's explicit acknowledgement of exactly that: that the server may hold its own credentials and tools that act with them outside Ori's merge queue, and that Ori cannot tell which tools those are. The acknowledgement is given as `acknowledged_reach` in `project.mcp.add` and recorded in the `mcp.server_added` event, which carries the server's name, transport, exposed roles and `acknowledged_reach`. ENV_SETUP section 5 states what that means for the permission manifest, and ENV_SETUP section 6 what it means for the forbidden-action test.
+
+In phase 1 the host connects to stdio servers only, and `project.mcp.add` accepts `stdio` as its `transport` and no other. Remote (HTTP) servers are a later decision (ROADMAP, "Later (not scheduled)").
 
 ## 4. Adapter traits (Rust)
 
