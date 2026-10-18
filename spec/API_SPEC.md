@@ -96,7 +96,7 @@ Cards: `card.confirmation` carries `{card_id, kind, question, recommendation, ev
 
 ## 3. Agent-facing MCP server
 
-Exposed to each agent session under its identity's scopes. Every call is recorded as `Event`s with the identity as actor (section 2 lists the kinds). `mcp.tool_called` is appended before the effect. `mcp.tool_refused` is appended when the call is refused, and `mcp.tool_failed` when an allowed effect fails. A call whose `mcp.tool_called` cannot be appended is refused, so no effect happens without its record. The `mcp.*` events carry identifiers and lengths, never agent free text: the content of a call is recorded through the sanitization barrier (SECURITY_NOTES, "Input validation"), not in the event. Tools:
+Exposed to each agent session under its identity's scopes. Every call is recorded as `Event`s with the identity as actor (section 2 lists the kinds). Each call is either allowed or refused, and records exactly one of `mcp.tool_called` (allowed; appended before the effect) and `mcp.tool_refused` (refused; nothing takes effect). `mcp.tool_failed` follows `mcp.tool_called` when the allowed effect fails. A call whose `mcp.tool_called` cannot be appended is refused, so no effect happens without its record. The `mcp.*` events carry identifiers and lengths, never agent free text: the content of a call is recorded through the sanitization barrier (SECURITY_NOTES, "Input validation"), not in the event. Tools:
 
 | Tool | Roles | Effect | Phase 1 |
 |---|---|---|---|
