@@ -1775,3 +1775,17 @@ This time the lead checked what precedes each insertion anchor (the ORI-T-0182 l
 | 113 | ORI-T-0183 | `crates/ori-memory/src/barrier.rs` (one method, one test), `crates/ori-memory/src/retrieval.rs` (`is_unsafe_char` made `pub(crate)`, one doc paragraph) | **2** (`barrier.rs`) | `/home/user/wt/ORI-T-0183`, `feat/ORI-T-0183-quoted-evidence` | Haiku 5.5 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 105, 109, 112 and 113. The next free identifier is ORI-T-0184.
+
+---
+
+## Claim 113 integrated: ORI-T-0183 (PM4), evidence content quoted in the barrier
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 113 | ORI-T-0183, batch 10 prerequisite PM4: `EvidenceContent::quoted` writes each line of an evidence blob's content prefixed `> `, scrubbed by the retrieval's own `is_unsafe_char` (now `pub(crate)`), so S7 never handles unquoted raw text | Haiku 5.5 applied the lead's three edits. Before dispatch, the lead proved them in a copy: `ori-memory` 544 passed, `ori-gates` 194, clippy, strict doc and rustfmt clean, and two mutants (no scrub, no prefix) each fail the new test. The coder's checks: fmt, clippy, tests (544 passed), strict doc and gate 13 exit 0 | Each file's tree equals the base with the lead's edits applied, byte for byte (checked by script). Fast-forwarded onto the session head (bc8dc36). fmt and gate 13 exit 0 |
+
+Claim 113 is released. Tier 2 (`barrier.rs`): the operator merges, with the rest of the pull request.
+
+**State after this section:** the claims held are 20, 105, 109 and 112. The next free identifier is ORI-T-0184.
