@@ -1721,3 +1721,19 @@ Claim 111 is released.
 The lead read the code change. A three-lens review is running.
 
 **State after this section:** the claims held are 20, 105, 108 and 109. The next free identifier is ORI-T-0183.
+
+---
+
+## Claim 108 integrated: ORI-T-0179 (PM3) with repair 1; a lead error in ORI-T-0182 corrected
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 108 | ORI-T-0179, batch 10 prerequisite PM3: `barrier::read_evidence_content`, the one read of an evidence blob's raw content. It uses `code_map`'s no-follow, non-blocking open, decides on the handle, caps the read, and returns an `EvidenceContent` that is not `Indexable` | Reviewed (14 agents): the read itself is right. Repair 1 answers the five confirmed should-fix findings: four docs that overclaimed (the index seam, the no-follow open off the verified platforms, the grant and path as the caller's preconditions, a caller named in the present tense) and a test that the read itself stops at the cap (a one-tebibyte sparse file; the read-the-whole-file mutant fails it with an allocation error). It also takes notes F6, F7, F9 and F11 to F14. The coder corrected two lead errors: the passage the package cited as a scope.rs "section" is a passage inside one, and rustdoc on stable does not check a `compile_fail` error code, so the probe is a plain `compile_fail` beside a compiling control. Two changes beyond the package (a contradicting seam sentence, and decision 1 of the new section) the lead accepts. The lead read the code change of the repair: one `Display` string and one test outside comments | Three commits cherry-picked onto the session head (96dcf75, dd8abe4, 40147d9). `cargo test --workspace --locked --no-fail-fast`: 1584 passed, 0 failed, 9 ignored. Workspace clippy, strict doc, fmt and gate 13 clean. The coder's Windows simulation of `barrier.rs`: clippy clean |
+
+Claim 108 is released. Tier 2 (`barrier.rs`): the operator merges, with the rest of the pull request.
+
+**A lead error in ORI-T-0182.** Edit 5 of the lead's package inserted the new label constant and `stale_reason` between `scrub`'s doc line and `fn scrub`. The line then documented the constant, and `scrub` had none. The lead's pre-dispatch proof (tests, clippy, strict doc, rustfmt) could not see it, because none of them reads which item a private doc line sits on. The lead found it when reading the file for S7, and moved the line back in its own commit (3989649, doc only; strict doc and clippy clean). Recorded for calibration: a lead edit that inserts before an anchor must check what the anchor's preceding lines belong to.
+
+**State after this section:** the claims held are 20, 105 and 109. ORI-T-0181 is allocated. The next free identifier is ORI-T-0183.
