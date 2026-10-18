@@ -6,6 +6,13 @@ license.workspace = true
 description = "MCP host toward the user's servers and MCP server toward agents, under scopes."
 
 [dependencies]
+# A workspace crate that `spec/LLD.md` section 2 lets `ori-mcp` name: `Role`,
+# `Id`, `Category`, `Actor` and `MethodologyRef` are items of `ori-core`
+# (`ops/batch-10-plan.md`, decisions D1 and D3). Already in this crate's
+# dependency graph through `ori-memory` and `ori-store`; added directly because
+# Rust does not let a crate name a transitive dependency's items. No external
+# crate is added.
+ori-core = { workspace = true }
 ori-memory = { workspace = true }
 ori-store = { workspace = true }
 # Approved workspace-wide by escalation E-0008 ("serde and serde_json

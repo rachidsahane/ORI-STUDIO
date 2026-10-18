@@ -21,8 +21,18 @@
 //!
 //! Must not: expose a tool not in `spec/API_SPEC.md` (`spec/LLD.md` section 2).
 
+/// What the server reaches through the engine: the traits `ori-engine`
+/// implements for identifiers, ticket upgrades, specification proposals and the
+/// operator's MCP servers, and the error they share (AICD §17, AICD §25). Tier 2.
+pub mod ports;
+
 /// The MCP wire both halves of this crate share: JSON-RPC 2.0 framing and
 /// messages, the phase 1 MCP messages, version negotiation and the connection
 /// state machine, on MCP 2025-11-25 (AICD §8). It holds no scope, tool or
 /// policy.
 pub mod protocol;
+
+/// Who may call which of Ori's eleven tools, and the sealed grant that is the
+/// only way to an operator's server: `ToolScopes`, the refusals, the proxied
+/// tool name rule (AICD §17, AICD §25, AICD §26, AICD §27). Tier 2.
+pub mod scopes;

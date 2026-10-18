@@ -312,6 +312,7 @@ dependencies = [
 name = "ori-mcp"
 version = "0.1.0"
 dependencies = [
+ "ori-core",
  "ori-memory",
  "ori-store",
  "serde",
