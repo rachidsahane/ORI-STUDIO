@@ -25,10 +25,11 @@
 //! `ADR-0001` (`spec/adr/ADR-0001-stack.md`) fixes "Official MCP semantics" for
 //! the engine's MCP surface and JSON-RPC 2.0 as the shape of its messages, and
 //! escalation E-0008 approved the JSON crate. The versioning page that would
-//! state the version string format was an empty file, so the `YYYY-MM-DD` shape
-//! this module checks is inferred from the three version strings the other
-//! files contain (`2025-11-25`, `2025-06-18` and the lifecycle page's
-//! `2024-11-05`).
+//! state the version string format was never obtained: its fetch failed, and the
+//! file that stands for it holds a 404 body (`404: Not Found`), not a page. The
+//! `YYYY-MM-DD` shape this module checks is therefore inferred from the three
+//! version strings the other files contain (`2025-11-25`, `2025-06-18` and the
+//! lifecycle page's `2024-11-05`).
 //!
 //! # Framing
 //!
@@ -50,32 +51,35 @@
 //! well-formed message; reading on would hand it to the caller as one. `acp.rs`
 //! also spends the session on an over-long line, because "the stream is then out
 //! of step"; this is the same decision with the smuggling case spelled out. The
-//! caller may send one error response (the line's id is unknown, so the
-//! response has none) and then closes the connection.
+//! caller answers the refusal once, with an error response that has no id (the
+//! line's id is unknown), and then closes the connection; "Errors" below states
+//! the rule for when an error is answered.
 //!
-//! [`crate::protocol::MAX_LINE_BYTES`] is 1 MiB, the figure `acp.rs` uses, and
-//! it is enough for MCP for these reasons:
+//! [`crate::protocol::MAX_LINE_BYTES`] is 1 MiB, the figure `acp.rs` uses. It is
+//! the default for **agent connections** (slice S2), whose inputs are
+//! length-capped, and it is not a figure for every line an operator's server may
+//! send, so the host (slice H2) chooses its own:
 //!
 //! - **Requests from an agent** are tool inputs, which `spec/SECURITY_NOTES.md`
 //!   ("Input validation") says are validated and length-capped. The largest, a
 //!   plan or a report, is a small fraction of a mebibyte.
-//! - **Text results from an operator's server** are capped when proxied (the
-//!   ticket for this slice gives 256 KiB; that figure is the ticket's, and
-//!   `ops/batch-10-plan.md` as committed does not state it). The line carrying
-//!   such a result is longer than the text: JSON escaping costs up to 2 bytes
-//!   per `"`, `\` or common control character, and a peer that writes every
-//!   non-ASCII character as `\uXXXX` costs 2 bytes for a 3-byte character and 3
-//!   times the size for a 4-byte one. 256 KiB of the worst realistic text
-//!   (4-byte characters escaped as surrogate pairs) is 768 KiB, which fits. Only
-//!   an adversarial result of control characters, 6 bytes each, can reach 1.5
-//!   MiB and be refused, which is acceptable.
+//! - **Results from an operator's server** are not so bounded. A server can
+//!   legitimately send a line longer than 1 MiB, and a limit on what this side
+//!   later forwards to an agent cannot bound the line a server sends to the
+//!   host, which is read first. The host must therefore choose its own cap
+//!   through [`crate::protocol::LineReader::with_max_line_bytes`], weighing the
+//!   memory-per-byte figure in the last bullet. A line over the cap ends that
+//!   connection (see "After a refusal" above), which is fail-closed: the host
+//!   loses one server's connection and never reads past a line it did not
+//!   accept. The line is longer than the text it carries: JSON escaping can
+//!   write a control character as 6 bytes (`\u0001`) and a 4-byte character as
+//!   a 12-byte surrogate pair (3 times its size).
 //! - **Binary blocks are the case 1 MiB does not cover.** An image or audio block
-//!   is base64, 4/3 of the file: a screenshot over about 768 KiB cannot be read
-//!   and ends the connection, although the host would only have replaced it with
-//!   a placeholder. The reader takes the cap as a parameter
-//!   ([`crate::protocol::LineReader::with_max_line_bytes`]) so the host can
-//!   choose a larger one for operator connections if it decides to tolerate
-//!   them; each step up is memory per connection (next item).
+//!   is base64, 4/3 of the file: with the default cap, a screenshot over about
+//!   768 KiB cannot be read and ends the connection, although the host would only
+//!   have replaced it with a placeholder. A host that decides to tolerate them
+//!   raises the cap for operator connections; each step up is memory per
+//!   connection (next item).
 //! - **The cap bounds the line, not what parsing it costs.** Parsing builds a
 //!   [`serde_json::Value`] tree that can be far larger than the text. Measured
 //!   once for this module (a counting allocator, `serde_json` 1.0.151 as pinned,
@@ -84,9 +88,26 @@
 //!   one-character strings, 16 times for an array of integers or of empty
 //!   objects, and 83 times (87 MiB) for an array of one-key objects such as
 //!   `{"a":1}`. A hostile peer can therefore make one parse hold on the order of
-//!   90 MiB at the default cap, transiently and once per connection. No test
-//!   re-measures this. The server reads small requests and should pick a
-//!   smaller cap for agent connections; the figure scales with the cap.
+//!   90 MiB at the default cap, transiently and once per connection. That is the
+//!   whole of what was measured, the tree by itself, and no test re-measures it.
+//!   What decoding the tree into a typed value adds is reasoned, not measured.
+//!   Decoding takes the message by value
+//!   ([`crate::protocol::Request::into_params`],
+//!   [`crate::protocol::Notification::into_params`],
+//!   [`crate::protocol::ResultResponse::into_result`]) through
+//!   `serde_json::from_value`, which moves each string and each object key out
+//!   of the tree into the typed value instead of copying it. The peak for one
+//!   message is then the parsed tree plus a transient (the containers being
+//!   rebuilt at that moment), not twice the tree. Deserializing from `&Value`,
+//!   which [`crate::protocol::Request::params_as`] and
+//!   [`crate::protocol::ResultResponse::result_as`] do, copies every string,
+//!   map and nested value out of the tree and would cost about a second tree;
+//!   those two are for a message this side built, never for a peer's. The one
+//!   thing a test can pin without measuring memory is pinned: a large string
+//!   reaches the typed value at the address it had in the tree. The host reads
+//!   operator results, the large case, and pays this figure for every
+//!   connection; the server reads small requests and may pick a smaller cap
+//!   than the default for agent connections. The figure scales with the cap.
 //!
 //! This settles the cap for MCP only. ORI-T-0149's question for ACP is a
 //! different protocol with different frames (a diff carries a file); nothing
@@ -134,6 +155,23 @@
 //! "method not found" for a request ([`crate::protocol::KnownRequest::decode`])
 //! and ignored for a notification ([`crate::protocol::KnownNotification::decode`]).
 //!
+//! **Each direction has its own method set**, and both decoders take the
+//! [`crate::protocol::Direction`] the message travelled. A server receives
+//! `initialize`, `ping`, `tools/list` and `tools/call`, and the notifications
+//! `notifications/initialized` and `notifications/cancelled`. A client receives
+//! `ping` and nothing else as a request, and the notifications
+//! `notifications/cancelled` and `notifications/tools/list_changed`: phase 1's
+//! client offers no sampling, roots or elicitation (the `sampling`, `roots` and
+//! `elicitation` members of `ClientCapabilities` in `schema-2025-11-25.ts`, which
+//! are what would allow a server to send `sampling/createMessage`,
+//! `roots/list` or `elicitation/create`), and no tasks (its `tasks` member), so a
+//! server's `initialize`, `tools/list` or `tools/call`, like any other request a
+//! server sends, is "method not found". The lifecycle table
+//! ([`crate::protocol::ConnectionState::permits`]) is about phases and does not
+//! know methods; direction is the decoder's. A known notification travelling the
+//! wrong way is ignored like an unknown one, because nothing answers a
+//! notification.
+//!
 //! **Content blocks.** [`crate::protocol::ContentBlock`] types the text block and
 //! carries every other block (image, audio, resource link, embedded resource) as
 //! the raw JSON object it arrived as, with its `type` tag checked. The host
@@ -149,9 +187,12 @@
 //! because of the error-response difference above: this side writes an
 //! id-less error response, which a `2025-06-18` peer's schema does not allow.
 //! The consequence for the host is that an operator's server that only speaks an
-//! older version is refused ([`crate::protocol::check_server_version`]); that is
-//! the lifecycle page's "SHOULD disconnect", and adding a version later is one
-//! entry in that array plus a review of this paragraph.
+//! older version is refused ([`crate::protocol::check_server_version`]). The
+//! lifecycle page words that as "SHOULD disconnect", but the schema wins over the
+//! prose and reads "If the client cannot support this version, it MUST
+//! disconnect" (`schema-2025-11-25.ts`, `InitializeResult.protocolVersion`), so
+//! the refusal is a must. Adding a version later is one entry in that array plus
+//! a review of this paragraph.
 //!
 //! # Connection state
 //!
@@ -185,9 +226,27 @@
 //! control refusal, so none carries a `MethodologyRef`; `acp.rs` follows the
 //! same convention for its `Protocol` and `Io` errors. A request refused on
 //! policy grounds (a role without a tool, a scope, a cap on a result) is not
-//! this module's to refuse. The text of an error never contains what the peer
-//! sent; the few echoes that help a human (a method name, a version) go in
-//! `data`, truncated.
+//! this module's to refuse.
+//!
+//! **What an error carries of the peer's text.** The `message` of an error is
+//! fixed text, and [`std::fmt::Display`] prints the message and the code and never
+//! the data. Peer text can reach `data`, in two forms, both cut to a number of
+//! characters: an echo of a method name or a requested version (`method`,
+//! `requested`), cut to `MAX_ECHO_CHARS` (128); and `detail`, the description
+//! `serde_json` gives of why parsing or decoding failed, cut to `MAX_DETAIL_CHARS`
+//! (256), which can quote what the peer sent (the offending value or an unknown
+//! variant, for instance). A caller that logs `data` is logging peer input.
+//!
+//! **When to answer a protocol error.** One rule, restated at every place that
+//! returns an error to a caller who might answer it:
+//!
+//! - an error carrying an id answers that request;
+//! - an error with no id, raised on input that could not be read as a request,
+//!   is answered once with an id-less error response (the `2025-11-25` schema's
+//!   `JSONRPCErrorResponse` has `id?`);
+//! - an error raised on a notification, whether decoding its parameters or
+//!   checking it against the connection state, is never answered, because
+//!   nothing answers a notification.
 
 use std::fmt;
 use std::io::{self, BufRead, ErrorKind, Write};
@@ -213,9 +272,13 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[LATEST_PROTOCOL_VERSION];
 /// The longest line, in bytes and without its newline, a [`LineReader`]
 /// accepts by default: 1 MiB.
 ///
-/// It is the cap `acp.rs` uses, and the module documentation, "Framing", says
-/// why it is enough for MCP text and not for large binary blocks. It bounds the
-/// memory a peer can make this process hold for one line.
+/// It is the cap `acp.rs` uses and the default for agent connections, whose
+/// inputs are length-capped. An operator's server can legitimately send a longer
+/// line, so the host chooses its own cap with
+/// [`LineReader::with_max_line_bytes`]; the module documentation, "Framing", says
+/// why, and what each byte of cap costs in memory. A line over the cap ends the
+/// connection, which is fail-closed. The cap bounds the memory a peer can make
+/// this process hold for one line, not for parsing it.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// The longest echo of peer text (a method name, a requested version) placed in
@@ -363,7 +426,8 @@ impl ProtocolError {
     }
 
     /// The id of the offending request, present only when the input had the
-    /// shape of a request and its id was readable: the id to answer with.
+    /// shape of a request and its id was readable: the id to answer with. The
+    /// module documentation, "Errors", gives the rule for when to answer.
     #[must_use]
     pub const fn id(&self) -> Option<&RequestId> {
         self.id.as_ref()
@@ -499,7 +563,9 @@ impl ReceiveError {
         matches!(self, Self::Frame(_))
     }
 
-    /// This error as a [`ProtocolError`], to answer the peer with.
+    /// This error as a [`ProtocolError`], to answer the peer with by the rule in
+    /// the module documentation, "Errors": the error's own id when it has one,
+    /// otherwise one id-less error response.
     #[must_use]
     pub fn to_protocol_error(&self) -> ProtocolError {
         match self {
@@ -606,9 +672,15 @@ impl<R: BufRead> LineReader<R> {
     ///
     /// # Errors
     ///
-    /// [`ReceiveError::Frame`] when the line could not be read (close the
-    /// connection), [`ReceiveError::Message`] when it was read and is not a
-    /// valid message (answer it if it carries an id, and read on).
+    /// [`ReceiveError::Frame`] when the line could not be read: the input could
+    /// not be read as a request, so it is answered once with an id-less error
+    /// response, and the connection is closed (when the transport itself failed,
+    /// the answer cannot be written either, and closing is all there is).
+    /// [`ReceiveError::Message`] when it was read and is not a valid message: an
+    /// error carrying an id answers that request, one with no id is answered once
+    /// with an id-less error response, and reading goes on. The module
+    /// documentation, "Errors", states this rule, and that an error raised while
+    /// decoding a notification is never answered.
     pub fn read_message(&mut self) -> Result<Option<Message>, ReceiveError> {
         match self.read_line() {
             Ok(Some(line)) => parse_message(line).map(Some).map_err(ReceiveError::Message),
@@ -819,11 +891,51 @@ fn to_object<T: Serialize + ?Sized>(value: &T, what: &'static str) -> Result<Val
     }
 }
 
-/// Deserializes `params` (absent means an empty object) into `T`.
-fn params_into<T: DeserializeOwned>(params: Option<&Value>) -> Result<T, serde_json::Error> {
+/// Deserializes `params` (absent means an empty object) into `T` from a borrow.
+///
+/// This copies every string, map and nested value out of the tree; it is for a
+/// message this side built. A peer's message goes through [`params_moved`].
+fn params_copied<T: DeserializeOwned>(params: Option<&Value>) -> Result<T, serde_json::Error> {
     match params {
         Some(value) => T::deserialize(value),
         None => T::deserialize(&Value::Object(Map::new())),
+    }
+}
+
+/// Deserializes `params` (absent means an empty object) into `T` by value:
+/// `serde_json::from_value` moves each string and key out of the tree instead of
+/// copying it. See the module documentation, "Framing", on memory.
+fn params_moved<T: DeserializeOwned>(params: Option<Value>) -> Result<T, serde_json::Error> {
+    serde_json::from_value(params.unwrap_or_else(|| Value::Object(Map::new())))
+}
+
+/// The -32602 error for parameters that do not fit, carrying the request's id
+/// when there is one and an echo of the method and the decoder's description.
+fn invalid_params(id: Option<RequestId>, method: &str, error: &serde_json::Error) -> ProtocolError {
+    ProtocolError::new(ErrorCode::InvalidParams, "invalid params")
+        .with_id(id)
+        .with_data(json!({ "method": echo(method), "detail": detail(error) }))
+}
+
+/// The -32601 error for a method this side does not serve in this direction,
+/// carrying the request's id and an echo of the method.
+fn method_not_found(id: RequestId, method: &str) -> ProtocolError {
+    ProtocolError::new(ErrorCode::MethodNotFound, "method not found")
+        .with_id(Some(id))
+        .with_data(json!({ "method": echo(method) }))
+}
+
+/// Decodes a request's parameters by value, handing the id back with them so a
+/// caller that consumed the request still has it, and moving it into the error
+/// when the parameters do not fit.
+fn decode_params<T: DeserializeOwned>(
+    id: RequestId,
+    method: &str,
+    params: Option<Value>,
+) -> Result<(RequestId, T), ProtocolError> {
+    match params_moved(params) {
+        Ok(decoded) => Ok((id, decoded)),
+        Err(error) => Err(invalid_params(Some(id), method, &error)),
     }
 }
 
@@ -855,17 +967,32 @@ impl Request {
         })
     }
 
-    /// The parameters as a `T`; absent parameters read as an empty object.
+    /// The parameters as a `T`, from a borrow; absent parameters read as an
+    /// empty object.
+    ///
+    /// This copies the tree: every string, map and nested value is copied out of
+    /// it. On a message a peer sent, use [`Request::into_params`], which moves
+    /// them instead (module documentation, "Framing").
     ///
     /// # Errors
     ///
     /// -32602, carrying this request's id, when the parameters do not fit `T`.
     pub fn params_as<T: DeserializeOwned>(&self) -> Result<T, ProtocolError> {
-        params_into(self.params.as_ref()).map_err(|error| {
-            ProtocolError::new(ErrorCode::InvalidParams, "invalid params")
-                .with_id(Some(self.id.clone()))
-                .with_data(json!({ "method": echo(&self.method), "detail": detail(&error) }))
-        })
+        params_copied(self.params.as_ref())
+            .map_err(|error| invalid_params(Some(self.id.clone()), &self.method, &error))
+    }
+
+    /// The parameters as a `T`, consuming the request; absent parameters read
+    /// as an empty object. The form to use on a peer's message: strings and maps
+    /// are moved out of the tree, not copied.
+    ///
+    /// # Errors
+    ///
+    /// -32602, carrying this request's id and the echoed method, when the
+    /// parameters do not fit `T`; the same error as [`Request::params_as`].
+    pub fn into_params<T: DeserializeOwned>(self) -> Result<T, ProtocolError> {
+        let Self { id, method, params } = self;
+        decode_params(id, &method, params).map(|(_, decoded)| decoded)
     }
 }
 
@@ -894,16 +1021,34 @@ impl Notification {
         })
     }
 
-    /// The parameters as a `T`; absent parameters read as an empty object.
+    /// The parameters as a `T`, from a borrow; absent parameters read as an
+    /// empty object.
+    ///
+    /// This copies the tree: every string, map and nested value is copied out of
+    /// it. On a message a peer sent, use [`Notification::into_params`], which
+    /// moves them instead (module documentation, "Framing").
     ///
     /// # Errors
     ///
-    /// -32602 (with no id: a notification has none) when they do not fit `T`.
+    /// -32602 (with no id: a notification has none, and by the rule in the
+    /// module documentation, "Errors", it is never answered) when they do not
+    /// fit `T`.
     pub fn params_as<T: DeserializeOwned>(&self) -> Result<T, ProtocolError> {
-        params_into(self.params.as_ref()).map_err(|error| {
-            ProtocolError::new(ErrorCode::InvalidParams, "invalid params")
-                .with_data(json!({ "method": echo(&self.method), "detail": detail(&error) }))
-        })
+        params_copied(self.params.as_ref())
+            .map_err(|error| invalid_params(None, &self.method, &error))
+    }
+
+    /// The parameters as a `T`, consuming the notification; absent parameters
+    /// read as an empty object. The form to use on a peer's message: strings and
+    /// maps are moved out of the tree, not copied.
+    ///
+    /// # Errors
+    ///
+    /// -32602 with no id, as [`Notification::params_as`], when they do not fit
+    /// `T`.
+    pub fn into_params<T: DeserializeOwned>(self) -> Result<T, ProtocolError> {
+        let Self { method, params } = self;
+        params_moved(params).map_err(|error| invalid_params(None, &method, &error))
     }
 }
 
@@ -932,7 +1077,12 @@ impl ResultResponse {
         })
     }
 
-    /// The result as a `T`, for the side that made the request.
+    /// The result as a `T`, from a borrow, for the side that made the request.
+    ///
+    /// This copies the tree: every string, map and nested value is copied out of
+    /// it, and a tool result is the large case. On a peer's response, use
+    /// [`ResultResponse::into_result`], which moves them instead (module
+    /// documentation, "Framing").
     ///
     /// The code is -32600, the nearest standard one for "this response is not
     /// a valid response to that method"; it is never sent, the caller maps it
@@ -942,10 +1092,26 @@ impl ResultResponse {
     ///
     /// -32600 when the result does not fit `T`.
     pub fn result_as<T: DeserializeOwned>(&self) -> Result<T, ProtocolError> {
-        T::deserialize(&self.result).map_err(|error| {
-            invalid_request("invalid result").with_data(json!({ "detail": detail(&error) }))
-        })
+        T::deserialize(&self.result).map_err(|error| invalid_result(&error))
     }
+
+    /// The result as a `T`, consuming the response, for the side that made the
+    /// request. The form to use on a peer's response: strings and maps are moved
+    /// out of the tree, not copied.
+    ///
+    /// # Errors
+    ///
+    /// -32600 when the result does not fit `T`; the same error as
+    /// [`ResultResponse::result_as`], and never sent.
+    pub fn into_result<T: DeserializeOwned>(self) -> Result<T, ProtocolError> {
+        serde_json::from_value(self.result).map_err(|error| invalid_result(&error))
+    }
+}
+
+/// The -32600 error for a result that does not fit its type, with the decoder's
+/// description as `detail`.
+fn invalid_result(error: &serde_json::Error) -> ProtocolError {
+    invalid_request("invalid result").with_data(json!({ "detail": detail(error) }))
 }
 
 impl ErrorResponse {
@@ -1446,15 +1612,17 @@ impl ContentBlock {
     /// A fixed description when the value is not an object with a string
     /// `type`, or is a `text` block without a string `text`.
     pub fn from_value(value: Value) -> Result<Self, &'static str> {
-        let Value::Object(object) = value else {
+        let Value::Object(mut object) = value else {
             return Err("a content block is an object");
         };
         let Some(Value::String(kind)) = object.get("type") else {
             return Err("a content block has a string type");
         };
         if kind == "text" {
-            return match object.get("text") {
-                Some(Value::String(text)) => Ok(Self::Text(TextContent { text: text.clone() })),
+            // The text is moved out of the object, not copied: it is the large
+            // part of a tool result (module documentation, "Framing").
+            return match object.remove("text") {
+                Some(Value::String(text)) => Ok(Self::Text(TextContent { text })),
                 _ => Err("a text block has a string text"),
             };
         }
@@ -1553,7 +1721,8 @@ pub struct CancelledParams {
 }
 
 /// A request this wire knows, decoded: `initialize`, `ping`, `tools/list`,
-/// `tools/call`.
+/// `tools/call`. Which of them a side may receive depends on the direction the
+/// request travelled, see [`KnownRequest::decode`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KnownRequest {
     /// `initialize`.
@@ -1567,27 +1736,49 @@ pub enum KnownRequest {
 }
 
 impl KnownRequest {
-    /// Decodes a request by its method.
+    /// Decodes a request that travelled in `direction`, by its method, and gives
+    /// its id back with it (the request is consumed, and its parameters are moved
+    /// out of the tree, not copied: module documentation, "Framing").
+    ///
+    /// Each direction has its own method set (module documentation, "The
+    /// messages"):
+    ///
+    /// - [`Direction::ClientToServer`], what a server receives: `initialize`,
+    ///   `ping`, `tools/list` and `tools/call`.
+    /// - [`Direction::ServerToClient`], what a client receives: `ping` only.
+    ///   Phase 1's client offers no sampling, roots or elicitation (the
+    ///   `sampling`, `roots` and `elicitation` members of `ClientCapabilities`
+    ///   in `schema-2025-11-25.ts`), nor tasks (its `tasks` member), so a server
+    ///   has no request to send it but a ping. `initialize`, `tools/list` and
+    ///   `tools/call` from a server are "method not found", exactly as an unknown
+    ///   method is.
     ///
     /// Whether the connection's state allows the method is
     /// [`ConnectionState::check`]'s question, asked before this one.
     ///
     /// # Errors
     ///
-    /// -32601 for any other method (decision D2: everything else is "method not
-    /// found"), and -32602 for parameters that do not fit. Both carry the
-    /// request's id.
-    pub fn decode(request: &Request) -> Result<Self, ProtocolError> {
-        match request.method.as_str() {
-            METHOD_INITIALIZE => request.params_as().map(Self::Initialize),
-            METHOD_PING => Ok(Self::Ping),
-            METHOD_TOOLS_LIST => request.params_as().map(Self::ToolsList),
-            METHOD_TOOLS_CALL => request.params_as().map(Self::ToolsCall),
-            other => Err(
-                ProtocolError::new(ErrorCode::MethodNotFound, "method not found")
-                    .with_id(Some(request.id.clone()))
-                    .with_data(json!({ "method": echo(other) })),
-            ),
+    /// -32601 for any other method in that direction (decision D2: everything
+    /// else is "method not found"), carrying the id and the echoed method, and
+    /// -32602 for parameters that do not fit. Both carry the request's id, so by
+    /// the rule in the module documentation, "Errors", each answers that request.
+    pub fn decode(
+        direction: Direction,
+        request: Request,
+    ) -> Result<(RequestId, Self), ProtocolError> {
+        let Request { id, method, params } = request;
+        match (direction, method.as_str()) {
+            (_, METHOD_PING) => Ok((id, Self::Ping)),
+            (Direction::ClientToServer, METHOD_INITIALIZE) => {
+                decode_params(id, &method, params).map(|(id, p)| (id, Self::Initialize(p)))
+            }
+            (Direction::ClientToServer, METHOD_TOOLS_LIST) => {
+                decode_params(id, &method, params).map(|(id, p)| (id, Self::ToolsList(p)))
+            }
+            (Direction::ClientToServer, METHOD_TOOLS_CALL) => {
+                decode_params(id, &method, params).map(|(id, p)| (id, Self::ToolsCall(p)))
+            }
+            _ => Err(method_not_found(id, &method)),
         }
     }
 }
@@ -1604,17 +1795,40 @@ pub enum KnownNotification {
 }
 
 impl KnownNotification {
-    /// Decodes a notification by its method; `Ok(None)` for one this wire does
-    /// not know, which the receiver ignores (a notification is never answered).
+    /// Decodes a notification that travelled in `direction`, by its method,
+    /// consuming it (its parameters are moved out of the tree, not copied:
+    /// module documentation, "Framing"). `Ok(None)` for one this wire does not
+    /// know, which the receiver ignores.
+    ///
+    /// Each direction has its own set:
+    ///
+    /// - [`Direction::ClientToServer`]: `notifications/initialized` and
+    ///   `notifications/cancelled`.
+    /// - [`Direction::ServerToClient`]: `notifications/cancelled` and
+    ///   `notifications/tools/list_changed`.
+    ///
+    /// A known notification travelling the wrong way (a client's
+    /// `notifications/tools/list_changed`, a server's
+    /// `notifications/initialized`) is `Ok(None)`, ignored like an unknown one:
+    /// nothing answers a notification, so there is no one to refuse it to.
     ///
     /// # Errors
     ///
-    /// -32602, with no id, for parameters that do not fit.
-    pub fn decode(notification: &Notification) -> Result<Option<Self>, ProtocolError> {
-        match notification.method.as_str() {
-            NOTIFICATION_INITIALIZED => Ok(Some(Self::Initialized)),
-            NOTIFICATION_CANCELLED => notification.params_as().map(|p| Some(Self::Cancelled(p))),
-            NOTIFICATION_TOOLS_LIST_CHANGED => Ok(Some(Self::ToolsListChanged)),
+    /// -32602, with no id, for parameters that do not fit. By the rule in the
+    /// module documentation, "Errors", an error raised while decoding a
+    /// notification is never answered.
+    pub fn decode(
+        direction: Direction,
+        notification: Notification,
+    ) -> Result<Option<Self>, ProtocolError> {
+        match (direction, notification.method.as_str()) {
+            (Direction::ClientToServer, NOTIFICATION_INITIALIZED) => Ok(Some(Self::Initialized)),
+            (_, NOTIFICATION_CANCELLED) => notification
+                .into_params()
+                .map(|params| Some(Self::Cancelled(params))),
+            (Direction::ServerToClient, NOTIFICATION_TOOLS_LIST_CHANGED) => {
+                Ok(Some(Self::ToolsListChanged))
+            }
             _ => Ok(None),
         }
     }
@@ -1658,6 +1872,12 @@ fn unsupported_version(requested: &str, supported: &[&str]) -> ProtocolError {
 ///
 /// -32602 for a malformed `requested`; -32603 when `supported` is empty or
 /// holds a malformed entry (a defect of the caller, never the peer's).
+///
+/// This function does not see the request, so the error carries no id: the
+/// caller attaches the `initialize` request's id with [`ProtocolError::with_id`]
+/// before answering (an error carrying an id answers that request, module
+/// documentation, "Errors"), as in
+/// `negotiate_version(..).map_err(|error| error.with_id(Some(id)))`.
 pub fn negotiate_version<'a>(
     requested: &str,
     supported: &[&'a str],
@@ -1683,8 +1903,11 @@ pub fn negotiate_version<'a>(
 }
 
 /// The client's side of negotiation: whether the version a server answered with
-/// is one this client supports. "If the client does not support the version in
-/// the server's response, it SHOULD disconnect."
+/// is one this client supports. The lifecycle page says "If the client does not
+/// support the version in the server's response, it SHOULD disconnect", but the
+/// schema wins over the prose, and it reads "If the client cannot support this
+/// version, it MUST disconnect" (`schema-2025-11-25.ts`,
+/// `InitializeResult.protocolVersion`): an `Err` here is a must-disconnect.
 ///
 /// # Errors
 ///
@@ -1808,6 +2031,12 @@ pub enum Transition {
 /// Both ends keep one, from their own sends and receives; the table in
 /// [`ConnectionState::permits`] is the same for both. The type decides nothing
 /// by itself: the server core enforces it.
+///
+/// An end that writes from another thread than the one that reads advances its
+/// own state to `Ready` (`advance(Transition::InitializedNotified)`) **before**
+/// it writes `notifications/initialized`. Otherwise the server's first request
+/// can arrive while the client's state still reads `Initialized`, and be
+/// refused by [`ConnectionState::check`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ConnectionState {
     /// Nothing has been agreed.
@@ -1840,11 +2069,18 @@ impl ConnectionState {
     ///
     /// A response is allowed everywhere: it answers a request that was itself
     /// checked when it was sent, and matching it to that request is the
-    /// caller's table of in-flight ids. In `Ready` a request of an unknown
-    /// method is allowed here; [`KnownRequest::decode`] answers it
-    /// "method not found". `notifications/cancelled` in `Fresh` is refused
-    /// because the only request in flight is `initialize`, which "MUST NOT" be
-    /// cancelled.
+    /// caller's table of in-flight ids. The table is about phases and knows
+    /// kinds, not methods or who may receive them: in `Ready` a request of an
+    /// unknown method, or of a method the receiving side does not serve, is
+    /// allowed here, and [`KnownRequest::decode`], which takes the direction,
+    /// answers it "method not found".
+    ///
+    /// `notifications/cancelled` in `Fresh` is refused, and the reason is not
+    /// that nothing else can be in flight, because a ping can be. In `Fresh` the
+    /// only requests in flight are `initialize`, whose cancellation the
+    /// lifecycle forbids ("MUST NOT"), and pings, which are not worth an
+    /// exception. A refused notification is dropped, never answered, so the
+    /// refusal costs nothing.
     #[must_use]
     pub const fn permits(self, direction: Direction, kind: MessageKind) -> bool {
         if matches!(kind, MessageKind::Response) {
@@ -1869,9 +2105,11 @@ impl ConnectionState {
     ///
     /// # Errors
     ///
-    /// -32600 with `{state}` as data, carrying the request's id when the message
-    /// is a request, so the server can answer it. For a notification the caller
-    /// drops the message: nothing answers a notification.
+    /// -32600 with `{state}` as data. By the rule in the module documentation,
+    /// "Errors": the error carries the request's id when the message is a
+    /// request, and that answers the request; for a notification the error has
+    /// no id and the caller drops the message, because nothing answers a
+    /// notification.
     pub fn check(self, direction: Direction, message: &Message) -> Result<(), ProtocolError> {
         if self.permits(direction, MessageKind::of(message)) {
             return Ok(());
@@ -1908,6 +2146,7 @@ impl ConnectionState {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::io::{BufReader, Cursor, Read};
 
     use super::*;
@@ -2053,8 +2292,8 @@ mod tests {
             panic!("a request")
         };
         assert_eq!(
-            KnownRequest::decode(&back),
-            Ok(KnownRequest::Initialize(params))
+            KnownRequest::decode(Direction::ClientToServer, back),
+            Ok((id(1), KnownRequest::Initialize(params)))
         );
 
         let result = InitializeResult {
@@ -2081,13 +2320,16 @@ mod tests {
         let Message::Request(ping) = round_trip(&Message::from(ping)) else {
             panic!("a request")
         };
-        assert_eq!(KnownRequest::decode(&ping), Ok(KnownRequest::Ping));
+        assert_eq!(
+            KnownRequest::decode(Direction::ClientToServer, ping),
+            Ok((id(2), KnownRequest::Ping))
+        );
         let initialized = Notification::without_params(NOTIFICATION_INITIALIZED);
         let Message::Notification(initialized) = round_trip(&Message::from(initialized)) else {
             panic!("a notification")
         };
         assert_eq!(
-            KnownNotification::decode(&initialized),
+            KnownNotification::decode(Direction::ClientToServer, initialized),
             Ok(Some(KnownNotification::Initialized))
         );
     }
@@ -2097,8 +2339,11 @@ mod tests {
         let first = Request::with_params(id(3), METHOD_TOOLS_LIST, &ListToolsParams::default())
             .expect("params");
         assert_eq!(
-            KnownRequest::decode(&first),
-            Ok(KnownRequest::ToolsList(ListToolsParams { cursor: None }))
+            KnownRequest::decode(Direction::ClientToServer, first),
+            Ok((
+                id(3),
+                KnownRequest::ToolsList(ListToolsParams { cursor: None })
+            ))
         );
         let page = ListToolsResult {
             tools: vec![Tool {
@@ -2146,10 +2391,13 @@ mod tests {
             panic!("a request")
         };
         assert_eq!(
-            KnownRequest::decode(&second),
-            Ok(KnownRequest::ToolsList(ListToolsParams {
-                cursor: Some("next-page-cursor".to_owned())
-            }))
+            KnownRequest::decode(Direction::ClientToServer, second),
+            Ok((
+                id(4),
+                KnownRequest::ToolsList(ListToolsParams {
+                    cursor: Some("next-page-cursor".to_owned())
+                })
+            ))
         );
     }
 
@@ -2176,8 +2424,8 @@ mod tests {
             panic!("a request")
         };
         assert_eq!(
-            KnownRequest::decode(&request),
-            Ok(KnownRequest::ToolsCall(params))
+            KnownRequest::decode(Direction::ClientToServer, request),
+            Ok((id(2), KnownRequest::ToolsCall(params)))
         );
 
         let result = CallToolResult {
@@ -2220,7 +2468,7 @@ mod tests {
             panic!("a notification")
         };
         assert_eq!(
-            KnownNotification::decode(&back),
+            KnownNotification::decode(Direction::ClientToServer, back),
             Ok(Some(KnownNotification::Cancelled(CancelledParams {
                 request_id: Some(RequestId::from("req-1")),
                 reason: None
@@ -2228,16 +2476,20 @@ mod tests {
         );
         let changed = Notification::without_params(NOTIFICATION_TOOLS_LIST_CHANGED);
         assert_eq!(
-            KnownNotification::decode(&changed),
+            KnownNotification::decode(Direction::ServerToClient, changed),
             Ok(Some(KnownNotification::ToolsListChanged))
         );
         let unknown = Notification::without_params("notifications/progress");
-        assert_eq!(KnownNotification::decode(&unknown), Ok(None));
+        assert_eq!(
+            KnownNotification::decode(Direction::ClientToServer, unknown),
+            Ok(None)
+        );
         let bad = Notification {
             method: NOTIFICATION_CANCELLED.to_owned(),
             params: Some(json!({"requestId": 1.5})),
         };
-        let error = KnownNotification::decode(&bad).expect_err("bad params");
+        let error =
+            KnownNotification::decode(Direction::ClientToServer, bad).expect_err("bad params");
         assert_eq!(error.code(), ErrorCode::InvalidParams);
         assert_eq!(error.id(), None);
     }
@@ -2272,7 +2524,9 @@ mod tests {
         let Message::Request(request) = request else {
             panic!("a request")
         };
-        let Ok(KnownRequest::Initialize(params)) = KnownRequest::decode(&request) else {
+        let Ok((_, KnownRequest::Initialize(params))) =
+            KnownRequest::decode(Direction::ClientToServer, request)
+        else {
             panic!("initialize")
         };
         assert_eq!(params.protocol_version, "2025-11-25");
@@ -2316,10 +2570,13 @@ mod tests {
             panic!("a request")
         };
         assert_eq!(
-            KnownRequest::decode(&list),
-            Ok(KnownRequest::ToolsList(ListToolsParams {
-                cursor: Some("optional-cursor-value".to_owned())
-            }))
+            KnownRequest::decode(Direction::ClientToServer, list),
+            Ok((
+                id(1),
+                KnownRequest::ToolsList(ListToolsParams {
+                    cursor: Some("optional-cursor-value".to_owned())
+                })
+            ))
         );
         let error = parse(
             r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"Unknown tool: invalid_tool_name"}}"#,
@@ -2762,8 +3019,8 @@ mod tests {
             panic!("a request")
         };
         assert!(matches!(
-            KnownRequest::decode(&request),
-            Ok(KnownRequest::ToolsCall(_))
+            KnownRequest::decode(Direction::ClientToServer, request),
+            Ok((RequestId::Number(1), KnownRequest::ToolsCall(_)))
         ));
         // `name` is required, `arguments` is an object.
         for params in [
@@ -2772,7 +3029,8 @@ mod tests {
             json!({"name": "t", "arguments": [1]}),
         ] {
             let request = Request::with_params(id(2), METHOD_TOOLS_CALL, &params).expect("object");
-            let error = KnownRequest::decode(&request).expect_err("bad params");
+            let error =
+                KnownRequest::decode(Direction::ClientToServer, request).expect_err("bad params");
             assert_eq!(error.code(), ErrorCode::InvalidParams);
             assert_eq!(error.code().code(), -32602);
             assert_eq!(error.id(), Some(&id(2)));
@@ -2780,13 +3038,19 @@ mod tests {
         // Absent params read as an empty object: fine for ping and tools/list,
         // not for initialize.
         assert_eq!(
-            KnownRequest::decode(&Request::without_params(id(3), METHOD_TOOLS_LIST)),
-            Ok(KnownRequest::ToolsList(ListToolsParams::default()))
+            KnownRequest::decode(
+                Direction::ClientToServer,
+                Request::without_params(id(3), METHOD_TOOLS_LIST)
+            ),
+            Ok((id(3), KnownRequest::ToolsList(ListToolsParams::default())))
         );
         assert_eq!(
-            KnownRequest::decode(&Request::without_params(id(4), METHOD_INITIALIZE))
-                .expect_err("missing")
-                .code(),
+            KnownRequest::decode(
+                Direction::ClientToServer,
+                Request::without_params(id(4), METHOD_INITIALIZE)
+            )
+            .expect_err("missing")
+            .code(),
             ErrorCode::InvalidParams
         );
     }
@@ -2794,13 +3058,13 @@ mod tests {
     #[test]
     fn ori_t_0158_an_unknown_method_is_method_not_found_with_a_bounded_echo() {
         let request = Request::without_params(id(8), "resources/list");
-        let error = KnownRequest::decode(&request).expect_err("unknown");
+        let error = KnownRequest::decode(Direction::ClientToServer, request).expect_err("unknown");
         assert_eq!(error.code(), ErrorCode::MethodNotFound);
         assert_eq!(error.code().code(), -32601);
         assert_eq!(error.id(), Some(&id(8)));
         assert_eq!(error.data(), Some(&json!({"method": "resources/list"})));
         let long = Request::without_params(id(9), "m".repeat(10_000));
-        let error = KnownRequest::decode(&long).expect_err("unknown");
+        let error = KnownRequest::decode(Direction::ClientToServer, long).expect_err("unknown");
         let echoed = error
             .data()
             .and_then(|d| d["method"].as_str())
@@ -3177,8 +3441,558 @@ mod tests {
         let response = Message::from(ResultResponse::empty(id(1)));
         assert_eq!(MessageKind::of(&response), MessageKind::Response);
         assert_eq!(MessageKind::ALL.len(), 10);
-        let mut seen = MessageKind::ALL.to_vec();
-        seen.dedup();
-        assert_eq!(seen.len(), 10, "ALL lists each kind once");
+        // `ALL` lists each kind once: as a set it has ten members. (`dedup`
+        // only removes adjacent repeats, so it could not show this.)
+        let distinct: HashSet<MessageKind> = MessageKind::ALL.iter().copied().collect();
+        assert_eq!(distinct.len(), 10, "ALL lists each kind once");
+        // And `ALL` lists every kind: the match below has no wildcard arm, so a
+        // new variant does not compile until it has an arm here, and the arms'
+        // numbers are checked against `ALL`, so it is then not forgotten there.
+        let number = |kind: MessageKind| -> usize {
+            match kind {
+                MessageKind::Initialize => 0,
+                MessageKind::Ping => 1,
+                MessageKind::ToolsList => 2,
+                MessageKind::ToolsCall => 3,
+                MessageKind::OtherRequest => 4,
+                MessageKind::Initialized => 5,
+                MessageKind::Cancelled => 6,
+                MessageKind::LoggingMessage => 7,
+                MessageKind::OtherNotification => 8,
+                MessageKind::Response => 9,
+            }
+        };
+        let numbers: HashSet<usize> = MessageKind::ALL.iter().map(|&kind| number(kind)).collect();
+        assert_eq!(
+            numbers,
+            (0..10).collect::<HashSet<usize>>(),
+            "every variant the match lists is in ALL"
+        );
+    }
+
+    // ----- decoding by value (repair 1, finding F1) -------------------------
+
+    /// A `tools/call` line whose `arguments.blob` is `blob`.
+    fn call_line_with_blob(blob: &str) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"t","arguments":{{"blob":"{blob}"}}}}}}"#
+        )
+    }
+
+    /// The address of the heap buffer of `arguments.blob` in a parsed request.
+    fn blob_address_in_tree(request: &Request) -> *const u8 {
+        request
+            .params
+            .as_ref()
+            .and_then(|params| params["arguments"]["blob"].as_str())
+            .expect("a string in the tree")
+            .as_ptr()
+    }
+
+    /// The address of the heap buffer of `arguments.blob` in decoded params.
+    fn blob_address_decoded(params: &CallToolParams) -> *const u8 {
+        params
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments["blob"].as_str())
+            .expect("a string in the typed value")
+            .as_ptr()
+    }
+
+    #[test]
+    fn ori_t_0158_decoding_a_request_by_value_moves_a_large_string_instead_of_copying_it() {
+        // Built at run time; the largest message that fits the default cap is
+        // about twice this.
+        let blob = "a".repeat(512 * 1024);
+        let line = call_line_with_blob(&blob);
+        assert!(line.len() < MAX_LINE_BYTES);
+        let Message::Request(request) = parse(&line).expect("request") else {
+            panic!("a request")
+        };
+        let in_tree = blob_address_in_tree(&request);
+
+        // The control: decoding from a borrow copies the string, so the check
+        // below can tell a copy from a move.
+        let copied: CallToolParams = request.params_as().expect("decodes");
+        assert_eq!(copied.arguments.as_ref().expect("arguments")["blob"], blob);
+        assert_ne!(
+            blob_address_decoded(&copied),
+            in_tree,
+            "params_as copies the string out of the tree"
+        );
+
+        // By value, the typed value holds the very buffer the tree held.
+        let params: CallToolParams = request.into_params().expect("decodes");
+        assert_eq!(params.arguments.as_ref().expect("arguments")["blob"], blob);
+        assert_eq!(
+            blob_address_decoded(&params),
+            in_tree,
+            "into_params moves the string out of the tree"
+        );
+    }
+
+    #[test]
+    fn ori_t_0158_known_request_decode_moves_a_large_string_instead_of_copying_it() {
+        let blob = "b".repeat(512 * 1024);
+        let Message::Request(request) = parse(&call_line_with_blob(&blob)).expect("request") else {
+            panic!("a request")
+        };
+        let in_tree = blob_address_in_tree(&request);
+        let (answered, decoded) =
+            KnownRequest::decode(Direction::ClientToServer, request).expect("decodes");
+        assert_eq!(answered, id(1));
+        let KnownRequest::ToolsCall(params) = decoded else {
+            panic!("tools/call")
+        };
+        assert_eq!(blob_address_decoded(&params), in_tree);
+    }
+
+    #[test]
+    fn ori_t_0158_decoding_a_result_by_value_moves_a_large_text_instead_of_copying_it() {
+        let text = "t".repeat(512 * 1024);
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"result":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+        );
+        let Message::ResultResponse(response) = parse(&line).expect("result") else {
+            panic!("a result")
+        };
+        let in_tree = response.result["content"][0]["text"]
+            .as_str()
+            .expect("a string in the tree")
+            .as_ptr();
+        let address_of =
+            |result: &CallToolResult| result.content[0].as_text().expect("a text block").as_ptr();
+
+        // The control: from a borrow the text is copied.
+        let copied: CallToolResult = response.result_as().expect("decodes");
+        assert_eq!(copied.content[0].as_text(), Some(text.as_str()));
+        assert_ne!(address_of(&copied), in_tree, "result_as copies the text");
+
+        // By value it is the same buffer, through the content block as well.
+        let result: CallToolResult = response.into_result().expect("decodes");
+        assert_eq!(result.content[0].as_text(), Some(text.as_str()));
+        assert_eq!(address_of(&result), in_tree, "into_result moves the text");
+    }
+
+    #[test]
+    fn ori_t_0158_by_value_and_by_reference_decoding_succeed_and_fail_alike() {
+        // The same value on success, for a request, a notification and a result.
+        let request = Request::with_params(
+            id(1),
+            METHOD_TOOLS_CALL,
+            &json!({"name": "t", "arguments": {"a": [1, "two", null]}}),
+        )
+        .expect("object");
+        assert_eq!(
+            request.clone().into_params::<CallToolParams>(),
+            request.params_as::<CallToolParams>()
+        );
+        assert!(request.params_as::<CallToolParams>().is_ok());
+        let notification = Notification::with_params(
+            NOTIFICATION_CANCELLED,
+            &json!({"requestId": "r", "reason": "x"}),
+        )
+        .expect("object");
+        assert_eq!(
+            notification.clone().into_params::<CancelledParams>(),
+            notification.params_as::<CancelledParams>()
+        );
+        assert!(notification.params_as::<CancelledParams>().is_ok());
+        let response =
+            ResultResponse::with_result(id(2), &CallToolResult::text("hi")).expect("object");
+        assert_eq!(
+            response.clone().into_result::<CallToolResult>(),
+            response.result_as::<CallToolResult>()
+        );
+        assert!(response.result_as::<CallToolResult>().is_ok());
+
+        // The same error on failure: code, id, and `data` (the echoed method and
+        // the decoder's description), for each of the three.
+        for params in [
+            json!({}),
+            json!({"name": 5}),
+            json!({"name": "t", "arguments": [1]}),
+        ] {
+            let request = Request::with_params(id(2), METHOD_TOOLS_CALL, &params).expect("object");
+            let by_ref = request.params_as::<CallToolParams>().expect_err("bad");
+            let by_value = request
+                .clone()
+                .into_params::<CallToolParams>()
+                .expect_err("bad");
+            assert_eq!(by_value, by_ref);
+            assert_eq!(by_value.code(), ErrorCode::InvalidParams);
+            assert_eq!(by_value.id(), Some(&id(2)));
+            let data = by_value.data().expect("data");
+            assert_eq!(data["method"], json!("tools/call"));
+            assert!(data["detail"].as_str().is_some_and(|d| !d.is_empty()));
+        }
+        let bad = Notification {
+            method: NOTIFICATION_CANCELLED.to_owned(),
+            params: Some(json!({"requestId": 1.5})),
+        };
+        let by_value = bad
+            .clone()
+            .into_params::<CancelledParams>()
+            .expect_err("bad");
+        assert_eq!(
+            by_value,
+            bad.params_as::<CancelledParams>().expect_err("bad")
+        );
+        assert_eq!(by_value.code(), ErrorCode::InvalidParams);
+        assert_eq!(by_value.id(), None);
+        let bad = ResultResponse::empty(id(3));
+        let by_value = bad
+            .clone()
+            .into_result::<CallToolResult>()
+            .expect_err("bad");
+        assert_eq!(
+            by_value,
+            bad.result_as::<CallToolResult>().expect_err("bad")
+        );
+        assert_eq!(by_value.code(), ErrorCode::InvalidRequest);
+
+        // Absent params read as an empty object by value too.
+        assert_eq!(
+            Request::without_params(id(4), METHOD_TOOLS_LIST).into_params::<ListToolsParams>(),
+            Ok(ListToolsParams::default())
+        );
+        let missing = Request::without_params(id(5), METHOD_INITIALIZE)
+            .into_params::<InitializeParams>()
+            .expect_err("required");
+        assert_eq!(missing.code(), ErrorCode::InvalidParams);
+        assert_eq!(missing.id(), Some(&id(5)));
+        assert_eq!(
+            Notification::without_params("x").into_params::<ListToolsParams>(),
+            Ok(ListToolsParams::default())
+        );
+    }
+
+    #[test]
+    fn ori_t_0158_a_text_block_still_needs_a_string_text_after_it_is_moved() {
+        // `ContentBlock::from_value` now removes `text` instead of cloning it;
+        // the refusals it had are unchanged.
+        for bad in [json!({"type": "text"}), json!({"type": "text", "text": 5})] {
+            assert_eq!(
+                ContentBlock::from_value(bad),
+                Err("a text block has a string text")
+            );
+        }
+        assert_eq!(
+            ContentBlock::from_value(json!({"type": "text", "text": "x", "annotations": {}})),
+            Ok(ContentBlock::text("x"))
+        );
+    }
+
+    #[test]
+    fn ori_t_0158_the_detail_of_a_params_error_is_cut_and_the_message_stays_fixed() {
+        // The module documentation says `detail` can quote the peer, cut to
+        // `MAX_DETAIL_CHARS`, and that the text of the error does not.
+        let big = "y".repeat(10_000);
+        let request = Request::with_params(
+            id(5),
+            METHOD_TOOLS_CALL,
+            &json!({"name": "t", "arguments": big}),
+        )
+        .expect("object");
+        let error =
+            KnownRequest::decode(Direction::ClientToServer, request).expect_err("bad params");
+        let detail = error
+            .data()
+            .and_then(|data| data["detail"].as_str())
+            .expect("detail");
+        assert_eq!(detail.chars().count(), MAX_DETAIL_CHARS);
+        assert!(
+            detail.contains("yyyy"),
+            "the detail quotes the peer: {detail}"
+        );
+        assert_eq!(error.message(), "invalid params");
+        assert!(!error.to_string().contains("yyyy"));
+    }
+
+    // ----- direction (repair 1, finding F2) ----------------------------------
+
+    #[test]
+    fn ori_t_0158_a_servers_tools_call_and_tools_list_are_method_not_found_for_a_client() {
+        // Valid parameters, so the refusal is the method's, not the params'.
+        let call = Request::with_params(
+            id(21),
+            METHOD_TOOLS_CALL,
+            &CallToolParams {
+                name: "t".to_owned(),
+                arguments: None,
+                task: None,
+                meta: None,
+            },
+        )
+        .expect("params");
+        let list = Request::with_params(id(22), METHOD_TOOLS_LIST, &ListToolsParams::default())
+            .expect("params");
+        let init = Request::with_params(
+            id(23),
+            METHOD_INITIALIZE,
+            &InitializeParams {
+                protocol_version: LATEST_PROTOCOL_VERSION.to_owned(),
+                capabilities: ClientCapabilities::default(),
+                client_info: client_info(),
+            },
+        )
+        .expect("params");
+        for (request, method, expected) in [
+            (call, METHOD_TOOLS_CALL, 21),
+            (list, METHOD_TOOLS_LIST, 22),
+            (init, METHOD_INITIALIZE, 23),
+        ] {
+            let error = KnownRequest::decode(Direction::ServerToClient, request).expect_err(method);
+            assert_eq!(error.code(), ErrorCode::MethodNotFound, "{method}");
+            assert_eq!(error.code().code(), -32601);
+            assert_eq!(error.id(), Some(&id(expected)), "{method}");
+            assert_eq!(error.data(), Some(&json!({ "method": method })));
+        }
+        // Method-not-found wins over bad params: the method is refused before
+        // its params are read.
+        let bad =
+            Request::with_params(id(24), METHOD_TOOLS_CALL, &json!({"name": 5})).expect("object");
+        let error = KnownRequest::decode(Direction::ServerToClient, bad).expect_err("refused");
+        assert_eq!(error.code(), ErrorCode::MethodNotFound);
+        assert_eq!(error.id(), Some(&id(24)));
+        // Every other method a server could send is refused the same way, and
+        // the echoed method is bounded.
+        for method in [
+            "sampling/createMessage",
+            "roots/list",
+            "elicitation/create",
+            "tasks/get",
+            "resources/list",
+        ] {
+            let request = Request::without_params(id(25), method);
+            let error = KnownRequest::decode(Direction::ServerToClient, request).expect_err(method);
+            assert_eq!(error.code(), ErrorCode::MethodNotFound, "{method}");
+            assert_eq!(error.id(), Some(&id(25)));
+        }
+        let long = Request::without_params(id(26), "m".repeat(10_000));
+        let error = KnownRequest::decode(Direction::ServerToClient, long).expect_err("long");
+        let echoed = error
+            .data()
+            .and_then(|data| data["method"].as_str())
+            .expect("echo");
+        assert_eq!(echoed.chars().count(), MAX_ECHO_CHARS);
+    }
+
+    #[test]
+    fn ori_t_0158_a_servers_ping_is_a_ping_for_a_client_and_the_id_comes_back() {
+        for direction in [Direction::ServerToClient, Direction::ClientToServer] {
+            for request_id in [id(27), RequestId::from("p-1")] {
+                let ping = Request::without_params(request_id.clone(), METHOD_PING);
+                assert_eq!(
+                    KnownRequest::decode(direction, ping),
+                    Ok((request_id, KnownRequest::Ping)),
+                    "{direction:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ori_t_0158_a_client_sent_list_changed_is_ignored_by_a_server() {
+        let changed = Notification::without_params(NOTIFICATION_TOOLS_LIST_CHANGED);
+        assert_eq!(
+            KnownNotification::decode(Direction::ClientToServer, changed.clone()),
+            Ok(None)
+        );
+        // In its own direction it is known.
+        assert_eq!(
+            KnownNotification::decode(Direction::ServerToClient, changed),
+            Ok(Some(KnownNotification::ToolsListChanged))
+        );
+    }
+
+    #[test]
+    fn ori_t_0158_a_server_sent_initialized_is_ignored_by_a_client() {
+        let initialized = Notification::without_params(NOTIFICATION_INITIALIZED);
+        assert_eq!(
+            KnownNotification::decode(Direction::ServerToClient, initialized.clone()),
+            Ok(None)
+        );
+        // In its own direction it is known.
+        assert_eq!(
+            KnownNotification::decode(Direction::ClientToServer, initialized),
+            Ok(Some(KnownNotification::Initialized))
+        );
+    }
+
+    #[test]
+    fn ori_t_0158_cancelled_is_known_both_ways_and_each_direction_has_its_own_set() {
+        let params = CancelledParams {
+            request_id: Some(id(9)),
+            reason: Some("r".to_owned()),
+        };
+        let cancelled = Notification::with_params(NOTIFICATION_CANCELLED, &params).expect("params");
+        for direction in [Direction::ClientToServer, Direction::ServerToClient] {
+            assert_eq!(
+                KnownNotification::decode(direction, cancelled.clone()),
+                Ok(Some(KnownNotification::Cancelled(params.clone()))),
+                "{direction:?}"
+            );
+            // Bad params are an error in either direction, with no id.
+            let bad = Notification {
+                method: NOTIFICATION_CANCELLED.to_owned(),
+                params: Some(json!({"requestId": true})),
+            };
+            let error = KnownNotification::decode(direction, bad).expect_err("bad");
+            assert_eq!(error.code(), ErrorCode::InvalidParams);
+            assert_eq!(error.id(), None);
+        }
+        // The whole table: which known notifications each direction decodes.
+        for (direction, method, known) in [
+            (Direction::ClientToServer, NOTIFICATION_INITIALIZED, true),
+            (
+                Direction::ClientToServer,
+                NOTIFICATION_TOOLS_LIST_CHANGED,
+                false,
+            ),
+            (Direction::ClientToServer, NOTIFICATION_MESSAGE, false),
+            (Direction::ServerToClient, NOTIFICATION_INITIALIZED, false),
+            (
+                Direction::ServerToClient,
+                NOTIFICATION_TOOLS_LIST_CHANGED,
+                true,
+            ),
+            (Direction::ServerToClient, NOTIFICATION_MESSAGE, false),
+        ] {
+            let decoded =
+                KnownNotification::decode(direction, Notification::without_params(method));
+            assert_eq!(
+                decoded.expect("no params to fail").is_some(),
+                known,
+                "{direction:?} {method}"
+            );
+        }
+        // For requests, the server's three methods are known to a server: with
+        // no params `tools/call` and `initialize` fail on them (-32602), and
+        // `tools/list` decodes, but none is "method not found".
+        for method in [METHOD_INITIALIZE, METHOD_TOOLS_LIST, METHOD_TOOLS_CALL] {
+            let to_server = KnownRequest::decode(
+                Direction::ClientToServer,
+                Request::without_params(id(30), method),
+            );
+            assert_ne!(
+                to_server.err().map(|error| error.code()),
+                Some(ErrorCode::MethodNotFound),
+                "{method}"
+            );
+        }
+    }
+
+    // ----- notes from the review (repair 1) ------------------------------------
+
+    #[test]
+    fn ori_t_0158_negotiate_versions_error_takes_the_requests_id_and_round_trips() {
+        let error =
+            negotiate_version("1.0.0", SUPPORTED_PROTOCOL_VERSIONS).expect_err("malformed version");
+        assert_eq!(error.id(), None, "negotiation does not see the request");
+        let answered = error.with_id(Some(id(11)));
+        let response = Message::from(answered.to_error_response());
+        let Message::ErrorResponse(back) = round_trip(&response) else {
+            panic!("an error response")
+        };
+        assert_eq!(back.id, Some(id(11)));
+        assert_eq!(back.error.code, -32602);
+        assert_eq!(
+            back.error.data,
+            Some(json!({"supported": ["2025-11-25"], "requested": "1.0.0"}))
+        );
+        // A string id is carried the same way.
+        let by_string = negotiate_version("latest", SUPPORTED_PROTOCOL_VERSIONS)
+            .expect_err("malformed version")
+            .with_id(Some(RequestId::from("init-1")));
+        assert_eq!(
+            by_string.to_error_response().id,
+            Some(RequestId::from("init-1"))
+        );
+    }
+
+    /// Counts the calls to `fill_buf`, to show a read spanned several.
+    struct CountingFills<R> {
+        inner: R,
+        fills: usize,
+    }
+
+    impl<R: Read> Read for CountingFills<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl<R: BufRead> BufRead for CountingFills<R> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.fills += 1;
+            self.inner.fill_buf()
+        }
+        fn consume(&mut self, amount: usize) {
+            self.inner.consume(amount);
+        }
+    }
+
+    #[test]
+    fn ori_t_0158_a_valid_message_spanning_many_fill_buf_calls_decodes_exactly() {
+        let params = CallToolParams {
+            name: "get_weather".to_owned(),
+            arguments: Some(
+                json!({
+                    "location": "New York",
+                    "note": "line one\nline two \"quoted\" \\ back".repeat(8),
+                    "unicode": "caf\u{e9} \u{1f600} \u{2028}",
+                    "list": [1, 2.5, null, true, {"k": "v"}]
+                })
+                .as_object()
+                .cloned()
+                .expect("obj"),
+            ),
+            task: None,
+            meta: Some(
+                json!({"progressToken": "p"})
+                    .as_object()
+                    .cloned()
+                    .expect("obj"),
+            ),
+        };
+        let message = Message::from(
+            Request::with_params(RequestId::from("multi"), METHOD_TOOLS_CALL, &params)
+                .expect("params"),
+        );
+        let mut bytes = wire(&message);
+        let line_length = bytes.len() - 1;
+        assert!(line_length > 300, "a few hundred bytes: {line_length}");
+        // A second message right behind it, so the boundary between two lines
+        // inside one 16-byte buffer is crossed as well.
+        bytes.extend_from_slice(&wire(&Message::from(Request::without_params(
+            id(2),
+            METHOD_PING,
+        ))));
+
+        let mut reader = LineReader::new(CountingFills {
+            inner: BufReader::with_capacity(16, bytes.as_slice()),
+            fills: 0,
+        });
+        let first = reader.read_message().expect("read").expect("a message");
+        assert_eq!(first, message, "the message decodes exactly");
+        assert!(
+            reader.inner.fills >= line_length / 16,
+            "{} fill_buf calls for {line_length} bytes",
+            reader.inner.fills
+        );
+        let Message::Request(request) = first else {
+            panic!("a request")
+        };
+        assert_eq!(
+            KnownRequest::decode(Direction::ClientToServer, request),
+            Ok((RequestId::from("multi"), KnownRequest::ToolsCall(params)))
+        );
+        let second = reader.read_message().expect("read").expect("a message");
+        assert_eq!(
+            second,
+            Message::from(Request::without_params(id(2), METHOD_PING))
+        );
+        assert_eq!(reader.read_message(), Ok(None));
     }
 }
