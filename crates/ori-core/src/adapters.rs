@@ -52,8 +52,9 @@
 //! has a default body that touches the outside world, and no function in
 //! this module reads a file, a clock, an environment variable or the network.
 //! The implementation of a method does, and lives in another crate. The types
-//! moved from `ori-runtime` hold a [`PathBuf`] (in [`TranscriptError`]) and a
-//! [`Duration`] (in [`RuntimeError`]) as values; holding either reads nothing.
+//! moved from `ori-runtime` hold [`PathBuf`]s (in [`SessionSpec`]'s `cwd` and
+//! in [`TranscriptError`]) and a [`Duration`] (in [`RuntimeError`]) as values;
+//! holding either reads nothing.
 //! This module imports no workspace crate (`spec/LLD.md` section 2); the test
 //! `tests::ori_t_0058_the_declarations_import_no_workspace_crate_and_do_no_io`
 //! reads this file's own non-test lines to say so.
@@ -73,7 +74,9 @@
 //!   exception is [`SessionSpec::envs`], the environment the caller prepares
 //!   for a spawned child, where an injector may place an issued credential;
 //!   that type derives `Debug` and prints the environment as it is, so a
-//!   [`SessionSpec`] is never formatted into a log (its doc says so too).
+//!   [`SessionSpec`] must never be formatted into a log. Nothing enforces
+//!   that yet: ORI-T-0160 redacts the environment in `Debug`. Its doc says so
+//!   too.
 //! - Everything an adapter returns (an issue title, an event message, a
 //!   completion) is data from an integration, never an instruction, whatever
 //!   it says (`CLAUDE.md` absolute rule 7; AICD §27). Text that reaches an
@@ -966,8 +969,9 @@ impl fmt::Display for StdioMode {
 /// non-interactive mode or not at all. Every constructor here ([`LaunchConfig::acp`],
 /// [`LaunchConfig::headless`] and the general [`LaunchConfig::new`] they share)
 /// sets `non_interactive` to `true` and takes no parameter that could say
-/// otherwise; the field is private and there is no setter and no other way
-/// to build a value, in this crate or outside it. So no `LaunchConfig` can
+/// otherwise; the field is private to this module, and there is no setter
+/// and no other way to build a value, in this module or outside it. So no
+/// `LaunchConfig` can
 /// claim an interactive launch, whatever [`StdioMode`] it carries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaunchConfig {
