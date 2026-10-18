@@ -1535,8 +1535,10 @@ pub struct CallToolParams {
     /// The arguments, an object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<JsonObject>,
-    /// A request for task-augmented execution, carried so a server that did
-    /// not declare tasks can see it and refuse rather than silently ignore it.
+    /// A request for task-augmented execution. A server that did not declare
+    /// task support for `tools/call` must process the call normally and ignore
+    /// this field (MCP 2025-11-25, the tasks page's behavior requirements); it
+    /// is carried so the server sees it and ignores it on purpose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<JsonObject>,
     /// The request's `_meta` (a progress token, for instance).
