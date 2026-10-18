@@ -3049,6 +3049,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ori_t_0174_a_way_that_fails_at_a_directory_the_install_does_not_create_is_still_read_by_its_text()
+     {
+        // `nowhere` is not `ori-original`, so the way reaches nothing, and no
+        // install will change that. Its text is still read, as a second look
+        // that fails closed: `nowhere/..` is the hooks directory, and
+        // `nowhere/../../shared` is a directory that is there, with a link in
+        // it to a hook the installer replaces. These are over-refusals, kept.
+        let scratch = Scratch::new("way-text-over-refusal");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        let shared = repo.join(".git").join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        std::os::unix::fs::symlink("../hooks/post-merge", shared.join("relay")).unwrap();
+        for written in ["nowhere/../post-merge", "nowhere/../../shared/relay"] {
+            let link = hooks_dir.join("post-checkout");
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(written, &link).unwrap();
+            expect_refused_link(
+                &repo,
+                &spool,
+                &link,
+                Path::new(written),
+                &["post-checkout", "post-commit"],
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ori_t_0174_a_link_through_a_hook_that_preserve_will_re_point_is_refused() {
         // H4, with no user `post-commit`: `pre-push` links to the real
         // directory `x`, so the install keeps it as `ori-original/pre-push`,
