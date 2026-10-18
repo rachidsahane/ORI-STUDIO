@@ -1789,3 +1789,44 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 113 is released. Tier 2 (`barrier.rs`): the operator merges, with the rest of the pull request.
 
 **State after this section:** the claims held are 20, 105, 109 and 112. The next free identifier is ORI-T-0184.
+
+---
+
+## S2's repair reviewed; repair 2 (docs only) dispatched on claim 105; ORI-T-0163 back and under review
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**S2 (ORI-T-0169) integrated** on the session branch: 917d3af, c32f452, 0b75d0a and d063787, cherry-picked from f3d9d31. `cargo test --workspace --locked --no-fail-fast` passed 1696, failed 0, ignored 9, and workspace clippy, strict doc, fmt and gate 13 were clean. CI run 178 on 58474ac passed every job that ran, the test legs on Linux and macOS included. Its Windows test leg was cancelled by a newer push.
+
+**A focused review of repair 1** used two lenses, the code delta and the docs (`review-0169-r1-full.json`). It found nothing blocking and nothing should-fix:
+- The latch covers every closing path, and no `unrecorded` is lost.
+- The event payloads are byte-identical to repair 0's, shown by a probe on both trees.
+- `why` is always a `&'static str` constant.
+- No existing assertion was loosened.
+
+It recorded eleven notes. The lead takes the true doc errors among them into **repair 2** (attempt 3 of 3, docs and test comments only, written by the lead, applied by Haiku 5.5):
+- `null` for `task`, `_meta` or `arguments` decodes as absent and is not refused;
+- S6's branch point needs `admit` widened, and must not move into `call`;
+- the pipeline table's rows 6 and 7 now show `why`, and check 7's own `invalid_arguments`;
+- refusal 8's reply cannot say whether the refusal row was written, so the engine treats every `call_not_recorded` as a log that stopped;
+- the ticket rule's present-tense "checks" becomes what each tool's control must do, and `aicd_report` has no check yet;
+- `BoundCall` lists S5's ticket desk;
+- two test comments.
+
+The lead proved the twelve edits in a copy of 0ffc491: fmt, clippy, strict doc, `ori-mcp` 201 passed, `ori-gates` 194.
+
+Recorded, not changed:
+- this file's S2-F4 record (around line 1466) states the old log bound ("the window's limit plus one row per connection"); the bound is now twice the limit plus one row per connection, plus a handler's own rows;
+- S6's package must widen `admit` (the note above).
+
+**ORI-T-0163 (claim 112)** came back at fd5ee06: seven new tests, every gate green, and the Windows simulation passes (73 tests). The coder added two things beyond the package:
+- a cross-batch guard, so a late backend `RootGone` is not counted twice on Linux;
+- a silenced-backend test, so the probe is proved alone on Linux.
+
+The coder reported one stale comment: above `tests::ori_t_0054_the_removal_of_the_root_is_recorded_as_a_missed_state`, the comment and the `cfg(not(windows))` gate describe a limit that no longer holds. Changing them needs a `test_modified` decision; they are left. A three-lens review is running.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 105 | ORI-T-0169 repair 2 (docs and test comments only) | `crates/ori-mcp/src/server.rs`, `crates/ori-mcp/src/scopes.rs` (two doc comments), `crates/ori-mcp/src/tools/mod.rs` (two doc comments): the lead's twelve edits only | 2 | `/home/user/wt/ORI-T-0169-r2`, `docs/ORI-T-0169-r2` | Haiku 5.5 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 105 (repair 2), 109 and 112. The next free identifier is ORI-T-0184.
