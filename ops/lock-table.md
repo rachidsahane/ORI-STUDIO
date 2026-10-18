@@ -1014,3 +1014,31 @@ Contested, for the lead's reading on resume: 0144-F2 (the coder's own finding th
 | ORI-T-0163 | Windows: `ReadDirectoryChangesW` never reports the watched root's removal, so the watcher cannot detect it there (ORI-T-0159 gated that test off Windows). A root-existence probe at reconciliation | `crates/ori-watch/src/watcher.rs` or the engine | 1 | after ORI-T-0159 | 2026-10-12 |
 
 **State after this section:** the claims held are 20, 81, 86, 87, 88, 89 and 90, all paused. The next free identifier is ORI-T-0164.
+
+---
+
+## Resumed 2026-10-18: R44 and R45; repairs dispatched; claim 91; ORI-T-0164 allocated
+
+Written by the lead on 2026-10-18 under [[R31]]. The operator resumed the session, answered the four waiting questions ([[R45]], each as recommended) and set how agents are used ([[R44]]): the lead does the design, coders run on Sonnet 5.5, Haiku 5.5 only for mechanical work whose every decision is in the package, and the lead verifies every coder's work.
+
+| Ticket | Work | Model | Claim |
+|---|---|---|---|
+| ORI-T-0144, repair 1 | Two doc corrections the lead wrote word for word: the evidence lockout is permanent and product-wide (0144-F1, R45 point 3); the write-side gaps go to ORI-T-0161 | Haiku 5.5 | 81 |
+| ORI-T-0141, repair 1 | Three doc corrections the lead wrote word for word (review notes 0141-F3, F5, F6) | Haiku 5.5 | 86 |
+| ORI-T-0158, repair 1 | The lead's design for the three confirmed findings: decode by value (F1), direction-aware decoding (F2), the cap's justification (F3), plus notes F4, F5, F7, F10, F12 to F16 | Sonnet 5.5 | 89 |
+| ORI-T-0156, repair 1 | R45 points 1, 2 and 4 written into the spec, findings F1, F2, F3, F5, F8, F9, F11 to F14, F16 and F17; ORI-T-0152 (LLD's graph draws `ori-integrations` reading the store) folded in, because claim 87 already holds `spec/LLD.md` | Sonnet 5.5 (documentation role) | 87, widened to `spec/adr/ADR-0002-single-operator.md`, `spec/DATA_MODEL.md`, `spec/ROADMAP.md` |
+| ORI-T-0146 | Drop the sentence in `prover.rs` that ORI-T-0133 made false | Haiku 5.5 | **91** |
+
+| # | Ticket | Modules | Tier | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|
+| 91 | ORI-T-0146 | `crates/ori-gates/src/prover.rs` (doc comment only) | 2 | `fix/ORI-T-0146-prover-doc` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 91 is disjoint from every held claim; no claim holds `prover.rs` since claim 63 released. Claim 87's widening is disjoint from every other held claim too: no claim holds ADR-0002, DATA_MODEL or ROADMAP.
+
+ORI-T-0157 and ORI-T-0159 were built during the pause and never reviewed. ORI-T-0159 (1,078 lines, tier 2) goes to an independent multi-lens review on Opus; the lead reads ORI-T-0157 (one file, 122 lines).
+
+| Ticket | Work | Module | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0164 | A recovery path for a product whose evidence is locked by one refused evidence event (R45 point 3): a per-record evidence read that refuses only the records a bad event touches, or a quarantine event kind the operator appends, with `read_evidence` honouring it. A design decision; the lead brings options to the operator | `crates/ori-memory/src/barrier.rs`, `scope.rs` | 2 | **needs planning** | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 81, 86, 87, 88, 89, 90 and 91. The next free identifier is ORI-T-0165.
