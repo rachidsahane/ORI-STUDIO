@@ -594,8 +594,10 @@ pub trait Indexable: sealed::Sealed {
 // ---------------------------------------------------------------------------
 
 /// One already-capped, already-neutralized field value:
-/// `MemoryRecord.structured`'s own values. The only way to build one is
-/// `sanitize_field` (in this module) or reading a stored record back
+/// `MemoryRecord.structured`'s own values, and the sanitized form of agent
+/// text stored outside a memory record ([`sanitize_text`]). The only way to
+/// build one is `sanitize_field` (in this module), which [`submit_report`]
+/// and [`sanitize_text`] call, or reading a stored record back
 /// ([`read_records`]); there is no public constructor, so a value of this
 /// type is always either this barrier's own output or this barrier's own
 /// record of what it previously wrote.
@@ -1544,6 +1546,57 @@ const fn neutralize_char(ch: char) -> char {
 }
 
 // ---------------------------------------------------------------------------
+// sanitize_text: the public entry for agent text kept outside a record
+// ---------------------------------------------------------------------------
+
+/// Sanitizes agent free text that is stored outside a memory record: a
+/// plan's content, an escalation's question, recommendation and evidence
+/// descriptions. AICD §8, and `spec/SECURITY_NOTES.md`: "free text from
+/// agents passes the sanitization barrier before storage". Escalation
+/// E-0012, answered by the operator on 2026-10-11, chose this entry.
+///
+/// It applies `sanitize_field`, the transform [`submit_report`] applies to
+/// every field, with the cap the caller names instead of
+/// [`BarrierConfig::field_cap_chars`]. A plan is not a `MemoryRecord`, and
+/// `spec/DATA_MODEL.md` section 4's cap binds `MemoryRecord.structured`
+/// only. The result holds the sealed [`SanitizedField`], so a port that
+/// takes one can be reached only through this barrier, and the compiler
+/// checks that. Nothing is stored here, no event is appended, and the raw
+/// text is not kept: unlike a report field, it gets no evidence blob.
+///
+/// ```
+/// let sanitized = ori_memory::barrier::sanitize_text("plan\u{0}text", 100);
+/// assert_eq!(sanitized.field.text(), "plan\u{fffd}text");
+/// assert!(!sanitized.truncated);
+/// ```
+///
+/// A [`SanitizedField`] cannot be built around this function:
+///
+/// ```compile_fail
+/// let forged = ori_memory::barrier::SanitizedField { text: String::new() };
+/// ```
+#[must_use]
+pub fn sanitize_text(raw: &str, cap_chars: usize) -> SanitizedText {
+    let (text, truncated) = sanitize_field(raw, cap_chars);
+    SanitizedText {
+        field: SanitizedField { text },
+        truncated,
+    }
+}
+
+/// What [`sanitize_text`] returns: the sealed field, and whether the cap cut
+/// anything off, so the caller can refuse or record a truncation instead of
+/// storing less than it was given without saying so. AICD §8.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SanitizedText {
+    /// The sanitized text: at most the cap's number of `char`s, control
+    /// characters replaced with U+FFFD.
+    pub field: SanitizedField,
+    /// Whether the raw text held more `char`s than the cap.
+    pub truncated: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Storage: typed wire shapes and the (de)serialization through them
 // ---------------------------------------------------------------------------
 
@@ -1958,6 +2011,40 @@ mod tests {
     // -------------------------------------------------------------------
     // Vacuity: identity-function and the untrusted flip.
     // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0176_sanitize_text_is_the_report_transform_with_the_callers_cap() {
+        for raw in [
+            "plain",
+            "tab\tnew\nline\r",
+            "nul\u{0}del\u{7f}esc\u{1b}",
+            "é漢字🙂",
+            "",
+        ] {
+            for cap in [0, 1, 3, 4_000, 65_536] {
+                let (text, truncated) = sanitize_field(raw, cap);
+                let sanitized = sanitize_text(raw, cap);
+                assert_eq!(sanitized.field.text(), text, "{raw:?} at {cap}");
+                assert_eq!(sanitized.truncated, truncated, "{raw:?} at {cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn ori_t_0176_sanitize_text_neutralizes_controls_and_reports_a_cut() {
+        let sanitized = sanitize_text("a\u{0}b\u{1b}c\td", 100);
+        assert_eq!(sanitized.field.text(), "a\u{fffd}b\u{fffd}c\td");
+        assert!(!sanitized.truncated);
+
+        let sanitized = sanitize_text("漢字🙂x", 3);
+        assert_eq!(sanitized.field.text(), "漢字🙂");
+        assert_eq!(sanitized.field.char_len(), 3);
+        assert!(sanitized.truncated);
+
+        let sanitized = sanitize_text("", 0);
+        assert_eq!(sanitized.field.text(), "");
+        assert!(!sanitized.truncated);
+    }
 
     #[test]
     fn ori_t_0037_barrier_is_not_the_identity_function() {
