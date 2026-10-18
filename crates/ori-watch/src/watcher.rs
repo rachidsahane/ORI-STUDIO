@@ -3374,7 +3374,23 @@ mod tests {
         let scratch = Scratch::new("dotdotroot");
         let root = scratch.dir("root");
         fs::create_dir_all(root.join("sub")).unwrap();
-        let spelled = root.join("sub").join("..");
+        // Spelled as text. On Windows the scratch root is verbatim (`\\?\`),
+        // and `join` on a verbatim path resolves the `..` away, which would
+        // hand the watcher the root itself. Without the verbatim prefix the
+        // `..` stays in the path until the watcher canonicalises it.
+        let text = root.to_str().expect("the scratch root is UTF-8");
+        let plain = match text.strip_prefix(r"\\?\") {
+            Some(rest) if !rest.starts_with("UNC") => rest,
+            _ => text,
+        };
+        let separator = std::path::MAIN_SEPARATOR;
+        let spelled = PathBuf::from(format!("{plain}{separator}sub{separator}.."));
+        assert!(
+            spelled
+                .components()
+                .any(|component| component == Component::ParentDir),
+            "the spelled root keeps its `..`, or the test judges the root itself"
+        );
         let mut watcher = TreeWatcher::watch_with(&spelled, quick()).unwrap();
         assert_eq!(watcher.root(), root.as_path());
         fs::write(root.join("x.txt"), b"x").unwrap();
