@@ -1389,3 +1389,17 @@ Claim 98 is released. Slice S8 (`aicd_search`) now has its prerequisite, once S2
 | 100 | ORI-T-0139, code docs quoting the superseded `system` rule ("only for scheduled triggers and watchers") quote the current one (`spec/DATA_MODEL.md` section 4, with "the engine's recovery after a restart"). Five doc passages; every edit written by the lead | `crates/ori-core/src/types.rs`, `crates/ori-core/src/ticket.rs`, `crates/ori-store/src/event_log.rs`, `crates/ori-memory/src/barrier.rs`, `crates/ori-memory/src/scope.rs` (doc comments only) | 2 | Haiku 5.5 | `docs/ORI-T-0139-system-actor-rule` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
 
 Claim 100 is disjoint from the held claims (20, 90). Two passages the ticket named are left as they are. `ticket.rs`'s module doc already says `system` is also the recovery's actor. `barrier.rs`'s quote sits in a test's doc comment, which gate 5's detector reads as part of the test, so it is recorded, not edited.
+
+---
+
+## Claim 100 integrated: ORI-T-0139, the current `system` rule quoted in code docs
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 100 | ORI-T-0139, five doc passages now quote `spec/DATA_MODEL.md` section 4's current rule ("`system` is allowed only for scheduled triggers, watchers, and the engine's recovery after a restart"), each conclusion drawn from it unchanged | The Haiku coder stopped before any edit and was right to: the lead's edit 4 said the recovery "submits no record at all", while `spec/runbooks/recover-engine.md` step 1 records `credential.revoked` and `session.recovered`. The lead narrowed edit 4 to "submit no memory record" and edit 5 to "none of its steps reads memory", both supported by the runbook's complete list of steps, and the coder applied the five edits exactly. The lead read the diff: doc comments only, no code and no test, and every quotation matches DATA_MODEL line 123 | Fast-forwarded as cdedf41. fmt, strict doc and gate 13 clean on the session branch; the coder's `ori-gates` tests (192) and clippy on the three crates passed |
+
+Claim 100 is released.
+
+**State after this section:** the claims held are 20 and 90 (repair 2 handed back; its integration is built on `integ/ORI-T-0159` and under review). The next free identifier is ORI-T-0173.
