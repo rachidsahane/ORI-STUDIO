@@ -1899,3 +1899,36 @@ There were eight notes.
 Recorded, not changed: F11 (equivalent or masked mutants) and F12 (a way that only passes through `/proc` is refused, by design).
 
 **State after this section:** the claims held are 20, 109 (repair 1), 112 and 114. The next free identifier is ORI-T-0185 (ORI-T-0184, slice S7, is allocated, package under critique).
+
+---
+
+## ORI-T-0180 with ORI-T-0168 integrated after repair 1; follow-up ORI-T-0185 allocated
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**The re-review** of repair 1 used two lenses (security; docs and tests), one skeptic per finding, 3 agents (`review-0180-r1-full.json`). It found nothing blocking and nothing should-fix:
+- the security lens's own pass was cut short, so it read the walk rather than running it. Its one finding's skeptic then ran real git 2.43 against a copy of `d10cd23`. The F1 layouts written into a hook link's own way (`../logs/` and a missing working-tree directory, each followed by 40 × `../` and `proc/self/cwd/...`) are refused with `HookLinkDependsOnProcess` through `/proc`. Repair 1 closes F1 as intended;
+- the docs-and-tests lens found every changed doc true. The chain check's "a missing directory reaches nothing" is scoped to that check, and that check is unchanged;
+- no test that existed at `a8a3a11` changed; 150 `ori-watch` tests pass.
+
+**The gate 13 refusal** of `ba77887`, which carried two `Ticket:` trailers, came from the lead's repair package, which told the coder to write both. At integration the lead cherry-picked the commit with its message reworded to the single trailer `Ticket: ORI-T-0180`. The body now says that its `ori-original/` and `status()` parts also serve ORI-T-0168. The coder's branch was not rewritten. Recorded as a lead error.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 109 | ORI-T-0180 (hook links through a per-process directory) with ORI-T-0168 (`ori-original` a link or not a directory), after repair 1 | Sonnet 5.5, attempt 2 of 3. The coder: 150 `ori-watch` tests, 1591 workspace tests, the Windows simulation, mutations m1 to m9 each killed | Cherry-picked as `d59cac1`, `48b5cf7`, `66e9efd` (the reworded `ba77887`) and `53bf8c6`. Their diff to `hooks.rs` equals `a8a3a11..d10cd23`'s, byte for byte. fmt 0, clippy `-D warnings` 0, strict doc 0, `cargo test --workspace --locked` 0 (1718 passed, 0 failed), gate 13 over the four commits 0 |
+
+Claim 109 is released.
+
+**Follow-up ORI-T-0185, allocated: hook links are judged against the tree as it stands at the install.** It covers three cases, two of them recorded by the re-review:
+- **A checkout changes the working tree.** The re-review's skeptic reproduced three layouts with real git. In each, the install passes and the next `git checkout other` records a false `post-merge`:
+  - a missing `d` that branch `other` tracks as a link to `/proc/self/cwd`;
+  - the same `d` tracked as a link to `.git/hooks`;
+  - a tracked regular file `f` that `other` tracks as a link to `.git/hooks/post-merge`.
+
+  It is not a regression: `a8a3a11` passed all three. What a checkout will put at a path is not knowable at the install. The candidate rule is to refuse a hook link whose way enters the working tree; the lead decides it in the package, against the false refusals it costs.
+- **`status()` does not judge the links inside `ori-original/`.** A link named for a managed hook, added there after a clean install, makes `status()` report the chain healthy. The next `install()` refuses it. Decision 3 of repair 1 aligned `status()` for the directory only.
+- **The chain check's text reading of an ordinary link** whose way passes a directory git creates later and then `..`. This is pre-existing, and the lead recorded it before repair 1.
+
+It must land before ORI-T-0055.
+
+**State after this section:** the claims held are 20, 112 and 114. The next free identifier is ORI-T-0186 (ORI-T-0184, slice S7, is allocated, its package under revision after its critique; ORI-T-0185 is allocated above).
