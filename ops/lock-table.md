@@ -1262,3 +1262,23 @@ The repair also takes nine notes: F8, F11, F13, F14, F16, F17, F18, F19, F20 and
 **S1 repair 1** (attempt 2 of 3), Sonnet 5.5, on claim 96: `scopes.rs`, `ports.rs`, and `lib.rs`'s doc. The S2 design takes the same decisions: `Binding::caller()` builds the identity-carrying `Caller`, and S6 decides per call.
 
 **State after this section:** the claims held are 20, 90 (repair 1 under review), 94 (stopped), 95 (stopped), 96 (repair 1) and 98. The next free identifier is ORI-T-0172.
+
+---
+
+## Claim 94 reviewed; ORI-T-0161 repair 1 dispatched; the test question goes to the operator
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**ORI-T-0161 review.** Four lenses ran (correctness and security, tests, the proposed test patch, platform), with two skeptics per finding: 19 agents. The results are in the session scratchpad (`review-0161-full.json`). Seven findings were confirmed, one of them blocking, and nine recorded as notes.
+
+| Finding | What | The lead's decision |
+|---|---|---|
+| F1 (blocking), F2 | On Windows, `create_new` on an existing directory or junction fails as access denied, not as already existing. It becomes `Io` with no `MethodologyRef`, and an ungated test is expected to fail on `windows-latest` | When the exclusive create fails otherwise than "already exists", look at the path without following it. An entry there is `FileAlreadyExists` on every platform |
+| F4 | Uniqueness was decided by the file system alone. With the earlier file gone, a chosen, reused evidence id was accepted. Reproduced | Before anything is created, refuse an id that an earlier `memory.evidence_stored` event names (`IdAlreadyRecorded`). An event with no readable id does not block writes |
+| F5 | A `;` in the new Mermaid note breaks the diagram (reproduced with the real parser) | Replaced with `,` |
+| F3 | `scope.rs`'s module doc on raw evidence is stale after the fix (outside claim 94) | Goes with the operator's answer on the test patch |
+| F6, F7 | Rated notes by their skeptics | F7's citation corrected; F6 recorded |
+
+**ORI-T-0161 repair 1** (attempt 2 of 3), Sonnet 5.5, on claim 94, `barrier.rs` only. The repair also takes notes F8, F10 and F12. The two existing tests in `scope.rs` and `oplog.rs` still fail with the fix, as before. Changing them is the operator's decision (`test_modified`), and the lead asks for it now. The patch keeps every `refused(...)` assertion. It changes one assertion's message only, which review note F15 says now checks the fixture rather than the barrier. With the log check of repair 1, the reviewers' alternative for the reused-id case (note F16) no longer works, so the patch's planted events stay.
+
+**State after this section:** the claims held are 20, 90 (repair 1 under review), 94 (repair 1; `test_modified` with the operator), 95 (stopped), 96 (repair 1) and 98 (under review). The next free identifier is ORI-T-0172.
