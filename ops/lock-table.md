@@ -1235,3 +1235,30 @@ Claim 98 is disjoint from every held claim (20, 90, 94, 95, 96). Claim 94 holds 
 S2 is under an adversarial design critique, and dispatches after S1 (claim 96) is integrated. A documentation ticket will carry S2's decisions into `spec/API_SPEC.md` sections 2 and 3, where the spec is silent today: payloads, the refusal shape, schemas and the rate limit.
 
 **State after this section:** the claims held are 20, 90 (repair 1), 94 (stopped), 95 (stopped), 96 (under review) and 98. The next free identifier is ORI-T-0171.
+
+---
+
+## Claim 96 reviewed; S1 repair 1 dispatched; ORI-T-0171 allocated
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**ORI-T-0166 (slice S1) review.** Four lenses ran (design conformance, security, tests, platform), with two skeptics per finding: 19 agents. The results are in the session scratchpad (`review-0166-full.json`). Six findings were confirmed, one refuted, and fifteen recorded as notes. Two confirmed findings trace to the lead's own package, so the repair changes the design too:
+
+| Finding | What | The lead's decision |
+|---|---|---|
+| F1 | `UserToolHost` took the grant by reference, so one decision could serve any number of calls and outlive a revocation. The docs claimed the opposite | The host takes the grant **by value**; one decision covers one host call, and S2 and S6 decide afresh for each |
+| F2 | Anyone can build the inputs and mint a grant; "four checks" where there are three. Skeptics: note | The docs state that the seal proves the decision ran, not that its inputs are true, and where the inputs must come from |
+| F3 | The text-only condition was left to the tier 1 host | The proxy (S6, tier 2) enforces it on whatever the host returns |
+| F4 | The desks had no agent identity and were told the role decision was made for them | `Caller` gains the identity. The desks record with it and route through the owner's own checks (`Lifecycle::advance`) |
+| F6 | A refusal's doc stated an undecided rule that would refuse the lead's own tools | The docs carry S2's ticket rule exactly |
+| F7 | The stable toolchain never checks the `compile_fail` error codes, and the codes hide the fences from the gate 5 detector | Bare `compile_fail` fences with snippets that can fail for one reason only, plus a stable probe test |
+
+The repair also takes nine notes: F8, F11, F13, F14, F16, F17, F18, F19, F20 and F21, with F9 as a stated limit. F12 and F15 are recorded without action.
+
+| Ticket | What | Modules | Tier | State | Recorded |
+|---|---|---|---|---|---|
+| ORI-T-0171 | Review note 0166-F22, pre-existing: `crates/ori-gates/src/modified_tests.rs`'s `doc_tests()` does not track fences it cannot run. After a Mermaid block it pairs fences out of phase and compares prose instead of doctests | `crates/ori-gates/src/modified_tests.rs` | 1 | ready | 2026-10-18 |
+
+**S1 repair 1** (attempt 2 of 3), Sonnet 5.5, on claim 96: `scopes.rs`, `ports.rs`, and `lib.rs`'s doc. The S2 design takes the same decisions: `Binding::caller()` builds the identity-carrying `Caller`, and S6 decides per call.
+
+**State after this section:** the claims held are 20, 90 (repair 1 under review), 94 (stopped), 95 (stopped), 96 (repair 1) and 98. The next free identifier is ORI-T-0172.
