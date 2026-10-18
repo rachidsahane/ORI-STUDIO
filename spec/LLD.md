@@ -58,7 +58,7 @@ flowchart TB
   RT --> BRK[ori-broker]
   MCP --> MEM[ori-memory]
   ORC --> MEM
-  RPC & FLOWS & WATCH & MCP & INT & NOT & CAL & ORC & GATES & RT & BRK & MEM --> STORE[ori-store]
+  RPC & FLOWS & WATCH & MCP & NOT & CAL & ORC & GATES & RT & BRK & MEM --> STORE[ori-store]
   STORE --> CORE[ori-core]
 ```
 
