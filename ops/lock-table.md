@@ -1208,3 +1208,30 @@ F3, the link scan failing open when `canonicalize` fails, was contested, and bot
 **Claim 96 (ORI-T-0166, slice S1) is built.** Two commits, 58fcd57 and 8214add. The coder reports 1379 workspace tests passing and hand mutations caught. The lead read the roles table cell by cell against the design, the order project, then reach, then role, and the sealing of `UserToolGrant`. The four-lens review is running.
 
 **State after this section:** the claims held are 20, 90 (repair 1 dispatched), 94 (stopped), 95 (stopped) and 96 (under review). The next free identifier is ORI-T-0169.
+
+---
+
+## Claim 97 confirmed by CI; claim 98 dispatched; slice S2 designed
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+**CI confirmed ORI-T-0167.** Run 153 on 12474b7 passed all 17 jobs, among them `clippy (windows-latest)`, `test (windows-latest)`, `test (macos-latest)` and gate 7. This was the first full Windows test run since ORI-T-0144 landed, so the crates after `ori-memory` are proven there too.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 98 | ORI-T-0170, batch 10 prerequisite PM1: `Retrieval::search`, admitted and capped results over a search authorization (the lead's design) | `crates/ori-memory/src/retrieval.rs` | 1 | Sonnet 5.5 | `feat/ORI-T-0170-search-entry` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 98 is disjoint from every held claim (20, 90, 94, 95, 96). Claim 94 holds `barrier.rs`, which PM1 reads and does not write.
+
+**Slice S2 (ORI-T-0169, the MCP server core) is designed, not dispatched.** The lead mapped the wire, the contracts, the event precedent and the search path with a five-agent read, and decided the gaps it found:
+- the session binding;
+- a clock port and a session port;
+- the pipeline's nine checks, each with its own refusal;
+- the input schemas, published and enforced from one source;
+- the three event payloads;
+- refusals before the effect as JSON-RPC errors, failures after it as `isError` results;
+- a rate limit, as MCP requires.
+
+S2 is under an adversarial design critique, and dispatches after S1 (claim 96) is integrated. A documentation ticket will carry S2's decisions into `spec/API_SPEC.md` sections 2 and 3, where the spec is silent today: payloads, the refusal shape, schemas and the rate limit.
+
+**State after this section:** the claims held are 20, 90 (repair 1), 94 (stopped), 95 (stopped), 96 (under review) and 98. The next free identifier is ORI-T-0171.
