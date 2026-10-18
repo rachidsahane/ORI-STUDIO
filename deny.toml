@@ -87,10 +87,12 @@ allow-wildcard-paths = false
 # on 2026-10-12): the one version-pinned exception to `multiple-versions`.
 # `windows-sys` is locked at 0.60.2 (through `keyring`, `notify` and
 # `winapi-util`) and at 0.61.2, which only `mio` 1.x brings in, under `notify`.
-# It is pinned to the version, so any other duplicate, and any later bump of
-# either `windows-sys`, is still refused. It is not a general relaxation.
+# It is pinned to the version: a third `windows-sys`, a change of 0.61.2 itself,
+# and any other crate's duplicate are still refused. A bump of the 0.60 line
+# alone is not seen while 0.61.2 is skipped, because only one other version is
+# then left to count. It is not a general relaxation.
 skip = [
-    { crate = "windows-sys@0.61.2", reason = "E-0009: only mio 1.x under notify 8.2.0 depends on windows-sys 0.61; notify takes mio on Linux, Android and the BSDs and mio takes windows-sys on Windows only, so on no single target do both windows-sys versions build" },
+    { crate = "windows-sys@0.61.2", reason = "E-0009: only mio 1.x under notify 8.2.0 depends on windows-sys 0.61; notify takes mio on Linux, Android, the BSDs and iOS (and on macOS only under its macos_kqueue feature) and mio takes windows-sys on Windows only, so on no single target do both windows-sys versions build" },
 ]
 
 [sources]
