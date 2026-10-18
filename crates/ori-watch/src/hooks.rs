@@ -67,7 +67,10 @@
 //! one level, so it still reaches what it stood for. The report says so
 //! ([`InstallOutcome::InstalledPreserving`]). If the preserved name is taken
 //! the installer refuses ([`HooksError::PreservedNameTaken`]) rather than
-//! choose which of two hooks to lose.
+//! choose which of two hooks to lose. `ori-original/` is the installer's, so an
+//! `ori-original` that is a link, or not a directory, refuses the install
+//! ([`HooksError::HooksDirNotADirectory`]) whatever the hooks are. A link would
+//! make the scripts run whatever it leads to, themselves included.
 //!
 //! **One arrangement is refused, and it is looked for in every entry of the
 //! hooks directory, not only the four hooks.** A link that, followed to its
@@ -317,7 +320,7 @@ pub enum HooksError {
         /// The configured value, as data.
         value: String,
     },
-    /// `.git/hooks` is a link or a file.
+    /// `.git/hooks`, or `ori-original/` in it, is a link or not a directory.
     HooksDirNotADirectory {
         /// The path.
         path: PathBuf,
@@ -683,7 +686,10 @@ impl GitHooks {
     /// [`HooksError::GitDirNotADirectory`] when `.git` has become a link or a
     /// file since [`GitHooks::new`], [`HooksError::ConfigNotReadable`] and
     /// [`HooksError::HooksPathConfigured`] when `.git/config` cannot be read or
-    /// sets `core.hooksPath`, [`HooksError::HooksDirNotADirectory`],
+    /// sets `core.hooksPath`, [`HooksError::HooksDirNotADirectory`] when the
+    /// hooks directory, or the `ori-original` in it, is a link or not a
+    /// directory (whatever the hooks are: a link there would make every script
+    /// run whatever it leads to, itself included),
     /// [`HooksError::HookNotAFile`], [`HooksError::HookLinksToManagedHook`]
     /// and [`HooksError::PreservedNameTaken`] when what is in the hooks
     /// directory cannot be kept safely, [`HooksError::HookAppeared`] when a
@@ -702,6 +708,27 @@ impl GitHooks {
             Err(source) => {
                 return Err(HooksError::Io {
                     path: hooks_dir,
+                    source,
+                });
+            }
+        }
+        // `ori-original/` is the installer's: absent, or a real directory,
+        // whatever the hooks are. The scripts run
+        // `ori-original/<their own name>` when it is executable, so a link
+        // there (`ori-original -> .`) makes each script run itself.
+        let preserved_dir = hooks_dir.join(PRESERVED_DIR);
+        match fs::symlink_metadata(&preserved_dir) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(HooksError::HooksDirNotADirectory {
+                        path: preserved_dir,
+                    });
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(HooksError::Io {
+                    path: preserved_dir,
                     source,
                 });
             }
@@ -788,7 +815,8 @@ impl GitHooks {
             Examined::Foreign => {
                 // A link to a hook we replace was refused before any plan was
                 // made (`refuse_if_a_link_reaches_a_managed_hook`), whatever
-                // its name.
+                // its name. `install` refused such an `ori-original` already,
+                // and this repeats the look for the hook it is about to keep.
                 let directory = hooks_dir.join(PRESERVED_DIR);
                 match fs::symlink_metadata(&directory) {
                     Ok(metadata) => {
@@ -3916,6 +3944,149 @@ mod tests {
         );
         assert_eq!(second.events.len(), 4, "{second:?}");
         assert_eq!(second.events[0].fields, vec!["e", "f"]);
+    }
+
+    // ---- ORI-T-0168: ori-original is absent or a real directory ----
+
+    /// What a refused installation must leave behind it: the entries of the
+    /// hooks directory as they were, and no spool.
+    fn assert_nothing_written(repo: &Path, spool: &Path, names_before: &[&str]) {
+        assert_eq!(
+            hook_dir_names(repo),
+            names_before,
+            "a refused installation wrote into the hooks directory"
+        );
+        assert!(
+            !spool.exists(),
+            "the spool was created by a refused install"
+        );
+    }
+
+    /// The repository for the `ori-original` tests: a hooks directory and
+    /// nothing in it.
+    fn repository_with_an_empty_hooks_directory(scratch: &Scratch) -> (PathBuf, PathBuf, PathBuf) {
+        let (repo, spool) = skeleton(scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        (repo, spool, hooks_dir)
+    }
+
+    /// Installs and expects `HooksDirNotADirectory` for `expected`, and that
+    /// nothing was written.
+    fn expect_refused_ori_original(
+        repo: &Path,
+        spool: &Path,
+        expected: &Path,
+        names_before: &[&str],
+    ) {
+        let error = GitHooks::new(repo, spool).unwrap().install().unwrap_err();
+        match &error {
+            HooksError::HooksDirNotADirectory { path } => assert_eq!(path, expected),
+            other => panic!("expected HooksDirNotADirectory, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+        assert_nothing_written(repo, spool, names_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0168_an_ori_original_that_links_to_the_hooks_directory_is_refused_with_no_hook_of_anyone_elses()
+     {
+        let scratch = Scratch::new("ori-original-dot");
+        let (repo, spool, hooks_dir) = repository_with_an_empty_hooks_directory(&scratch);
+        let preserved_dir = hooks_dir.join("ori-original");
+        std::os::unix::fs::symlink(".", &preserved_dir).unwrap();
+
+        // The premise: through the link, `ori-original/<name>` is the hooks
+        // directory again, at every depth, so a script that runs it when it is
+        // executable would run itself.
+        assert_eq!(
+            fs::canonicalize(preserved_dir.join("ori-original")).unwrap(),
+            fs::canonicalize(&hooks_dir).unwrap(),
+            "the layout is not the one that loops, so the test proves nothing"
+        );
+
+        expect_refused_ori_original(&repo, &spool, &preserved_dir, &["ori-original"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0168_an_ori_original_that_links_out_of_the_repository_is_refused() {
+        let scratch = Scratch::new("ori-original-out");
+        let (repo, spool, hooks_dir) = repository_with_an_empty_hooks_directory(&scratch);
+        let elsewhere = scratch.dir("elsewhere");
+        let theirs = "#!/bin/sh\necho theirs\n";
+        fs::write(elsewhere.join("post-commit"), theirs).unwrap();
+        make_executable(&elsewhere.join("post-commit")).unwrap();
+        let preserved_dir = hooks_dir.join("ori-original");
+        std::os::unix::fs::symlink(&elsewhere, &preserved_dir).unwrap();
+
+        expect_refused_ori_original(&repo, &spool, &preserved_dir, &["ori-original"]);
+        assert_eq!(
+            fs::read_dir(&elsewhere).unwrap().count(),
+            1,
+            "something was written beyond the link"
+        );
+        assert_eq!(
+            fs::read_to_string(elsewhere.join("post-commit")).unwrap(),
+            theirs
+        );
+    }
+
+    #[test]
+    fn ori_t_0168_an_ori_original_that_is_a_file_is_refused() {
+        let scratch = Scratch::new("ori-original-file");
+        let (repo, spool, hooks_dir) = repository_with_an_empty_hooks_directory(&scratch);
+        let preserved_dir = hooks_dir.join("ori-original");
+        fs::write(&preserved_dir, "not a directory\n").unwrap();
+
+        expect_refused_ori_original(&repo, &spool, &preserved_dir, &["ori-original"]);
+        assert_eq!(
+            fs::read_to_string(&preserved_dir).unwrap(),
+            "not a directory\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0168_an_ori_original_made_a_link_after_an_install_is_refused_on_the_next() {
+        let scratch = Scratch::new("ori-original-after");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        let written: Vec<Vec<u8>> = GitHook::ALL
+            .iter()
+            .map(|hook| fs::read(hook_path(&repo, *hook)).unwrap())
+            .collect();
+
+        let preserved_dir = hooks_dir.join("ori-original");
+        std::os::unix::fs::symlink(".", &preserved_dir).unwrap();
+        let error = hooks.install().unwrap_err();
+        match &error {
+            HooksError::HooksDirNotADirectory { path } => assert_eq!(path, &preserved_dir),
+            other => panic!("expected HooksDirNotADirectory, got {other}"),
+        }
+        assert_eq!(
+            hook_dir_names(&repo),
+            [
+                "ori-original",
+                "post-commit",
+                "post-merge",
+                "post-rewrite",
+                "pre-push"
+            ],
+            "a refused installation wrote into the hooks directory"
+        );
+        // The first install made the spool; the refused one added nothing to it.
+        assert_eq!(fs::read_dir(&spool).unwrap().count(), 0);
+        for (hook, before) in GitHook::ALL.iter().zip(&written) {
+            assert_eq!(
+                &fs::read(hook_path(&repo, *hook)).unwrap(),
+                before,
+                "{hook:?} changed under a refused installation"
+            );
+        }
     }
 
     // ---- the scripts, run by a real shell and by real git ----
