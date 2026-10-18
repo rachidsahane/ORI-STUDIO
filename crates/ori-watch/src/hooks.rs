@@ -2710,7 +2710,17 @@ mod tests {
         // different working directory.
         for plain in [
             PathBuf::from("spool"),
-            scratch.path.join("x").join("..").join("spool"),
+            // Built as text: on Windows the scratch path is verbatim (`\\?\`),
+            // and `join` normalizes a `..` away on a verbatim path, which
+            // would leave a plain sibling directory to judge.
+            {
+                let mut text = scratch.path.clone().into_os_string();
+                for part in ["x", "..", "spool"] {
+                    text.push(std::path::MAIN_SEPARATOR_STR);
+                    text.push(part);
+                }
+                PathBuf::from(text)
+            },
         ] {
             let error = GitHooks::new(&repo, &plain).unwrap_err();
             assert!(

@@ -2584,6 +2584,15 @@ mod tests {
     fn ori_t_0054_an_edit_inside_a_linked_worktree_is_reported_relative_to_the_worktree() {
         let scratch = Scratch::new("worktree");
         let repo = scratch.dir("repo");
+        // `path` without the verbatim prefix (`\\?\`) that `fs::canonicalize`
+        // gives on Windows: git for Windows cannot take it, as a working
+        // directory or as an argument. Elsewhere, `path` as it is.
+        fn for_git(path: &Path) -> PathBuf {
+            match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+                Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+                _ => path.to_path_buf(),
+            }
+        }
         let git = |dir: &Path, args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
@@ -2594,7 +2603,7 @@ mod tests {
                     "init.defaultBranch=main",
                 ])
                 .args(args)
-                .current_dir(dir)
+                .current_dir(for_git(dir))
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("HOME", &scratch.path)
                 .env("XDG_CONFIG_HOME", &scratch.path)
@@ -2613,6 +2622,7 @@ mod tests {
         git(&repo, &["commit", "-q", "-m", "first"]);
         // A session's worktree: a sibling directory whose `.git` is a file.
         let worktree = scratch.path.join("session-worktree");
+        let worktree_for_git = for_git(&worktree);
         git(
             &repo,
             &[
@@ -2621,7 +2631,7 @@ mod tests {
                 "-q",
                 "-b",
                 "feat/T-1",
-                worktree.to_str().unwrap(),
+                worktree_for_git.to_str().unwrap(),
             ],
         );
         assert!(worktree.join(".git").is_file());
