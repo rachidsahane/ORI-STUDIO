@@ -128,7 +128,10 @@
 //! already created by `ProductDb::open`; see `crates/ori-store/src/db.rs`),
 //! named by the evidence id the caller supplied, and records only a pointer
 //! to that file ([`EvidenceBlob::content_ref`]) plus its content type in the
-//! event log, through one `memory.evidence_stored` event per field. Nothing
+//! event log, through one `memory.evidence_stored` event per field. Every
+//! file is created, never overwritten, and all of them are written before
+//! any event is appended; "Reading a blob back", decision 7, says how and
+//! what a failure leaves behind. Nothing
 //! in this module ever indexes a file; that is not because indexing code
 //! here happens not to be written, it is because [`EvidenceBlob`] has **no
 //! method that returns its content as text at all**, only
@@ -158,11 +161,17 @@
 //!   participant Disk as product evidence/ directory
 //!   Caller->>Barrier: submit_report(source, NewReport { fields: raw text })
 //!   loop each field
-//!     Barrier->>Barrier: sanitize_field (cap chars, neutralize controls)
-//!     Barrier->>Disk: write raw_text verbatim to evidence/<id>
-//!     Barrier->>Log: append memory.evidence_stored (content_ref, content_type, untrusted=true)
+//!     Barrier->>Barrier: sanitize_field (cap chars, neutralize controls), encode the blob's event payload
 //!   end
 //!   Barrier->>Barrier: untrusted_for(source), never from a field
+//!   Barrier->>Disk: symlink_metadata(evidence/), once: a link is refused (ORI-T-0161)
+//!   loop each field, pass 1
+//!     Barrier->>Disk: create_new, then write raw_text verbatim to evidence/<id>.txt
+//!     Note over Barrier,Disk: anything already at the path is refused;<br/>a failure removes this call's files and no event exists yet
+//!   end
+//!   loop each field, pass 2
+//!     Barrier->>Log: append memory.evidence_stored (content_ref, content_type, untrusted=true)
+//!   end
 //!   Barrier->>Log: append memory.record_created (sanitized fields, provenance, untrusted)
 //!   Log-->>Barrier: committed
 //!   Barrier-->>Caller: Submission (record, evidence, truncated_fields)
@@ -264,11 +273,54 @@
 //!    the offending string, cut to 256 characters and quoted) so a human can
 //!    find it; a recovery path (a per-record read, or a quarantine event
 //!    kind) is ORI-T-0164.
-//! 7. **Unchanged.** [`submit_report`] writes what it wrote before, and the
-//!    event log is never updated. It still writes through a link already
-//!    standing at `<ID>.txt` or at `evidence/`, and overwrites the file of a
-//!    reused evidence id; that is out of this ticket's scope, and ORI-T-0161
-//!    refuses both at write time.
+//! 7. **Writing refuses what reading refuses, and writes every file before
+//!    it appends any event (ORI-T-0161).** What [`submit_report`] persists is
+//!    unchanged, and the event log is never updated. What it no longer does
+//!    is write through a link or over a file: AICD §8 keeps raw, untrusted
+//!    text inside the evidence directory, in a file no earlier submission
+//!    owns. In order:
+//!    - **The directory is examined once, before anything is created.**
+//!      `std::fs::symlink_metadata` (which does not follow) of
+//!      `<product dir>/evidence`: a symbolic link is
+//!      [`BarrierError::EvidenceWriteRefused`] with
+//!      [`EvidenceWriteFault::EvidenceDirIsLink`]; a directory proceeds;
+//!      absent, not a directory, or any other failure is [`BarrierError::Io`],
+//!      fail closed. `ProductDb::open` creates the directory
+//!      (`ensure_dir` in `crates/ori-store/src/db.rs`), so absent means
+//!      something removed it. A report with no fields creates no file and
+//!      examines nothing.
+//!    - **Pass 1 creates and writes every field's file**, each opened with
+//!      `OpenOptions::new().write(true).create_new(true)`. `create_new` is
+//!      POSIX `open` with `O_CREAT | O_EXCL`, and Windows `CREATE_NEW`: it
+//!      fails when anything stands at the path and does not follow a link at
+//!      the final component, which POSIX states for `O_EXCL` "regardless of
+//!      the contents of the symbolic link", so a dangling link is refused and
+//!      nothing is created at its target. `ErrorKind::AlreadyExists` is
+//!      [`EvidenceWriteFault::FileAlreadyExists`]: a regular file (an
+//!      evidence id used before, or twice in one report), a directory, or a
+//!      link, dangling or not, stands at the path. Any other error is
+//!      [`BarrierError::Io`]. On the first failure the files this call
+//!      created are removed (best effort, `remove_file` on those paths and on
+//!      no other) and the error is returned. No event has been appended.
+//!    - **Pass 2 appends the events**: one `memory.evidence_stored` per
+//!      field, in field order, then the one `memory.record_created`. Every
+//!      payload is encoded before pass 1 starts, so the only failure left in
+//!      pass 2 is the log refusing an append. That leaves the files pass 1
+//!      wrote with no event, and the events already appended (if any) with
+//!      the record missing, as before this ticket. A file with no event is
+//!      unreferenced: [`read_evidence`] projects events, never the directory,
+//!      so it never hands one out. Its name is taken, though: a retry of the
+//!      same report needs fresh evidence ids.
+//!
+//!    **What this does not catch:** the gap between examining the directory
+//!    and creating a file in it (a directory swapped for a link in between is
+//!    followed, as is a link in `<product dir>` itself or above it, the root
+//!    the engine chose, as for reading, decision 5); the cleanup after a
+//!    failed pass 1, which removes the name this call created and would
+//!    remove whatever has replaced it since; and a bind mount or a junction
+//!    (the tests are Unix only). **What it does catch, though it is not a
+//!    link:** a hard link standing at the path, which `create_new` refuses as
+//!    an existing entry.
 //!
 //! ```mermaid
 //! flowchart TD
@@ -287,6 +339,9 @@
 use core::fmt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
+use std::io::Write;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -766,6 +821,37 @@ impl fmt::Display for EvidenceRefFault {
     }
 }
 
+/// Why [`submit_report`] refused to write an evidence file: AICD §8 (raw,
+/// untrusted text stays in the product's own evidence directory, "referenced
+/// from the record by identifier"). The write-side counterpart of
+/// [`EvidenceRefFault`]. See the module doc comment, "Reading a blob back",
+/// decision 7.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum EvidenceWriteFault {
+    /// `<product dir>/evidence` is a symbolic link, so a file created in it
+    /// would land wherever the link points. Found once, before any file is
+    /// created; nothing was written.
+    EvidenceDirIsLink,
+    /// Something already stands at `<product dir>/evidence/<id>.txt`, so the
+    /// file was not created. Covers a regular file (an evidence id used by an
+    /// earlier submission, or twice in one report), a directory, and a link,
+    /// dangling or not: `create_new` refuses every one of them and follows
+    /// none, so nothing was written to the entry or to a link's target.
+    FileAlreadyExists,
+}
+
+impl fmt::Display for EvidenceWriteFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::EvidenceDirIsLink => "the evidence directory is a symbolic link",
+            Self::FileAlreadyExists => {
+                "something already stands at this blob's evidence file path (a file, a directory or a link), and an evidence file is only ever created"
+            }
+        })
+    }
+}
+
 /// A failure sanitizing, storing or reading back a report.
 ///
 /// The same split `crate::barrier`'s sibling modules in `ori-broker` draw
@@ -773,8 +859,10 @@ impl fmt::Display for EvidenceRefFault {
 /// `Malformed` and `Serialize` are this module's own parse or encode
 /// failures, never a refusal by a control; a genuine refusal inside
 /// [`EventLogError`] still carries its own [`ori_core::error::MethodologyRef`],
-/// reachable through [`BarrierError::methodology_ref`], and so does
-/// [`BarrierError::EvidenceRefRefused`], this module's own refusal (AICD §8).
+/// reachable through [`BarrierError::methodology_ref`], and so do
+/// [`BarrierError::EvidenceRefRefused`] and
+/// [`BarrierError::EvidenceWriteRefused`], this module's own refusals
+/// (AICD §8).
 /// Ruling R20 in `ops/rulings.md` defers `thiserror`; this is the
 /// hand-written `Display` and [`std::error::Error`] implementation that
 /// stands until then.
@@ -824,6 +912,24 @@ pub enum BarrierError {
         /// quoted and escaped by this error's `Display`.
         found: String,
     },
+    /// [`submit_report`] refused to write an evidence file because of what
+    /// stands at its path or at the evidence directory: a refusal under AICD
+    /// §8. The report is not stored: the files this call had already created
+    /// are removed (best effort) and no event was appended. See the module
+    /// doc comment, "Reading a blob back", decision 7.
+    EvidenceWriteRefused {
+        /// The blob whose file was refused: for
+        /// [`EvidenceWriteFault::EvidenceDirIsLink`], the first field's, the
+        /// one the check was made for.
+        evidence_id: Id,
+        /// What was refused: the evidence file's path, or for
+        /// [`EvidenceWriteFault::EvidenceDirIsLink`] the evidence directory's.
+        /// Built by this module from the product directory and an [`Id`],
+        /// never from a field's text.
+        path: PathBuf,
+        /// Which rule refused it.
+        fault: EvidenceWriteFault,
+    },
 }
 
 impl BarrierError {
@@ -836,16 +942,19 @@ impl BarrierError {
 
     /// The methodology section a refusal is made under, for the refusals
     /// [`EventLogError`] carries, and for [`BarrierError::EvidenceRefRefused`]
-    /// (AICD §8, "referenced from the record by identifier"), and for nothing
-    /// else: see [`EventLogError`]'s own `methodology_ref`.
+    /// and [`BarrierError::EvidenceWriteRefused`] (both AICD §8, "referenced
+    /// from the record by identifier"), and for nothing else: see
+    /// [`EventLogError`]'s own `methodology_ref`.
     #[must_use]
     pub const fn methodology_ref(&self) -> Option<ori_core::error::MethodologyRef> {
         match self {
             Self::EventLog(inner) => inner.methodology_ref(),
-            Self::EvidenceRefRefused { .. } => Some(ori_core::error::MethodologyRef {
-                section: 8,
-                subsection: None,
-            }),
+            Self::EvidenceRefRefused { .. } | Self::EvidenceWriteRefused { .. } => {
+                Some(ori_core::error::MethodologyRef {
+                    section: 8,
+                    subsection: None,
+                })
+            }
             Self::Malformed { .. } | Self::Serialize { .. } | Self::Io { .. } => None,
         }
     }
@@ -866,6 +975,15 @@ impl fmt::Display for BarrierError {
             } => write!(
                 f,
                 "evidence event at seq {seq} for blob {evidence_id}: content_ref {found:?} refused: {fault}"
+            ),
+            Self::EvidenceWriteRefused {
+                evidence_id,
+                path,
+                fault,
+            } => write!(
+                f,
+                "evidence file for blob {evidence_id} at {} not written: {fault}",
+                path.display()
             ),
         }
     }
@@ -952,23 +1070,50 @@ impl Submission {
 /// Runs a report through the barrier and records the result: `aicd_report`'s
 /// own future entry point (escalation E-0005; see the module doc comment).
 ///
-/// For each field in `request.fields`: sanitizes it (`sanitize_field`),
-/// writes the *raw* text verbatim to an evidence file under `db`'s own
-/// `evidence/` directory, and appends one `memory.evidence_stored` event.
-/// Then builds one [`MemoryRecord`] from every sanitized field plus
-/// `source`-derived provenance and `untrusted` (`untrusted_for`), and
-/// appends one `memory.record_created` event. `at` is stamped on every
-/// event this call produces; `source` is cloned into each event's own actor
-/// and into [`MemoryRecord::provenance`], never re-derived from field
-/// content.
+/// For each field in `request.fields`: sanitizes it (`sanitize_field`) and
+/// encodes the event its evidence blob will be stored under. Builds one
+/// [`MemoryRecord`] from every sanitized field plus `source`-derived
+/// provenance and `untrusted` (`untrusted_for`) and encodes its event. Nothing
+/// has touched the disk or the log yet. Then, in two passes (AICD §8, module
+/// doc comment, "Reading a blob back", decision 7):
+///
+/// 1. **Files.** `<product dir>/evidence` is examined once, and every field's
+///    *raw* text is created verbatim as `<product dir>/evidence/<id>.txt`,
+///    refusing anything already standing there. On the first failure the
+///    files this call created are removed and the error is returned, with no
+///    event appended.
+/// 2. **Events.** One `memory.evidence_stored` event per field, in field
+///    order, then one `memory.record_created` event.
+///
+/// `at` is stamped on every event this call produces; `source` is cloned into
+/// each event's own actor and into [`MemoryRecord::provenance`], never
+/// re-derived from field content.
 ///
 /// # Errors
 ///
-/// [`BarrierError::Io`] if an evidence file cannot be written;
-/// [`BarrierError::Serialize`] if a typed payload cannot be encoded (should
-/// not happen for the types this module builds, but is handled rather than
-/// unwrapped: `spec/CONVENTIONS.md`, "No unwrap, expect or panic! outside
-/// tests"); otherwise, whatever [`EventLog::append`] returns.
+/// [`BarrierError::EvidenceWriteRefused`] (carrying AICD §8 through
+/// [`BarrierError::methodology_ref`]) when `<product dir>/evidence` is a
+/// symbolic link ([`EvidenceWriteFault::EvidenceDirIsLink`]), or when
+/// anything already stands at a field's evidence file
+/// ([`EvidenceWriteFault::FileAlreadyExists`]): a file of an evidence id used
+/// before or carried by two fields of this report, a directory, or a link,
+/// dangling or not. [`BarrierError::Io`] if the evidence directory is absent,
+/// is not a directory, or cannot be examined, or if an evidence file cannot
+/// be created or written; [`BarrierError::Serialize`] if a typed payload
+/// cannot be encoded (should not happen for the types this module builds, but
+/// is handled rather than unwrapped: `spec/CONVENTIONS.md`, "No unwrap,
+/// expect or panic! outside tests"); otherwise, whatever [`EventLog::append`]
+/// returns.
+///
+/// **What a failure leaves behind.** An error from the directory examination,
+/// from pass 1 or from encoding leaves no event, and no file this call
+/// created: the removal is best effort (a file that cannot be removed stays,
+/// unreferenced), and it touches no path this call did not create. An error
+/// from [`EventLog::append`] in pass 2 (the log refusing) leaves every file
+/// pass 1 wrote, and the events appended before it, if any, with no record
+/// event after them. A file no event names is unreferenced, and
+/// [`read_evidence`] never hands it out; but its name is taken, so a retry of
+/// the same report needs fresh evidence ids.
 pub fn submit_report(
     db: &mut ProductDb,
     at: Timestamp,
@@ -982,6 +1127,7 @@ pub fn submit_report(
     let mut structured = BTreeMap::new();
     let mut truncated_fields = BTreeSet::new();
     let mut evidence = Vec::new();
+    let mut evidence_payloads = Vec::new();
 
     for field in &request.fields {
         let (text, truncated) = sanitize_field(&field.raw_text, config.field_cap_chars);
@@ -990,30 +1136,13 @@ pub fn submit_report(
         }
         structured.insert(field.name.clone(), SanitizedField { text });
 
-        let content_ref = evidence_path(db, &field.evidence_id);
-        std::fs::write(&content_ref, field.raw_text.as_bytes()).map_err(|err| {
-            BarrierError::Io {
-                path: content_ref.clone(),
-                message: err.to_string(),
-            }
-        })?;
         let blob = EvidenceBlob {
             id: field.evidence_id.clone(),
             record_id: request.record_id.clone(),
-            content_ref,
+            content_ref: evidence_path(db, &field.evidence_id),
             content_type: "text/plain; charset=utf-8",
         };
-
-        let payload = evidence_payload(&blob)?;
-        EventLog::append(
-            db.connection(),
-            product_id.clone(),
-            at,
-            source.clone(),
-            "memory.evidence_stored",
-            Some(request.record_id.clone()),
-            payload,
-        )?;
+        evidence_payloads.push(evidence_payload(&blob)?);
         evidence.push(blob);
     }
 
@@ -1031,8 +1160,24 @@ pub fn submit_report(
         },
         untrusted,
     };
+    let record_event_payload = record_payload(&record)?;
 
-    let payload = record_payload(&record)?;
+    // Pass 1: every file, before any event. A refusal here leaves the log
+    // exactly as it was.
+    write_evidence_files(db, &request.fields, &evidence)?;
+
+    // Pass 2: the events. Only the log can refuse from here on.
+    for payload in evidence_payloads {
+        EventLog::append(
+            db.connection(),
+            product_id.clone(),
+            at,
+            source.clone(),
+            "memory.evidence_stored",
+            Some(request.record_id.clone()),
+            payload,
+        )?;
+    }
     EventLog::append(
         db.connection(),
         product_id,
@@ -1040,13 +1185,122 @@ pub fn submit_report(
         source,
         "memory.record_created",
         request.ticket_id,
-        payload,
+        record_event_payload,
     )?;
 
     Ok(Submission {
         record,
         evidence,
         truncated_fields,
+    })
+}
+
+/// Pass 1 of [`submit_report`]: examines the evidence directory once, then
+/// creates every blob's file with its field's raw text. `fields` and `blobs`
+/// are the same length and in the same order (the blob of field `n` is
+/// `blobs[n]`).
+///
+/// On the first failure, removes the files this call created and returns the
+/// error. `remove_file` removes a name and never follows a link, and is
+/// called only on paths `create_evidence_file` reported creating. A removal
+/// that fails is ignored: the original refusal is the error worth returning,
+/// and a file left behind is unreferenced (no event names it).
+fn write_evidence_files(
+    db: &ProductDb,
+    fields: &[NewReportField],
+    blobs: &[EvidenceBlob],
+) -> Result<(), BarrierError> {
+    // No field, no file: nothing to protect, and no evidence id to name in a
+    // refusal.
+    let Some(first) = blobs.first() else {
+        return Ok(());
+    };
+    check_evidence_dir(db, &first.id)?;
+
+    let mut created: Vec<&Path> = Vec::new();
+    for (field, blob) in fields.iter().zip(blobs) {
+        if let Err(err) = create_evidence_file(
+            &blob.id,
+            &blob.content_ref,
+            field.raw_text.as_bytes(),
+            &mut created,
+        ) {
+            for path in created {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+/// Examines `<db's product dir>/evidence` once, before anything is created:
+/// a symbolic link is [`BarrierError::EvidenceWriteRefused`] with
+/// [`EvidenceWriteFault::EvidenceDirIsLink`] (naming `evidence_id`, the first
+/// blob, and the directory); a directory is fine; absent, not a directory,
+/// or any other failure of `std::fs::symlink_metadata` (which does not
+/// follow a link) is [`BarrierError::Io`], fail closed.
+/// `ProductDb::open` creates the directory (`ensure_dir`,
+/// `crates/ori-store/src/db.rs`), so an absent one means something removed it.
+fn check_evidence_dir(db: &ProductDb, evidence_id: &Id) -> Result<(), BarrierError> {
+    let dir = db.dir().join(EVIDENCE_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(BarrierError::EvidenceWriteRefused {
+                evidence_id: evidence_id.clone(),
+                path: dir,
+                fault: EvidenceWriteFault::EvidenceDirIsLink,
+            })
+        }
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(BarrierError::Io {
+            path: dir,
+            message: "not a directory".to_owned(),
+        }),
+        Err(err) => Err(BarrierError::Io {
+            path: dir,
+            message: err.to_string(),
+        }),
+    }
+}
+
+/// Creates the file at `path` and writes `raw` to it, refusing anything that
+/// already stands there. On success `path` is pushed to `created` before the
+/// bytes are written, so a write that fails halfway is removed with the rest.
+///
+/// `OpenOptions::create_new(true)` is POSIX `open` with `O_CREAT | O_EXCL`
+/// and Windows `CREATE_NEW`: it fails when the path names any existing entry
+/// and does not follow a link at the final component. POSIX `open`: "If
+/// `O_EXCL` and `O_CREAT` are set, and path names a symbolic link, `open`
+/// shall fail and set `errno` to `[EEXIST]`, regardless of the contents of
+/// the symbolic link." That failure is [`EvidenceWriteFault::FileAlreadyExists`];
+/// any other is [`BarrierError::Io`].
+fn create_evidence_file<'a>(
+    evidence_id: &Id,
+    path: &'a Path,
+    raw: &[u8],
+    created: &mut Vec<&'a Path>,
+) -> Result<(), BarrierError> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            return Err(BarrierError::EvidenceWriteRefused {
+                evidence_id: evidence_id.clone(),
+                path: path.to_path_buf(),
+                fault: EvidenceWriteFault::FileAlreadyExists,
+            });
+        }
+        Err(err) => {
+            return Err(BarrierError::Io {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            });
+        }
+    };
+    created.push(path);
+    file.write_all(raw).map_err(|err| BarrierError::Io {
+        path: path.to_path_buf(),
+        message: err.to_string(),
     })
 }
 
@@ -2628,5 +2882,518 @@ mod tests {
             fs::read_to_string(blobs[0].content_ref()).expect("readable"),
             "raw text"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // ORI-T-0161: the evidence write refuses a link, an existing file and
+    // a linked evidence directory, and writes every file before it appends
+    // any event.
+    //
+    // Criteria: ORI-P1-021 (raw content lives only in an evidence blob, so
+    // the file it is written to must be this product's own, new file) and
+    // ORI-P1-033 (the refusal carries a MethodologyRef that resolves).
+    // The links are Unix symbolic links; this container runs as root and
+    // nothing below depends on a file mode.
+    // -------------------------------------------------------------------
+
+    /// How many events `db`'s log holds.
+    fn event_count(db: &mut ProductDb) -> usize {
+        read_all_events(db).expect("the log reads").len()
+    }
+
+    /// The kinds of every event in `db`'s log, in `seq` order.
+    fn event_kinds(db: &mut ProductDb) -> Vec<String> {
+        read_all_events(db)
+            .expect("the log reads")
+            .iter()
+            .map(|event| event.kind().to_owned())
+            .collect()
+    }
+
+    /// Submits a report of `fields` as `(raw text, evidence id)` pairs.
+    fn submit_fields(
+        db: &mut ProductDb,
+        record: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<Submission, BarrierError> {
+        submit_report(
+            db,
+            at(2_000),
+            agent("AGENT0161"),
+            NewReport {
+                record_id: id(record),
+                kind: RecordKind::Finding,
+                ticket_id: None,
+                fields: fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (raw, evidence))| field(&format!("field{index}"), raw, evidence))
+                    .collect(),
+            },
+            &BarrierConfig::default(),
+        )
+    }
+
+    /// Asserts `result` is the write refusal for `evidence`'s blob at `path`
+    /// with `fault`, under a `MethodologyRef` that resolves (ORI-P1-033), and
+    /// that its message names the path.
+    fn assert_write_refused(
+        result: Result<Submission, BarrierError>,
+        evidence: &str,
+        path: &Path,
+        fault: EvidenceWriteFault,
+    ) {
+        let err = result.expect_err("the write must be refused, not made");
+        let reference = err
+            .methodology_ref()
+            .expect("a refusal carries a MethodologyRef");
+        assert!(reference.resolves(), "{reference} must resolve");
+        assert_eq!(reference.section, 8, "AICD section 8 governs evidence");
+        assert_eq!(reference.subsection, None);
+        match &err {
+            BarrierError::EvidenceWriteRefused {
+                evidence_id,
+                path: refused_path,
+                fault: refused_fault,
+            } => {
+                assert_eq!(evidence_id, &id(evidence));
+                assert_eq!(refused_path, path);
+                assert_eq!(*refused_fault, fault);
+            }
+            other => panic!("expected EvidenceWriteRefused, got {other}"),
+        }
+        assert!(err.to_string().contains(&path.display().to_string()));
+    }
+
+    /// Whether anything, a dangling link included, stands at `path`.
+    fn anything_at(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0161_a_symbolic_link_at_the_evidence_file_is_refused_and_its_target_is_not_written() {
+        let (scratch, mut db) = fresh("w-link-file");
+        let outside = scratch.path.join("outside-file.txt");
+        fs::write(&outside, "a file the product does not own").expect("the outside file");
+        let path = evidence_path(&db, &id("EVIDENCE0161"));
+        std::os::unix::fs::symlink(&outside, &path).expect("the link is made");
+        let before = event_count(&mut db);
+
+        assert_write_refused(
+            submit_fields(
+                &mut db,
+                "RECORD0161",
+                &[("raw, untrusted text", "EVIDENCE0161")],
+            ),
+            "EVIDENCE0161",
+            &path,
+            EvidenceWriteFault::FileAlreadyExists,
+        );
+
+        assert_eq!(
+            fs::read(&outside).expect("the target is still there"),
+            b"a file the product does not own",
+            "the outside file's bytes are unchanged"
+        );
+        assert!(
+            fs::symlink_metadata(&path)
+                .expect("the link is still there")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0161_a_dangling_link_at_the_evidence_file_is_refused_and_nothing_is_made_at_its_target()
+     {
+        let (scratch, mut db) = fresh("w-dangling");
+        let target = scratch.path.join("never-created.txt");
+        let path = evidence_path(&db, &id("EVIDENCE0161"));
+        std::os::unix::fs::symlink(&target, &path).expect("the link is made");
+        assert!(!anything_at(&target), "the link dangles");
+        let before = event_count(&mut db);
+
+        assert_write_refused(
+            submit_fields(
+                &mut db,
+                "RECORD0161",
+                &[("raw, untrusted text", "EVIDENCE0161")],
+            ),
+            "EVIDENCE0161",
+            &path,
+            EvidenceWriteFault::FileAlreadyExists,
+        );
+
+        assert!(!anything_at(&target), "nothing was created at the target");
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0161_an_evidence_directory_replaced_by_a_link_is_refused_and_nothing_is_written_through_it()
+     {
+        let (scratch, mut db) = fresh("w-link-dir");
+        let evidence_dir = db.dir().join("evidence");
+        let outside = scratch.path.join("outside-dir");
+        fs::create_dir(&outside).expect("the outside directory");
+        fs::remove_dir(&evidence_dir).expect("the empty evidence directory goes");
+        std::os::unix::fs::symlink(&outside, &evidence_dir).expect("the link is made");
+        let before = event_count(&mut db);
+
+        assert_write_refused(
+            submit_fields(
+                &mut db,
+                "RECORD0161",
+                &[
+                    ("first raw text", "EVIDENCEFIRST"),
+                    ("second", "EVIDENCESECOND"),
+                ],
+            ),
+            "EVIDENCEFIRST",
+            &evidence_dir,
+            EvidenceWriteFault::EvidenceDirIsLink,
+        );
+
+        assert_eq!(
+            fs::read_dir(&outside)
+                .expect("the outside directory")
+                .count(),
+            0,
+            "nothing was written in the outside directory"
+        );
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+    }
+
+    #[test]
+    fn ori_t_0161_a_regular_file_already_at_the_path_is_refused_and_left_as_it_was() {
+        let (_scratch, mut db) = fresh("w-reused");
+        let first = submit_fields(
+            &mut db,
+            "RECORDFIRST",
+            &[("first raw text", "EVIDENCE0161")],
+        )
+        .expect("the first use of an evidence id is stored");
+        let path = first.evidence()[0].content_ref().to_path_buf();
+        let before = event_count(&mut db);
+
+        assert_write_refused(
+            submit_fields(
+                &mut db,
+                "RECORDSECOND",
+                &[("second raw text", "EVIDENCE0161")],
+            ),
+            "EVIDENCE0161",
+            &path,
+            EvidenceWriteFault::FileAlreadyExists,
+        );
+
+        assert_eq!(
+            fs::read(&path).expect("the first file is still there"),
+            b"first raw text",
+            "the reused id's file is not overwritten"
+        );
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+        assert_eq!(read_evidence(&mut db).expect("the evidence reads").len(), 1);
+    }
+
+    #[test]
+    fn ori_t_0161_a_directory_at_the_path_is_refused_like_a_file() {
+        let (_scratch, mut db) = fresh("w-dir-at-path");
+        let path = evidence_path(&db, &id("EVIDENCE0161"));
+        fs::create_dir(&path).expect("a directory stands where the file goes");
+        let before = event_count(&mut db);
+
+        assert_write_refused(
+            submit_fields(&mut db, "RECORD0161", &[("raw text", "EVIDENCE0161")]),
+            "EVIDENCE0161",
+            &path,
+            EvidenceWriteFault::FileAlreadyExists,
+        );
+
+        assert!(path.is_dir(), "the directory is untouched");
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+    }
+
+    #[test]
+    fn ori_t_0161_two_fields_of_one_report_with_one_evidence_id_are_refused_and_the_first_file_is_removed()
+     {
+        let (_scratch, mut db) = fresh("w-same-id");
+        let path = evidence_path(&db, &id("EVIDENCE0161"));
+        let before = event_count(&mut db);
+
+        assert_write_refused(
+            submit_fields(
+                &mut db,
+                "RECORD0161",
+                &[
+                    ("first raw text", "EVIDENCE0161"),
+                    ("second raw text", "EVIDENCE0161"),
+                ],
+            ),
+            "EVIDENCE0161",
+            &path,
+            EvidenceWriteFault::FileAlreadyExists,
+        );
+
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+        assert!(
+            !anything_at(&path),
+            "the file pass 1 created for the first field is removed"
+        );
+        assert!(
+            read_evidence(&mut db)
+                .expect("the evidence reads")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ori_t_0161_a_planted_second_path_leaves_no_event_and_no_file_of_the_first_field() {
+        let (_scratch, mut db) = fresh("w-second-planted");
+        let first_path = evidence_path(&db, &id("EVIDENCEFIRST"));
+        let second_path = evidence_path(&db, &id("EVIDENCESECOND"));
+        fs::write(&second_path, "planted before the report").expect("the planted file");
+        let before = event_count(&mut db);
+
+        assert_write_refused(
+            submit_fields(
+                &mut db,
+                "RECORD0161",
+                &[
+                    ("first raw text", "EVIDENCEFIRST"),
+                    ("second raw text", "EVIDENCESECOND"),
+                ],
+            ),
+            "EVIDENCESECOND",
+            &second_path,
+            EvidenceWriteFault::FileAlreadyExists,
+        );
+
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+        assert!(
+            !anything_at(&first_path),
+            "the first field's file does not exist afterwards"
+        );
+        assert_eq!(
+            fs::read(&second_path).expect("the planted file is still there"),
+            b"planted before the report",
+            "the file this call did not create is not removed or changed"
+        );
+    }
+
+    #[test]
+    fn ori_t_0161_a_failed_write_after_the_first_file_removes_it_and_is_no_refusal() {
+        // `write_evidence_files` directly, with a second blob whose file
+        // cannot be created for a reason other than "it exists": its
+        // directory is not there. No mode is involved.
+        let (_scratch, db) = fresh("w-io-second");
+        let first = EvidenceBlob {
+            id: id("EVIDENCEFIRST"),
+            record_id: id("RECORD0161"),
+            content_ref: evidence_path(&db, &id("EVIDENCEFIRST")),
+            content_type: "text/plain; charset=utf-8",
+        };
+        let second = EvidenceBlob {
+            id: id("EVIDENCESECOND"),
+            record_id: id("RECORD0161"),
+            content_ref: db
+                .dir()
+                .join("no-such-directory")
+                .join(evidence_file_name(&id("EVIDENCESECOND"))),
+            content_type: "text/plain; charset=utf-8",
+        };
+        let fields = [
+            field("one", "first raw text", "EVIDENCEFIRST"),
+            field("two", "second raw text", "EVIDENCESECOND"),
+        ];
+
+        let err = write_evidence_files(&db, &fields, &[first.clone(), second.clone()])
+            .expect_err("the second file cannot be created");
+
+        match &err {
+            BarrierError::Io { path, .. } => assert_eq!(path, &second.content_ref),
+            other => panic!("expected Io, got {other}"),
+        }
+        assert_eq!(err.methodology_ref(), None, "an I/O failure is no refusal");
+        assert!(
+            !anything_at(&first.content_ref),
+            "the first file is removed with the failure"
+        );
+    }
+
+    #[test]
+    fn ori_t_0161_an_absent_evidence_directory_fails_closed_and_nothing_is_appended() {
+        let (_scratch, mut db) = fresh("w-absent-dir");
+        let evidence_dir = db.dir().join("evidence");
+        fs::remove_dir(&evidence_dir).expect("the empty evidence directory goes");
+        let before = event_count(&mut db);
+
+        let err = submit_fields(&mut db, "RECORD0161", &[("raw text", "EVIDENCE0161")])
+            .expect_err("a missing evidence directory is not recreated or written around");
+
+        match &err {
+            BarrierError::Io { path, .. } => assert_eq!(path, &evidence_dir),
+            other => panic!("expected Io, got {other}"),
+        }
+        assert_eq!(err.methodology_ref(), None, "an I/O failure is no refusal");
+        assert!(
+            !anything_at(&evidence_dir),
+            "the directory was not recreated"
+        );
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+    }
+
+    #[test]
+    fn ori_t_0161_a_file_where_the_evidence_directory_belongs_fails_closed() {
+        let (_scratch, mut db) = fresh("w-dir-is-file");
+        let evidence_dir = db.dir().join("evidence");
+        fs::remove_dir(&evidence_dir).expect("the empty evidence directory goes");
+        fs::write(&evidence_dir, "not a directory").expect("a file stands in its place");
+        let before = event_count(&mut db);
+
+        let err = submit_fields(&mut db, "RECORD0161", &[("raw text", "EVIDENCE0161")])
+            .expect_err("a file is not an evidence directory");
+
+        match &err {
+            BarrierError::Io { path, .. } => assert_eq!(path, &evidence_dir),
+            other => panic!("expected Io, got {other}"),
+        }
+        assert_eq!(
+            fs::read(&evidence_dir).expect("the file is untouched"),
+            b"not a directory"
+        );
+        assert_eq!(event_count(&mut db), before, "no event was appended");
+    }
+
+    #[test]
+    fn ori_t_0161_a_report_with_no_fields_creates_no_file_and_examines_no_directory() {
+        let (_scratch, mut db) = fresh("w-no-fields");
+        fs::remove_dir(db.dir().join("evidence")).expect("the empty evidence directory goes");
+
+        let submission = submit_fields(&mut db, "RECORD0161", &[])
+            .expect("a report with nothing to write is stored");
+
+        assert!(submission.evidence().is_empty());
+        assert_eq!(event_kinds(&mut db), vec!["memory.record_created"]);
+    }
+
+    #[test]
+    fn ori_t_0161_a_normal_report_writes_each_file_with_its_raw_text_and_appends_its_events_in_order()
+     {
+        let (_scratch, mut db) = fresh("w-normal");
+        let first_raw = "first raw text, with \"quotes\" and a \u{1F3AF}";
+        let second_raw = "second\u{0}raw\u{7}text\nover two lines";
+        let third_raw = "";
+
+        let submission = submit_fields(
+            &mut db,
+            "RECORD0161",
+            &[
+                (first_raw, "EVIDENCEFIRST"),
+                (second_raw, "EVIDENCESECOND"),
+                (third_raw, "EVIDENCETHIRD"),
+            ],
+        )
+        .expect("a normal report is stored");
+
+        assert_eq!(submission.evidence().len(), 3);
+        let raws = [first_raw, second_raw, third_raw];
+        for (blob, raw) in submission.evidence().iter().zip(raws) {
+            assert_eq!(
+                fs::read(blob.content_ref()).expect("the file is there"),
+                raw.as_bytes(),
+                "exactly the raw text, unsanitized"
+            );
+        }
+        assert_eq!(
+            event_kinds(&mut db),
+            vec![
+                "memory.evidence_stored",
+                "memory.evidence_stored",
+                "memory.evidence_stored",
+                "memory.record_created",
+            ],
+            "one evidence event per field in field order, then the record"
+        );
+        let stored: Vec<Id> = read_evidence(&mut db)
+            .expect("the evidence reads back")
+            .iter()
+            .map(|blob| blob.id().clone())
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                id("EVIDENCEFIRST"),
+                id("EVIDENCESECOND"),
+                id("EVIDENCETHIRD")
+            ]
+        );
+        assert_eq!(read_records(&mut db).expect("the records read").len(), 1);
+    }
+
+    #[test]
+    fn ori_t_0161_a_hard_link_at_the_path_is_refused_as_an_existing_entry() {
+        let (scratch, mut db) = fresh("w-hard-link");
+        let outside = scratch.path.join("outside-file.txt");
+        fs::write(&outside, "a file the product does not own").expect("the outside file");
+        let path = evidence_path(&db, &id("EVIDENCE0161"));
+        fs::hard_link(&outside, &path).expect("the hard link is made");
+
+        assert_write_refused(
+            submit_fields(
+                &mut db,
+                "RECORD0161",
+                &[("raw, untrusted text", "EVIDENCE0161")],
+            ),
+            "EVIDENCE0161",
+            &path,
+            EvidenceWriteFault::FileAlreadyExists,
+        );
+
+        assert_eq!(
+            fs::read(&outside).expect("the other name is still there"),
+            b"a file the product does not own"
+        );
+    }
+
+    #[test]
+    fn ori_t_0161_the_write_refusal_carries_a_methodology_ref_that_resolves() {
+        let index: serde_json::Value =
+            serde_json::from_str(include_str!("../../../methodology/sections.json"))
+                .expect("the committed methodology index parses");
+        for fault in [
+            EvidenceWriteFault::EvidenceDirIsLink,
+            EvidenceWriteFault::FileAlreadyExists,
+        ] {
+            let err = BarrierError::EvidenceWriteRefused {
+                evidence_id: id("EVIDENCE0161"),
+                path: PathBuf::from("/products/p/evidence/e.txt"),
+                fault,
+            };
+            let reference = err
+                .methodology_ref()
+                .expect("a refusal carries a MethodologyRef");
+            assert!(reference.resolves());
+            assert_eq!(reference.section, 8);
+            assert_eq!(reference.subsection, None);
+            let in_the_index = index["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .any(|entry| {
+                    entry["kind"] == "section"
+                        && entry["number"] == reference.section.to_string().as_str()
+                });
+            assert!(
+                in_the_index,
+                "section {} is not in sections.json",
+                reference.section
+            );
+            assert!(!err.to_string().is_empty());
+            assert!(!fault.to_string().is_empty());
+        }
     }
 }
