@@ -631,8 +631,9 @@ pub enum ToolRefusal {
     ///   coders and a coder takes one validated ticket (AICD §7), so a coder with
     ///   none has been assigned nothing;
     /// - any other role's ticket argument passes slice S2, whatever ticket the
-    ///   session is bound to, and the tool's own control checks it (the
-    ///   ticket-rule table in `server.rs`'s module documentation).
+    ///   session is bound to, and checking it is the tool's own control's (the
+    ///   ticket-rule table in `server.rs`'s module documentation; for
+    ///   `aicd_report` that check does not exist yet, and slice S4 adds it).
     TicketNotAssigned {
         /// The ticket the call named.
         ticket: Id,
@@ -644,7 +645,7 @@ pub enum ToolRefusal {
     /// arguments name a `ticket_id`: when the coder is bound to a ticket and the
     /// argument names another, this refusal; the other cases are those of
     /// [`ToolRefusal::TicketNotAssigned`], and any other role's ticket argument
-    /// passes slice S2 and is checked by the tool's own control. The binding
+    /// passes slice S2, and checking it is the tool's own control's. The binding
     /// wins, and the call is
     /// refused rather than quietly corrected, as the scope enforcer of AICD §25
     /// refuses a request outside its scope. `claim` names the field, a constant

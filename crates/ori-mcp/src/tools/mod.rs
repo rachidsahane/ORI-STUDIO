@@ -1126,9 +1126,10 @@ impl std::error::Error for HandlerError {
 ///   text;
 /// - `ticket_id` is the agent's argument, validated and canonical. For a coder it
 ///   equals the bound ticket (check 7). For every other role the server checked
-///   it against nothing, and the handler that acts on it must: slice S4 checks
-///   that the ticket exists in this product, slice S3 the memory scope, slice S9
-///   the escalation desk.
+///   it against nothing, and the handler that acts on it must: slice S3 through
+///   the memory scope, slice S5 at the ticket desk, slice S9 at the escalation
+///   desk, and slice S4, which must add a check that the ticket exists in this
+///   product (`aicd_report` has none today).
 #[derive(Clone, Copy, Debug)]
 pub struct BoundCall<'a> {
     /// The session the connection serves: the engine's binding.
@@ -1140,8 +1141,8 @@ pub struct BoundCall<'a> {
     /// The call's time: the engine's clock, read once at call entry.
     pub at: Timestamp,
     /// The validated, canonical `ticket_id` argument, for a tool that has one:
-    /// the agent's own claim, which the handler that acts on it checks for every
-    /// role but the coder.
+    /// the agent's own claim, which the handler that acts on it must check for
+    /// every role but the coder.
     pub ticket_id: Option<&'a Id>,
 }
 

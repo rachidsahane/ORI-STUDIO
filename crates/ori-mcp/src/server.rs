@@ -61,9 +61,12 @@
 //! ignoring any task-augmentation metadata if present." The server declares no
 //! `tasks` capability, so it reads `task` only to drop it: an object-valued `task`
 //! is dropped, never recorded or echoed, and the reply is a `CallToolResult`,
-//! never a task result. A `task`, `_meta` or `arguments` that is not an object is
-//! refused by W0's decode (-32602), whose `data.detail` quotes serde's text, cut
-//! by W0 to 256 characters; that reply is W0's (below), and it is not a call. The
+//! never a task result. A `task`, `_meta` or `arguments` that is neither an object
+//! nor `null` is refused by W0's decode (-32602), whose `data.detail` quotes
+//! serde's text, cut by W0 to 256 characters; that reply is W0's (below), and it
+//! is not a call. `null` decodes as absent: a null `task` or `_meta` is dropped
+//! like an object-valued one, and a null `arguments` is the empty object, which
+//! the schema then judges. The
 //! documentation on `CallToolParams.task` in `protocol.rs` says the opposite
 //! ("refuse rather than silently ignore it"), which is wrong on this point and is
 //! corrected by a separate ticket, because that file is another slice's.
@@ -81,7 +84,13 @@
 //! adds its branch for a proxied name **after checks 0 to 2** and before the
 //! `unknown_tool` refusal. `Tool::from_wire_name` stays at the start of a call,
 //! because it is pure and a refusal's record needs its answer; the branch point
-//! is not there. At the append point S6 must keep two things. The server
+//! is not there. At check 3, `admit` holds only that classification
+//! (`Option<Tool>`) and returns an `Accepted` that names one of Ori's tools, so
+//! S6 also passes the requested name into `admit` and gives its result a way to
+//! carry a proxied dispatch. It must not move the branch into `call` instead,
+//! where it would run before checks 0 to 2:
+//! `tests::ori_t_0169_a_name_no_tool_has_meets_checks_0_to_2_before_check_3`
+//! fails if it does. At the append point S6 must keep two things. The server
 //! declares `listChanged: false`, so S6 either snapshots the proxied tools at
 //! connection start or switches the capability to `true` and sends
 //! `notifications/tools/list_changed`. And S6 drops or refuses a proxied name
@@ -128,8 +137,8 @@
 //! | 3 | the name is one of Ori's tools | `unknown_tool` | AICD §17 | JSON-RPC -32602 | record |
 //! | 4 | the tool is in phase 1 and has a handler | `tool_not_available` | AICD §17 | JSON-RPC -32602 | record |
 //! | 5 | `ToolScopes::authorize` | `tool_not_permitted_for_role` | AICD §17 | JSON-RPC -32602 | record |
-//! | 6 | the serialized arguments fit the cap, then the schema | `invalid_arguments`, with `field` | AICD §27 | an `isError` result | record |
-//! | 7 | the ticket rule | `claim_contradicts_session` or `ticket_not_assigned` | AICD §25; AICD §7 | an `isError` result | record |
+//! | 6 | the serialized arguments fit the cap, then the schema | `invalid_arguments`, with `field` and `why` | AICD §27 | an `isError` result | record |
+//! | 7 | the ticket rule | `claim_contradicts_session` or `ticket_not_assigned`; `invalid_arguments` at `/ticket_id` for a ticket argument that is not a valid identifier (or, unreachable through today's catalogue, one that is missing or not a string) | AICD §25; AICD §7; AICD §27 | an `isError` result | record |
 //! | 8 | append `mcp.tool_called` | `call_not_recorded` | AICD §17 | JSON-RPC -32603 | attempt `mcp.tool_refused`; `unrecorded` set; close |
 //!
 //! The codes -32010 and -32011 are Ori's own, from the implementation-defined
@@ -230,9 +239,10 @@
 //! refused, and the logging failure goes to the caller. A call whose
 //! `mcp.tool_called` cannot be appended is refused `call_not_recorded`, so no
 //! effect happens without its record. The server then attempts to append
-//! `mcp.tool_refused` for it; if that cannot be written either, `unrecorded` still
-//! names `mcp.tool_called`, the first failure, and the log is to be treated as
-//! stopped.
+//! `mcp.tool_refused` for it. Whether or not that row is written, `unrecorded`
+//! names `mcp.tool_called`, the first failure, so the reply does not say whether
+//! the refusal row reached the log: the engine treats every `call_not_recorded`
+//! as a log that has stopped accepting rows.
 //!
 //! **A close is final.** Once a reply has `close` set, the engine stops reading
 //! the connection and drops the lines it has buffered. The server also latches
@@ -585,10 +595,11 @@ pub enum CallRefusal {
     /// `mcp.tool_called` could not be appended, so the call is not made.
     /// AICD §17.
     ///
-    /// The server then attempts to append `mcp.tool_refused` for the call. If that
-    /// cannot be written either, [`Reply::unrecorded`] still names
-    /// `mcp.tool_called`, the first failure, and the log is to be treated as
-    /// stopped. The connection closes.
+    /// The server then attempts to append `mcp.tool_refused` for the call. Whether
+    /// or not that row is written, [`Reply::unrecorded`] names `mcp.tool_called`,
+    /// the first failure, so the reply does not say whether the refusal row reached
+    /// the log: the engine treats every `call_not_recorded` as a log that has
+    /// stopped accepting rows. The connection closes.
     CallNotRecorded,
 }
 
@@ -4865,8 +4876,9 @@ mod tests {
     #[test]
     fn ori_t_0169_refusal_6_the_byte_cap_is_reported_before_a_schema_fault_below_the_root() {
         // A number where a string belongs, under a cap the object exceeds. The cap
-        // first reports the root and the size; the schema first would report
-        // `/query` and the type. The two orders differ here, and only here.
+        // first reports the root, with why "arguments too large"; the schema first
+        // would report `/query`, with why "must be a string". Here the two orders
+        // differ in `field` as well as in `why`, so the order is pinned by both.
         let mut world = Setup::new().max_arguments_bytes(4).build("refusal-6-first");
         world.handshake();
         let reply = world.call("aicd_search", json!({"query": 1}));
@@ -5004,7 +5016,7 @@ mod tests {
             close: true,
             unrecorded: None,
         };
-        // A valid call, a ping, a request that would not decode, and a frame error
+        // A valid call, a ping, a `tools/list`, a notification and a frame error
         // all get nothing.
         assert_eq!(search(&mut world), silent);
         assert_eq!(world.send(request(70, "ping", None)), silent);
