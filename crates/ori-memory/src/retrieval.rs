@@ -270,6 +270,56 @@
 //! which may be a dependency's), and `false` for a document of the canonical
 //! layer. [`ContextPackage::render`] quotes untrusted text and labels it.
 //!
+//! # Search
+//!
+//! [`Retrieval::search`] turns an `Authorization` granted for a search into a
+//! [`SearchPackage`]: AICD §25, "Every item returned carries its source, its
+//! commit and its verification date" and "Context packages are bounded".
+//! `aicd_search` (`spec/API_SPEC.md` section 3) does not exist yet; this is
+//! what it will call. It stands on the same seam as [`Retrieval::assemble`],
+//! with the same three product links checked, and the same two functions
+//! decide what a reader holds: `admit` (the filter, the only gate; a search
+//! never decides admission itself) and `build_item` (provenance, verification
+//! and the untrusted label). What a search adds is a **match** and an order:
+//!
+//! - **Documents**: what the product's index returns for the trimmed query,
+//!   in the index's own order (best score first, then path), at most
+//!   [`SEARCH_HIT_LIMIT`] of them. The index is asked for one hit more, and a
+//!   hit beyond the limit is a [`SearchNote::LimitReached`]. The index cannot
+//!   be limited to a source, so for a reader who may read only some document
+//!   sources the hits of the others count against that limit before the
+//!   filter drops them, as they do for [`Retrieval::assemble`].
+//! - **Operational records**: a record matches when the lower-cased query is a
+//!   substring of the lower-cased text of any of its structured fields (never
+//!   of a field's name, and never of raw evidence, which a search never
+//!   reads). Newest first.
+//! - **Code map modules**: a module matches when the lower-cased query is a
+//!   substring of the lower-cased path. By path.
+//!
+//! For records and modules the limit counts what the reader may read: the
+//! candidates are admitted one at a time in order, and the note is made when
+//! one more than [`SEARCH_HIT_LIMIT`] admitted candidates exists. A limit
+//! counted before the filter would let another ticket's records use up a
+//! coder's hits, and would tell it, by a note or by how few of its own came
+//! back, that more than [`SEARCH_HIT_LIMIT`] records it may not read matched.
+//!
+//! **The query text is never repeated.** A query holding a NUL character or
+//! longer than [`MAX_SEARCH_QUERY_BYTES`] is refused
+//! ([`RetrievalError::InvalidSearchQuery`]) before any source is read, with
+//! its length and never its text. Because both are refused there, the
+//! indexer's `InvalidQuery`, which carries and displays the raw query text,
+//! cannot be reached from [`Retrieval::search`]. The package says how many
+//! characters the query had, and nothing of it; an item may of course show
+//! the text that matched, as an item of any package shows its source's text.
+//! A query that is empty after trimming reads no source at all and is
+//! answered with a [`SearchNote::EmptyQuery`].
+//!
+//! Items are ordered documents, then records, then modules, and the package
+//! cap cuts from the end of that order, with every item left out counted in a
+//! [`Cut`]: [`SearchPackage::size_bytes`] never exceeds the cap. A search
+//! builds no evidence candidate: raw evidence is never a source of a search
+//! authorization.
+//!
 //! # Inspectable without the query
 //!
 //! A [`ContextPackage`] is a value: [`ContextPackage::items`] enumerates it
@@ -340,6 +390,21 @@ pub const DEFAULT_HITS_PER_MODULE: usize = 25;
 /// The smallest [`PackageConfig::item_bytes`] accepted: room for a few lines
 /// and the line that says what was cut.
 pub const MIN_ITEM_BYTES: usize = 256;
+
+/// The longest search query, in bytes, [`Retrieval::search`] accepts: AICD
+/// §25. A longer one is refused with
+/// [`RetrievalError::InvalidSearchQuery`] before any source is read.
+///
+/// Equal to the cap the indexer's own search keeps (`Indexer::search` refuses
+/// a longer query with `IndexerError::QueryTooLarge`), so that a query this
+/// module accepts is never refused by the index for its size; a test holds
+/// the two together.
+pub const MAX_SEARCH_QUERY_BYTES: usize = 1024;
+
+/// The most results of one kind of source (documents, records, code map
+/// modules) a [`SearchPackage`] holds before it says the limit was reached
+/// ([`SearchNote::LimitReached`]): AICD §25, "Context packages are bounded".
+pub const SEARCH_HIT_LIMIT: usize = 50;
 
 /// The bytes reserved at the end of a bounded body for the line saying what
 /// was cut.
@@ -438,11 +503,26 @@ pub enum RetrievalError {
         /// The kind of query it was granted for.
         found: &'static str,
     },
+    /// The authorization was not granted for a search, so no search may be run
+    /// under it: AICD §25.
+    NotASearchAuthorization {
+        /// The kind of query it was granted for.
+        found: &'static str,
+    },
     /// The authorization was not granted for an evidence request, so it holds
     /// no evidence to hand over: AICD §8.
     NotAnEvidenceAuthorization {
         /// The kind of query it was granted for.
         found: &'static str,
+    },
+    /// The search query cannot be searched for: AICD §25. Carries the reason
+    /// and the query's length in bytes, never the query: the text is free text
+    /// from the caller and appears in no error, note or package.
+    InvalidSearchQuery {
+        /// What is wrong with the query.
+        why: &'static str,
+        /// The query's length in bytes.
+        bytes: usize,
     },
     /// The authorization, the database and this retrieval do not all name one
     /// product: AICD §25, "An agent identity belongs to one product".
@@ -485,7 +565,9 @@ impl RetrievalError {
             Self::Oplog(inner) => inner.methodology_ref(),
             Self::Index(inner) => inner.methodology_ref(),
             Self::NotAContextAuthorization { .. }
+            | Self::NotASearchAuthorization { .. }
             | Self::NotAnEvidenceAuthorization { .. }
+            | Self::InvalidSearchQuery { .. }
             | Self::ProductMismatch { .. }
             | Self::InvalidConfig { .. }
             | Self::CapTooSmall { .. }
@@ -504,10 +586,17 @@ impl fmt::Display for RetrievalError {
                 f,
                 "no context package may be assembled under an authorization granted for a {found} query"
             ),
+            Self::NotASearchAuthorization { found } => write!(
+                f,
+                "no search may be run under an authorization granted for a {found} query"
+            ),
             Self::NotAnEvidenceAuthorization { found } => write!(
                 f,
                 "no evidence is held by an authorization granted for a {found} query"
             ),
+            Self::InvalidSearchQuery { why, bytes } => {
+                write!(f, "the search query {why} ({bytes} bytes)")
+            }
             Self::ProductMismatch { what } => write!(f, "product mismatch: {what}"),
             Self::InvalidConfig { detail } => write!(f, "invalid package configuration: {detail}"),
             Self::CapTooSmall {
@@ -1165,6 +1254,252 @@ fn reader_line(reader: &Reader) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// The search package
+// ---------------------------------------------------------------------------
+
+/// Something a search did not do, or a limit it reached, that its reader
+/// should know: AICD §25.
+///
+/// No variant carries the query: the text is never repeated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SearchNote {
+    /// The query was empty after trimming, so nothing was searched and no
+    /// source was read.
+    EmptyQuery,
+    /// More results of one kind matched than the package holds, so the rest
+    /// were not read.
+    LimitReached {
+        /// The kind of result: `documents`, `records` or `modules`.
+        kind: &'static str,
+    },
+    /// Sources the reader may read that no module of this crate produces yet,
+    /// so nothing of them is in the results.
+    NoProducer {
+        /// The sources.
+        sources: Vec<Source>,
+    },
+    /// The product's index was searched and holds no document, so no document
+    /// can be returned until it is built.
+    IndexEmpty,
+}
+
+impl SearchNote {
+    fn line(&self) -> String {
+        match self {
+            Self::EmptyQuery => {
+                "note: the query is empty; nothing was searched and no source was read".to_owned()
+            }
+            Self::LimitReached { kind } => format!(
+                "note: more {kind} matched than the limit of {SEARCH_HIT_LIMIT}; the rest were not read"
+            ),
+            Self::NoProducer { sources } => format!(
+                "note: {} readable by this reader but no module of this crate produces it yet; nothing of it is in these results",
+                source_list(sources)
+            ),
+            Self::IndexEmpty => "note: the repository index holds no document; no document can be returned until it is built".to_owned(),
+        }
+    }
+}
+
+/// The admitted results of a search: AICD §25, `spec/API_SPEC.md` section 3
+/// (`aicd_search`), "Every item returned carries its source, its commit and
+/// its verification date".
+///
+/// A value, inspectable item by item ([`SearchPackage::items`]) and as text
+/// ([`SearchPackage::render`]). Built only by [`Retrieval::search`], from
+/// items that passed `Authorization::filter`; it never renders longer than
+/// the cap it was fitted under, and says what it cut. It holds the number of
+/// characters the query had and never the query itself. Holds no raw
+/// evidence: see the module doc, "Search".
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchPackage {
+    product_id: Id,
+    reader: Reader,
+    query_chars: usize,
+    sources: Vec<Source>,
+    log_tip_seq: Option<u64>,
+    documents_covered: Option<usize>,
+    cap_bytes: usize,
+    items: Vec<ContextItem>,
+    cuts: Vec<Cut>,
+    notes: Vec<SearchNote>,
+}
+
+impl SearchPackage {
+    /// The product the results are from: AICD §25.
+    #[must_use]
+    pub const fn product_id(&self) -> &Id {
+        &self.product_id
+    }
+
+    /// The reader the search was run for: AICD §25.
+    #[must_use]
+    pub const fn reader(&self) -> &Reader {
+        &self.reader
+    }
+
+    /// How many characters the query had, as the caller sent it: AICD §25.
+    /// The text itself is in no part of this value.
+    #[must_use]
+    pub const fn query_chars(&self) -> usize {
+        self.query_chars
+    }
+
+    /// The sources the authorization allowed: AICD §25.
+    #[must_use]
+    pub fn sources(&self) -> &[Source] {
+        &self.sources
+    }
+
+    /// The last `seq` of the log the operational records were read at, `None`
+    /// when the log was not read: AICD §8.
+    #[must_use]
+    pub const fn log_tip_seq(&self) -> Option<u64> {
+        self.log_tip_seq
+    }
+
+    /// How many documents the index held when it was searched. `None` when it
+    /// was not searched, or when the reader may read only part of it and the
+    /// count of the whole is not theirs: AICD §25.
+    #[must_use]
+    pub const fn documents_covered(&self) -> Option<usize> {
+        self.documents_covered
+    }
+
+    /// The cap the package was fitted under, in bytes: AICD §25.
+    #[must_use]
+    pub const fn cap_bytes(&self) -> usize {
+        self.cap_bytes
+    }
+
+    /// Every item: documents in the index's order, then records newest
+    /// first, then modules by path: AICD §25.
+    #[must_use]
+    pub fn items(&self) -> &[ContextItem] {
+        &self.items
+    }
+
+    /// What was cut, per source and reason: AICD §25.
+    #[must_use]
+    pub fn cuts(&self) -> &[Cut] {
+        &self.cuts
+    }
+
+    /// What the search did not do, or a limit it reached: AICD §25.
+    #[must_use]
+    pub fn notes(&self) -> &[SearchNote] {
+        &self.notes
+    }
+
+    /// The size of the package, the length of [`SearchPackage::render`], in
+    /// bytes. Never more than [`SearchPackage::cap_bytes`]: AICD §25.
+    #[must_use]
+    pub fn size_bytes(&self) -> usize {
+        self.render().len()
+    }
+
+    /// The whole package as text, from this value alone, headed `search
+    /// results`: AICD §25. The query is written as a count of characters,
+    /// never as text.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("search results\n");
+        out.push_str(&format!("product: {}\n", self.product_id));
+        out.push_str(&format!("reader: {}\n", reader_line(&self.reader)));
+        out.push_str(&format!("query: {} characters\n", self.query_chars));
+        let sources: Vec<&str> = self.sources.iter().map(|source| source.as_str()).collect();
+        out.push_str(&format!("sources allowed: {}\n", sources.join(", ")));
+        out.push_str(&format!("cap: {} bytes\n", self.cap_bytes));
+        match self.log_tip_seq {
+            Some(seq) => out.push_str(&format!("operational log read as of event seq {seq}\n")),
+            None => out.push_str("operational log not read, or empty\n"),
+        }
+        if let Some(count) = self.documents_covered {
+            out.push_str(&format!("documents covered: {count}\n"));
+        }
+        out.push_str(&format!("items: {}\n", self.items.len()));
+        out.push_str("evidence: none; raw evidence is never part of search results\n");
+        for item in &self.items {
+            out.push_str(&item.render());
+        }
+        if self.cuts.is_empty() {
+            out.push_str("cuts: none\n");
+        }
+        for cut in &self.cuts {
+            out.push_str(&cut.line());
+            out.push('\n');
+        }
+        for note in &self.notes {
+            out.push_str(&note.line());
+            out.push('\n');
+        }
+        out.push_str("end of search results\n");
+        out
+    }
+}
+
+/// What [`fit_under_cap`] needs of a package: to render itself, to hold items
+/// and to hold the cuts made. Implemented by the two packages of this module
+/// so that one algorithm fits both under their cap.
+trait Fit {
+    /// The package as text, whose length the cap bounds.
+    fn rendered(&self) -> String;
+    /// The items held so far.
+    fn kept(&self) -> &[ContextItem];
+    /// Holds one more item, after those held.
+    fn keep(&mut self, item: ContextItem);
+    /// Gives up the last item held, `None` when there is none.
+    fn give_up_last(&mut self) -> Option<ContextItem>;
+    /// Replaces the cuts the package states.
+    fn set_cuts(&mut self, cuts: Vec<Cut>);
+}
+
+impl Fit for ContextPackage {
+    fn rendered(&self) -> String {
+        self.render()
+    }
+
+    fn kept(&self) -> &[ContextItem] {
+        &self.items
+    }
+
+    fn keep(&mut self, item: ContextItem) {
+        self.items.push(item);
+    }
+
+    fn give_up_last(&mut self) -> Option<ContextItem> {
+        self.items.pop()
+    }
+
+    fn set_cuts(&mut self, cuts: Vec<Cut>) {
+        self.cuts = cuts;
+    }
+}
+
+impl Fit for SearchPackage {
+    fn rendered(&self) -> String {
+        self.render()
+    }
+
+    fn kept(&self) -> &[ContextItem] {
+        &self.items
+    }
+
+    fn keep(&mut self, item: ContextItem) {
+        self.items.push(item);
+    }
+
+    fn give_up_last(&mut self) -> Option<ContextItem> {
+        self.items.pop()
+    }
+
+    fn set_cuts(&mut self, cuts: Vec<Cut>) {
+        self.cuts = cuts;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Text helpers: every line an item shows is scrubbed of anything that could
 // start a line of its own.
 // ---------------------------------------------------------------------------
@@ -1494,6 +1829,39 @@ const fn could_hide_a_module(reason: &SkipReason) -> bool {
     }
 }
 
+/// Refuses a search query that cannot be searched for, with its length and
+/// never its text: AICD §25. Called before any source is read.
+///
+/// Both refusals are made here so that the indexer's own `InvalidQuery`, which
+/// carries and displays the raw text, cannot be reached from a search: the
+/// indexer refuses a NUL character with it, and a query longer than its cap
+/// with `QueryTooLarge`, which carries a length only.
+fn check_search_text(text: &str) -> Result<(), RetrievalError> {
+    if text.contains('\0') {
+        return Err(RetrievalError::InvalidSearchQuery {
+            why: "contains a NUL character",
+            bytes: text.len(),
+        });
+    }
+    if text.len() > MAX_SEARCH_QUERY_BYTES {
+        return Err(RetrievalError::InvalidSearchQuery {
+            why: "is longer than the search query cap",
+            bytes: text.len(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether `record` matches a search for `needle`, already lower-cased: the
+/// needle is a substring of the lower-cased text of any structured field. A
+/// field's name never matches.
+fn record_matches(record: &MemoryRecord, needle: &str) -> bool {
+    record
+        .structured()
+        .values()
+        .any(|field| field.text().to_lowercase().contains(needle))
+}
+
 /// How a gathered candidate ranks: group first, then within the group.
 #[derive(Clone, Debug)]
 struct Rank {
@@ -1616,20 +1984,7 @@ impl<'a> Retrieval<'a> {
                 found: authorization.query().kind(),
             });
         };
-        if authorization.product_id() != &self.product_id {
-            return Err(RetrievalError::ProductMismatch {
-                what: "the authorization was granted in another product than this retrieval serves",
-            });
-        }
-        let db_product =
-            Id::parse(db.product_id()).map_err(|_| RetrievalError::ProductMismatch {
-                what: "the database's product identifier is not an Id",
-            })?;
-        if db_product != self.product_id {
-            return Err(RetrievalError::ProductMismatch {
-                what: "the database is another product's than this retrieval serves",
-            });
-        }
+        self.check_product_links(db, authorization)?;
         let ticket_id = ticket_id.clone();
         let focus: Vec<ModulePath> = authorization.declared_modules().to_vec();
 
@@ -1730,6 +2085,256 @@ impl<'a> Retrieval<'a> {
             notes,
         };
         fit_under_cap(package, items, &self.config)
+    }
+
+    /// The admitted results of a search: AICD §25, `spec/API_SPEC.md` section
+    /// 3 (`aicd_search`).
+    ///
+    /// Runs the query of the `Query::Search` `authorization` was granted for
+    /// against the sources it allows, and holds only what
+    /// `Authorization::filter` returns, in provenance-carrying items fitted
+    /// under the package cap; see the module doc, "Search", for what matches
+    /// in each source, the order and the limit. The query text is checked
+    /// before any source is read and is never put in an error, a note or the
+    /// package. Appends nothing to the log. It opens the product's index when
+    /// the authorization allows a document source, which creates an empty
+    /// index file when none exists yet, and says so ([`SearchNote::IndexEmpty`]).
+    ///
+    /// # Errors
+    ///
+    /// [`RetrievalError::NotASearchAuthorization`] for an authorization
+    /// granted for any other query; [`RetrievalError::ProductMismatch`] when
+    /// the authorization, `db` and this retrieval do not name one product;
+    /// [`RetrievalError::InvalidSearchQuery`] for a query holding a NUL
+    /// character or longer than [`MAX_SEARCH_QUERY_BYTES`], which also means
+    /// the indexer's own `InvalidQuery`, carrying the raw text, can never be
+    /// reached from here; [`RetrievalError::CapTooSmall`] when the cap is
+    /// below an empty package; [`RetrievalError::SeamBroken`] when the
+    /// filter's result is not tied to `authorization`;
+    /// [`RetrievalError::Oplog`] and [`RetrievalError::Index`] when the log or
+    /// the index cannot be read.
+    pub fn search(
+        &self,
+        db: &mut ProductDb,
+        authorization: &Authorization,
+    ) -> Result<SearchPackage, RetrievalError> {
+        let Query::Search { text, .. } = authorization.query() else {
+            return Err(RetrievalError::NotASearchAuthorization {
+                found: authorization.query().kind(),
+            });
+        };
+        self.check_product_links(db, authorization)?;
+        check_search_text(text)?;
+        let query = text.trim();
+
+        let mut package = SearchPackage {
+            product_id: authorization.product_id().clone(),
+            reader: authorization.reader().clone(),
+            query_chars: text.chars().count(),
+            sources: authorization.sources().keys().copied().collect(),
+            log_tip_seq: None,
+            documents_covered: None,
+            cap_bytes: self.config.cap_bytes,
+            items: Vec::new(),
+            cuts: Vec::new(),
+            notes: Vec::new(),
+        };
+        if query.is_empty() {
+            package.notes.push(SearchNote::EmptyQuery);
+            return fit_under_cap(package, Vec::new(), &self.config);
+        }
+        let needle = query.to_lowercase();
+
+        let mut items: Vec<ContextItem> = Vec::new();
+        let mut notes: Vec<SearchNote> = Vec::new();
+        let mut corpus = BTreeMap::new();
+
+        if DOCUMENT_SOURCES
+            .iter()
+            .any(|source| authorization.allows(*source))
+        {
+            // The index is opened from `db` and dropped before the log is
+            // read; the corpus is read after the search, as `gather_documents`
+            // reads it, so a sync between the two reads a document as changed
+            // or missing, never as fresh over text it was not verified
+            // against.
+            let (mut hits, covered, read) = {
+                let index = Indexer::open(db)?;
+                let report = index.search(query, SEARCH_HIT_LIMIT.saturating_add(1))?;
+                let read = index.freshness_corpus()?;
+                (report.hits, report.documents_covered, read)
+            };
+            corpus = read;
+            if hits.len() > SEARCH_HIT_LIMIT {
+                hits.truncate(SEARCH_HIT_LIMIT);
+                notes.push(SearchNote::LimitReached { kind: "documents" });
+            }
+            if covered == 0 {
+                notes.push(SearchNote::IndexEmpty);
+            }
+            // The count covers every document of the index, whatever its
+            // source: shown only to a reader who may read all five.
+            if DOCUMENT_SOURCES
+                .iter()
+                .all(|source| authorization.allows(*source))
+            {
+                package.documents_covered = Some(covered);
+            }
+            for hit in hits {
+                let origin = Origin::Index {
+                    path: hit.path.clone(),
+                };
+                let candidate = Candidate::Document {
+                    product_id: authorization.product_id().clone(),
+                    hit,
+                };
+                items.extend(self.admit_one(
+                    authorization,
+                    candidate,
+                    origin,
+                    GROUP_DOCUMENTS,
+                    &corpus,
+                )?);
+            }
+        }
+
+        if RECORD_SOURCES
+            .iter()
+            .any(|source| authorization.allows(*source))
+        {
+            let log = OperationalLog::read(db)?;
+            package.log_tip_seq = log.tip_seq();
+            let mut matching: Vec<(u64, Candidate)> = Vec::new();
+            for entry in log.entries() {
+                if !record_matches(entry.record(), &needle) {
+                    continue;
+                }
+                let candidate = entry.candidate();
+                let allowed = candidate
+                    .classify()
+                    .is_some_and(|source| authorization.allows(source));
+                if allowed {
+                    matching.push((entry.seq(), candidate));
+                }
+            }
+            // Newest first.
+            matching.sort_by_key(|entry| core::cmp::Reverse(entry.0));
+            let mut kept = 0_usize;
+            for (seq, candidate) in matching {
+                let origin = Origin::OperationalLog { seq };
+                let Some(item) = self.admit_one(
+                    authorization,
+                    candidate,
+                    origin,
+                    GROUP_OTHER_RECORDS,
+                    &corpus,
+                )?
+                else {
+                    continue;
+                };
+                if kept == SEARCH_HIT_LIMIT {
+                    notes.push(SearchNote::LimitReached { kind: "records" });
+                    break;
+                }
+                items.push(item);
+                kept += 1;
+            }
+        }
+
+        if authorization.allows(Source::CodeMap) {
+            let mut matching: Vec<&Module> = self
+                .code_map
+                .modules
+                .iter()
+                .filter(|module| module.path.to_lowercase().contains(&needle))
+                .collect();
+            matching.sort_by(|left, right| left.path.cmp(&right.path));
+            let mut kept = 0_usize;
+            for module in matching {
+                let origin = Origin::CodeMap {
+                    path: module.path.clone(),
+                };
+                let candidate = Candidate::Module {
+                    product_id: authorization.product_id().clone(),
+                    module: module.clone(),
+                };
+                let Some(item) =
+                    self.admit_one(authorization, candidate, origin, GROUP_MODULES, &corpus)?
+                else {
+                    continue;
+                };
+                if kept == SEARCH_HIT_LIMIT {
+                    notes.push(SearchNote::LimitReached { kind: "modules" });
+                    break;
+                }
+                items.push(item);
+                kept += 1;
+            }
+        }
+
+        let missing: Vec<Source> = UNPRODUCED_SOURCES
+            .iter()
+            .copied()
+            .filter(|source| authorization.allows(*source))
+            .collect();
+        if !missing.is_empty() {
+            notes.push(SearchNote::NoProducer { sources: missing });
+        }
+
+        package.notes = notes;
+        fit_under_cap(package, items, &self.config)
+    }
+
+    /// Admits one gathered candidate through [`Retrieval::admit`], the only
+    /// gate, and returns its item, `None` when the filter did not return it.
+    fn admit_one(
+        &self,
+        authorization: &Authorization,
+        candidate: Candidate,
+        origin: Origin,
+        group: u8,
+        corpus: &BTreeMap<String, String>,
+    ) -> Result<Option<ContextItem>, RetrievalError> {
+        let gathered = Gathered {
+            candidate,
+            // The order of a search is the order the candidates are admitted
+            // in; the rank is not read.
+            rank: Rank {
+                group,
+                seq: 0,
+                score: 0.0,
+                name: String::new(),
+            },
+            origin,
+        };
+        let mut admitted = self.admit(authorization, vec![gathered], corpus)?;
+        Ok(admitted.pop().map(|(item, _)| item))
+    }
+
+    /// The three product links the module doc, "The seam this module stands
+    /// on", names: the authorization is the product this retrieval serves,
+    /// and so is the database. Checked before anything is read, by
+    /// [`Retrieval::assemble`] and [`Retrieval::search`] alike.
+    fn check_product_links(
+        &self,
+        db: &ProductDb,
+        authorization: &Authorization,
+    ) -> Result<(), RetrievalError> {
+        if authorization.product_id() != &self.product_id {
+            return Err(RetrievalError::ProductMismatch {
+                what: "the authorization was granted in another product than this retrieval serves",
+            });
+        }
+        let db_product =
+            Id::parse(db.product_id()).map_err(|_| RetrievalError::ProductMismatch {
+                what: "the database's product identifier is not an Id",
+            })?;
+        if db_product != self.product_id {
+            return Err(RetrievalError::ProductMismatch {
+                what: "the database is another product's than this retrieval serves",
+            });
+        }
+        Ok(())
     }
 
     /// Gathers the product's operational records the authorization allows:
@@ -2014,30 +2619,32 @@ impl<'a> Retrieval<'a> {
 
 /// Fits `items`, already ranked, under the cap: the package never renders
 /// longer than `config.cap_bytes`, and says what it cut.
-fn fit_under_cap(
-    mut package: ContextPackage,
+///
+/// Fits a [`ContextPackage`] and a [`SearchPackage`] alike, through [`Fit`].
+fn fit_under_cap<P: Fit>(
+    mut package: P,
     items: Vec<ContextItem>,
     config: &PackageConfig,
-) -> Result<ContextPackage, RetrievalError> {
-    let empty_len = package.render().len();
+) -> Result<P, RetrievalError> {
+    let empty_len = package.rendered().len();
     let mut used = empty_len;
     let mut dropped: Vec<Source> = Vec::new();
     for item in items {
         let len = item.render().len();
         if used + len <= config.cap_bytes {
             used += len;
-            package.items.push(item);
+            package.keep(item);
         } else {
             dropped.push(item.source());
         }
     }
     loop {
-        package.cuts = cuts_of(&package.items, &dropped, config);
-        let size = package.render().len();
+        package.set_cuts(cuts_of(package.kept(), &dropped, config));
+        let size = package.rendered().len();
         if size <= config.cap_bytes {
             return Ok(package);
         }
-        match package.items.pop() {
+        match package.give_up_last() {
             Some(item) => dropped.push(item.source()),
             None => {
                 return Err(RetrievalError::CapTooSmall {
@@ -4309,5 +4916,1364 @@ mod tests {
         let (_, _package) = coder_package(&mut w);
         let after = EventLog::verify(w.p.db.connection()).expect("the log verifies");
         assert_eq!(before, after, "assembling a package changed the log");
+    }
+
+    // -------------------------------------------------------------------
+    // ORI-T-0170: a search entry over a search authorization
+    // -------------------------------------------------------------------
+
+    fn search_request(text: &str) -> MemoryRequest {
+        MemoryRequest::new(Query::Search {
+            text: text.to_owned(),
+            sources: Vec::new(),
+        })
+    }
+
+    fn named_search_request(text: &str, sources: &[&str]) -> MemoryRequest {
+        MemoryRequest::new(Query::Search {
+            text: text.to_owned(),
+            sources: sources.iter().map(|name| (*name).to_owned()).collect(),
+        })
+    }
+
+    /// Authorizes `request` for `role` and runs the search under `config`,
+    /// returning the authorization beside the outcome.
+    fn search_with(
+        w: &mut World,
+        role: Role,
+        request: &MemoryRequest,
+        config: PackageConfig,
+    ) -> (Authorization, Result<SearchPackage, RetrievalError>) {
+        let auth = authorize(&mut w.p, role, &w.ticket_m, request);
+        let retrieval =
+            Retrieval::new(&w.p.db, &w.code_map, Some(at(BUILT_AT)), &w.tracker, config)
+                .expect("a retrieval for the fixture product");
+        let outcome = retrieval.search(&mut w.p.db, &auth);
+        (auth, outcome)
+    }
+
+    /// A search by `role` for `text` under the default configuration.
+    fn search_as(w: &mut World, role: Role, text: &str) -> SearchPackage {
+        let (_, outcome) = search_with(w, role, &search_request(text), PackageConfig::default());
+        outcome.unwrap_or_else(|err| panic!("a search package is returned: {err}"))
+    }
+
+    fn search_record_ids(items: &[ContextItem]) -> BTreeSet<Id> {
+        items
+            .iter()
+            .filter_map(|item| match item.candidate() {
+                Some(Candidate::Record(record)) => Some(record.id().clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The seqs of the record items, in the order the package holds them.
+    fn search_record_seqs(items: &[ContextItem]) -> Vec<u64> {
+        items
+            .iter()
+            .filter_map(|item| match item.provenance().origin() {
+                Origin::OperationalLog { seq } => Some(*seq),
+                Origin::Index { .. } | Origin::CodeMap { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The paths of the document items, in the order the package holds them.
+    fn search_document_paths(items: &[ContextItem]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item.candidate() {
+                Some(Candidate::Document { hit, .. }) => Some(hit.path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The paths of the module items, in the order the package holds them.
+    fn search_module_paths(items: &[ContextItem]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item.candidate() {
+                Some(Candidate::Module { module, .. }) => Some(module.path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn paths_of(documents: &[&IndexableDocument]) -> BTreeSet<String> {
+        documents
+            .iter()
+            .map(|document| document.path.clone())
+            .collect()
+    }
+
+    fn file_closing(p: &mut Product, label: &str, ticket: &Id, text: &str) -> Id {
+        file_record(
+            p,
+            label,
+            RecordKind::ClosingReport,
+            Some(ticket),
+            &[("summary", text)],
+        )
+    }
+
+    #[test]
+    fn ori_t_0170_a_context_read_or_evidence_authorization_is_refused() {
+        let mut w = world("t0170-wrong-query");
+        let context_request = context(&w.ticket_m);
+        let read_request = MemoryRequest::new(Query::Read {
+            source: "adr".to_owned(),
+        });
+        let evidence_request = MemoryRequest::new(Query::Evidence {
+            record_id: w.rec_m.clone(),
+        });
+        for (role, request, found) in [
+            (Role::Coder, context_request, "context"),
+            (Role::Coder, read_request, "read"),
+            (Role::Lead, evidence_request, "evidence"),
+        ] {
+            let (auth, outcome) = search_with(&mut w, role, &request, PackageConfig::default());
+            let err = outcome.expect_err("an authorization for another query is no search");
+            assert!(
+                matches!(&err, RetrievalError::NotASearchAuthorization { found: got } if *got == found),
+                "{err}"
+            );
+            assert_eq!(err.methodology_ref().section, 25);
+            assert!(
+                err.to_string().contains(found),
+                "the refusal names the kind it found: {err}"
+            );
+            // The same authorization is no context package either, as before.
+            let retrieval = Retrieval::new(
+                &w.p.db,
+                &w.code_map,
+                Some(at(BUILT_AT)),
+                &w.tracker,
+                PackageConfig::default(),
+            )
+            .expect("a retrieval");
+            if found != "context" {
+                assert!(matches!(
+                    retrieval.assemble(&mut w.p.db, &auth),
+                    Err(RetrievalError::NotAContextAuthorization { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn ori_t_0170_a_retrieval_for_another_product_refuses_a_search_authorization_and_the_database()
+    {
+        let mut a = world("t0170-product-a");
+        let mut b = product("t0170-product-b", "PRODUCTB");
+        let auth_a = authorize(&mut a.p, Role::Lead, &a.ticket_m, &search_request("widget"));
+        let map = code_map_of(&["crates/m/src/lib.rs"]);
+        let tracker = FreshnessTracker::new();
+
+        let for_b = Retrieval::new(&b.db, &map, None, &tracker, PackageConfig::default())
+            .expect("a retrieval for product B");
+        let err = for_b
+            .search(&mut b.db, &auth_a)
+            .expect_err("product A's authorization is not product B's to use");
+        assert!(
+            matches!(err, RetrievalError::ProductMismatch { .. }),
+            "{err}"
+        );
+        assert_eq!(err.methodology_ref().section, 25);
+
+        let for_a = Retrieval::new(&a.p.db, &map, None, &tracker, PackageConfig::default())
+            .expect("a retrieval for product A");
+        let err = for_a
+            .search(&mut b.db, &auth_a)
+            .expect_err("product B's database is not product A's");
+        assert!(
+            matches!(err, RetrievalError::ProductMismatch { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ori_p1_036_a_search_in_one_product_never_returns_the_others_records() {
+        let mut a = world("p1-036-a");
+        a.code_map = code_map_of(&["crates/m/src/widget.rs"]);
+        let mut b = product("p1-036-b", "PRODUCTB");
+        register(&mut b, &identity_of(Role::Lead), Role::Lead);
+        let ticket_b = id("TICKETB");
+        file_ticket(&mut b, &ticket_b);
+        let rec_b = file_closing(
+            &mut b,
+            "RECB",
+            &ticket_b,
+            "a widget note of the other product",
+        );
+        let doc_b = IndexableDocument::new(
+            spec_doc("B.md", "b-widgets"),
+            DocumentKind::Section,
+            "Widget handbook of product B",
+            "The widget text only product B holds.",
+        );
+        build_index(&b, std::slice::from_ref(&doc_b));
+        let map_b = code_map_of(&["crates/widget/src/lib.rs"]);
+        let tracker_b = FreshnessTracker::new();
+
+        let package_a = search_as(&mut a, Role::Lead, "widget");
+        let auth_b = authorize(&mut b, Role::Lead, &ticket_b, &search_request("widget"));
+        let retrieval_b = Retrieval::new(
+            &b.db,
+            &map_b,
+            Some(at(BUILT_AT)),
+            &tracker_b,
+            PackageConfig::default(),
+        )
+        .expect("a retrieval for product B");
+        let package_b = retrieval_b
+            .search(&mut b.db, &auth_b)
+            .expect("a search in product B");
+
+        assert_eq!(
+            search_record_ids(package_a.items()),
+            set(&[a.rec_m.clone(), a.rec_m_finding.clone(), a.rec_p.clone()]),
+            "product A's search holds product A's matching records, and not B's"
+        );
+        assert_eq!(
+            set(&search_document_paths(package_a.items())),
+            paths_of(&[&a.docs.section_m, &a.docs.adr_m, &a.docs.criterion_m]),
+            "product A's search holds product A's matching documents, and not B's"
+        );
+        assert_eq!(
+            search_module_paths(package_a.items()),
+            ["crates/m/src/widget.rs".to_owned()]
+        );
+        assert_eq!(
+            search_record_ids(package_b.items()),
+            set(std::slice::from_ref(&rec_b)),
+            "product B's search holds product B's record alone"
+        );
+        assert_eq!(
+            search_document_paths(package_b.items()),
+            std::slice::from_ref(&doc_b.path)
+        );
+        assert_eq!(
+            search_module_paths(package_b.items()),
+            ["crates/widget/src/lib.rs".to_owned()]
+        );
+        for (package, own) in [(&package_a, &a.p.id), (&package_b, &b.id)] {
+            assert_eq!(package.product_id(), own);
+            for item in package.items() {
+                assert_eq!(item.provenance().product_id(), own);
+            }
+        }
+        let text_a = package_a.render();
+        let text_b = package_b.render();
+        assert!(!text_a.contains(b.id.as_str()) && !text_a.contains("other product"));
+        assert!(!text_b.contains(a.p.id.as_str()) && !text_b.contains("closed the widget work"));
+    }
+
+    #[test]
+    fn ori_t_0170_a_coder_search_returns_only_records_and_modules_inside_its_declared_scope() {
+        let mut w = world("t0170-coder-scope");
+        let probe = "scopeprobe";
+        let mut records = BTreeMap::new();
+        for (label, ticket) in [
+            ("PROBEM", Some(id("TICKETM"))),
+            ("PROBEP", Some(id("TICKETP"))),
+            ("PROBEO", Some(id("TICKETO"))),
+            ("PROBEX", Some(id("TICKETX"))),
+            ("PROBENONE", None),
+        ] {
+            let text = format!("{probe} filed under {label}");
+            let record_id = file_record(
+                &mut w.p,
+                label,
+                RecordKind::ClosingReport,
+                ticket.as_ref(),
+                &[("summary", text.as_str())],
+            );
+            records.insert(label, record_id);
+        }
+        let section_m = IndexableDocument::new(
+            spec_doc("PROBE.md", "m-probe"),
+            DocumentKind::Section,
+            "Probe of m",
+            "scopeprobe cites crates/m",
+        );
+        let section_o = IndexableDocument::new(
+            spec_doc("PROBE.md", "o-probe"),
+            DocumentKind::Section,
+            "Probe of other",
+            "scopeprobe cites crates/other",
+        );
+        let module_doc_m = IndexableDocument::new(
+            "crates/m/src/lib.rs",
+            DocumentKind::Module,
+            "module m",
+            "scopeprobe module text",
+        );
+        let module_doc_o = IndexableDocument::new(
+            "crates/other/src/lib.rs",
+            DocumentKind::Module,
+            "module other",
+            "scopeprobe module text",
+        );
+        build_index(
+            &w.p,
+            &[
+                section_m.clone(),
+                section_o.clone(),
+                module_doc_m.clone(),
+                module_doc_o.clone(),
+            ],
+        );
+        w.code_map = code_map_of(&[
+            "crates/m/src/scopeprobe.rs",
+            "crates/other/src/scopeprobe.rs",
+        ]);
+
+        let coder = search_as(&mut w, Role::Coder, probe);
+        assert_eq!(
+            search_record_ids(coder.items()),
+            set(&[records["PROBEM"].clone(), records["PROBEP"].clone()]),
+            "the records of the declared scope's tickets, and of no other ticket or none"
+        );
+        assert_eq!(
+            search_module_paths(coder.items()),
+            ["crates/m/src/scopeprobe.rs".to_owned()],
+            "the code map of the declared module only"
+        );
+        assert_eq!(
+            set(&search_document_paths(coder.items())),
+            paths_of(&[&section_m, &section_o, &module_doc_m]),
+            "canonical documents by the coder's row, and a module document only inside its scope"
+        );
+        assert!(
+            coder
+                .items()
+                .iter()
+                .all(|item| !matches!(item.candidate(), Some(Candidate::Evidence(_))))
+        );
+
+        // The same query by the lead holds everything, so the coder's absences
+        // are the filter's work and not an empty fixture.
+        let lead = search_as(&mut w, Role::Lead, probe);
+        assert_eq!(
+            search_record_ids(lead.items()).len(),
+            records.len(),
+            "the lead reads every record the fixture filed"
+        );
+        assert_eq!(search_module_paths(lead.items()).len(), 2);
+        assert_eq!(search_document_paths(lead.items()).len(), 4);
+    }
+
+    #[test]
+    fn ori_t_0170_the_limit_counts_only_what_the_reader_may_read() {
+        let mut w = world("t0170-limit-scope");
+        let ticket_m = w.ticket_m.clone();
+        let ticket_o = id("TICKETO");
+        let mine: Vec<Id> = (0..2)
+            .map(|n| file_closing(&mut w.p, &format!("OWN{n}"), &ticket_m, "outprobe mine"))
+            .collect();
+        for n in 0..=SEARCH_HIT_LIMIT {
+            file_closing(
+                &mut w.p,
+                &format!("THEIR{n}"),
+                &ticket_o,
+                "outprobe of another ticket",
+            );
+        }
+        let mut paths: Vec<String> = (0..=SEARCH_HIT_LIMIT)
+            .map(|n| format!("crates/a-other/src/outprobe{n:02}.rs"))
+            .collect();
+        paths.push("crates/m/src/outprobe.rs".to_owned());
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        w.code_map = code_map_of(&refs);
+
+        let coder = search_as(&mut w, Role::Coder, "outprobe");
+        assert_eq!(
+            search_record_ids(coder.items()),
+            set(&mine),
+            "records of other tickets, newer than the coder's own, did not use up its hits"
+        );
+        assert_eq!(
+            search_module_paths(coder.items()),
+            ["crates/m/src/outprobe.rs".to_owned()],
+            "modules outside the scope, earlier by path, did not use up its hits"
+        );
+        assert!(
+            !coder
+                .notes()
+                .iter()
+                .any(|note| matches!(note, SearchNote::LimitReached { .. })),
+            "no note tells a coder that more than {SEARCH_HIT_LIMIT} results it may not read matched: {:?}",
+            coder.notes()
+        );
+
+        // A reader of all of it is told, for both kinds.
+        let lead = search_as(&mut w, Role::Lead, "outprobe");
+        for kind in ["records", "modules"] {
+            assert!(
+                lead.notes().contains(&SearchNote::LimitReached { kind }),
+                "{kind}: {:?}",
+                lead.notes()
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0170_records_match_any_structured_field_case_insensitively_and_never_by_field_name() {
+        let mut w = world("t0170-record-match");
+        let ticket = w.ticket_m.clone();
+        let alpha = file_record(
+            &mut w.p,
+            "ALPHA",
+            RecordKind::ClosingReport,
+            Some(&ticket),
+            &[
+                ("summary", "nothing special"),
+                ("rootcause", "The Quick BROWN fox"),
+            ],
+        );
+        let bravo = file_record(
+            &mut w.p,
+            "BRAVO",
+            RecordKind::Finding,
+            Some(&ticket),
+            &[("needle", "unrelated words")],
+        );
+        let ids = |package: &SearchPackage| search_record_ids(package.items());
+
+        for query in ["quick brown", "QUICK BROWN FOX", "  The quick brown fox  "] {
+            assert_eq!(
+                ids(&search_as(&mut w, Role::Lead, query)),
+                set(std::slice::from_ref(&alpha)),
+                "{query}: a match in the second field, whatever the case"
+            );
+        }
+        assert_eq!(
+            ids(&search_as(&mut w, Role::Lead, "UNRELATED")),
+            set(std::slice::from_ref(&bravo)),
+            "the record whose field is named for the other query is still found by its text"
+        );
+        for query in [
+            "needle",
+            "rootcause",
+            "ROOTCAUSE",
+            "summary",
+            "closing_report",
+        ] {
+            assert!(
+                ids(&search_as(&mut w, Role::Lead, query)).is_empty(),
+                "{query} names a field or a kind, never a field's text"
+            );
+        }
+    }
+
+    #[test]
+    fn ori_t_0170_modules_match_by_path_and_documents_by_the_index() {
+        let mut w = world("t0170-modules-documents");
+        let ticket = w.ticket_m.clone();
+        w.code_map = code_map_of(&[
+            "crates/m/src/util.rs",
+            "crates/m/src/lib.rs",
+            "crates/m/src/pipeline.rs",
+            "crates/other/src/lib.rs",
+        ]);
+        file_closing(&mut w.p, "PIPEONE", &ticket, "first pipeline note");
+        file_closing(&mut w.p, "PIPETWO", &ticket, "second pipeline note");
+
+        let by_path = search_as(&mut w, Role::Lead, "SRC/UTIL");
+        assert_eq!(
+            search_module_paths(by_path.items()),
+            ["crates/m/src/util.rs".to_owned()],
+            "a module matches by its path, whatever the case"
+        );
+        let all = search_as(&mut w, Role::Lead, "crates/m/src");
+        assert_eq!(
+            search_module_paths(all.items()),
+            [
+                "crates/m/src/lib.rs".to_owned(),
+                "crates/m/src/pipeline.rs".to_owned(),
+                "crates/m/src/util.rs".to_owned(),
+            ],
+            "modules are ordered by path"
+        );
+
+        let expected: Vec<String> = {
+            let index = Indexer::open(&w.p.db).expect("the index opens");
+            let report = index
+                .search("pipeline", SEARCH_HIT_LIMIT + 1)
+                .expect("the index searches");
+            report.hits.into_iter().map(|hit| hit.path).collect()
+        };
+        assert!(expected.len() >= 3, "the fixture has documents to match");
+        let package = search_as(&mut w, Role::Lead, "pipeline");
+        assert_eq!(
+            search_document_paths(package.items()),
+            expected,
+            "documents are what the index returned, in the index's order"
+        );
+        let rank = |item: &ContextItem| match item.candidate() {
+            Some(Candidate::Document { .. }) => 0,
+            Some(Candidate::Record(_)) => 1,
+            Some(Candidate::Module { .. }) => 2,
+            other => panic!("an item no search builds: {other:?}"),
+        };
+        let ranks: Vec<u8> = package.items().iter().map(rank).collect();
+        let mut sorted = ranks.clone();
+        sorted.sort_unstable();
+        assert_eq!(ranks, sorted, "documents, then records, then modules");
+        assert!(ranks.contains(&0) && ranks.contains(&1) && ranks.contains(&2));
+        let seqs = search_record_seqs(package.items());
+        assert_eq!(seqs.len(), 2);
+        assert!(seqs[0] > seqs[1], "records are newest first: {seqs:?}");
+
+        // A document's path is not its text: the index does not read it.
+        let by_name = search_as(&mut w, Role::Lead, "widgets");
+        assert!(
+            search_document_paths(by_name.items()).is_empty(),
+            "two fixture paths hold 'widgets' and no text does"
+        );
+    }
+
+    #[test]
+    fn ori_t_0170_no_evidence_blob_is_ever_in_a_search_result() {
+        let mut w = world("t0170-evidence");
+        let blobs = barrier::read_evidence(&mut w.p.db).expect("evidence reads");
+        assert!(
+            blobs.iter().any(|blob| blob.record_id() == &w.rec_m),
+            "the fixture stored evidence for the record searched for"
+        );
+        let package = search_as(&mut w, Role::Lead, "widget");
+        assert!(
+            search_record_ids(package.items()).contains(&w.rec_m),
+            "the record itself is a result, so the absence below is not vacuous"
+        );
+        for item in package.items() {
+            assert!(
+                !matches!(item.candidate(), Some(Candidate::Evidence(_))),
+                "an evidence blob is an item of the results"
+            );
+        }
+        let rendered = package.render();
+        assert!(
+            !rendered.contains(RAW_TAIL),
+            "raw evidence text reached the results"
+        );
+        for blob in &blobs {
+            assert!(!rendered.contains(blob.id().as_str()));
+            assert!(!rendered.contains(&blob.content_ref().display().to_string()));
+        }
+        assert!(rendered.contains("evidence: none"));
+
+        // What only the raw evidence holds is not searched.
+        let by_raw = search_as(&mut w, Role::Lead, RAW_TAIL);
+        assert!(
+            by_raw.items().is_empty(),
+            "a query that matches only raw evidence found {:?}",
+            by_raw.items()
+        );
+    }
+
+    #[test]
+    fn ori_t_0170_a_query_with_a_nul_or_over_the_cap_is_refused_without_its_text() {
+        let mut w = world("t0170-query-refused");
+        let marker = "PLANTEDQUERYMARKER";
+        let multibyte = "\u{e9}".repeat(MAX_SEARCH_QUERY_BYTES / 2 + 1);
+        assert!(multibyte.chars().count() < MAX_SEARCH_QUERY_BYTES);
+        let cases = [
+            (
+                format!("{marker}\0 widget"),
+                "contains a NUL character",
+                "a NUL anywhere in the text",
+            ),
+            (
+                "\0".to_owned(),
+                "contains a NUL character",
+                "a query of nothing but a NUL is a NUL, not an empty query",
+            ),
+            (
+                format!("{marker}{}", "a".repeat(MAX_SEARCH_QUERY_BYTES)),
+                "is longer than the search query cap",
+                "one query over the cap",
+            ),
+            (
+                multibyte,
+                "is longer than the search query cap",
+                "the cap is in bytes, not characters",
+            ),
+        ];
+        for (text, why, label) in cases {
+            for role in [Role::Lead, Role::Coder] {
+                let (_, outcome) = search_with(
+                    &mut w,
+                    role,
+                    &search_request(&text),
+                    PackageConfig::default(),
+                );
+                let err = outcome.expect_err(label);
+                assert!(
+                    matches!(
+                        &err,
+                        RetrievalError::InvalidSearchQuery { why: got, bytes }
+                            if *got == why && *bytes == text.len()
+                    ),
+                    "{label}: {err:?}"
+                );
+                assert_eq!(err.methodology_ref().section, 25);
+                let shown = format!("{err}");
+                let debug = format!("{err:?}");
+                for form in [&shown, &debug] {
+                    assert!(
+                        !form.contains(marker),
+                        "{label}: the query's text is in an error: {form}"
+                    );
+                }
+                assert!(shown.contains(&text.len().to_string()), "{shown}");
+            }
+        }
+
+        // The edge: exactly the cap is searched, one more is refused.
+        let padding = " ".repeat(MAX_SEARCH_QUERY_BYTES - "widget".len());
+        let at_cap = format!("widget{padding}");
+        assert_eq!(at_cap.len(), MAX_SEARCH_QUERY_BYTES);
+        let package = search_as(&mut w, Role::Lead, &at_cap);
+        assert!(!package.items().is_empty());
+        assert_eq!(package.query_chars(), MAX_SEARCH_QUERY_BYTES);
+        let (_, outcome) = search_with(
+            &mut w,
+            Role::Lead,
+            &search_request(&format!("{at_cap} ")),
+            PackageConfig::default(),
+        );
+        assert!(matches!(
+            outcome,
+            Err(RetrievalError::InvalidSearchQuery { bytes, .. }) if bytes == MAX_SEARCH_QUERY_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn ori_t_0170_a_query_in_the_index_syntax_is_searched_as_text_and_never_refused() {
+        let mut w = world("t0170-hostile-syntax");
+        for query in [
+            "\"",
+            "*",
+            "NOT",
+            "widget OR gadget",
+            "path:secret",
+            "(",
+            "\\",
+            "'; DROP TABLE documents; --",
+            "widget\nwork",
+        ] {
+            let (_, outcome) = search_with(
+                &mut w,
+                Role::Lead,
+                &search_request(query),
+                PackageConfig::default(),
+            );
+            let package = outcome.unwrap_or_else(|err| panic!("{query:?} was refused: {err}"));
+            assert!(
+                package.items().is_empty(),
+                "{query:?} is a phrase of text, not an operator: {:?}",
+                package.items()
+            );
+            assert_eq!(package.documents_covered(), Some(5));
+        }
+    }
+
+    #[test]
+    fn ori_t_0170_the_search_cap_equals_the_indexers() {
+        let w = world("t0170-cap-equals-indexers");
+        let index = Indexer::open(&w.p.db).expect("the index opens");
+        let at_cap = "a".repeat(MAX_SEARCH_QUERY_BYTES);
+        assert!(
+            index.search(&at_cap, 1).is_ok(),
+            "the indexer accepts the longest query a search accepts"
+        );
+        let over = "a".repeat(MAX_SEARCH_QUERY_BYTES + 1);
+        assert!(
+            matches!(
+                index.search(&over, 1),
+                Err(IndexerError::QueryTooLarge { byte_len }) if byte_len == MAX_SEARCH_QUERY_BYTES + 1
+            ),
+            "the indexer refuses one byte more with QueryTooLarge"
+        );
+    }
+
+    #[test]
+    fn ori_t_0170_an_empty_query_reads_nothing_and_says_so() {
+        let mut p = product("t0170-empty-query", "PRODUCTA");
+        register(&mut p, &identity_of(Role::Lead), Role::Lead);
+        let ticket = id("TICKETM");
+        file_ticket(&mut p, &ticket);
+        file_closing(&mut p, "SOMETHING", &ticket, "a record that would match");
+        let map = code_map_of(&["crates/m/src/lib.rs"]);
+        let tracker = FreshnessTracker::new();
+        let index_dir = p.db.dir().join("index");
+        let index_files = || {
+            fs::read_dir(&index_dir)
+                .expect("the product's index directory exists")
+                .count()
+        };
+        assert_eq!(index_files(), 0, "no index has been opened yet");
+
+        let search = |p: &mut Product, text: &str| {
+            let auth = authorize(p, Role::Lead, &ticket, &search_request(text));
+            let retrieval = Retrieval::new(
+                &p.db,
+                &map,
+                Some(at(BUILT_AT)),
+                &tracker,
+                PackageConfig::default(),
+            )
+            .expect("a retrieval");
+            retrieval
+                .search(&mut p.db, &auth)
+                .unwrap_or_else(|err| panic!("a package is returned: {err}"))
+        };
+        for query in ["", "   ", " \t\r\n "] {
+            let package = search(&mut p, query);
+            assert!(package.items().is_empty());
+            assert_eq!(package.notes(), [SearchNote::EmptyQuery]);
+            assert_eq!(package.log_tip_seq(), None, "the log was not read");
+            assert_eq!(package.documents_covered(), None);
+            assert!(package.cuts().is_empty());
+            assert!(package.render().contains("the query is empty"));
+            assert!(package.render().starts_with("search results\n"));
+            assert_eq!(package.query_chars(), query.chars().count());
+            assert_eq!(
+                index_files(),
+                0,
+                "an empty query opened the index (opening it creates its file)"
+            );
+        }
+        // The control: a query that is not empty reads the log and the index.
+        let package = search(&mut p, "record");
+        assert!(package.log_tip_seq().is_some());
+        assert!(index_files() > 0, "the control opened the index");
+        assert_eq!(search_record_ids(package.items()).len(), 1);
+    }
+
+    #[test]
+    fn ori_p1_030_a_search_package_never_exceeds_its_cap_and_states_what_it_cut() {
+        let mut w = world("p1-030-search-cap");
+        crowd(&mut w, 40);
+        w.code_map = code_map_of(&[
+            "crates/report/src/a.rs",
+            "crates/report/src/b.rs",
+            "crates/report/src/c.rs",
+            "crates/report/src/d.rs",
+            "crates/report/src/e.rs",
+        ]);
+        let mut documents = vec![
+            w.docs.section_m.clone(),
+            w.docs.adr_m.clone(),
+            w.docs.criterion_m.clone(),
+            w.docs.runbook_m.clone(),
+            w.docs.section_o.clone(),
+        ];
+        for n in 0..5 {
+            documents.push(IndexableDocument::new(
+                spec_doc("REPORTS.md", &format!("r{n}")),
+                DocumentKind::Section,
+                format!("Report {n}"),
+                "a report document",
+            ));
+        }
+        build_index(&w.p, &documents);
+
+        let with_cap = |cap_bytes: usize| PackageConfig {
+            cap_bytes,
+            ..PackageConfig::default()
+        };
+        let run = |w: &mut World, config: PackageConfig| {
+            search_with(w, Role::Lead, &search_request("report"), config).1
+        };
+        let whole = run(&mut w, with_cap(1 << 24)).expect("a package under a huge cap");
+        assert!(whole.cuts().is_empty(), "a cap this large cuts nothing");
+        assert!(whole.render().contains("cuts: none"));
+        let total = whole.items().len();
+        assert_eq!(
+            (
+                search_record_ids(whole.items()).len(),
+                search_document_paths(whole.items()).len(),
+                search_module_paths(whole.items()).len(),
+            ),
+            (40, 5, 5),
+            "the fixture matches in all three kinds"
+        );
+        let mut saw_cut = false;
+        for cap in [
+            2_000,
+            3_000,
+            5_000,
+            8_000,
+            13_000,
+            21_000,
+            34_000,
+            whole.size_bytes(),
+        ] {
+            match run(&mut w, with_cap(cap)) {
+                Ok(package) => {
+                    let size = package.size_bytes();
+                    assert_eq!(size, package.render().len());
+                    assert!(
+                        size <= cap,
+                        "a package of {size} bytes exceeds its cap of {cap}"
+                    );
+                    let left_out: usize = package
+                        .cuts()
+                        .iter()
+                        .filter(|cut| matches!(cut.reason(), CutReason::PackageCap { .. }))
+                        .map(Cut::count)
+                        .sum();
+                    assert_eq!(
+                        package.items().len() + left_out,
+                        total,
+                        "every admitted item is in the package or counted as cut (cap {cap})"
+                    );
+                    if left_out > 0 {
+                        saw_cut = true;
+                        assert!(package.render().contains("left out whole"));
+                    }
+                }
+                Err(RetrievalError::CapTooSmall {
+                    cap_bytes,
+                    needed_bytes,
+                }) => {
+                    assert_eq!(cap_bytes, cap);
+                    assert!(needed_bytes > cap);
+                }
+                Err(other) => panic!("unexpected failure at cap {cap}: {other}"),
+            }
+        }
+        assert!(saw_cut, "the sweep includes a cap that cuts");
+
+        // The edge: the size a package has under its own cap fits whole; one
+        // byte less cuts something.
+        let probe = run(&mut w, with_cap(whole.size_bytes())).expect("a package");
+        assert_eq!(probe.items().len(), total);
+        let exact = probe.size_bytes();
+        let at_exact = run(&mut w, with_cap(exact)).expect("a package");
+        assert_eq!(at_exact.items().len(), total);
+        assert!(at_exact.cuts().is_empty());
+        let under = run(&mut w, with_cap(exact - 1)).expect("a package");
+        assert!(under.size_bytes() < exact);
+        assert!(under.items().len() < total);
+        assert!(
+            under
+                .cuts()
+                .iter()
+                .any(|cut| matches!(cut.reason(), CutReason::PackageCap { .. }))
+        );
+
+        // A cap below a package with no item is refused, not exceeded.
+        assert!(matches!(
+            run(&mut w, with_cap(10)),
+            Err(RetrievalError::CapTooSmall { cap_bytes: 10, .. })
+        ));
+    }
+
+    #[test]
+    fn ori_p1_030_a_search_package_says_which_items_it_shortened() {
+        let mut w = world("p1-030-search-shortened");
+        let long: Vec<String> = (0..12)
+            .map(|n| format!("test_{n}_{}", "x".repeat(100)))
+            .collect();
+        let mut heavy = module("crates/m/src/heavy.rs");
+        heavy.covering_tests = long;
+        w.code_map = CodeMap {
+            modules: vec![heavy],
+            coverage: clean_coverage(),
+            spec_docs: Vec::new(),
+            spec_headings: Vec::new(),
+        };
+        let (_, outcome) = search_with(
+            &mut w,
+            Role::Lead,
+            &search_request("heavy"),
+            PackageConfig {
+                item_bytes: MIN_ITEM_BYTES,
+                ..PackageConfig::default()
+            },
+        );
+        let package = outcome.expect("a package");
+        let [item] = package.items() else {
+            panic!("one module matches: {:?}", package.items());
+        };
+        assert!(item.body_was_cut());
+        assert!(
+            package.cuts().iter().any(|cut| {
+                cut.source() == Source::CodeMap
+                    && cut.count() == 1
+                    && matches!(cut.reason(), CutReason::ItemBound { item_bytes } if item_bytes == MIN_ITEM_BYTES)
+            }),
+            "{:?}",
+            package.cuts()
+        );
+        assert!(package.render().contains("shown shortened"));
+    }
+
+    #[test]
+    fn ori_t_0170_documents_covered_is_shown_only_to_a_reader_of_all_five_document_sources() {
+        let mut w = world("t0170-documents-covered");
+        let all_five = ["canonical_section", "adr", "criterion", "brief", "runbook"];
+        for (role, request, shown, label) in [
+            (Role::Lead, search_request("pipeline"), true, "the lead"),
+            (Role::Qa, search_request("pipeline"), true, "qa"),
+            (Role::Coder, search_request("pipeline"), true, "the coder"),
+            (
+                Role::Lead,
+                named_search_request("pipeline", &all_five),
+                true,
+                "the lead naming all five",
+            ),
+            (
+                Role::Lead,
+                named_search_request("pipeline", &["adr", "runbook"]),
+                false,
+                "the lead naming two",
+            ),
+            (
+                Role::Operations,
+                search_request("pipeline"),
+                false,
+                "operations, who read the runbooks",
+            ),
+            (
+                Role::ProductSignal,
+                search_request("pipeline"),
+                false,
+                "product signal, who read the brief",
+            ),
+            (
+                Role::Lead,
+                named_search_request("pipeline", &["code_map"]),
+                false,
+                "the lead naming only the code map",
+            ),
+        ] {
+            let (_, outcome) = search_with(&mut w, role, &request, PackageConfig::default());
+            let package = outcome.unwrap_or_else(|err| panic!("{label}: {err}"));
+            let rendered = package.render();
+            if shown {
+                assert_eq!(package.documents_covered(), Some(5), "{label}");
+                assert!(rendered.contains("documents covered: 5"), "{label}");
+            } else {
+                assert_eq!(package.documents_covered(), None, "{label}");
+                assert!(!rendered.contains("documents covered"), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn ori_t_0170_more_matches_than_the_limit_are_noted_per_kind() {
+        let mut w = world("t0170-limits");
+        let ticket = w.ticket_m.clone();
+        let early: Vec<Id> = (0..5)
+            .map(|n| file_closing(&mut w.p, &format!("EARLY{n}"), &ticket, "limitmark early"))
+            .collect();
+        let late: Vec<Id> = (0..SEARCH_HIT_LIMIT)
+            .map(|n| file_closing(&mut w.p, &format!("LATE{n}"), &ticket, "limitmark late"))
+            .collect();
+        let documents: Vec<IndexableDocument> = (0..SEARCH_HIT_LIMIT + 5)
+            .map(|n| {
+                IndexableDocument::new(
+                    spec_doc("LIMIT.md", &format!("s{n}")),
+                    DocumentKind::Section,
+                    format!("limitmark {n}"),
+                    "limitmark body",
+                )
+            })
+            .collect();
+        build_index(&w.p, &documents);
+        let paths: Vec<String> = (0..SEARCH_HIT_LIMIT + 5)
+            .map(|n| format!("crates/limitmark/src/m{n:02}.rs"))
+            .collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        w.code_map = code_map_of(&refs);
+
+        let huge = PackageConfig {
+            cap_bytes: 1 << 24,
+            ..PackageConfig::default()
+        };
+        let (_, outcome) = search_with(&mut w, Role::Lead, &search_request("limitmark"), huge);
+        let package = outcome.expect("a package");
+        for kind in ["documents", "records", "modules"] {
+            assert_eq!(
+                package
+                    .notes()
+                    .iter()
+                    .filter(|note| **note == SearchNote::LimitReached { kind })
+                    .count(),
+                1,
+                "{kind}: {:?}",
+                package.notes()
+            );
+        }
+        assert_eq!(
+            search_document_paths(package.items()).len(),
+            SEARCH_HIT_LIMIT
+        );
+        assert_eq!(search_module_paths(package.items()).len(), SEARCH_HIT_LIMIT);
+        assert_eq!(
+            search_module_paths(package.items()),
+            paths[..SEARCH_HIT_LIMIT],
+            "the limit keeps the first modules by path"
+        );
+        assert_eq!(
+            search_record_ids(package.items()),
+            set(&late),
+            "the limit keeps the newest records, and none of the five oldest"
+        );
+        assert!(
+            early
+                .iter()
+                .all(|id| !search_record_ids(package.items()).contains(id))
+        );
+        assert!(
+            package
+                .render()
+                .contains("more records matched than the limit of 50")
+        );
+
+        // Exactly at the limit is not past it.
+        let exactly = search_as(&mut w, Role::Lead, "limitmark late");
+        assert_eq!(search_record_ids(exactly.items()), set(&late));
+        assert!(
+            !exactly
+                .notes()
+                .iter()
+                .any(|note| matches!(note, SearchNote::LimitReached { .. })),
+            "{:?}",
+            exactly.notes()
+        );
+        build_index(&w.p, &documents[..SEARCH_HIT_LIMIT]);
+        w.code_map = code_map_of(&refs[..SEARCH_HIT_LIMIT]);
+        let (_, outcome) = search_with(
+            &mut w,
+            Role::Lead,
+            &search_request("limitmark"),
+            PackageConfig {
+                cap_bytes: 1 << 24,
+                ..PackageConfig::default()
+            },
+        );
+        let at_limit = outcome.expect("a package");
+        assert_eq!(
+            search_document_paths(at_limit.items()).len(),
+            SEARCH_HIT_LIMIT
+        );
+        assert_eq!(
+            search_module_paths(at_limit.items()).len(),
+            SEARCH_HIT_LIMIT
+        );
+        assert!(
+            !at_limit
+                .notes()
+                .contains(&SearchNote::LimitReached { kind: "documents" })
+        );
+        assert!(
+            !at_limit
+                .notes()
+                .contains(&SearchNote::LimitReached { kind: "modules" })
+        );
+        assert!(
+            at_limit
+                .notes()
+                .contains(&SearchNote::LimitReached { kind: "records" })
+        );
+    }
+
+    #[test]
+    fn ori_t_0170_unproduced_sources_are_noted_and_an_empty_index_is_said() {
+        let mut w = world("t0170-notes");
+        let lead = search_as(&mut w, Role::Lead, "pipeline");
+        assert!(
+            lead.notes().contains(&SearchNote::NoProducer {
+                sources: vec![
+                    Source::Organizational,
+                    Source::InfrastructureAdr,
+                    Source::MergedDiff,
+                    Source::AnalyticsSummary,
+                    Source::CodeRead,
+                ],
+            }),
+            "{:?}",
+            lead.notes()
+        );
+        assert!(
+            lead.render()
+                .contains("no module of this crate produces it yet")
+        );
+        let coder = search_as(&mut w, Role::Coder, "pipeline");
+        assert!(coder.notes().contains(&SearchNote::NoProducer {
+            sources: vec![Source::Organizational, Source::InfrastructureAdr],
+        }));
+        let named = try_named(&mut w, "pipeline", &["adr"]);
+        assert!(
+            !named
+                .notes()
+                .iter()
+                .any(|note| matches!(note, SearchNote::NoProducer { .. })),
+            "a reader who named a source with a producer is told nothing of the others"
+        );
+
+        // An index that matched nothing is not an empty index.
+        let none = search_as(&mut w, Role::Lead, "nonexistentwordzz");
+        assert!(none.items().is_empty());
+        assert_eq!(none.documents_covered(), Some(5));
+        assert!(!none.notes().contains(&SearchNote::IndexEmpty));
+
+        build_index(&w.p, &[]);
+        let empty = search_as(&mut w, Role::Lead, "pipeline");
+        assert!(empty.notes().contains(&SearchNote::IndexEmpty));
+        assert_eq!(empty.documents_covered(), Some(0));
+        assert!(
+            empty
+                .render()
+                .contains("the repository index holds no document")
+        );
+    }
+
+    /// A lead's search naming `sources`.
+    fn try_named(w: &mut World, text: &str, sources: &[&str]) -> SearchPackage {
+        let (_, outcome) = search_with(
+            w,
+            Role::Lead,
+            &named_search_request(text, sources),
+            PackageConfig::default(),
+        );
+        outcome.unwrap_or_else(|err| panic!("a search package is returned: {err}"))
+    }
+
+    #[test]
+    fn ori_t_0170_every_item_carries_provenance_verification_and_untrusted() {
+        let mut w = world("t0170-provenance");
+        let ticket = w.ticket_m.clone();
+        let human = id("HUMANWIDGET");
+        submit_report(
+            &mut w.p.db,
+            at(210),
+            Actor::Human(id("OPERATOR")),
+            NewReport {
+                record_id: human.clone(),
+                kind: RecordKind::ClosingReport,
+                ticket_id: Some(ticket),
+                fields: vec![NewReportField {
+                    name: FieldName::parse("summary").expect("a field name"),
+                    raw_text: "a widget report written by the operator".to_owned(),
+                    evidence_id: id("EVHUMANWIDGET"),
+                }],
+            },
+            &BarrierConfig::default(),
+        )
+        .expect("the human's record is submitted");
+        w.code_map = code_map_of(&["crates/m/src/widget.rs"]);
+        let log = OperationalLog::read(&mut w.p.db).expect("the log reads");
+        let (auth, outcome) = search_with(
+            &mut w,
+            Role::Lead,
+            &search_request("widget"),
+            PackageConfig::default(),
+        );
+        let package = outcome.expect("a package");
+        let expected_dates: BTreeMap<String, i64> = [
+            (w.docs.section_m.path.clone(), 301),
+            (w.docs.adr_m.path.clone(), 302),
+            (w.docs.criterion_m.path.clone(), 303),
+        ]
+        .into_iter()
+        .collect();
+        let (mut documents, mut records, mut modules) = (0, 0, 0);
+        for item in package.items() {
+            assert_eq!(item.provenance().product_id(), &w.p.id);
+            assert_eq!(item.provenance().source(), item.source());
+            assert!(
+                item.admitted().was_filtered_by(&auth) && item.admitted().candidates().len() == 1,
+                "every item is one candidate the search's own authorization filtered"
+            );
+            assert!(
+                item.verification().date().is_some(),
+                "{} has no verification date",
+                item.render()
+            );
+            match (item.candidate(), item.provenance().origin()) {
+                (Some(Candidate::Record(record)), Origin::OperationalLog { seq }) => {
+                    records += 1;
+                    let entry = log.with_id(record.id()).next().expect("in the log");
+                    assert_eq!(entry.seq(), *seq);
+                    assert!(matches!(item.verification(), Verification::Recorded { .. }));
+                    assert_eq!(
+                        item.provenance().filed_by(),
+                        Some(record.provenance().actor())
+                    );
+                    assert_eq!(
+                        item.provenance().ticket_id(),
+                        record.provenance().ticket_id()
+                    );
+                    let by_human = matches!(record.provenance().actor(), Actor::Human(_));
+                    assert_eq!(by_human, record.id() == &human);
+                    assert_eq!(
+                        item.untrusted(),
+                        !by_human,
+                        "a record is untrusted unless a human filed it"
+                    );
+                }
+                (Some(Candidate::Document { hit, .. }), Origin::Index { path }) => {
+                    documents += 1;
+                    assert_eq!(path, &hit.path);
+                    assert_eq!(
+                        item.verification(),
+                        &Verification::Verified {
+                            at: at(expected_dates[&hit.path])
+                        }
+                    );
+                    assert!(!item.untrusted());
+                }
+                (Some(Candidate::Module { module, .. }), Origin::CodeMap { path }) => {
+                    modules += 1;
+                    assert_eq!(path, &module.path);
+                    assert_eq!(
+                        item.verification(),
+                        &Verification::CodeMapBuilt { at: at(BUILT_AT) }
+                    );
+                    assert!(item.untrusted(), "a module's names come from source files");
+                }
+                other => panic!("an item with a mismatched origin: {other:?}"),
+            }
+        }
+        assert_eq!((documents, records, modules), (3, 4, 1));
+        let rendered = package.render();
+        let count = |prefix: &str| {
+            rendered
+                .lines()
+                .filter(|line| line.starts_with(prefix))
+                .count()
+        };
+        for prefix in [
+            "--- item: ",
+            "provenance: ",
+            "verification: ",
+            "untrusted: ",
+        ] {
+            assert_eq!(count(prefix), package.items().len(), "{prefix}");
+        }
+
+        // A document the tracker never verified says so and borrows no date.
+        let unverified = search_as(&mut w, Role::Lead, "gadget");
+        let [doc, ..] = unverified.items() else {
+            panic!("the fixture holds a document about gadgets");
+        };
+        assert!(matches!(
+            doc.verification(),
+            Verification::Stale {
+                last_verified_at: None,
+                ..
+            }
+        ));
+        assert_eq!(doc.verification().date(), None);
+        assert!(
+            unverified
+                .render()
+                .contains("the tracker gave no verification date")
+        );
+    }
+
+    #[test]
+    fn ori_t_0170_the_render_never_contains_the_query_text() {
+        let mut w = world("t0170-render-query");
+        let marker = "zephyrquuxmarker";
+        let marked = IndexableDocument::new(
+            spec_doc("MARK.md", "marked"),
+            DocumentKind::Section,
+            "A plain title",
+            format!("The body holds {marker} and nothing else."),
+        );
+        build_index(
+            &w.p,
+            &[
+                w.docs.section_m.clone(),
+                w.docs.adr_m.clone(),
+                marked.clone(),
+            ],
+        );
+
+        // A match through the index alone: the text appears nowhere.
+        for query in [marker, "ZEPHYRQUUXMARKER", "  zephyrquuxmarker  "] {
+            let package = search_as(&mut w, Role::Lead, query);
+            assert_eq!(
+                search_document_paths(package.items()),
+                std::slice::from_ref(&marked.path),
+                "{query}"
+            );
+            let rendered = package.render().to_lowercase();
+            assert!(
+                !rendered.contains(marker),
+                "{query}: the query text is in the render: {rendered}"
+            );
+            assert_eq!(package.query_chars(), query.chars().count());
+            assert!(
+                package
+                    .render()
+                    .contains(&format!("query: {} characters\n", query.chars().count()))
+            );
+        }
+
+        // Matches through a record's text and a module's path may show that
+        // text in the item; no line that is not an item's names the query.
+        w.code_map = code_map_of(&["crates/m/src/widget.rs"]);
+        for query in ["widget", "WIDGET WORK", "crates/m/src/WIDGET"] {
+            let (_, outcome) = search_with(
+                &mut w,
+                Role::Lead,
+                &search_request(query),
+                PackageConfig {
+                    cap_bytes: 3_000,
+                    ..PackageConfig::default()
+                },
+            );
+            let package = outcome.expect("a package");
+            assert!(!package.items().is_empty(), "{query}");
+            let needle = query.to_lowercase();
+            let rendered = package.render();
+            let mut in_items = false;
+            for line in rendered.lines() {
+                if line.starts_with("--- item: ") {
+                    in_items = true;
+                } else if line.starts_with("cuts: ")
+                    || line.starts_with("cut: ")
+                    || line.starts_with("note: ")
+                    || line.starts_with("end of search results")
+                {
+                    in_items = false;
+                }
+                if !in_items {
+                    assert!(
+                        !line.to_lowercase().contains(&needle),
+                        "{query}: the query text is in a line that is no item's: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ori_t_0170_a_search_appends_nothing_to_the_log() {
+        let mut w = world("t0170-read-only");
+        let auth = authorize(&mut w.p, Role::Lead, &w.ticket_m, &search_request("widget"));
+        let before = EventLog::verify(w.p.db.connection()).expect("the log verifies");
+        let retrieval = Retrieval::new(
+            &w.p.db,
+            &w.code_map,
+            Some(at(BUILT_AT)),
+            &w.tracker,
+            PackageConfig::default(),
+        )
+        .expect("a retrieval");
+        let package = retrieval.search(&mut w.p.db, &auth).expect("a package");
+        assert!(!package.items().is_empty());
+        let after = EventLog::verify(w.p.db.connection()).expect("the log verifies");
+        assert_eq!(before, after, "a search changed the log");
     }
 }
