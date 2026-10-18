@@ -19,9 +19,9 @@
 //! one role in one project may reach one such server is decided here too, and
 //! the decision is a value: a [`crate::scopes::UserToolGrant`], which nothing
 //! outside this module can build. The host that speaks to the operator's server
-//! (tier 1, a later slice) takes a grant by reference, so no call reaches an
-//! operator's server without this module's decision (`ops/batch-10-plan.md`,
-//! decision D3).
+//! (tier 1, a later slice) takes a grant by value and each call consumes it, so
+//! no call reaches an operator's server without a decision of this module made
+//! for that call (`ops/batch-10-plan.md`, decision D3).
 //!
 //! ```mermaid
 //! flowchart TD
@@ -35,8 +35,8 @@
 //!   door -- "1. another project" --> r2["ServerNotInProject, AICD §26"]
 //!   door -- "2. reach not acknowledged" --> r3["ServerReachNotAcknowledged, AICD §17"]
 //!   door -- "3. role not listed" --> r4["ServerNotExposedToRole, AICD §17"]
-//!   door -- "4. otherwise" --> grant["UserToolGrant"]
-//!   grant --> host["the host calls the operator's server"]
+//!   door -- "all three pass" --> grant["UserToolGrant"]
+//!   grant --> host["the host's one call consumes the grant"]
 //! ```
 //!
 //! # The roles column is the table
@@ -79,7 +79,7 @@
 //!   own checks; the refusals for the ones that belong to the session are
 //!   declared on [`crate::scopes::ToolRefusal`] so that slice S2 does not
 //!   reopen this file.
-//! - Anything about the operator's exposure of a server beyond the four checks
+//! - Anything about the operator's exposure of a server beyond the three checks
 //!   of [`crate::scopes::ToolScopes::authorize_user_tool`]. The exposure is
 //!   data the operator recorded (`mcp.server_added`), not a row of this table.
 //!
@@ -123,8 +123,9 @@ const MEMORY_SERVICE_SECTION: u8 = 25;
 /// and fleets never share context.
 const PRODUCTS_SECTION: u8 = 26;
 
-/// AICD §27, "Security and compliance in depth": the threat model a name that
-/// imitates another is a threat under.
+/// AICD §27, "Security and compliance in depth": a server name that imitates
+/// one of Ori's tools is injection by an untrusted party, of the kind AICD §27
+/// describes.
 const SECURITY_SECTION: u8 = 27;
 
 /// A reference to a whole methodology section, built without a check because
@@ -340,6 +341,10 @@ impl fmt::Display for ServerName {
 /// Why a text is not a server name: AICD §27.
 ///
 /// None of the variants echoes the text that was refused.
+///
+/// The `Display` is written by hand, as ruling R20 allows until `thiserror` is
+/// adopted; converting it is mechanical, each arm becoming an `#[error]`
+/// attribute.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
 pub enum ServerNameError {
@@ -413,8 +418,12 @@ impl std::error::Error for ServerNameError {}
 /// - the part after it is empty.
 ///
 /// The tool part may itself hold `__`: `github__a__b` is the tool `a__b` of the
-/// server `github`. The tool part is otherwise not examined; it comes from the
-/// operator's server and is untrusted data (condition 3).
+/// server `github`. The tool part is otherwise not examined. At the moment this
+/// function splits, it is the agent's call text, untrusted: it becomes the
+/// operator's own tool name only once the server core has matched it against
+/// that server's `tools/list` (slice S6), and until then nothing may treat it as
+/// a name the server gave. It is never recorded in an event, where only lengths
+/// go (`spec/API_SPEC.md` section 3).
 ///
 /// A name that [`Tool::from_wire_name`] recognises is never a proxied tool.
 /// None of Ori's names holds `__`, so this function returns `None` for each of
@@ -435,26 +444,43 @@ pub fn split_proxied(name: &str) -> Option<(ServerName, &str)> {
 // The caller and the server
 // ---------------------------------------------------------------------------
 
-/// Who is calling: the role and the product of the session the engine bound the
-/// connection to.
+/// Who is calling: the agent identity, the role and the product of the session
+/// the engine bound the connection to.
 ///
 /// Slice S2 builds it from the session binding the engine registered, **never
 /// from a tool argument**: `spec/SECURITY_NOTES.md`, trust boundary 2, makes the
 /// connection's identity the session that was handed the endpoint, and "no field
 /// of any message can change the binding". A value built from anything the agent
-/// sent would let the agent choose its own role (AICD §17) or its own product
-/// (AICD §26).
+/// sent would let the agent choose its own identity, its own role (AICD §17) or
+/// its own product (AICD §26).
+///
+/// The identity is carried so that a port can record what it writes under the
+/// agent that asked for it (`Actor::Agent`), and so that the component behind
+/// the port decides on the identity and not on a role alone.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Caller {
+    identity: Id,
     role: Role,
     product_id: Id,
 }
 
 impl Caller {
-    /// A caller of this role in this product.
+    /// A caller with this agent identity, of this role, in this product.
+    ///
+    /// `identity` is the agent identity of the session.
     #[must_use]
-    pub fn new(role: Role, product_id: Id) -> Self {
-        Self { role, product_id }
+    pub fn new(identity: Id, role: Role, product_id: Id) -> Self {
+        Self {
+            identity,
+            role,
+            product_id,
+        }
+    }
+
+    /// The agent identity the engine registered for the session.
+    #[must_use]
+    pub const fn identity(&self) -> &Id {
+        &self.identity
     }
 
     /// The role the engine registered for the session.
@@ -473,9 +499,10 @@ impl Caller {
 /// A server the operator added to a product and what the operator decided about
 /// exposing it: AICD §26, AICD §17.
 ///
-/// Slice H1's registry builds it from the product's `mcp.server_added` event:
-/// the server's name, the roles it is exposed to (`exposed_to_roles`) and
-/// whether the operator acknowledged the reach (`acknowledged_reach`).
+/// Slice H1's registry builds it from the registry's projection of the
+/// product's `mcp.server_added` and `mcp.server_removed` events: the server's
+/// name, the roles it is exposed to (`exposed_to_roles`) and whether the
+/// operator acknowledged the reach (`acknowledged_reach`).
 /// `spec/API_SPEC.md` section 3, "Proxied tools", conditions 1 and 5. It holds
 /// no transport, command or secret: a server's own secret stays with the engine
 /// (condition 4).
@@ -538,9 +565,10 @@ impl ExposedServer {
 ///
 /// Every variant carries a methodology section through
 /// [`ToolRefusal::methodology_ref`], and the type has no variant without one.
-/// The variants are all declared here, though slice S2 raises most of them, so
-/// that the server core does not reopen this tier 2 file to add a refusal. No
-/// variant carries agent free text: `mcp.*` events hold identifiers and
+/// This module raises the first four itself, in [`ToolScopes::authorize`] and
+/// [`ToolScopes::authorize_user_tool`]; the others are declared here for the
+/// server core, so that it does not reopen this tier 2 file to add a refusal.
+/// No variant carries agent free text: `mcp.*` events hold identifiers and
 /// lengths, never what an agent wrote (`spec/API_SPEC.md` section 3).
 ///
 /// The `Display` is written by hand, as ruling R20 allows until `thiserror` is
@@ -552,8 +580,7 @@ pub enum ToolRefusal {
     /// The role does not hold the tool in the table of
     /// `spec/API_SPEC.md` section 3. AICD §17.
     ///
-    /// Raised by [`ToolScopes::authorize`], which the server core calls before it
-    /// runs any of Ori's own tools.
+    /// Raised by [`ToolScopes::authorize`].
     ToolNotPermittedForRole {
         /// The role of the session that called.
         role: Role,
@@ -562,12 +589,11 @@ pub enum ToolRefusal {
     },
     /// The server belongs to another project than the caller's. AICD §26.
     ///
-    /// Raised by [`ToolScopes::authorize_user_tool`] when the products differ,
-    /// and by the server core when the registry holds no server of that name in
-    /// the caller's product, which is what a session of another project
-    /// reaching for it comes to (ORI-P1-038). Checked before everything else
-    /// about the server, so a session of another project learns nothing of the
-    /// server's roles or acknowledgement.
+    /// Raised by [`ToolScopes::authorize_user_tool`] when the products differ.
+    /// Checked before everything else about the server, so a session of another
+    /// project learns nothing of the server's roles or acknowledgement. The
+    /// end-to-end refusal (ORI-P1-038) also comes from the registry holding no
+    /// server of that name in the caller's product, which is slice S6's path.
     ServerNotInProject {
         /// The server's name as the call spelled it.
         server: ServerName,
@@ -593,12 +619,19 @@ pub enum ToolRefusal {
         /// The server's name.
         server: ServerName,
     },
-    /// The call names a ticket the calling session is not assigned. AICD §7.
+    /// The call names a ticket, and the session is a coder's with no ticket
+    /// bound. AICD §7.
     ///
-    /// Raised by the server core when a tool that acts on one ticket is given a
-    /// ticket other than the one the session's identity holds: the lead assigns
-    /// tickets to coders and a coder takes one validated ticket (AICD §7), and
-    /// the assignment is the engine's record, not the caller's word.
+    /// The rule slice S2 applies, for a tool whose arguments name a
+    /// `ticket_id`:
+    ///
+    /// - when the session is bound to a ticket and the argument names another,
+    ///   [`ToolRefusal::ClaimContradictsSession`];
+    /// - when the session has no ticket and the role is `coder`, this refusal:
+    ///   the lead assigns tickets to coders and a coder takes one validated
+    ///   ticket (AICD §7), so a coder with none has been assigned nothing;
+    /// - otherwise the argument passes the server core, and what a role may do
+    ///   with a ticket it is not bound to is the downstream control's.
     TicketNotAssigned {
         /// The ticket the call named.
         ticket: Id,
@@ -606,20 +639,22 @@ pub enum ToolRefusal {
     /// A claim in the call contradicts the session the engine registered.
     /// AICD §25.
     ///
-    /// Raised by the server core when an argument asserts something about the
-    /// caller (its role, its product, its identity) that differs from the
-    /// session binding. The binding wins, and the call is refused rather than
-    /// quietly corrected, as the scope enforcer of AICD §25 refuses a request
-    /// outside its scope. `claim` names the field, a constant of the server
-    /// core, never the agent's value.
+    /// The rule slice S2 applies, for a tool whose arguments name a
+    /// `ticket_id`: when the session is bound to a ticket and the argument names
+    /// another, this refusal; the other two cases are those of
+    /// [`ToolRefusal::TicketNotAssigned`]. The binding wins, and the call is
+    /// refused rather than quietly corrected, as the scope enforcer of AICD §25
+    /// refuses a request outside its scope. `claim` names the field, a constant
+    /// of the server core, never the agent's value.
     ClaimContradictsSession {
         /// Which claim, as a constant name chosen by the server core.
         claim: &'static str,
     },
-    /// The session that holds the connection is not active. AICD §17.
+    /// The session that holds the connection is not active, so the connection
+    /// grants nothing. AICD §17.
     ///
-    /// Raised by the server core when the session has ended or was suspended,
-    /// so a connection that outlived its session grants nothing.
+    /// Declared here for the server core's use; nothing in this module raises
+    /// it.
     SessionNotActive,
 }
 
@@ -643,7 +678,7 @@ impl ToolRefusal {
     /// carries: criterion ORI-P1-033.
     ///
     /// AICD §17 for a role, a reach or a session; AICD §26 for another
-    /// project's server; AICD §7 for another agent's ticket; AICD §25 for a
+    /// project's server; AICD §7 for a coder with no ticket; AICD §25 for a
     /// claim the scope enforcer would not accept.
     #[must_use]
     pub fn methodology_ref(&self) -> MethodologyRef {
@@ -705,17 +740,30 @@ impl std::error::Error for ToolRefusal {}
 /// **Sealed.** The fields are private and there is no public constructor, no
 /// `Default` and no `Clone`. The only way to obtain one is
 /// [`ToolScopes::authorize_user_tool`], so a function that takes a
-/// `&UserToolGrant` can only have been reached by a call that passed its four
-/// checks; the host that speaks to the operator's server therefore holds no
-/// policy (decision D3). A grant is for the call it was made for: a caller that
-/// wants a second call makes a second decision.
+/// `UserToolGrant` can only have been reached by a decision that passed the
+/// three checks there; the host that speaks to the operator's server therefore
+/// holds no policy (decision D3).
+///
+/// **One grant, one host call.** The grant cannot be copied, and each host call
+/// consumes it, so one decision covers one host call. The caller (slices S2
+/// and S6) calls [`ToolScopes::authorize_user_tool`] for every call, from the
+/// registry's state at that moment. A grant names its server by name, and the
+/// host resolves that name in that product when the call is made.
+///
+/// **What the seal proves.** That the decision ran over the inputs it was
+/// given, and that is all: the truth of those inputs is the caller's. A
+/// [`Caller`] comes from the session binding the engine registered (slice S2),
+/// and an [`ExposedServer`] from the registry's projection of
+/// `mcp.server_added` and `mcp.server_removed` (slice H1). Code that builds
+/// either from anything else is outside what this type can stop.
 ///
 /// ```
 /// use ori_core::types::{Id, Role};
 /// use ori_mcp::scopes::{Caller, ExposedServer, ServerName, ToolScopes};
 ///
+/// let identity = Id::parse("01D39ZY06FGSCTVN4T2V9PKHFZ").unwrap();
 /// let product = Id::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
-/// let caller = Caller::new(Role::Qa, product.clone());
+/// let caller = Caller::new(identity, Role::Qa, product.clone());
 /// let server = ExposedServer::new(
 ///     product,
 ///     ServerName::parse("github").unwrap(),
@@ -727,44 +775,62 @@ impl std::error::Error for ToolRefusal {}
 /// assert_eq!(grant.server().as_str(), "github");
 /// ```
 ///
+/// A host call takes the grant by value, which is the control for the example
+/// after it:
+///
+/// ```
+/// use ori_mcp::ports::UserToolHost;
+/// use ori_mcp::scopes::UserToolGrant;
+///
+/// fn spend_once(host: &mut dyn UserToolHost, grant: UserToolGrant) {
+///     let _ = host.call_tool(grant, "a", None);
+/// }
+/// ```
+///
+/// The grant is spent by the call it was passed to, so it cannot be spent twice:
+///
+/// ```compile_fail
+/// use ori_mcp::ports::UserToolHost;
+/// use ori_mcp::scopes::UserToolGrant;
+///
+/// fn spend_twice(host: &mut dyn UserToolHost, grant: UserToolGrant) {
+///     let _ = host.call_tool(grant, "a", None);
+///     let _ = host.call_tool(grant, "b", None);
+/// }
+/// ```
+///
 /// The fields cannot be named outside this module, so a grant cannot be built
 /// by hand:
 ///
-/// ```compile_fail,E0451
+/// ```compile_fail
 /// use ori_core::types::{Id, Role};
 /// use ori_mcp::scopes::{ServerName, UserToolGrant};
 ///
-/// let _grant = UserToolGrant {
-///     product_id: Id::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
-///     server: ServerName::parse("github").unwrap(),
-///     role: Role::Qa,
-/// };
+/// fn forge(product_id: Id, server: ServerName, role: Role) -> UserToolGrant {
+///     UserToolGrant {
+///         product_id,
+///         server,
+///         role,
+///     }
+/// }
 /// ```
 ///
 /// It has no `Default`:
 ///
-/// ```compile_fail,E0599
+/// ```compile_fail
 /// use ori_mcp::scopes::UserToolGrant;
 ///
-/// let _grant = UserToolGrant::default();
+/// fn need<T: Default>() {}
+/// need::<UserToolGrant>();
 /// ```
 ///
-/// And it cannot be copied, so a grant cannot be kept and spent again:
+/// And it has no `Clone`, so a grant cannot be duplicated and spent twice:
 ///
-/// ```compile_fail,E0599
-/// use ori_core::types::{Id, Role};
-/// use ori_mcp::scopes::{Caller, ExposedServer, ServerName, ToolScopes};
+/// ```compile_fail
+/// use ori_mcp::scopes::UserToolGrant;
 ///
-/// let product = Id::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
-/// let caller = Caller::new(Role::Qa, product.clone());
-/// let server = ExposedServer::new(
-///     product,
-///     ServerName::parse("github").unwrap(),
-///     vec![Role::Qa],
-///     true,
-/// );
-/// let grant = ToolScopes::authorize_user_tool(&caller, &server).unwrap();
-/// let _again = grant.clone();
+/// fn need<T: Clone>() {}
+/// need::<UserToolGrant>();
 /// ```
 #[derive(Debug)]
 pub struct UserToolGrant {
@@ -917,7 +983,7 @@ impl ToolScopes {
     /// Authorizes a caller to reach an operator's server, and returns the only
     /// value that lets the host do it: AICD §17, AICD §26.
     ///
-    /// The checks run in this order, and the order is part of the contract.
+    /// Three checks run in this order, and the order is part of the contract.
     /// ORI-P1-038's "qa in B refused (project)" must come out as the project
     /// refusal whatever the server's roles say, so the project is checked first
     /// and nothing about a server of another project is revealed.
@@ -930,7 +996,20 @@ impl ToolScopes {
     ///    holds for a role the server lists as well.
     /// 3. The caller's role is in the server's `exposed_to_roles`, or
     ///    [`ToolRefusal::ServerNotExposedToRole`].
-    /// 4. Otherwise a [`UserToolGrant`].
+    ///
+    /// When all three pass, the answer is a [`UserToolGrant`], which the host
+    /// consumes with its one call.
+    ///
+    /// A stated limit of the order: checking the reach before the role tells a
+    /// role of the same product that the server does not list whether the
+    /// operator acknowledged the server's reach. The order is the decided one.
+    ///
+    /// The seal on the grant proves this decision ran over the inputs it was
+    /// given, and the truth of those inputs is the caller's: the [`Caller`]
+    /// comes from the session binding the engine registered (slice S2), and the
+    /// [`ExposedServer`] from the registry's projection of `mcp.server_added`
+    /// and `mcp.server_removed` (slice H1). Code that builds either from
+    /// anything else is outside what the grant's type can stop.
     ///
     /// # Errors
     ///
@@ -970,7 +1049,7 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
 
-    use ori_core::permission::{self, Action, Resource};
+    use ori_core::permission::{self, Action, Constraint, Resource};
     use ori_core::types::Actor;
 
     use super::*;
@@ -978,6 +1057,8 @@ mod tests {
     /// Two distinct, valid product identifiers.
     const PRODUCT_A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const PRODUCT_B: &str = "01BX5ZZKBKACTAV9WEVGEMMVRY";
+    /// A valid identifier for the agent identity of a session.
+    const AGENT: &str = "01D39ZY06FGSCTVN4T2V9PKHFZ";
 
     fn id(text: &str) -> Id {
         Id::parse(text).expect("a valid ULID")
@@ -988,7 +1069,7 @@ mod tests {
     }
 
     fn caller(role: Role, product: &str) -> Caller {
-        Caller::new(role, id(product))
+        Caller::new(id(AGENT), role, id(product))
     }
 
     fn server(product: &str, exposed_to: &[Role], acknowledged: bool) -> ExposedServer {
@@ -1010,6 +1091,28 @@ mod tests {
         roles: HashSet<Role>,
         names_system: bool,
         phase_1: bool,
+    }
+
+    /// The one row whose roles cell holds a parenthetical, and the role and
+    /// qualifier it holds: `qa (test env)` on `aicd_gate_result`.
+    const QUALIFIED_ROW: (&str, &str, &str) = ("aicd_gate_result", "qa", "test env");
+
+    /// One item of a roles cell without its parenthetical.
+    ///
+    /// The reader accepts exactly one parenthetical, [`QUALIFIED_ROW`], and
+    /// panics naming the row on any other, so a qualifier added to the
+    /// specification is not dropped unnoticed.
+    fn role_without_its_known_qualifier<'a>(wire_name: &str, item: &'a str) -> &'a str {
+        let Some((role, rest)) = item.split_once('(') else {
+            return item;
+        };
+        let (row, known_role, qualifier) = QUALIFIED_ROW;
+        assert!(
+            wire_name == row && role.trim() == known_role && rest == format!("{qualifier})"),
+            "the roles cell of the row {wire_name} holds a parenthetical this reader does not \
+             know: {item:?}"
+        );
+        role.trim()
     }
 
     /// Reads the first table under the heading that begins `## 3.`.
@@ -1066,11 +1169,7 @@ mod tests {
                     roles.extend(Role::ALL.iter().copied());
                 } else {
                     for item in cells[1].split(',') {
-                        let item = item
-                            .split('(')
-                            .next()
-                            .expect("split yields one item")
-                            .trim();
+                        let item = role_without_its_known_qualifier(&wire_name, item.trim());
                         if item == "system" {
                             names_system = true;
                         } else {
@@ -1097,7 +1196,9 @@ mod tests {
 
     fn spec_rows() -> Vec<SpecRow> {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("../../spec/API_SPEC.md");
+        for part in ["..", "..", "spec", "API_SPEC.md"] {
+            path.push(part);
+        }
         let text = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
         parse_tool_table(&text)
@@ -1121,7 +1222,7 @@ Some prose.
 | Tool | Roles | Effect | Phase 1 |
 |---|---|---|---|
 | `aicd_one(a, b)` | all | first | Yes |
-| `aicd_two(a)` | lead, qa (test env), system | second | No |
+| `aicd_gate_result(a)` | lead, qa (test env), system | second | No |
 
 | Tool | Roles | Effect | Phase 1 |
 |---|---|---|---|
@@ -1133,10 +1234,58 @@ Some prose.
         assert_eq!(rows[0].roles.len(), 7);
         assert!(!rows[0].names_system);
         assert!(rows[0].phase_1);
-        assert_eq!(rows[1].wire_name, "aicd_two");
+        assert_eq!(rows[1].wire_name, "aicd_gate_result");
         assert_eq!(rows[1].roles, HashSet::from([Role::Lead, Role::Qa]));
         assert!(rows[1].names_system);
         assert!(!rows[1].phase_1);
+    }
+
+    /// A one-row table in the shape the reader expects.
+    fn one_row_table(wire_name: &str, roles: &str) -> String {
+        format!(
+            "## 3. Agent-facing MCP server\n\n\
+             | Tool | Roles | Effect | Phase 1 |\n\
+             |---|---|---|---|\n\
+             | `{wire_name}(x)` | {roles} | effect | No |\n"
+        )
+    }
+
+    #[test]
+    fn ori_t_0166_the_table_reader_accepts_the_one_parenthetical_the_spec_has() {
+        let rows = parse_tool_table(&one_row_table("aicd_gate_result", "qa (test env), system"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].roles, HashSet::from([Role::Qa]));
+        assert!(rows[0].names_system);
+        // Without the parenthetical the same row reads the same.
+        let rows = parse_tool_table(&one_row_table("aicd_gate_result", "qa, system"));
+        assert_eq!(rows[0].roles, HashSet::from([Role::Qa]));
+    }
+
+    #[test]
+    #[should_panic(expected = "the roles cell of the row aicd_search holds a parenthetical")]
+    fn ori_t_0166_the_table_reader_refuses_the_known_qualifier_on_another_row() {
+        let _ = parse_tool_table(&one_row_table("aicd_search", "qa (test env)"));
+    }
+
+    #[test]
+    #[should_panic(expected = "the roles cell of the row aicd_gate_result holds a parenthetical")]
+    fn ori_t_0166_the_table_reader_refuses_the_known_qualifier_on_another_role() {
+        let _ = parse_tool_table(&one_row_table(
+            "aicd_gate_result",
+            "lead (test env), system",
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "the roles cell of the row aicd_gate_result holds a parenthetical")]
+    fn ori_t_0166_the_table_reader_refuses_another_qualifier_on_the_known_role() {
+        let _ = parse_tool_table(&one_row_table("aicd_gate_result", "qa (staging), system"));
+    }
+
+    #[test]
+    #[should_panic(expected = "the roles cell of the row aicd_context holds a parenthetical")]
+    fn ori_t_0166_the_table_reader_refuses_an_unknown_qualifier_on_an_unknown_row() {
+        let _ = parse_tool_table(&one_row_table("aicd_context", "coder (own ticket)"));
     }
 
     #[test]
@@ -1249,6 +1398,8 @@ Some prose.
             "AICD_CONTEXT",
             " aicd_context",
             "aicd_context ",
+            "aicd_context\t",
+            "aicd_context\n",
             "aicd_context(ticket_id)",
             "aicd_merge",
             "github__create_issue",
@@ -1275,53 +1426,68 @@ Some prose.
     // Never wider than the permission matrix
     // -------------------------------------------------------------------
 
-    /// The four tools whose effect AICD §17's matrix also governs, and the cell
-    /// each is read against.
+    /// The four tools whose effect AICD §17's matrix also governs, the cell each
+    /// is read against, and for the two propose tools the limit the tool needs.
     ///
-    /// Reported by this run (`--nocapture` shows it): the matrix allows
-    /// `Propose` on the specification to qa (criteria only) and to documentation
-    /// (via pull request), so `CriterionPropose` is narrower than the matrix for
-    /// documentation, and `SpecPropose` is narrower for qa. Narrower is allowed;
-    /// wider would be a defect.
+    /// For every role that holds a tool, the matrix must allow the tool's
+    /// action. A tool is held by a subset of the roles the matrix allows; what
+    /// the matrix would allow and the table does not give is not examined. For
+    /// `aicd_criterion_propose` the limit of the matrix's grant must be the
+    /// criteria limit, and for `aicd_spec_propose` the via-pull-request limit,
+    /// so a role whose cell allows `Propose` on the specification only in the
+    /// other form cannot be given the tool.
     #[test]
     fn ori_t_0166_a_tool_is_never_wider_than_the_permission_matrix() {
         let cells = [
-            (Tool::TicketCreate, Resource::Tickets, Action::Create),
+            (Tool::TicketCreate, Resource::Tickets, Action::Create, None),
             (
                 Tool::TicketUpgrade,
                 Resource::Tickets,
                 Action::UpgradeCategory,
+                None,
             ),
             (
                 Tool::CriterionPropose,
                 Resource::Specification,
                 Action::Propose,
+                Some(Constraint::Criteria),
             ),
-            (Tool::SpecPropose, Resource::Specification, Action::Propose),
+            (
+                Tool::SpecPropose,
+                Resource::Specification,
+                Action::Propose,
+                Some(Constraint::ViaPullRequest),
+            ),
         ];
         let actor = Actor::Agent(id(PRODUCT_A));
-        let mut narrower = Vec::new();
-        for (tool, resource, action) in cells {
+        for (tool, resource, action, needed) in cells {
             let mut held = 0;
             for role in Role::ALL {
-                let allowed = permission::permits(&actor, *role, resource, action).is_allowed();
-                if ToolScopes::permits(*role, tool) {
-                    assert!(
-                        allowed,
-                        "{tool} is held by {role}, which AICD §17's matrix does not allow to \
-                         {action} on {resource}"
-                    );
-                    held += 1;
-                } else if allowed {
-                    narrower.push(format!("{tool}: {role}"));
+                if !ToolScopes::permits(*role, tool) {
+                    continue;
                 }
+                let decision = permission::permits(&actor, *role, resource, action);
+                assert!(
+                    decision.is_allowed(),
+                    "{tool} is held by {role}, which AICD §17's matrix does not allow to \
+                     {action} on {resource}"
+                );
+                if let Some(needed) = needed {
+                    assert_eq!(
+                        decision.limit(),
+                        Some(needed),
+                        "{tool} is held by {role}, and the matrix allows {action} on {resource} \
+                         only with the limit {:?}, where the tool needs {needed}",
+                        decision.limit()
+                    );
+                }
+                held += 1;
             }
             assert!(
                 held > 0,
                 "{tool} is held by no role, so nothing was compared"
             );
         }
-        eprintln!("roles the matrix allows and the tool table does not: {narrower:?}");
     }
 
     // -------------------------------------------------------------------
@@ -1481,6 +1647,65 @@ Some prose.
         assert_eq!(exposed.exposed_to_roles(), [Role::Lead, Role::Qa]);
         assert!(exposed.acknowledged_reach());
         assert!(!server(PRODUCT_B, &[], false).acknowledged_reach());
+    }
+
+    #[test]
+    fn ori_t_0166_a_caller_carries_the_identity_it_was_given() {
+        let caller = Caller::new(id(AGENT), Role::Coder, id(PRODUCT_A));
+        assert_eq!(caller.identity(), &id(AGENT));
+        assert_eq!(caller.role(), Role::Coder);
+        assert_eq!(caller.product_id(), &id(PRODUCT_A));
+        // Two sessions of one role in one product are two callers.
+        assert_ne!(
+            caller,
+            Caller::new(id(PRODUCT_B), Role::Coder, id(PRODUCT_A))
+        );
+    }
+
+    /// Whether a type is `Clone` or `Default`, read at compile time on stable
+    /// Rust: an inherent associated constant that exists only when the bound
+    /// holds takes the place of the trait's default when it does.
+    struct Probe<T>(std::marker::PhantomData<T>);
+
+    trait NotClone {
+        const CLONE: bool = false;
+    }
+    impl<T> NotClone for Probe<T> {}
+    impl<T: Clone> Probe<T> {
+        const CLONE: bool = true;
+    }
+
+    trait NotDefault {
+        const DEFAULT: bool = false;
+    }
+    impl<T> NotDefault for Probe<T> {}
+    impl<T: Default> Probe<T> {
+        const DEFAULT: bool = true;
+    }
+
+    #[test]
+    fn ori_t_0166_a_grant_is_neither_clone_nor_default() {
+        // What the probe reads, and what it must read. The first three are the
+        // controls: it reads `true` where the bound holds and `false` where it
+        // does not, so a `false` for the grant is not the probe failing.
+        let probes: [(&str, bool, bool); 5] = [
+            ("ServerName is Clone", Probe::<ServerName>::CLONE, true),
+            ("String is Default", Probe::<String>::DEFAULT, true),
+            ("ServerName is Default", Probe::<ServerName>::DEFAULT, false),
+            (
+                "UserToolGrant is Clone",
+                Probe::<UserToolGrant>::CLONE,
+                false,
+            ),
+            (
+                "UserToolGrant is Default",
+                Probe::<UserToolGrant>::DEFAULT,
+                false,
+            ),
+        ];
+        for (what, found, expected) in probes {
+            assert_eq!(found, expected, "{what}");
+        }
     }
 
     // -------------------------------------------------------------------

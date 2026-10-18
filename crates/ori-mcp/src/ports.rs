@@ -1,5 +1,5 @@
 //! The ports: what the server reaches through the engine, declared here and
-//! implemented by `ori-engine`: AICD §17, AICD §25.
+//! implemented by `ori-engine`: AICD §17.
 //!
 //! # Why traits here
 //!
@@ -45,14 +45,17 @@
 //!   the engine, which connects to the server itself (`spec/API_SPEC.md`
 //!   section 3, "Proxied tools", condition 4).
 //! - **[`crate::ports::UserToolHost`] takes a
-//!   [`crate::scopes::UserToolGrant`]**, which only
-//!   [`crate::scopes::ToolScopes::authorize_user_tool`] can make, so no call
-//!   reaches an operator's server without `scopes.rs`'s decision.
+//!   [`crate::scopes::UserToolGrant`] by value**, which only
+//!   [`crate::scopes::ToolScopes::authorize_user_tool`] can make and which each
+//!   host call consumes, so no call reaches an operator's server without a
+//!   decision of `scopes.rs` made for that call.
 //!
 //! A port also receives the [`crate::scopes::Caller`] that the server core built
-//! from the session binding, never an identity read from a tool argument, and
-//! decides nothing about whether the caller's role may use the tool: that
-//! decision was made in `scopes.rs` before the port was called.
+//! from the session binding, never an identity read from a tool argument. The
+//! caller carries the agent identity of the session, and a port that writes
+//! records its write under it. A desk never assumes that the server core's scope
+//! check ran: it makes the checks of the component it routes the change through,
+//! and each method below says which.
 //!
 //! # Tier
 //!
@@ -71,16 +74,20 @@ use crate::scopes::{Caller, UserToolGrant};
 /// Why a port could not do what it was asked: AICD §17.
 ///
 /// Three kinds, because the server core answers them differently: a refusal by
-/// the component behind the port is passed on with its own reason, an argument
-/// the port could not accept is the caller's mistake, and an unavailable
-/// component is the engine's.
+/// the component behind the port is passed on with its own code and methodology
+/// section, an argument the port could not accept is the caller's mistake, and
+/// an unavailable component is the engine's.
 ///
-/// None of the texts may be copied into an `mcp.*` event, which holds
-/// identifiers and lengths and never text (`spec/API_SPEC.md` section 3): they
-/// can carry what the component behind the port said.
+/// The free text in [`PortError::Invalid`]'s `why` and in
+/// [`PortError::Unavailable`]'s `what` may hold implementation detail, such as
+/// a server's command or its stderr. It reaches neither an `mcp.*` event, which
+/// holds identifiers and lengths and never text (`spec/API_SPEC.md` section 3),
+/// nor an agent's reply: the server core replies with the failure's kind and
+/// code only.
 ///
 /// The `Display` is written by hand, as ruling R20 allows until `thiserror` is
-/// adopted.
+/// adopted; converting it is mechanical, each arm becoming an `#[error]`
+/// attribute.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum PortError {
@@ -88,6 +95,10 @@ pub enum PortError {
     /// [`MethodologyRef`] and its `E_` code, such as `E_UPGRADE_ONLY` for a
     /// category that would be lowered (`spec/API_SPEC.md` section 1,
     /// `tickets.setCategory`).
+    ///
+    /// It must hold an [`Error`] that is a refusal, one with a
+    /// [`MethodologyRef`]. The server core treats a `Refused` without one as an
+    /// implementation defect and reports the failure as `invalid`.
     Refused(Error),
     /// An argument was not acceptable to the component behind the port.
     Invalid {
@@ -159,17 +170,24 @@ pub trait IdSource {
 pub trait TicketDesk {
     /// Raises a ticket's category, which AICD §11 allows in one direction only.
     ///
-    /// Called for `aicd_ticket_upgrade`, which only the lead holds
-    /// ([`crate::scopes::ToolScopes`] decided that before this call). The
-    /// implementation refuses a category that is not above the ticket's current
-    /// one with an error that keeps the code `E_UPGRADE_ONLY`
-    /// ([`PortError::Refused`]).
+    /// Called for `aicd_ticket_upgrade`. The implementation never assumes the
+    /// server core's scope check ran, so it:
+    ///
+    /// - records its write with `Actor::Agent`, naming `caller.identity()` as
+    ///   the agent;
+    /// - refuses a caller whose product is not `db`'s product;
+    /// - routes the change through `ori-orchestrator`'s `Lifecycle::advance`,
+    ///   which evaluates AICD §17's matrix itself.
+    ///
+    /// It refuses what `ori-core`'s `Ticket::apply` refuses as a category
+    /// downgrade, with an error that keeps the code `E_UPGRADE_ONLY`
+    /// ([`PortError::Refused`]), and nothing else.
     ///
     /// # Errors
     ///
     /// [`PortError::Refused`] for a refusal by the component behind the port,
-    /// [`PortError::Invalid`] for a ticket that does not exist in the caller's
-    /// product, [`PortError::Unavailable`] when it could not answer.
+    /// [`PortError::Invalid`] for a ticket the caller's product does not hold,
+    /// [`PortError::Unavailable`] when it could not answer.
     fn upgrade(
         &mut self,
         db: &mut ProductDb,
@@ -189,9 +207,18 @@ pub trait TicketDesk {
 pub trait SpecDesk {
     /// Opens a specification pull request; returns its reference for the reply.
     ///
-    /// Called for `aicd_spec_propose`, which only the documentation role holds.
-    /// The agent never writes `spec/` itself: the content becomes a proposal a
-    /// human reviews (`spec/API_SPEC.md` section 3, the second promise).
+    /// Called for `aicd_spec_propose`. The agent never writes `spec/` itself:
+    /// the content becomes a proposal a human reviews (`spec/API_SPEC.md`
+    /// section 3, the second promise).
+    ///
+    /// The implementation never assumes the server core's scope check ran, so
+    /// it:
+    ///
+    /// - records its write with `Actor::Agent`, naming `caller.identity()` as
+    ///   the agent;
+    /// - refuses a caller whose product is not `db`'s product;
+    /// - routes the proposal through the owning component's own checks, which
+    ///   evaluate AICD §17's matrix for the specification themselves.
     ///
     /// # Errors
     ///
@@ -210,32 +237,41 @@ pub trait SpecDesk {
 /// The host toward the operator's MCP servers, as the server core sees it:
 /// AICD §17, AICD §26.
 ///
-/// **Every method takes a `&UserToolGrant`**, which only
-/// [`crate::scopes::ToolScopes::authorize_user_tool`] can make, so no call
-/// reaches an operator's server without `scopes.rs`'s decision, and the host
-/// that implements this holds no policy. The grant names the product, the
-/// server and the role; the implementation reaches the server of that name in
-/// that product and no other.
+/// **Every method takes a [`UserToolGrant`] by value**, which only
+/// [`crate::scopes::ToolScopes::authorize_user_tool`] can make, and each host
+/// call consumes it. The grant cannot be copied, so one decision covers one host
+/// call; the caller (slices S2 and S6) calls `authorize_user_tool` for every
+/// call, from the registry's state at that moment. No call reaches an
+/// operator's server without `scopes.rs`'s decision, and the host that
+/// implements this holds no policy. The grant names the product, the server and
+/// the role. It names the server by name, and the implementation resolves that
+/// name in that product when the call is made and reaches no other server.
 ///
 /// The server's own secret stays with the engine, which connects to the server
-/// itself, and no credential passes through this port. What the server returns
-/// is untrusted data (`spec/API_SPEC.md` section 3, "Proxied tools",
-/// condition 3): the implementation returns text blocks only, and the server
-/// core labels every block untrusted before it reaches a session.
+/// itself, and no credential passes through this port.
+///
+/// **What the server returns is untrusted data, and the host is not trusted to
+/// filter it** (`spec/API_SPEC.md` section 3, "Proxied tools", condition 3). The
+/// implementation returns what the operator's server returned. The server
+/// core's proxy (slice S6, `tools/proxy.rs`, tier 2) enforces condition 3 on
+/// whatever the host returns: it keeps text blocks only, drops every other
+/// block and any `structured_content`, and labels every block it forwards
+/// untrusted.
 pub trait UserToolHost {
     /// The tools of the granted server, as the server named them: untrusted
-    /// data, names and descriptions included.
+    /// data, names and descriptions included. The grant is consumed.
     ///
     /// # Errors
     ///
     /// [`PortError::Unavailable`] when the server cannot be reached.
-    fn list_tools(&mut self, grant: &UserToolGrant) -> Result<Vec<Tool>, PortError>;
+    fn list_tools(&mut self, grant: UserToolGrant) -> Result<Vec<Tool>, PortError>;
 
     /// Calls `tool` of the granted server with `arguments`, and returns its
-    /// result.
+    /// result as the server returned it. The grant is consumed.
     ///
     /// `tool` is the server's own name for the tool, the part after the first
-    /// `__` of the name the agent called ([`crate::scopes::split_proxied`]).
+    /// `__` of the name the agent called ([`crate::scopes::split_proxied`]),
+    /// once the server core has matched it against the server's tool list.
     ///
     /// # Errors
     ///
@@ -244,7 +280,7 @@ pub trait UserToolHost {
     /// answer.
     fn call_tool(
         &mut self,
-        grant: &UserToolGrant,
+        grant: UserToolGrant,
         tool: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, PortError>;
@@ -259,6 +295,8 @@ mod tests {
     use crate::scopes::{ExposedServer, ServerName, ToolScopes};
 
     const PRODUCT: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    /// A valid identifier for the agent identity of a session.
+    const AGENT: &str = "01D39ZY06FGSCTVN4T2V9PKHFZ";
 
     fn id(text: &str) -> Id {
         Id::parse(text).expect("a valid ULID")
@@ -356,7 +394,7 @@ mod tests {
     }
 
     impl UserToolHost for Scripted {
-        fn list_tools(&mut self, grant: &UserToolGrant) -> Result<Vec<Tool>, PortError> {
+        fn list_tools(&mut self, grant: UserToolGrant) -> Result<Vec<Tool>, PortError> {
             Ok(vec![Tool {
                 name: format!("{}-tool", grant.server()),
                 title: None,
@@ -370,7 +408,7 @@ mod tests {
 
         fn call_tool(
             &mut self,
-            grant: &UserToolGrant,
+            grant: UserToolGrant,
             tool: &str,
             _arguments: Option<JsonObject>,
         ) -> Result<CallToolResult, PortError> {
@@ -389,21 +427,23 @@ mod tests {
         let _: Option<&mut dyn TicketDesk> = None;
         let _: Option<&mut dyn SpecDesk> = None;
 
-        // The only way to a grant is the decision in scopes.rs.
+        // The only way to a grant is the decision in scopes.rs, and each host
+        // call consumes the grant it was made for: two calls are two decisions.
         let product = id(PRODUCT);
-        let caller = Caller::new(Role::Qa, product.clone());
+        let caller = Caller::new(id(AGENT), Role::Qa, product.clone());
         let exposed = ExposedServer::new(
             product,
             ServerName::parse("github").expect("a server name"),
             vec![Role::Qa],
             true,
         );
-        let grant = ToolScopes::authorize_user_tool(&caller, &exposed).expect("a grant");
         let host: &mut dyn UserToolHost = &mut scripted;
-        let tools = host.list_tools(&grant).expect("a list");
+        let grant = ToolScopes::authorize_user_tool(&caller, &exposed).expect("a grant");
+        let tools = host.list_tools(grant).expect("a list");
         assert_eq!(tools[0].name, "github-tool");
+        let grant = ToolScopes::authorize_user_tool(&caller, &exposed).expect("a second grant");
         let result = host
-            .call_tool(&grant, "create_issue", None)
+            .call_tool(grant, "create_issue", None)
             .expect("a result");
         assert_eq!(result.content[0].as_text(), Some("github:create_issue"));
     }
