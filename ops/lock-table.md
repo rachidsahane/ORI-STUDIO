@@ -1403,3 +1403,19 @@ Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
 Claim 100 is released.
 
 **State after this section:** the claims held are 20 and 90 (repair 2 handed back; its integration is built on `integ/ORI-T-0159` and under review). The next free identifier is ORI-T-0173.
+
+---
+
+## Claim 101 dispatched: ORI-T-0171, gate 5's doc test fences; ORI-T-0151 folded into ORI-T-0149
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 101 | ORI-T-0171, gate 5's `doc_tests()` tracks every fence and closes it as CommonMark 0.31 section 4.5 does (same marker, a run at least as long, no info string); tilde fences are doc tests too. Code and two tests written by the lead and proved in a copy: clippy clean, 194 `ori-gates` tests pass, and five mutations (an untracked non-runnable fence, no tilde, a closer of any length, a closer with an info string, a backtick info string) each fail a new test | `crates/ori-gates/src/modified_tests.rs` | 1 | Haiku 5.5 | `fix/ORI-T-0171-doc-fences` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 101 is disjoint from the held claims (20, 90). Gate 5 is not wired into `scripts/gates.sh` (it reports as a probe), so the change cannot move any CI result. The doc comment records three limits left as they are: a fence open at the end of a file is not counted, a whole file's doc comments are read as one text, and indented code blocks are not read.
+
+**ORI-T-0151 is folded into ORI-T-0149** rather than dispatched. Capping the transcript by dropping entries would break AICD §17's complete audit trail, and could drop the `session/request_permission` entry ORI-P1-039 inspects. Refusing at a cap needs a new `TranscriptError` variant, and that type is declared in `crates/ori-core/src/adapters.rs` (tier 2) under `spec/API_SPEC.md` section 4's contract. The in-place append that removes the per-entry clone and the cap's form (most likely a budget that ends the session, never a silent drop) are decided with ORI-T-0149's design of a production-fit `AcpClient`.
+
+**State after this section:** the claims held are 20, 90 (repair 2 handed back; integration built on `integ/ORI-T-0159`, under review) and 101. The next free identifier is ORI-T-0173.
