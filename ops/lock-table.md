@@ -1737,3 +1737,19 @@ Claim 108 is released. Tier 2 (`barrier.rs`): the operator merges, with the rest
 **A lead error in ORI-T-0182.** Edit 5 of the lead's package inserted the new label constant and `stale_reason` between `scrub`'s doc line and `fn scrub`. The line then documented the constant, and `scrub` had none. The lead's pre-dispatch proof (tests, clippy, strict doc, rustfmt) could not see it, because none of them reads which item a private doc line sits on. The lead found it when reading the file for S7, and moved the line back in its own commit (3989649, doc only; strict doc and clippy clean). Recorded for calibration: a lead edit that inserts before an anchor must check what the anchor's preceding lines belong to.
 
 **State after this section:** the claims held are 20, 105 and 109. ORI-T-0181 is allocated. The next free identifier is ORI-T-0183.
+
+---
+
+## Claim 112: ORI-T-0163 dispatched
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+The lead designed ORI-T-0163 as a probe in the watcher itself, not in the engine. `TreeWatcher` records its root's identity (device and inode on unix). It looks at the root on every `next_batch`, including a call where nothing arrived, and in `mark_reconciled`. A root that was removed, replaced by another directory, or can no longer be looked at records `MissedReason::RootGone` once. Such a watcher never reads `Watching` again: it is replaced, not reconciled.
+
+That closes the Windows gap the module doc records: `ReadDirectoryChangesW` never reports the root's removal. It also closes a gap on every platform: a root replaced at the same path was cleared by a reconciliation. What remains is that Windows cannot tell a replaced root apart, because stable `std` gives no file identity there.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 112 | ORI-T-0163 | `crates/ori-watch/src/watcher.rs` | 1 | `/home/user/wt/ORI-T-0163`, `fix/ORI-T-0163-root-probe` | Sonnet 5.5 | 2026-10-18 |
+
+**State after this section:** the claims held are 20, 105, 109 and 112. The next free identifier is ORI-T-0183.
