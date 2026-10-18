@@ -1573,3 +1573,17 @@ The integration of 527574e on the session head passed every check: 1568 workspac
 | ORI-T-0180 | Review finding 0174-F1: a hook link whose way runs through a per-process link (`/proc/self`, `/proc/thread-self`, `/dev/fd` on Linux) is judged from the installer's own process, not git's, so `post-checkout -> /proc/self/cwd/.git/hooks/post-merge` installs and every checkout records a false `post-merge`. Refuse any way that enters such a link, at every hop, not only on `NotFound`. **Must land before ORI-T-0055** | `crates/ori-watch/src/hooks.rs` | 1 | after ORI-T-0174 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 103 (repair 1), 105 (S2, under review) and 108 (PM3, under review). The next free identifier is ORI-T-0181.
+
+---
+
+## Claim 103 integrated: ORI-T-0174 with repair 1, a hook link through what the install creates is refused
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 103 | ORI-T-0174, the follow-up of ORI-T-0159's last review: `way_enters_what_the_install_creates` resolves a missing way one component at a time, following links physically, and refuses a link whose way first fails at `hooks/ori-original/` or a hook-named entry of it, or no longer fails at all (a race, refused since repair 1). The review's doc findings in `hooks.rs` and `watcher.rs` are answered | Reviewed (12 agents): the five reproduced layouts (H2, H2b, H3, H3b, H4) and H4 on a second install are refused, and no new gap was found. Repair 1 answers the four confirmed should-fix findings (F2 to F4 in docs; F1, procfs links, is stated as a limit and is ORI-T-0180) and the notes F5 (the race now fails closed) and F10 (the rule pinned to the hooks directory's own `ori-original/`). The coder corrected two lead errors: the package's m2 and m3 could not fail H3 and H3b, which the rule refuses at `ori-original/` first, and Decision 2's three cases did not exercise the file-name condition. Each gained a test that does. The lead read the code change of the repair (the resolver's last answer, `false` to `true`, and two tests). No test that existed before the ticket changed. ORI-T-0159's tests keep comments that now describe the text reading (review note F17); changing them needs a `test_modified` escalation, and they are left. The coder created a stray local branch, `scratch-amend`, and reset its own unpushed commits once. No ref is deleted, so the branch stays, recorded | Nine commits cherry-picked onto the session head, on top of ORI-T-0177's two test-path edits. `cargo test --workspace --locked --no-fail-fast`: 1570 passed, 0 failed, 9 ignored. Workspace clippy, strict doc, fmt and gate 13 clean. Windows simulation of `ori-watch`: clippy clean, 69 tests pass |
+
+Claim 103 is released. ORI-T-0180 (procfs links), ORI-T-0168 (`ori-original` as a link), ORI-T-0178 (the dotdot test on Windows) and ORI-T-0163 (the Windows root probe) may now be claimed, and each must land before ORI-T-0055 installs the hooks.
+
+**State after this section:** the claims held are 20, 105 (S2, under review) and 108 (PM3, under review). The next free identifier is ORI-T-0181.
