@@ -1320,8 +1320,14 @@ fn is_named(name: &std::ffi::OsStr, expected: &str, fold_case: bool) -> bool {
     })
 }
 
-/// Whether `path`, resolved one component at a time, first fails at something
-/// this install creates: AICD §13.
+/// Whether the way `path` is one to refuse a link for: AICD §13.
+///
+/// `true` has two causes. The way, resolved one component at a time, first
+/// fails at something this install creates; or it does not fail at all, so the
+/// tree changed between the caller's look, which found a component missing, and
+/// this one (a race). Refusing the install in that case fails closed, and
+/// running it again decides afresh. `false` means the way first fails
+/// somewhere else, and reaches nothing, or it meets a file.
 ///
 /// What the install creates, and which a link can run through before it exists,
 /// is `ori-original/` under the hooks directory (`PRESERVED_DIR`) and an entry
@@ -1329,8 +1335,8 @@ fn is_named(name: &std::ffi::OsStr, expected: &str, fold_case: bool) -> bool {
 /// each foreign hook. The first is looked for at the hooks directory, the
 /// second in a `ori-original/` that is there under it.
 ///
-/// The way is resolved as the operating system will once the install has run,
-/// and not by its text. A work list of the components starts at the current
+/// The way is resolved physically, as the operating system resolves it now, and
+/// not by its text. A work list of the components starts at the current
 /// directory, or at the root a path begins with, canonicalized, so the
 /// directory the walk stands in (`current`) is always an existing one that holds
 /// no link, and its textual parent is its physical one. `.` is skipped. `..`
@@ -1341,7 +1347,8 @@ fn is_named(name: &std::ffi::OsStr, expected: &str, fold_case: bool) -> bool {
 ///   list, so a `..` after it leaves from where the link led and not from the
 ///   link; an absolute target restarts at its root, a relative one is read from
 ///   `current`, the link's own directory. More than `LINK_HOPS_CAP` links in one
-///   call is an error, which refuses the install: no process could run it;
+///   call is an error, which refuses the install: a way that could not be
+///   resolved is not a no (AICD §14);
 /// - a directory becomes `current`;
 /// - anything else is a file, and the way meets a non-directory and reaches
 ///   nothing: `false`;
@@ -1352,7 +1359,9 @@ fn is_named(name: &std::ffi::OsStr, expected: &str, fold_case: bool) -> bool {
 ///   is `false`;
 /// - a name under a file is `false` as well; every other failure is returned.
 ///
-/// If every component resolves, `false`: the directory was there after all.
+/// If every component resolves, `true`: the caller found the way failing a
+/// moment ago, so it changed under the check, and a way that cannot be told
+/// from one that now reaches the engine's script is refused.
 ///
 /// # Errors
 ///
@@ -1421,7 +1430,10 @@ fn way_enters_what_the_install_creates(
             }
         }
     }
-    Ok(false)
+    // Every component resolved, though the caller's `canonicalize` failed with
+    // "not found" a moment ago: the tree changed between the two looks. The
+    // text reading that follows could misread such a way, so it is refused.
+    Ok(true)
 }
 
 /// The first target of the link at `start`, as written, if following it and
@@ -3378,6 +3390,33 @@ mod tests {
                 )
                 .unwrap(),
                 "a relative way did not start at the current directory"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0174_a_way_that_resolves_after_the_system_said_it_did_not_is_refused() {
+        // The resolver is reached only after `canonicalize` failed with "not
+        // found". A way whose every component exists now means the tree
+        // changed between the two looks, and the text reading that would
+        // follow could misread it (an H3-shaped way), so it is refused and the
+        // install is run again.
+        let scratch = Scratch::new("way-resolves-after-all");
+        let (repo, _) = skeleton(&scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(hooks_dir.join("x").join("y")).unwrap();
+        std::os::unix::fs::symlink("x/y", hooks_dir.join("L")).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        for way in [
+            hooks_dir.clone(),
+            hooks_dir.join("x").join("y"),
+            hooks_dir.join("L").join(".."),
+            hooks_dir.join("L").join("..").join(".."),
+        ] {
+            assert!(
+                way_enters_what_the_install_creates(&way, &hooks_dir, &canonical, false).unwrap(),
+                "{way:?} resolves and was not refused"
             );
         }
     }
