@@ -91,6 +91,15 @@ allow-wildcard-paths = false
 # and any other crate's duplicate are still refused. A bump of the 0.60 line
 # alone is not seen while 0.61.2 is skipped, because only one other version is
 # then left to count. It is not a general relaxation.
+#
+# What this skip does not see. It is sound only while `mio` is the one dependent
+# of `windows-sys` 0.61.2, and nothing here enforces that: cargo-deny 0.20.2
+# refuses a crate that is in both `skip` and `deny` ("a crate was specified in
+# both"), so the entry that would ban 0.61.2 except under `mio`
+# (`wrappers = ["mio"]`) cannot be written beside it. A second dependent of
+# 0.61.2, such as `winapi-util` after a lock refresh (it accepts windows-sys up
+# to 0.61), is not seen by this skip: gate 7 would pass, and both versions could
+# then build on one target.
 skip = [
     { crate = "windows-sys@0.61.2", reason = "E-0009: only mio 1.x under notify 8.2.0 depends on windows-sys 0.61; notify takes mio on Linux, Android, the BSDs and iOS (and on macOS only under its macos_kqueue feature) and mio takes windows-sys on Windows only, so on no single target do both windows-sys versions build" },
 ]
