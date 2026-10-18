@@ -1533,3 +1533,19 @@ Claims 106 and 107 are released. With PM2 in, slice S4 beyond `closing` and `blo
 | ORI-T-0178 | `ori_t_0054_a_root_spelled_with_dotdot_is_canonicalised_before_paths_are_judged` passes on Windows without testing anything: its root is verbatim there, and `join` normalizes the `..` away, so the watcher is handed the root itself. Build the spelled root as text, as ORI-T-0177 did for the spool test. A test-portability change to an ORI-T-0054 test not yet on `main` (the ORI-T-0167 precedent) | `crates/ori-watch/src/watcher.rs` (that test) | 1 | after ORI-T-0174 | 2026-10-18 |
 
 **State after this section:** the claims held are 20, 103 (ORI-T-0174) and 105 (ORI-T-0169, S2). The next free identifier is ORI-T-0179.
+
+---
+
+## Claim 108 dispatched: ORI-T-0179, batch 10 prerequisite PM3 (the barrier reads one evidence blob's content)
+
+Written by the lead on 2026-10-18 under [[R31]] and [[R44]].
+
+A read-only map of what the memory tools S3, S7 and S8 need from `ori-memory` (four agents, `map-s3-s7-s8.json`) found that nothing in the workspace reads an evidence file's content. `spec/API_SPEC.md` section 3 says `aicd_evidence` returns "Raw evidence, returned labeled untrusted". The safe primitives (a no-follow, non-blocking open decided on the handle, and a capped read) exist privately in `code_map.rs`. PM3 puts the read in the barrier, next to `EvidenceBlob`, so that `ori-mcp` never opens a path by hand.
+
+| # | Ticket | Modules | Tier | Model | Branch | Granted | Released | Recorded |
+|---|---|---|---|---|---|---|---|---|
+| 108 | ORI-T-0179, PM3: `barrier::read_evidence_content(blob, cap_bytes)` returns `EvidenceContent` (bytes, truncated, lossy text, never `Indexable`); `BarrierError::EvidenceReadRefused { Missing \| NotARegularFile }` at §8 | `crates/ori-memory/src/barrier.rs`; `crates/ori-memory/src/code_map.rs` (two functions made `pub(crate)`, doc only otherwise) | 2 | Sonnet 5.5 | `feat/ORI-T-0179-evidence-content` | 2026-10-18 | **held** | 2026-10-18, at dispatch |
+
+Claim 108 is disjoint from the held claims (20, 103, 105).
+
+**State after this section:** the claims held are 20, 103, 105 and 108. The next free identifier is ORI-T-0180.
