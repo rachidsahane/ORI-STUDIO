@@ -5,9 +5,10 @@
 //!
 //! `spec/API_SPEC.md` section 3 lists the eleven tools Ori exposes to an agent
 //! session, and the roles that hold each. AICD §17 makes the permission matrix
-//! the source of what a role may do, and AICD §25 puts the enforcement at the
-//! edge of the service rather than in the agent's good behaviour. This module
-//! is that enforcement for the tool surface: [`crate::scopes::ToolScopes`] answers
+//! the source of what a role may do, and AICD §25's scope enforcer is enforced
+//! at query time: "an agent cannot request outside its scope, and the refusal
+//! is logged". This module is that enforcement for the tool surface:
+//! [`crate::scopes::ToolScopes`] answers
 //! "may this role call this tool" from one constant table, and a call outside
 //! the table is refused with a [`crate::scopes::ToolRefusal`] that carries the
 //! methodology section it was refused under (`CLAUDE.md` rule 9, criterion
@@ -107,8 +108,8 @@ use core::fmt;
 use ori_core::error::MethodologyRef;
 use ori_core::types::{Id, Role};
 
-/// AICD §7, "The agent team and separation of duties": a ticket belongs to one
-/// agent.
+/// AICD §7, "The agent team and separation of duties": the lead assigns tickets
+/// to coders, and a coder takes one validated ticket.
 const ROLES_SECTION: u8 = 7;
 
 /// AICD §17, "Autonomy tiers and the permission model": what each role may do.
@@ -595,9 +596,9 @@ pub enum ToolRefusal {
     /// The call names a ticket the calling session is not assigned. AICD §7.
     ///
     /// Raised by the server core when a tool that acts on one ticket is given a
-    /// ticket other than the one the session's identity holds: a ticket belongs
-    /// to one agent (AICD §7), and the assignment is the engine's record, not
-    /// the caller's word.
+    /// ticket other than the one the session's identity holds: the lead assigns
+    /// tickets to coders and a coder takes one validated ticket (AICD §7), and
+    /// the assignment is the engine's record, not the caller's word.
     TicketNotAssigned {
         /// The ticket the call named.
         ticket: Id,
