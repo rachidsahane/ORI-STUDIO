@@ -4,21 +4,23 @@
 //! Two handlers, [`crate::tools::desk::TicketUpgradeHandler`] and
 //! [`crate::tools::desk::SpecProposeHandler`], that the engine registers with
 //! [`crate::tools::Handlers::register`]. Each holds one desk, a port slice S1
-//! declared and the engine implements (ORI-T-0070), and passes a call to it:
+//! declared and the engine is to implement (ORI-T-0070), and passes a call to it:
 //! **no policy of their own, no event of their own, no text of their own** beyond
 //! fixed labels. The desk decides, because it routes the change through the
 //! component that owns the rule ([`crate::ports::TicketDesk`],
 //! [`crate::ports::SpecDesk`]); the handler builds the call from the engine's
-//! binding and returns what the desk said.
+//! binding and the validated arguments, and answers with what the desk said, a
+//! reference that fails the reference rule withheld.
 //!
 //! | Tool | Takes | Role | Effect, in `spec/API_SPEC.md` section 3's words |
 //! |---|---|---|---|
 //! | `aicd_ticket_upgrade` | `ticket_id`, `category` | lead | "Upgrade only" |
 //! | `aicd_spec_propose` | `document_id`, `content` | documentation | "Opens a specification PR" |
 //!
-//! Slice S2's catalogue admits only the lead to the first and only documentation
-//! to the second (`crate::scopes::ToolScopes::permits`), and checks the arguments
-//! against the tool's schema before a handler is reached, so a handler sees a
+//! Slice S1's role matrix (`crate::scopes::ToolScopes::permits`), which S2's
+//! check 5 applies, admits only the lead to the first and only documentation to
+//! the second, and S2 checks the arguments against the catalogue's schema before
+//! a handler is reached, so a handler sees a
 //! canonical `ticket_id`, a `category` that is one of the four and a canonical
 //! `document_id`. A handler still checks what it takes from the arguments and
 //! fails closed on what it did not expect (below).
@@ -39,7 +41,7 @@
 //!   S->>S: checks 0 to 7
 //!   S->>L: append mcp.tool_called
 //!   S->>H: call(db, BoundCall, arguments)
-//!   H->>H: read the arguments; the caller is the binding's
+//!   H->>H: read the arguments, the caller is the binding's
 //!   alt an argument is missing or malformed (unreachable after S2)
 //!     H-->>S: Port(Invalid) with the field and a fixed sentence
 //!   else
@@ -63,7 +65,9 @@
 //! 1. The ticket is `call.ticket_id`, the validated, canonical argument, **never
 //!    the binding's ticket**: S2's check 7 binds only a coder's argument to its
 //!    session, and the upgrade is a lead's. A call that carries none is
-//!    `Port(Invalid)` for `ticket_id`.
+//!    `Port(Invalid)` for `ticket_id`. The handler does not check that the
+//!    ticket exists in the caller's product: `crate::ports::TicketDesk::upgrade`
+//!    does, as `crate::server`'s check 7 table assigns.
 //! 2. The category is the `category` argument, parsed by
 //!    `ori_core::types::Category`'s `FromStr`. Anything else is `Port(Invalid)`
 //!    for `category`.
@@ -85,7 +89,7 @@
 //!    `Port(Invalid)` for `content`. **It is handed to the desk as it is and is
 //!    not sanitized**: a proposal becomes a pull request that a human reviews
 //!    (`spec/SECURITY_NOTES.md`, "Input validation"), and the agent never writes
-//!    `spec/` itself (`spec/API_SPEC.md` section 3, the second promise).
+//!    `spec/` itself (`spec/API_SPEC.md` section 3, the first promise).
 //! 3. The caller is the binding's, as for the upgrade.
 //! 4. The desk is asked, and its `PortError` is kept whole.
 //! 5. **The pull request's reference is integration data** (`CLAUDE.md`, rule 7):
@@ -99,7 +103,10 @@
 //!      <document_id>; its pull request reference could not be shown` and a line
 //!      break. **This is still a success.** The desk answered `Ok`, so the pull
 //!      request exists, and a failure would invite a retry that opens another one.
-//!      The desk's own text is in neither the reply nor any row.
+//!      The desk's own text is in neither the reply nor any of S2's rows. The
+//!      proposal desk's own row is not defined yet (below); when ORI-T-0070
+//!      defines it, a reference it records must not reach an agent except
+//!      through this rule.
 //!
 //! **The reference rule.** A reference is shown only when it is 1 to 512
 //! characters, each an ASCII graphic character (U+0021 to U+007E). It refuses
@@ -111,16 +118,16 @@
 //! # What is recorded
 //!
 //! **A handler's own code appends nothing**, and holds no state across calls
-//! beyond its desk. A desk may append the row of its effect. The upgrade desk
-//! routes the change through `Lifecycle::advance`, which is pure, and then appends
-//! `ticket.category_set`, only on success. The proposal desk's row is not defined
-//! yet.
+//! beyond its desk. A desk may append the row of its effect. The upgrade desk is
+//! to route the change through `Lifecycle::advance`, which is pure, as
+//! `crate::ports::TicketDesk` requires, and to append `ticket.category_set` only
+//! on success (ORI-T-0070). The proposal desk's row is not defined yet.
 //!
 //! | Outcome | Rows, in order |
 //! |---|---|
 //! | done, a reference withheld included | `mcp.tool_called` (ticket column: the argument for the upgrade; the binding's ticket, or none, for the proposal), then whatever row the desk appends |
-//! | a desk's refusal, `Port(Refused(e))` | `mcp.tool_called`, then `mcp.tool_failed` (`failure: refused`, `e.code()`, `e`'s section; for a downgrade `E_UPGRADE_ONLY`, AICD §11) |
-//! | a ticket or document not in the caller's product, `Port(Invalid)` | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
+//! | a desk's refusal, `Port(Refused(e))` | `mcp.tool_called`, then `mcp.tool_failed` (`failure: refused`, `e.code()` or S2's fallback `refused` for a refusal with no code, and `e`'s section; for a downgrade `E_UPGRADE_ONLY`, AICD §11). A refusal with no section is `failure: invalid` |
+//! | a ticket the caller's product does not hold, or a document that is not one of the specification's, `Port(Invalid)` | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
 //! | a desk that could not answer | `mcp.tool_called`, then the desk's row if it appended one before failing, then `mcp.tool_failed` (`failure: unavailable`) |
 //! | a missing or malformed argument (unreachable through S2; test 8 calls the handler directly) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
 //!
@@ -151,17 +158,25 @@
 //!   The documentation role works on `spec/<ticket>` branches
 //!   (`spec/agents/documentation.md`), and opening a pull request needs a title and
 //!   a body. Widening [`crate::ports::SpecDesk::propose`] would change the test
-//!   fake in `ports.rs`, so the port stays as it is: the engine resolves the
-//!   session and the ticket from the identity's live binding (prerequisite PW of
-//!   `ops/batch-10-plan.md`, folded into ORI-T-0070), and whose credential opens
-//!   the pull request is the engine's decision.
+//!   fake in `ports.rs`, so the port stays as it is, and **the gap is open**: how
+//!   the desk finds the session, the ticket, the branch, the title and the body
+//!   is ORI-T-0070's to decide. Prerequisite PW of `ops/batch-10-plan.md` says
+//!   only that the engine implements every port and registers session bindings,
+//!   and a documentation binding with no ticket (the weekly drift audit) has no
+//!   ticket to name a branch after. Whose credential opens the pull request is
+//!   the engine's decision too.
 //! - **The proposal holds the product's single writer across a network call.**
 //!   [`crate::ports::SpecDesk::propose`] takes `&mut ProductDb`, so a slow host
 //!   stalls every connection of the product for as long as it takes.
 //! - **A pull request opened before the desk's own append failed exists with only
-//!   `mcp.tool_called` and `mcp.tool_failed` to show for it.** S2's rule still
-//!   holds: the call was recorded before the effect.
-//! - **A desk refusal with no `ori-core` refusal kind** (a section 17 matrix
+//!   `mcp.tool_called` and `mcp.tool_failed` to show for it**, or with only
+//!   `mcp.tool_called` when the store refuses S2's failure row too. S2's rule
+//!   still holds: the call was recorded before the effect. The agent is answered
+//!   `unavailable`, which S2 defines as "retry later", so a retry can open a
+//!   second pull request. ORI-T-0070 chooses between answering `Ok` with the
+//!   reference withheld and a desk that opens at most one pull request for one
+//!   proposal.
+//! - **A desk refusal with no `ori-core` refusal kind** (an AICD §17 matrix
 //!   refusal from the lifecycle, a specification refusal with no `RefusalKind`)
 //!   can reach the server today only as `Invalid` or `Unavailable`, so its section
 //!   is lost. Slice S9 (ORI-T-0188) will add `PortError::Denied { code,
@@ -169,9 +184,9 @@
 //! - **The reference rule keeps a hostile reference from reading as a line of its
 //!   own, and no more.** Punctuation-joined words pass it. The label says so, and
 //!   an agent must treat the reference as data.
-//! - **No desk exists yet.** The engine implements both (ORI-T-0070). Until it
-//!   does, nothing registers these handlers, and the tests drive them against
-//!   fake desks.
+//! - **No desk exists yet.** The engine is to implement both (ORI-T-0070).
+//!   Until it does, nothing registers these handlers, and the tests drive them
+//!   against fake desks.
 //!
 //! # Tier
 //!
@@ -200,12 +215,12 @@ const WHY_DOCUMENT: &str = "the document_id argument is missing or is not an ide
 /// The fixed sentence of a proposal whose content is missing or is not a string.
 const WHY_CONTENT: &str = "the content argument is missing or is not a string";
 
-/// What a pull request reference must be to reach an agent: AICD §17.
+/// What a pull request reference must be to reach an agent: AICD §27.
 ///
 /// **1 to 512 characters, each an ASCII graphic character (U+0021 to U+007E).**
 /// The reference is what the host answered, which is integration data
 /// (`CLAUDE.md`, rule 7), and the reply carries it into an agent's context. The
-/// rule is the narrowest that every real reference fits (a number, a path or a
+/// rule is a simple one that every real reference fits (a number, a path or a
 /// URL has no whitespace and no non-ASCII character), and it refuses what makes
 /// text read as something other than a token:
 ///
@@ -265,8 +280,8 @@ fn invalid(field: &'static str, why: &str) -> HandlerError {
 ///
 /// # Examples
 ///
-/// The engine registers both handlers, each over its own desk, which it
-/// implements (ORI-T-0070). The handlers hold `Send` trait objects, because
+/// The engine is to register both handlers, each over its own desk, which it
+/// is to implement (ORI-T-0070). The handlers hold `Send` trait objects, because
 /// [`crate::tools::ToolHandler`] is `Send` and the ports are not required to be.
 ///
 /// ```
@@ -1221,5 +1236,46 @@ mod tests {
                 case,
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // 9. A reference with a control or invisible character is withheld
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0186_a_reference_with_a_control_or_invisible_character_is_withheld() {
+        // Each reference is valid but for its one character outside the
+        // ASCII graphic range, which some reader takes as a line end, a
+        // terminal command or nothing visible.
+        let cases: [(&str, &str); 10] = [
+            ("cr", "ZQ0186\r"),
+            ("cr-inside", "ZQ0186\rpull/12"),
+            ("tab", "ZQ0186\t"),
+            ("nul", "ZQ0186\u{0}"),
+            ("esc", "ZQ0186\u{1b}[2J"),
+            ("del", "ZQ0186\u{7f}"),
+            ("nel", "ZQ0186\u{85}"),
+            ("nbsp", "ZQ0186\u{a0}"),
+            ("zero-width", "ZQ0186\u{200b}"),
+            ("line-separator", "ZQ0186\u{2028}"),
+        ];
+        for (label, reference) in cases {
+            let mut desks = desks_for_reference(&format!("withheld-control-{label}"), reference);
+            let tip = desks.world.tip();
+
+            let reply = propose_call(&mut desks.world, "a proposal");
+            assert_text_success(&reply, &withheld());
+            assert_eq!(desks.proposals().len(), 1, "{label}: the desk was asked");
+
+            let rows = desks.world.rows_since(tip);
+            assert_eq!(kinds(&rows), ["mcp.tool_called"], "{label}");
+            assert_absent(&reply, &rows, &["ZQ0186", reference]);
+        }
+
+        // The rule itself, at the edges of the graphic range.
+        assert!(REFERENCE_RULE.admits("!"));
+        assert!(REFERENCE_RULE.admits("~"));
+        assert!(!REFERENCE_RULE.admits(" "));
+        assert!(!REFERENCE_RULE.admits("\u{7f}"));
     }
 }
