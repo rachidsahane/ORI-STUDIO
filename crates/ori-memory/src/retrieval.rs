@@ -1585,10 +1585,11 @@ impl Fit for SearchPackage {
 /// Whether `ch` is a Unicode format character (general category `Cf`), Unicode
 /// 16.0.0.
 ///
-/// The ranges follow `DerivedCoreProperties.txt` in the Unicode Character
-/// Database for category `Cf`, with the language-tag and tag block
-/// `U+E0000`..=`U+E007F` taken whole (tag characters are `Cf` from
-/// `U+E0020`; `U+E0000` is unassigned but belongs to the same block).
+/// The ranges follow `extracted/DerivedGeneralCategory.txt` in the Unicode
+/// Character Database (Unicode 16.0.0) for `General_Category=Cf`. The block
+/// `U+E0000`..=`U+E007F` is taken whole: tag characters are `Cf` from
+/// `U+E0020`, and the unassigned (`Cn`) code points `U+E0000` and
+/// `U+E0002`..=`U+E001F` are included deliberately (security-conservative).
 /// Implements `spec/SECURITY_NOTES.md` "Injection" (untrusted text scrubbing).
 fn is_unicode_cf(ch: char) -> bool {
     matches!(
@@ -1617,8 +1618,9 @@ fn is_unicode_cf(ch: char) -> bool {
 }
 
 /// Whether a character may not appear in untrusted text the retrieval shows or
-/// the barrier quotes: a control character (`Cc`), a format character (`Cf`),
-/// and the Unicode line and paragraph separators (`Zl`/`Zp`, not `Cf`).
+/// the barrier quotes: a control character (`Cc`), every code point in the `Cf`
+/// table above, and the line and paragraph separators `U+2028` and `U+2029`
+/// (`Zl`/`Zp`, not `Cf`, added deliberately).
 ///
 /// **Zero-width joiner (`U+200D`).** Emoji sequences legitimately use `Cf`
 /// characters; this predicate still treats them as unsafe and rendering replaces
@@ -6882,5 +6884,59 @@ mod tests {
         assert!(is_blank_after_untrusted_scrub("\u{E0041}\u{E007F}"));
         assert!(!is_blank_after_untrusted_scrub("none"));
         assert!(!is_blank_after_untrusted_scrub("a\u{200B}b"));
+    }
+
+    // Every inclusive range where DerivedGeneralCategory.txt (Unicode 16.0.0)
+    // assigns General_Category=Cf. Source:
+    // https://www.unicode.org/Public/16.0.0/ucd/extracted/DerivedGeneralCategory.txt
+    const UNICODE_16_0_0_CF: &[(u32, u32)] = &[
+        (0xAD, 0xAD),
+        (0x600, 0x605),
+        (0x61C, 0x61C),
+        (0x6DD, 0x6DD),
+        (0x70F, 0x70F),
+        (0x890, 0x891),
+        (0x8E2, 0x8E2),
+        (0x180E, 0x180E),
+        (0x200B, 0x200F),
+        (0x202A, 0x202E),
+        (0x2060, 0x2064),
+        (0x2066, 0x206F),
+        (0xFEFF, 0xFEFF),
+        (0xFFF9, 0xFFFB),
+        (0x110BD, 0x110BD),
+        (0x110CD, 0x110CD),
+        (0x13430, 0x1343F),
+        (0x1BCA0, 0x1BCA3),
+        (0x1D173, 0x1D17A),
+        (0xE0001, 0xE0001),
+        (0xE0020, 0xE007F),
+    ];
+
+    #[test]
+    fn ori_t_0191_unsafe_char_refuses_every_unicode_16_cf_code_point() {
+        for &(start, end) in UNICODE_16_0_0_CF {
+            for cp in start..=end {
+                let ch = char::from_u32(cp).expect("a Unicode scalar value");
+                assert!(
+                    is_unsafe_char(ch),
+                    "U+{cp:04X} is Cf in DerivedGeneralCategory.txt (16.0.0)"
+                );
+            }
+        }
+        for cp in [0x2028_u32, 0x2029] {
+            let ch = char::from_u32(cp).unwrap();
+            assert!(
+                is_unsafe_char(ch),
+                "U+{cp:04X} is Zl/Zp and is refused deliberately"
+            );
+        }
+        for cp in [0x41_u32, 0xAC, 0xAE, 0x2027, 0x205F, 0xE0080] {
+            let ch = char::from_u32(cp).unwrap();
+            assert!(
+                !is_unsafe_char(ch),
+                "U+{cp:04X} is not refused (neighbour or past the tag block)"
+            );
+        }
     }
 }
