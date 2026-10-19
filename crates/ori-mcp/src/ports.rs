@@ -87,7 +87,8 @@
 //! - [`crate::ports::PlanDesk`] must record the session in each lock claim
 //!   (`lock.claimed { module, session_id }`), and a [`crate::scopes::Caller`]
 //!   carries none;
-//! - [`crate::ports::EscalationDesk`] holds the session it may suspend.
+//! - [`crate::ports::EscalationDesk`] answers for the session it may suspend,
+//!   and must check a coder's ticket against the binding's.
 //!
 //! The binding, like the caller, carries the agent identity of the session, and a
 //! port that writes records its write under it. A desk never assumes that the
@@ -151,9 +152,11 @@ pub enum PortError {
     /// rule, a specification rule), with its own fixed code and section.
     ///
     /// The server core answers it as it answers [`PortError::Refused`]:
-    /// `failure: refused`, with the code and the section, always. **The code is
-    /// an MCP `reason` value**, lower case like `source_not_in_scope`, and not an
-    /// `E_` code: a new `E_` code would change `spec/API_SPEC.md`'s contract.
+    /// `failure: refused`, with the code and the section. A section that does
+    /// not resolve is answered `invalid`, as for [`PortError::Refused`]. **The
+    /// code is an MCP `reason` value**, lower case like `source_not_in_scope`,
+    /// and not an `E_` code: a new `E_` code would change `spec/API_SPEC.md`'s
+    /// contract.
     ///
     /// A desk's codes are its own fixed constants, never built from agent text.
     /// A `&'static str` does not prove that, because `String::leak` makes one.
@@ -263,11 +266,12 @@ pub trait TicketDesk {
     /// It refuses what `ori-core`'s `Ticket::apply` refuses as a category
     /// downgrade, with an error that keeps the code `E_UPGRADE_ONLY`
     /// ([`PortError::Refused`]). Besides the checks this contract lists (the
-    /// product), the desk applies no business rule of its own beyond what the
-    /// component it routes through refuses. It may answer [`PortError::Denied`]
-    /// for a refusal that `ori-core`'s `RefusalKind` has no variant for, such as a
-    /// lifecycle permission; any `Denied` code of this desk besides
-    /// `product_database_mismatch` is left to slice S5 and ORI-T-0070.
+    /// product, and a ticket the product does not hold), the desk applies no
+    /// business rule of its own beyond what the component it routes through
+    /// refuses. It may answer [`PortError::Denied`] for a refusal that
+    /// `ori-core`'s `RefusalKind` has no variant for, such as a lifecycle
+    /// permission; any `Denied` code of this desk besides
+    /// `product_database_mismatch` is left to ORI-T-0070.
     ///
     /// # Errors
     ///
@@ -312,7 +316,7 @@ pub trait SpecDesk {
     ///
     /// A specification rule that `ori-core`'s `RefusalKind` has no variant for is
     /// answered [`PortError::Denied`] too; any `Denied` code of this desk besides
-    /// `product_database_mismatch` is left to slice S5 and ORI-T-0070.
+    /// `product_database_mismatch` is left to ORI-T-0070.
     ///
     /// # Errors
     ///
@@ -438,14 +442,17 @@ pub trait SessionDesk: Send {
 ///
 /// The port takes the [`Binding`], as [`SessionDesk`] does, and not a
 /// [`Caller`]: the desk must record the session in each lock claim
-/// (`lock.claimed { module, session_id }`), and a `Caller` carries none. The tool
-/// is coder-only, so no lead reaches this port.
+/// (`lock.claimed { module, session_id }`), and a `Caller` carries none. Its
+/// check 7 duties need the bound ticket too, which a `Caller` does not carry. The
+/// tool is coder-only, so no lead reaches this port.
 pub trait PlanDesk: Send {
     /// Stores a ticket's plan and claims the modules it declares: AICD §12.
     ///
     /// `plan` is the sanitized text, untrimmed. `declared_scope` is the agent's
-    /// list in its own order, duplicates included: the handler passes both on
-    /// unchanged. `LockTable::claim` takes an `ori_core::types::Scope`, and
+    /// list in its own order, duplicates included: the handler passes both on in
+    /// order, duplicates kept, each path as `ori_memory::scope::ModulePath::parse`
+    /// gives it (one trailing `/` dropped). `LockTable::claim` takes an
+    /// `ori_core::types::Scope`, and
     /// `Scope::new` trims each path, strips trailing `/` characters, collapses
     /// duplicates and sorts. So the agent's order and duplicates never reach the
     /// table.
@@ -581,8 +588,9 @@ pub struct PlanStored {
 /// task.
 ///
 /// The port takes the [`Binding`], as [`SessionDesk`] does, and not a
-/// [`Caller`], because the desk holds the session it may suspend, which is the
-/// binding's. A lead and a coder both reach this port.
+/// [`Caller`], because the desk answers for the session it may suspend, which is
+/// the binding's, and its check 7 duties need the bound ticket. A lead and a coder
+/// both reach this port.
 pub trait EscalationDesk: Send {
     /// Opens an escalation on a ticket, and suspends the session if the
     /// configuration says so: AICD §12.
@@ -643,7 +651,12 @@ pub trait EscalationDesk: Send {
     ///   `ori-store`'s projection reader takes the first `"key"` it finds
     ///   anywhere in the payload, values included, so with this order the
     ///   column a human triages on, `trigger`, is read before any agent text, and
-    ///   no question, recommendation or evidence can set it;
+    ///   no question, recommendation or evidence can set it. The payload's
+    ///   `question`, `recommendation` and `evidence` are the call's own texts as
+    ///   the handler hands them in `NewEscalation`, not the component's trimmed
+    ///   copies, and its evidence is this call's entries only. The `Situation`
+    ///   the desk hands `Escalation::raise` holds this call's findings and no
+    ///   others;
     /// - **move the ticket to `Escalated` only for a coder's escalation**, which
     ///   the checks above have made an escalation on its own bound ticket, and
     ///   only when that ticket is `InProgress`. Ask `ori-orchestrator`'s
