@@ -2446,3 +2446,28 @@ It also had ten smaller faults. All were corrected before dispatch.
 **Recorded for ORI-T-0070:** nothing checks that a declared path names a directory of the product. The lock table does path arithmetic only, so a path that does not exist is claimed as written, and that can block a later ticket that creates it. The engine's `PlanDesk` decides whether to check.
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 117 (repair 2 with the operator) and 118 (S9 repair 1). The next free identifier is ORI-T-0193.
+
+---
+
+## 2026-10-19, ORI-T-0188 (slice S9) integrated after three repairs; claim 118 released
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**Repair 1** (Sonnet 5.5, edit tool; `e980b00`, `f135e8f`) took the review's seven should-fix findings and 20 of its notes. The coder caught one more wording error of the lead's: the F20 sentence said the old blank-`found_at` case "would catch m14 on its own", and it would not. Mutations m1 to m17 each failed their named tests. The lead's clean-copy proof passed: fmt, clippy, strict doc, the Windows compile check, `ori-mcp` 233 and `ori-gates` 194.
+
+**The focused re-review of repair 1** (three lenses, 4 agents, `rereview-0188-r1.json`) found nothing blocking. It found one test gap: the new scope-entry bound was untested against a byte count. It also recorded ten notes.
+
+**Repair 2** (Sonnet 5.5, edit tool; `4090697`, `f427d17`) took the gap and all ten notes:
+- a two-byte at-bound entry pins characters (m18);
+- an evidence `what` of VT and FF pins blankness on the sanitized text (m19);
+- eleven doc passages were corrected, among them the stale "left to slice S5", the binding reasons, `Denied`'s "always", the scope-bound paragraph and the diagram.
+
+**Repair 3** (Haiku 5.5, edit tool, lead-written; `931f74c`, on a branch cut from the session head). S5's `desk.rs` still said S9 "will add `PortError::Denied`". The repair rewrites that limit and adds a `Denied` row to its events table. Doc comments only.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 118 | ORI-T-0188, batch 10 slice S9 (`aicd_plan_submit`, `aicd_escalate`, `PlanDesk`, `EscalationDesk`, `PortError::Denied`), with repairs 1 and 2 (Sonnet 5.5) and repair 3 (Haiku 5.5) | Pre-dispatch critique (one blocking lead error) and re-critique. Review: 5 lenses, 20 agents, nothing blocking, 7 should-fix and 24 notes. Repair 1 package fact-checked before dispatch (four lead errors fixed). Re-review of repair 1: 1 gap and 10 notes, taken in repair 2 | Cherry-picked as `00330ae`, `74d08ca`, `a70ca52`, `151df39`, `02aa62f` and `cb3d0c3`. The diffs of `ports.rs`, `server.rs`, `lib.rs` and `orchestration.rs` equal the branch's `4121562..f427d17` byte for byte; the `tools/mod.rs` line merged cleanly in alphabetical order. fmt 0, clippy `-D warnings` 0, Windows clippy 0, strict doc 0, `cargo test --workspace --locked --no-fail-fast` 0 (**1778 passed**, 0 failed), gate 13 over the six commits 0. Repair 3 cherry-picked on top: fmt 0, strict doc 0, `ori-gates` 0, gate 13 0 |
+
+Claim 118 is released. **Batch 10 slices S3, S5, S7, S8 and S9 are complete on this branch.** S4 (claim 117) is complete through repair 1, and its repair 2 is with the operator (classifier refusal). Tier 2: the operator merges.
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator) and 117 (ORI-T-0187, repair 2 with the operator). The next free identifier is ORI-T-0193.
