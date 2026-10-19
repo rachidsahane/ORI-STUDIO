@@ -108,9 +108,9 @@
 //! nothing until the first fetch makes `refs/remotes`, and the engine's
 //! `post-merge` from then on). A link to a same-named hook in some other
 //! directory (a team's shared hooks) is not this. A link that cannot be read,
-//! or an entry that
-//! cannot be looked at for a reason other than not being there, refuses the
-//! installation as an IO error rather than passing it ([`HooksError::Io`]).
+//! or an entry that cannot be looked at for a reason other than not being
+//! there, refuses the installation as an IO error rather than passing it
+//! ([`HooksError::Io`]).
 //! On macOS and Windows, whose file systems are case-insensitive by
 //! default, names are compared without regard to ASCII case, so a link to
 //! `Post-Commit` counts; a case-sensitive volume there is refused where it
@@ -1810,10 +1810,10 @@ fn way_enters_what_the_install_creates(
 ///   landing, when that is a directory that is there (`hooks/L -> ../refs` with
 ///   `L/../sub/relay`, where `hooks/sub/relay` links to a hook: the physical
 ///   reading ends at `.git/sub`, which is not there, and the text lands on
-///   `hooks/sub`), though that directory is where the
-///   text puts the way and not necessarily where the way goes. Where neither
-///   is there, the chain ends, as does a chain that ends at an entry that is
-///   not there (a dangling link reaches nothing). A physical reading that
+///   `hooks/sub`), though that directory is where the text puts the way and
+///   not necessarily where the way goes. Where neither is there, the chain
+///   ends, as does a chain that ends at an entry that is not there (a
+///   dangling link reaches nothing). A physical reading that
 ///   reads more than `LINK_HOPS_CAP` links is an error and not a no, and
 ///   refuses the install.
 /// - (c) The spool's future path is read like any other missing directory, by
@@ -1851,9 +1851,10 @@ fn way_enters_what_the_install_creates(
 /// regular file. Behind a missing directory, a way through a regular file is
 /// read as reaching nothing, and the link passes, unless that way first fails
 /// at what the install creates, rule (a), or the physical reading of rule (b)
-/// reaches a hook, or its text lands on a hook's place. The physical reading treats a file with steps after it as a
-/// directory that is not there. On Windows, opening a path through a regular
-/// file reports it as not found, so such a way is always read this way there.
+/// reaches a hook, or its text lands on a hook's place. The physical reading
+/// treats a file with steps after it as a directory that is not there. On
+/// Windows, opening a path through a regular file reports it as not found, so
+/// such a way is always read this way there.
 ///
 /// # Errors
 ///
@@ -2073,13 +2074,13 @@ enum WayEnd {
 /// in a directory that is there, and the path is canonical. That holds after a
 /// climb back out of a missing component too: a `..` taken while the count is
 /// above 0 removes a name taken by its text, and when the count is back to 0
-/// the walk stands in the canonical directory it left. They run out at `WayEnd::Elsewhere` past a component that
-/// is not there (the count above is not 0), or at a file at the last step.
-/// More than `LINK_HOPS_CAP` links read end it at `WayEnd::TooManyLinks`. That
-/// is not an error here, because no process can follow such a way, and each
-/// caller says what it makes of it. The cap counts every link read and none is
-/// read past a missing component, so the walk always ends (`L ->
-/// missing/../L` reaches the cap).
+/// the walk stands in the canonical directory it left. They run out at
+/// `WayEnd::Elsewhere` past a component that is not there (the count above is
+/// not 0), or at a file at the last step. More than `LINK_HOPS_CAP` links read
+/// end it at `WayEnd::TooManyLinks`. That is not an error here, because no
+/// process can follow such a way, and each caller says what it makes of it.
+/// The cap counts every link read and none is read past a missing component,
+/// so the walk always ends (`L -> missing/../L` reaches the cap).
 ///
 /// # Errors
 ///
