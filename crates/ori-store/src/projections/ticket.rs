@@ -809,4 +809,32 @@ mod tests {
         assert_eq!(row.0, "Filed", "a refused merge left the state alone");
         assert_eq!(row.1, None);
     }
+
+    #[test]
+    fn ori_t_0189_kind_is_a_json_read() {
+        // `kind` comes after a value that spells its name, with another key
+        // between: the first-key reader read that other key's value instead.
+        let mut conn = connection();
+        let projection = TicketProjection;
+        let ticket = id("TICKET1");
+        let event = append_for(
+            &mut conn,
+            "ticket.filed",
+            &ticket,
+            r#"{"note":"kind","x":"WRONG","kind":"feature","category":"auto"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply filed");
+        let kind: Option<String> = conn
+            .query_row(
+                "SELECT kind FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| row.get(0),
+            )
+            .expect("row exists");
+        assert_eq!(
+            kind,
+            Some("feature".to_owned()),
+            "the first-key reader gave WRONG"
+        );
+    }
 }

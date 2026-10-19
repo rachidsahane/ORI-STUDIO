@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(row.1, "recommendation");
         assert_eq!(
             row.2, "stop",
-            "the first-key reader gave `question` here, the value of the key before it"
+            "the first-key reader gave `question` here, the value of the key after the decoy (`trigger`'s)"
         );
     }
 
@@ -714,5 +714,50 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(escalation_rows(&conn), 0);
+    }
+
+    #[test]
+    fn ori_t_0189_escalation_ids_trigger_and_answered_by_are_json_reads() {
+        // Each field comes after a value that spells its name, with another key
+        // between: the first-key reader read that other key's value instead.
+        let mut conn = connection();
+        let projection = EscalationProjection;
+        let ticket = id("TICKET1");
+        let event = append_for(
+            &mut conn,
+            "escalation.raised",
+            &ticket,
+            r#"{"note":"escalation_id","x":"WRONG","escalation_id":"E1","t":"trigger","y":"WRONG2","trigger":"adr_area","question":"q","recommendation":"r"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply raised");
+        let trigger: String = conn
+            .query_row(
+                "SELECT trigger FROM proj_escalations WHERE escalation_id = 'E1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the row is keyed E1, not WRONG");
+        assert_eq!(trigger, "adr_area", "the first-key reader gave WRONG2");
+
+        let event = append_for(
+            &mut conn,
+            "escalation.answered",
+            &ticket,
+            r#"{"note":"escalation_id","x":"WRONG","escalation_id":"E1","by":"answered_by","y":"WRONG2","answered_by":"HUMAN","answer":"ok"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply answered");
+        let answered_by: Option<String> = conn
+            .query_row(
+                "SELECT answered_by FROM proj_escalations WHERE escalation_id = 'E1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the answer lands on E1");
+        assert_eq!(
+            answered_by,
+            Some("HUMAN".to_owned()),
+            "the first-key reader gave WRONG2"
+        );
+        assert_eq!(escalation_rows(&conn), 1, "no row keyed WRONG was written");
     }
 }

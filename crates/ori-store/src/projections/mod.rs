@@ -47,11 +47,14 @@
 //! `ori_orchestrator::lock_table` and `ori_orchestrator::escalation` are pure
 //! functions with no writer wired to this crate's log. So the event kind
 //! vocabulary and the payload fields `crate::projections::payload` reads (one
-//! JSON object for the escalation and ticket projections) are this ticket's
-//! own design, not a contract already relied on elsewhere; the pull request report says this
-//! plainly under "Whether this payload convention is load-bearing elsewhere"
-//! and names the follow-up (wiring the real writer to emit it) as a finding,
-//! not silently assumed. It does not weaken the identity proof:
+//! JSON object for the escalation and ticket projections, since ORI-T-0189)
+//! are ORI-T-0025's design, and no production writer relies on them yet;
+//! ORI-T-0025's pull request report says so under "Whether this payload
+//! convention is load-bearing elsewhere" and names the follow-up (wiring the
+//! real writer to emit it) as a finding, not silently assumed. One reader
+//! does rely on them: `ori-memory`'s lock fold mirrors the lock projection's
+//! reading of `module` (`crate::projections::payload`'s module doc). It does
+//! not weaken the identity proof:
 //! [`crate::rebuild::rebuild`] and the ordinary incremental path both call the
 //! exact same [`Projection::apply`] over the exact same stored rows, so
 //! whatever the convention says, both paths agree on what it says.
@@ -171,8 +174,9 @@ pub trait Projection {
     /// `event.payload()` is not one JSON object whose keys are distinct.
     /// [`ProjectionError::MalformedPayload`] when a required field is absent
     /// from, or of the wrong type in, `event.payload()`. The lock projection
-    /// reads its fields with `payload::field`, not as JSON, so it reports a
-    /// payload that is not JSON as `MalformedPayload` too.
+    /// reads its fields with `payload::field`, not as JSON: it gives
+    /// `MalformedPayload` whenever that reader finds no such field, whether or
+    /// not the payload is JSON, and never `UnreadablePayload`.
     /// [`ProjectionError::Sql`] on an underlying statement failure.
     fn apply(&self, conn: &Connection, event: &Event) -> Result<(), ProjectionError>;
 
@@ -220,7 +224,7 @@ pub enum ProjectionError {
     /// From the ticket and escalation projections, the payload is a readable
     /// object that lacks a required field or carries it as another JSON type.
     /// From the lock projection, `payload::field` finds no such field in the
-    /// payload.
+    /// payload. A refusal under AICD §8.
     MalformedPayload {
         /// The `seq` of the offending event.
         seq: u64,
@@ -230,8 +234,10 @@ pub enum ProjectionError {
     /// From the ticket and escalation projections, for an event kind that reads
     /// payload fields: the payload is not one JSON object whose keys are
     /// distinct. That is text that is not JSON, JSON of another shape (an
-    /// array, a string, a number), text after the object, or a key given
-    /// twice.
+    /// array, a string, a number), text after the object, a key given twice,
+    /// or JSON that `serde_json` refuses although its grammar allows it: a
+    /// number too large for `f64`, a lone surrogate escape, or nesting 128
+    /// levels deep or more. A refusal under AICD §8, as `MalformedPayload` is.
     UnreadablePayload {
         /// The `seq` of the offending event.
         seq: u64,

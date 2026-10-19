@@ -9,9 +9,10 @@
 //!   workspace-wide by `ops/escalations/E-0008-json-serialization.md`), and
 //!   gives back its top-level keys. The escalation and ticket projections use
 //!   it, because the text they read, an escalation's question and answer above
-//!   all, is written by a serde writer, which escapes `"`, `\` and every
-//!   control character below U+0020, and a reader that undoes none of that
-//!   hands the human queue a cut-short or doubled-backslash question.
+//!   all, will be written by a serde writer (S9's desk contract; ORI-T-0070
+//!   writes the events), which escapes `"`, `\` and every control character
+//!   below U+0020, and a reader that undoes none of that hands the human
+//!   queue a cut-short or doubled-backslash question.
 //! - [`field`] is the first-key reader of ORI-T-0025: it finds the first
 //!   `"key"` in the text and cuts the value at the next `"`. Only the lock
 //!   projection (`crate::projections::lock`) uses it.
@@ -26,8 +27,8 @@
 //! The desk can write no `module` value on which the two readers differ
 //! (`ModulePath::parse` refuses a backslash and a control character, and the
 //! plan tool's handler in `ori-mcp` refuses a `"`), so nothing is wrong in the
-//! meantime. Moving the lock projection and `ori-memory`'s copy together is
-//! ORI-T-0193.
+//! meantime. Whether to move the lock projection and `ori-memory`'s copy
+//! together is ORI-T-0193, a decision for the operator.
 //!
 //! No methodology section applies to the reader itself: it is a parsing
 //! convenience, not a control. `crates/ori-store/src/projections/mod.rs`'s
@@ -59,14 +60,15 @@ use serde_json::Value;
 /// disagree on the same row, and refusing is the only rule that cannot
 /// disagree with another reader. The cost is that such an event blocks every
 /// rebuild of its product (`crate::rebuild::rebuild` stops at the first
-/// refusal). No writer the engine has or plans would produce one:
+/// refusal). No writer contract written so far would produce one:
 ///
-/// - every planned writer serializes one derived struct through serde, which
-///   writes each field once (S9's desk contract for `escalation.raised`,
-///   `crates/ori-mcp/src/ports.rs`);
+/// - the only one, S9's desk contract for `escalation.raised`
+///   (`crates/ori-mcp/src/ports.rs`), serializes a struct through serde, which
+///   writes each field once; the ticket events have no writer contract yet
+///   (ORI-T-0070 writes them), and theirs must do the same;
 /// - a `#[serde(flatten)]` map, two fields renamed onto one name, or a
-///   hand-written `Serialize` could repeat a key, and no planned payload uses
-///   any of them.
+///   hand-written `Serialize` could repeat a key, and S9's contract uses none
+///   of them.
 ///
 /// `ori-memory`'s `LockClaimWire` likewise refuses a `lock.claimed` payload
 /// that gives `module` or `session_id` twice, through serde's derive.
@@ -85,24 +87,34 @@ pub(crate) struct Object {
 /// Reads `payload` as one JSON object whose top-level keys are distinct, or
 /// `None` when it is not one.
 ///
-/// Refused, each by `serde_json` as pinned in `crates/ori-store/Cargo.toml`:
+/// Refused by `serde_json` as pinned in `crates/ori-store/Cargo.toml`:
 ///
 /// - text that is not JSON;
 /// - JSON whose top level is not an object: an array, a string, a number, a
-///   boolean or `null`. `serde_json`'s `deserialize_map` reports an invalid
-///   type, naming the visitor's `expecting` text, for anything that does not
-///   begin with `{`, and never calls the visitor;
-/// - an object followed by anything but whitespace;
-/// - a key given twice at the top level, whatever the two values;
-/// - nesting 128 levels deep or more, counting the top object (the pin leaves
-///   `serde_json`'s `unbounded_depth` off, which is what bounds the work one
-///   payload can cause);
+///   boolean or `null`. For a JSON value that does not begin with `{`,
+///   `serde_json`'s `deserialize_map` reports an invalid type, naming the
+///   visitor's `expecting` text, and never calls the visitor;
+/// - an object followed by anything but JSON whitespace;
+/// - nesting 128 levels deep or more, counting the top object. The pin leaves
+///   `serde_json`'s `unbounded_depth` off, which bounds how deep the parser
+///   recurses; it does not bound a payload's size, and a flat payload is
+///   parsed whole, with every top-level value kept;
 /// - a raw control character inside a string, a lone surrogate escape, and a
-///   number outside `f64`'s range.
+///   number too large for `f64` (an underflow such as `1e-400` reads as 0).
+///
+/// Refused by this module's visitor: a key given twice at the top level,
+/// whatever the two values.
 ///
 /// Accepted: any top-level object with distinct keys, whatever the values,
-/// including nested values and keys the caller does not read, and whitespace
-/// around the object and between tokens.
+/// including nested values and keys the caller does not read, with JSON
+/// whitespace (space, tab, line feed, carriage return) around the object and
+/// between tokens. Any other character around it, a byte order mark or a
+/// no-break space included, is refused.
+///
+/// A limit: `serde_json` writes a value of any depth, so a payload that
+/// carried free-form JSON nested 127 levels or more below the top object would
+/// be written and then refused here. No writer contract carries one: S9's
+/// `evidence` is three levels deep.
 #[must_use]
 pub(crate) fn object(payload: &str) -> Option<Object> {
     serde_json::from_str::<Object>(payload).ok()
@@ -290,7 +302,15 @@ mod tests {
 
     #[test]
     fn ori_t_0189_object_undoes_every_json_escape() {
-        let read = object(r#"{"q":"\"\\\/\n\t\r\b\fé😀"}"#).expect("an object");
+        // The two `\u` escapes, the second a surrogate pair that makes U+1F600,
+        // are spelled with `\x5c` (a backslash) in a plain string, so that no
+        // tool decodes them before the compiler does.
+        let payload = concat!(
+            r#"{"q":"\"\\\/\n\t\r\b\f"#,
+            "\x5cu00e9\x5cud83d\x5cude00",
+            r#""}"#
+        );
+        let read = object(payload).expect("an object");
         // Rust has no `\b` or `\f` escape, so those two are spelled `\u{..}`.
         assert_eq!(read.text("q"), Some("\"\\/\n\t\r\u{8}\u{c}\u{e9}\u{1F600}"));
     }
@@ -333,6 +353,9 @@ mod tests {
             "{\"a\":\"x\ny\"}",
             r#"{"a":"\ud800"}"#,
             r#"{"a":1e400}"#,
+            "\x0c{\"a\":\"1\"}",
+            "{\"a\":\"1\"}\u{a0}",
+            "\u{feff}{\"a\":\"1\"}",
         ];
         for payload in refused {
             assert!(
