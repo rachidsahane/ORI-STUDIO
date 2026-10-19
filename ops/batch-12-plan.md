@@ -71,7 +71,7 @@ Lead reading of this repository's `spec/` layout (each path immutable in events)
 
 | Slice | Ticket / backlog | Declared scope | Tier | Order |
 |---|---|---|---|---|
-| **R1** | ORI-T-0197 | `registry.rs`, `ports.rs`, `migrate/mod.rs` (stub), `tests/ori_t_0060_registry.rs`; queue: `Cargo.toml`, `lib.rs`, `Cargo.lock` | **1** | First |
+| **R1** | ORI-T-0197 | `registry.rs`, `ports.rs`, `migrate/mod.rs` (stub), `tests/ori_t_0197_registry.rs`; queue: `Cargo.toml`, `lib.rs`, `Cargo.lock` | **1** | First |
 | **R2** | 0060 | `init.rs`, tree-probe port, `tests/ori_p1_001_init.rs` | 1 | After R1 |
 | **RD** | 0061 | `readiness.rs`, unit tests in module | 1 | After R1 |
 | **DOC** | 0063 | `documents.rs`, `tests/ori_p1_040_*`, `tests/ori_p1_016_*` | 1 | After R1; no `submit` until Q7; propose refuses non Missing/Draft per Q8(c) |
@@ -186,7 +186,7 @@ C1–C12 from draft adopted with review fixes (owner in code table not payload; 
 | citation.rs reads working tree :1119+ | **pass** |
 | ori-store serde without derive in manifest | **pass**; R1 adds derive on ori-flows dep |
 | Claims / next id ORI-T-0197 after 0195/0196 | **pass** (0195/0196 on PR 78 comment) |
-| P-V tier 2 backlog:254 | **pass** |
+| P-V tier 2 backlog:255 (ORI-T-0059) | **pass** |
 | SECURITY_NOTES:51 scope mcp.* only | **pass** |
 | LLD:74 ≠ Decisional (AICD §11) | **pass** (D8 cites §11) |
 
@@ -198,7 +198,7 @@ Independent re-check: same results on paths sampled above; no blocking discrepan
 
 | Id | Purpose |
 |---|---|
-| ORI-T-0195 | ORI-T-0187 repair 2 (PR 78) |
+| ORI-T-0195 | ORI-T-0187 repair 2 + S4 `is_blank_after_untrusted_scrub` ([[R48]]) |
 | ORI-T-0196 | ORI-T-0163 repair 2 (PR 78) |
 | **ORI-T-0197** | Batch 12 slice **R1** (this plan) |
 | **ORI-T-0198** | **P-I** migrated product creation (`create_product` / import precursor) |
