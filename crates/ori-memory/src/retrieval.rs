@@ -1582,26 +1582,66 @@ impl Fit for SearchPackage {
 // start a line of its own.
 // ---------------------------------------------------------------------------
 
-/// Whether a character could end a line, reorder text or pass for structure:
-/// a control character, the Unicode line and paragraph separators, and the
-/// characters that set text direction (the embeddings and overrides, the
-/// isolates, the left and right marks and the Arabic letter mark).
+/// Whether `ch` is a Unicode format character (general category `Cf`), Unicode
+/// 16.0.0.
+///
+/// The ranges follow `DerivedCoreProperties.txt` in the Unicode Character
+/// Database for category `Cf`, with the language-tag and tag block
+/// `U+E0000`..=`U+E007F` taken whole (tag characters are `Cf` from
+/// `U+E0020`; `U+E0000` is unassigned but belongs to the same block).
+/// Implements `spec/SECURITY_NOTES.md` "Injection" (untrusted text scrubbing).
+fn is_unicode_cf(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+/// Whether a character may not appear in untrusted text the retrieval shows or
+/// the barrier quotes: a control character (`Cc`), a format character (`Cf`),
+/// and the Unicode line and paragraph separators (`Zl`/`Zp`, not `Cf`).
+///
+/// **Zero-width joiner (`U+200D`).** Emoji sequences legitimately use `Cf`
+/// characters; this predicate still treats them as unsafe and rendering replaces
+/// them with spaces. That is the security default for agent and integration
+/// text (AICD §27, `spec/SECURITY_NOTES.md` "Injection").
 ///
 /// The barrier quotes an evidence blob's content with the same rule
 /// (`crate::barrier::EvidenceContent::quoted`), so the two never disagree on
-/// what untrusted text may not carry onto the page.
-pub(crate) fn is_unsafe_char(ch: char) -> bool {
-    ch.is_control()
-        || matches!(
-            ch,
-            '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
+/// what untrusted text may not carry onto the page. `ori-mcp` repeats this rule
+/// where it cannot call here (MCP stdio configuration); everywhere else it
+/// imports this function.
+pub fn is_unsafe_char(ch: char) -> bool {
+    ch.is_control() || is_unicode_cf(ch) || matches!(ch, '\u{2028}' | '\u{2029}')
+}
+
+/// Whether `text` is blank after the same scrub applied to context lines and
+/// quoted evidence: every [`is_unsafe_char`] becomes a space, then Unicode
+/// white space is trimmed.
+///
+/// Slice S4's `aicd_report` blank check (ORI-T-0187) must use this instead of
+/// `str::trim` alone so a field of only format characters is refused blank.
+pub fn is_blank_after_untrusted_scrub(text: &str) -> bool {
+    scrub(text).trim().is_empty()
 }
 
 /// The label before a divergence's description in a verification line.
@@ -6811,5 +6851,36 @@ mod tests {
         assert!(!package.items().is_empty());
         let after = EventLog::verify(w.p.db.connection()).expect("the log verifies");
         assert_eq!(before, after, "a search changed the log");
+    }
+
+    #[test]
+    fn ori_t_0191_unsafe_char_refuses_unicode_cf_including_zero_width_and_soft_hyphen() {
+        for ch in [
+            '\u{00AD}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{2064}', '\u{FEFF}',
+        ] {
+            assert!(is_unsafe_char(ch), "U+{:04X}", u32::from(ch));
+        }
+    }
+
+    #[test]
+    fn ori_t_0191_unsafe_char_refuses_the_tag_block_including_its_bounds() {
+        for ch in ['\u{E0000}', '\u{E0020}', '\u{E007F}'] {
+            assert!(is_unsafe_char(ch), "U+{:04X}", u32::from(ch));
+        }
+        assert!(!is_unsafe_char('\u{E0080}'));
+    }
+
+    #[test]
+    fn ori_t_0191_scrub_replaces_format_characters_with_spaces() {
+        let scrubbed = scrub("a\u{200B}b\u{FEFF}c");
+        assert_eq!(scrubbed, "a b c");
+    }
+
+    #[test]
+    fn ori_t_0191_a_field_of_only_format_characters_is_blank_after_scrub() {
+        assert!(is_blank_after_untrusted_scrub("\u{200B}\u{200C}\u{200D}"));
+        assert!(is_blank_after_untrusted_scrub("\u{E0041}\u{E007F}"));
+        assert!(!is_blank_after_untrusted_scrub("none"));
+        assert!(!is_blank_after_untrusted_scrub("a\u{200B}b"));
     }
 }

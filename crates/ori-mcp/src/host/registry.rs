@@ -134,6 +134,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ori_core::error::MethodologyRef;
 use ori_core::types::{Actor, Id, Role, Timestamp};
+use ori_memory::retrieval::is_unsafe_char;
 use ori_store::db::ProductDb;
 use ori_store::event_log::{Event, EventHash, EventLog, EventLogError};
 use serde::{Deserialize, Serialize};
@@ -342,34 +343,6 @@ impl fmt::Debug for StdioConfig {
             .field("args", &format_args!("{} argument(s)", self.args.len()))
             .finish()
     }
-}
-
-/// Whether a character may not appear in a command or an argument: AICD §27.
-///
-/// This repeats the rule of `ori-memory`'s `retrieval::is_unsafe_char`, which is
-/// `pub(crate)` there and cannot be called from this crate: a control character
-/// (`char::is_control`, which covers NUL, the other C0 controls, DEL and the C1
-/// controls), U+061C, U+200E, U+200F, U+2028, U+2029, U+202A to U+202E and U+2066
-/// to U+2069. A widening of that rule decided under ORI-T-0191 (later; its
-/// recorded scope is `crates/ori-memory/src/retrieval.rs`) must be repeated here,
-/// because this copy does not follow it on its own.
-///
-/// A NUL cannot be passed to a process, since it ends a C string. The
-/// configuration is printed by later surfaces (`events.subscribe` clients,
-/// `project.mcp.list`, a CLI), where a control or reordering character would let
-/// it display as something other than what is launched.
-fn is_unsafe_char(ch: char) -> bool {
-    ch.is_control()
-        || matches!(
-            ch,
-            '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
-        )
 }
 
 /// The name, within the server's product, of the keychain entry that holds the
@@ -2222,6 +2195,19 @@ mod tests {
             config_result("c", &["ok", "", "a\0b"]).err(),
             Some(ServerError::ArgHasControl { index: 2 })
         );
+    }
+
+    #[test]
+    fn ori_t_0191_stdio_config_refuses_format_characters_through_retrieval_rule() {
+        for ch in ['\u{200B}', '\u{FEFF}', '\u{E0041}'] {
+            let text = format!("tool{ch}");
+            assert_eq!(
+                config_result(&text, &[]).err(),
+                Some(ServerError::CommandHasControl),
+                "command with U+{:04X}",
+                u32::from(ch)
+            );
+        }
     }
 
     #[test]
