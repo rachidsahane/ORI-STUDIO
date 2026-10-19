@@ -2773,3 +2773,27 @@ Written by the lead on 2026-10-19 under [[R31]] and [[R48]].
 **Documentation pair:** [PR 80](https://github.com/rachidsahane/ORI-STUDIO/pull/80) (`spec/agents/CLAUDE.md` source) and [PR 82](https://github.com/rachidsahane/ORI-STUDIO/pull/82) (regenerated root `CLAUDE.md`, stacked on 80).
 
 **State after this section:** unchanged claims (20, 112, 117, 123). ORI-T-0197 package revised on PR 79 (34 tests). Next free identifier: **ORI-T-0199**.
+
+---
+
+## R49 recorded; ORI-T-0197 implemented on PR 85; ORI-T-0199 designed on claim 124
+
+Written by the lead on 2026-10-19 under [[R31]] and [[R49]].
+
+**Operator ([[R49]]).**
+- **Accepts** ORI-T-0197's interim deviation on [PR 85](https://github.com/rachidsahane/ORI-STUDIO/pull/85) (`feat/ORI-T-0197-flows-registry`, `683b320`, `66a7f9f`, `a742233`): in `apply_document_approved`, Draft documents get `DocumentEvent::Submitted` **in memory only** before approve, so the log may omit `document.submitted`. **Remove when ORI-T-0199 lands** (approve only after logged submit; fold refuses approve unless `UnderReview`).
+- **Q7 yes:** implement `flows.documents.submit` → `document.submitted` (**ORI-T-0199**).
+
+**ORI-T-0197 (claim 122).** Coder delivered PR 85; lead review posted (non-blocking; SO-1 not satisfied). **35 tests** on the branch (32 integration + 3 unit). **Claim 122: implemented, held until PR 85 merges** (tier 1 release on merge per ADR-0002).
+
+| # | Ticket | Modules (declared scope) | Tier | Recorded |
+|---|---|---|---|---|
+| 122 | ORI-T-0197 | unchanged (`ops/tickets/ORI-T-0197-flows-registry.md`) | 1 | **Implemented** PR 85; deviation [[R49]] |
+
+**ORI-T-0199 allocated** (Q7 submit + bridge removal). Package: `ops/tickets/ORI-T-0199-document-submitted.md`. **`test_modified` escalation text** in that package (two ORI-T-0197 tests); operator answer required before dispatch unless pre-approved with the ruling.
+
+| # | Ticket | Modules (declared scope) | Tier | Recorded |
+|---|---|---|---|---|
+| 124 | ORI-T-0199, Q7 `document.submitted` | `registry.rs`, new `documents.rs`, `tests/ori_t_0199_document_submitted.rs`; **modify** two tests in `ori_t_0197_registry.rs` per escalation; queue `lib.rs` | 1 | 2026-10-19, designed not dispatched |
+
+**State after this section:** claims held: 20, 112, 117, 123, **122** (ORI-T-0197 until PR 85 merge). **124** designed for ORI-T-0199. Next free identifier: **ORI-T-0200**.
