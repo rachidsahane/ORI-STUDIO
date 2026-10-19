@@ -35,11 +35,13 @@
 //! may still act. The last two are slice S9's, and the handlers of
 //! `aicd_plan_submit` and `aicd_escalate` call them, not the server core:
 //! [`crate::ports::PlanDesk`] stores a plan after the lock check, and
-//! [`crate::ports::EscalationDesk`] opens an escalation. Each takes agent text,
-//! and each takes it as `ori_memory::barrier::SanitizedField`, the sealed type of
-//! the sanitization barrier (escalation E-0012's public entry, plan prerequisite
-//! PM2) that only `ori_memory::barrier::sanitize_text` makes, so neither takes a
-//! raw `String` where the barrier's output belongs. That is a statement about these
+//! [`crate::ports::EscalationDesk`] opens an escalation. Both desks take agent
+//! prose as `ori_memory::barrier::SanitizedField`, the sanitization barrier's
+//! sealed type (escalation E-0012's public entry, plan prerequisite PM2), which
+//! `sanitize_text` makes for text outside a record, `submit_report` makes for a
+//! report's fields, and reading a stored record back makes. `PlanDesk` also takes
+//! the declared paths as `ori_memory::scope::ModulePath`. So neither takes a raw
+//! `String` where the barrier's output belongs. That is a statement about these
 //! two ports, not about every port: [`crate::ports::SpecDesk::propose`]'s content
 //! and [`crate::ports::UserToolHost::call_tool`]'s arguments are not barrier text,
 //! by decision.
@@ -62,10 +64,14 @@
 //!   decision of `scopes.rs` made for that call.
 //!
 //! [`crate::ports::Clock`], [`crate::ports::SessionDesk`],
-//! [`crate::ports::PlanDesk`] and [`crate::ports::EscalationDesk`] are `Send`,
-//! which the first four are not required to be: the server holds them as trait
-//! objects and is itself `Send`, so the engine can build it on one thread and
-//! hand it to the product's writer task.
+//! [`crate::ports::PlanDesk`] and [`crate::ports::EscalationDesk`] are `Send`;
+//! [`crate::ports::IdSource`], [`crate::ports::TicketDesk`],
+//! [`crate::ports::SpecDesk`] and [`crate::ports::UserToolHost`] are not
+//! required to be. A holder that must be `Send`, such as a
+//! [`crate::tools::ToolHandler`], asks for `dyn Trait + Send`. The server or its
+//! handlers hold the four `Send` ports as trait objects and the server is itself
+//! `Send`, so the engine can build it on one thread and hand it to the product's
+//! writer task.
 //!
 //! The desks of the effect, [`crate::ports::TicketDesk`] and
 //! [`crate::ports::SpecDesk`], which slice S5's handlers call, receive the
@@ -74,13 +80,20 @@
 //! else: [`crate::ports::IdSource`] and [`crate::ports::Clock`] take nothing,
 //! [`crate::ports::UserToolHost`] takes a [`crate::scopes::UserToolGrant`], and
 //! [`crate::ports::SessionDesk`], [`crate::ports::PlanDesk`] and
-//! [`crate::ports::EscalationDesk`] take the [`crate::server::Binding`] itself:
-//! a lock claim records the session (`lock.claimed { module, session_id }`), and
-//! a [`crate::scopes::Caller`] carries none. The binding, like the caller,
-//! carries the agent identity of the session, and a port that writes records its
-//! write under it. A desk never assumes that the server core's scope check ran:
-//! it makes the checks of the component it routes the change through, and each
-//! method below says which.
+//! [`crate::ports::EscalationDesk`] take the [`crate::server::Binding`] itself,
+//! each for its own reason:
+//!
+//! - [`crate::ports::SessionDesk`] answers for the session;
+//! - [`crate::ports::PlanDesk`] must record the session in each lock claim
+//!   (`lock.claimed { module, session_id }`), and a [`crate::scopes::Caller`]
+//!   carries none;
+//! - [`crate::ports::EscalationDesk`] holds the session it may suspend.
+//!
+//! The binding, like the caller, carries the agent identity of the session, and a
+//! port that writes records its write under it. A desk never assumes that the
+//! server core's scope check ran: it makes the checks of the component it routes
+//! the change through, and the two S9 desks, which take the binding itself, check
+//! the binding as well. Each method below says which checks it makes.
 //!
 //! # Tier
 //!
@@ -141,6 +154,9 @@ pub enum PortError {
     /// `failure: refused`, with the code and the section, always. **The code is
     /// an MCP `reason` value**, lower case like `source_not_in_scope`, and not an
     /// `E_` code: a new `E_` code would change `spec/API_SPEC.md`'s contract.
+    ///
+    /// A desk's codes are its own fixed constants, never built from agent text.
+    /// A `&'static str` does not prove that, because `String::leak` makes one.
     Denied {
         /// The refusal's fixed code, an MCP `reason` value.
         code: &'static str,
@@ -246,12 +262,12 @@ pub trait TicketDesk {
     ///
     /// It refuses what `ori-core`'s `Ticket::apply` refuses as a category
     /// downgrade, with an error that keeps the code `E_UPGRADE_ONLY`
-    /// ([`PortError::Refused`]), and applies no business rule beyond
-    /// `ori-core`'s: "nothing else" means that. It may also answer
-    /// [`PortError::Denied`] for a refusal that `ori-core`'s `RefusalKind` has
-    /// no variant for, such as a lifecycle permission; any `Denied` code of this
-    /// desk besides `product_database_mismatch` is left to slice S5 and
-    /// ORI-T-0070.
+    /// ([`PortError::Refused`]). Besides the checks this contract lists (the
+    /// product), the desk applies no business rule of its own beyond what the
+    /// component it routes through refuses. It may answer [`PortError::Denied`]
+    /// for a refusal that `ori-core`'s `RefusalKind` has no variant for, such as a
+    /// lifecycle permission; any `Denied` code of this desk besides
+    /// `product_database_mismatch` is left to slice S5 and ORI-T-0070.
     ///
     /// # Errors
     ///
@@ -280,7 +296,7 @@ pub trait SpecDesk {
     ///
     /// Called for `aicd_spec_propose`. The agent never writes `spec/` itself:
     /// the content becomes a proposal a human reviews (`spec/API_SPEC.md`
-    /// section 3, the second promise).
+    /// section 3, the first promise).
     ///
     /// The implementation never assumes the server core's scope check ran, so
     /// it:
@@ -416,66 +432,117 @@ pub trait SessionDesk: Send {
 /// claimed: this port is where the plan is stored and that check is made. The
 /// plan arrives as a [`SanitizedField`], the sanitization barrier's own output,
 /// and the declared scope as [`ModulePath`]s the handler has already read
-/// strictly. The desk mints its own identifiers, so the handler needs no
-/// [`IdSource`]. No credential passes through this port. `Send`, because the
-/// server that holds it is handed to the product's writer task.
+/// strictly. The desk must mint its own identifiers, so the handler needs none
+/// from an [`IdSource`]. No credential passes through this port. `Send`, because
+/// the server that holds it is handed to the product's writer task.
 ///
 /// The port takes the [`Binding`], as [`SessionDesk`] does, and not a
-/// [`Caller`]: a lock claim records the session (`lock.claimed { module,
-/// session_id }`), and a `Caller` carries none.
+/// [`Caller`]: the desk must record the session in each lock claim
+/// (`lock.claimed { module, session_id }`), and a `Caller` carries none. The tool
+/// is coder-only, so no lead reaches this port.
 pub trait PlanDesk: Send {
     /// Stores a ticket's plan and claims the modules it declares: AICD §12.
     ///
-    /// `plan` is the sanitized text, untrimmed, and `declared_scope` is the
-    /// agent's list in its own order, duplicates included: the lock table
-    /// decides what a duplicate means.
+    /// `plan` is the sanitized text, untrimmed. `declared_scope` is the agent's
+    /// list in its own order, duplicates included: the handler passes both on
+    /// unchanged. `LockTable::claim` takes an `ori_core::types::Scope`, and
+    /// `Scope::new` trims each path, strips trailing `/` characters, collapses
+    /// duplicates and sorts. So the agent's order and duplicates never reach the
+    /// table.
     ///
-    /// The implementation never assumes the server core's checks ran, so it:
+    /// The implementation never assumes the server core's checks ran, so it
+    /// must:
     ///
-    /// - records its writes with `Actor::Agent`, naming `binding.identity()` as
+    /// - record its writes with `Actor::Agent`, naming `binding.identity()` as
     ///   the agent;
-    /// - refuses a binding whose product is not `db`'s product, as
-    ///   `Denied { code: "product_database_mismatch", methodology_ref: AICD §26 }`
-    ///   ([`PortError::Denied`]), the server core's own code for that fact;
-    /// - refuses a ticket the product does not hold, as
-    ///   `PortError::Invalid { field: "ticket_id" }`: the server core checks a
-    ///   coder's ticket against the binding, and nobody checks a lead's;
-    /// - answers every refusal with a code and a section: [`PortError::Refused`]
+    /// - **check the binding itself, before its first append, in this order:**
+    ///   - refuse a binding whose role is not `coder`, as
+    ///     `Denied { code: "tool_not_permitted_for_role", methodology_ref: AICD §17 }`
+    ///     ([`PortError::Denied`]), S2's check 5;
+    ///   - refuse a coder binding with no bound ticket, as
+    ///     `Denied { code: "ticket_not_assigned", methodology_ref: AICD §7 }`;
+    ///   - refuse a coder binding bound to a ticket other than the call's, as
+    ///     `Denied { code: "claim_contradicts_session", methodology_ref: AICD §25 }`.
+    ///
+    ///   The last two are the two codes of S2's check 7, for the same two facts;
+    /// - then refuse a binding whose product is not `db`'s product, as
+    ///   `Denied { code: "product_database_mismatch", methodology_ref: AICD §26 }`,
+    ///   the server core's own code for that fact;
+    /// - then refuse a ticket the product does not hold, as
+    ///   `PortError::Invalid { field: "ticket_id" }`;
+    /// - answer every refusal with a code and a section: [`PortError::Refused`]
     ///   for a refusal kind of `ori-core`, [`PortError::Denied`] otherwise. A
-    ///   `Malformed` error is never wrapped in `Refused`, because a `Refused`
-    ///   without a section is recorded as `invalid`;
-    /// - **makes every refusal, and every `Invalid`, before its first append.**
-    ///   A refused call stores nothing. Only an
-    ///   [`PortError::Unavailable`], which is an append that failed, can leave
-    ///   rows behind it;
-    /// - writes every event it appends with the ticket in its ticket column.
+    ///   desk's codes are its own fixed constants, never built from agent text;
+    /// - **make every refusal, and every `Invalid`, before its first append.** A
+    ///   refused call stores nothing. Only an [`PortError::Unavailable`] can leave
+    ///   rows behind it (see "Faults and retries" below);
+    /// - write every event it appends with the ticket in its ticket column, and
+    ///   read the time of its rows from the engine's [`Clock`]: the port passes
+    ///   none.
     ///
-    /// It also:
+    /// It must also:
     ///
-    /// - **checks, then stores.** It runs the lock check, `ori-orchestrator`'s
-    ///   `LockTable::claim`, before it stores anything. On a conflict it passes
-    ///   the error of `LockTable::claim` on unchanged, as [`PortError::Refused`]
+    /// - **check, then store.** Run the lock check, `ori-orchestrator`'s
+    ///   `LockTable::claim`, before it stores anything. On a conflict, pass the
+    ///   error of `LockTable::claim` on unchanged, as [`PortError::Refused`]
     ///   holding `RefusalKind::ScopeLocked` (code `E_SCOPE_LOCKED`, AICD §12), and
-    ///   stores nothing. The module stays inside the error and never reaches the
+    ///   store nothing. The module stays inside the error and never reaches the
     ///   agent: the server core replies with the code and the section only;
-    /// - **claims for an in-progress ticket only.** The plan's declared scope
+    /// - **claim for an in-progress ticket only.** The plan's declared scope
     ///   extends the ticket's own claim, and only while the ticket is
     ///   `InProgress`: a plan is submitted while the ticket is being worked on,
     ///   and a ticket that is escalated or in review is re-planned only through
     ///   the lead. Any other state is
     ///   `Denied { code: "ticket_not_in_progress", methodology_ref: AICD §11 }`;
-    /// - **appends** one plan row (its event kind is named by a specification
-    ///   change, PD-2), then one `lock.claimed` per newly claimed module, and
-    ///   nothing else. A module is newly claimed if the lock table did not hold
-    ///   it before the call.
+    /// - **append** one plan row, then one `lock.claimed` per newly claimed
+    ///   module, and nothing else.
+    ///
+    /// # The plan row
+    ///
+    /// `spec/DATA_MODEL.md` section 2's Plan row has seven fields: `id`,
+    /// `ticket_id`, `session_id`, `content`, `declared_scope`, `approved_by` and
+    /// `approved_at` ("Immutable; a new plan supersedes"). At submission the desk
+    /// knows the first five. The approval fields belong to an approval this port
+    /// does not perform. **ORI-T-0192** settles three things:
+    ///
+    /// - the row's event kind;
+    /// - the order of its payload's keys;
+    /// - how a submitted plan's row carries the approval fields.
+    ///
+    /// ORI-T-0192 is the specification ticket that settles batch 10's event names
+    /// and rows, and its record in `ops/lock-table.md` lists these items.
+    /// Whatever it names, no key a projection of the row reads may come after the
+    /// plan or the paths in the payload: `ori-store`'s reader takes the first
+    /// `"key"` it finds anywhere in a payload (ORI-T-0189), so a key that follows
+    /// the agent's text could be set by it.
+    ///
+    /// # Newly claimed
+    ///
+    /// A module is newly claimed when `LockTable::claim` inserts a key it did not
+    /// hold for this ticket before the call. A path under a module the ticket
+    /// already holds is a new key: it gets its `lock.claimed` row and is counted.
+    /// `claim` does not report which keys are new, so the desk compares the
+    /// table's entries before and after.
+    ///
+    /// # Faults and retries
+    ///
+    /// A `Malformed` error is [`PortError::Unavailable`], whether it comes from
+    /// `LockTable::claim`, from `Scope::new` or from a stored identifier: it is
+    /// not a refusal, and a `Refused` without a section is recorded as `invalid`.
+    /// `Unavailable` also answers a read that failed before any append. Each
+    /// `EventLog::append` commits on its own, so an `Unavailable` after a first
+    /// append leaves the rows before it. A retry then appends a second plan row.
+    /// The claims already recorded are held for this ticket, so they are not
+    /// newly claimed and are not appended again. That holds if the desk builds
+    /// its lock table from the log, which is ORI-T-0070's choice.
     ///
     /// # Errors
     ///
     /// [`PortError::Refused`] for a refusal that `ori-core` has a refusal kind
     /// for, `E_SCOPE_LOCKED` among them; [`PortError::Denied`] for one it has
-    /// none for; [`PortError::Invalid`] for a ticket the product does not hold;
-    /// [`PortError::Unavailable`] when it could not answer, which can follow
-    /// appended rows.
+    /// none for, the binding's refusals among them; [`PortError::Invalid`] for a
+    /// ticket the product does not hold; [`PortError::Unavailable`] when it could
+    /// not answer, which can follow appended rows.
     fn submit(
         &mut self,
         db: &mut ProductDb,
@@ -494,8 +561,10 @@ pub trait PlanDesk: Send {
 pub struct PlanStored {
     /// The identifier of the stored plan.
     pub plan_id: Id,
-    /// How many modules this call newly claimed: the ones the lock table did
-    /// not hold before it.
+    /// How many modules this call newly claimed: the keys
+    /// `LockTable::claim` inserted that it did not hold for this ticket before
+    /// the call. A path under a module the ticket already holds is a new key and
+    /// is counted.
     pub modules_claimed: usize,
 }
 
@@ -506,44 +575,67 @@ pub struct PlanStored {
 /// core. AICD §12 makes each escalation a question addressed to a human, with a
 /// recommendation attached and evidence behind the trigger: this port is where
 /// that is opened. Every text arrives as a [`SanitizedField`], the sanitization
-/// barrier's own output. The desk mints its own identifiers, so the handler
-/// needs no [`IdSource`]. No credential passes through this port. `Send`,
-/// because the server that holds it is handed to the product's writer task.
+/// barrier's own output. The desk must mint its own identifiers, so the handler
+/// needs none from an [`IdSource`]. No credential passes through this port.
+/// `Send`, because the server that holds it is handed to the product's writer
+/// task.
 ///
 /// The port takes the [`Binding`], as [`SessionDesk`] does, and not a
-/// [`Caller`], because the session it may suspend is the binding's.
+/// [`Caller`], because the desk holds the session it may suspend, which is the
+/// binding's. A lead and a coder both reach this port.
 pub trait EscalationDesk: Send {
     /// Opens an escalation on a ticket, and suspends the session if the
     /// configuration says so: AICD §12.
     ///
-    /// The implementation never assumes the server core's checks ran, so it:
+    /// The implementation never assumes the server core's checks ran, so it
+    /// must:
     ///
-    /// - records its writes with `Actor::Agent`, naming `binding.identity()` as
+    /// - record its writes with `Actor::Agent`, naming `binding.identity()` as
     ///   the agent;
-    /// - refuses a binding whose product is not `db`'s product, as
-    ///   `Denied { code: "product_database_mismatch", methodology_ref: AICD §26 }`
-    ///   ([`PortError::Denied`]), the server core's own code for that fact;
-    /// - refuses a ticket the product does not hold, as
-    ///   `PortError::Invalid { field: "ticket_id" }`: the server core checks a
-    ///   coder's ticket against the binding, and nobody checks a lead's;
-    /// - answers every refusal with a code and a section: [`PortError::Refused`]
+    /// - **check the binding itself, before its first append, in this order:**
+    ///   - refuse a binding whose role is neither `lead` nor `coder`, as
+    ///     `Denied { code: "tool_not_permitted_for_role", methodology_ref: AICD §17 }`
+    ///     ([`PortError::Denied`]), with S2's check 5 code;
+    ///   - for a coder, refuse a binding with no bound ticket, as
+    ///     `Denied { code: "ticket_not_assigned", methodology_ref: AICD §7 }`,
+    ///     and a binding bound to a ticket other than the call's, as
+    ///     `Denied { code: "claim_contradicts_session", methodology_ref: AICD §25 }`:
+    ///     the two codes of S2's check 7, for the same two facts.
+    ///
+    ///   A lead may name any ticket the product holds, and the desk checks that
+    ///   the product holds it;
+    /// - then refuse a binding whose product is not `db`'s product, as
+    ///   `Denied { code: "product_database_mismatch", methodology_ref: AICD §26 }`,
+    ///   the server core's own code for that fact;
+    /// - then refuse a ticket the product does not hold, as
+    ///   `PortError::Invalid { field: "ticket_id" }`;
+    /// - answer every refusal with a code and a section: [`PortError::Refused`]
     ///   for a refusal kind of `ori-core`, [`PortError::Denied`] otherwise. A
-    ///   `Malformed` error is never wrapped in `Refused`, because a `Refused`
-    ///   without a section is recorded as `invalid`;
-    /// - **makes every refusal, and every `Invalid`, before its first append.**
-    ///   A refused call stores nothing. Only an
-    ///   [`PortError::Unavailable`], which is an append that failed, can leave
-    ///   rows behind it;
-    /// - writes every event it appends with the ticket in its ticket column.
+    ///   desk's codes are its own fixed constants, never built from agent text;
+    /// - **make every refusal, and every `Invalid`, before its first append.** A
+    ///   refused call stores nothing. Only an [`PortError::Unavailable`] can leave
+    ///   rows behind it (see "Faults and retries" below);
+    /// - write every event it appends with the ticket in its ticket column, and
+    ///   read the time of its rows from the engine's [`Clock`]: the port passes
+    ///   none.
     ///
-    /// It also:
+    /// It must also:
     ///
-    /// - **routes the escalation through** `ori-orchestrator`'s
+    /// - **route the escalation through** `ori-orchestrator`'s
     ///   `Escalation::raise`, which raises a trigger only when a finding stands
-    ///   behind it. An `EscalationError` from it, which the handler's own checks
-    ///   make unreachable, is
-    ///   `Denied { code: "escalation_refused", methodology_ref: AICD §12 }`;
-    /// - **appends `escalation.raised`**, the kind `ori-store` projects. The
+    ///   behind it. For that the desk must:
+    ///   - pass each text's `text()` unaltered;
+    ///   - record every evidence entry as a `Finding` under the call's trigger in
+    ///     the situation it hands `Escalation::raise`;
+    ///   - map the trigger by its spelling to `ori-orchestrator`'s `Trigger`,
+    ///     refusing any spelling it does not know.
+    ///
+    ///   An `EscalationError` it still meets is
+    ///   `Denied { code: "escalation_refused", methodology_ref: AICD §12 }`.
+    ///   `Escalation::raise` and `Finding::new` trim the texts they keep, so an
+    ///   escalation built by the component holds trimmed text. The handler hands
+    ///   the desk untrimmed text;
+    /// - **append `escalation.raised`**, the kind `ori-store` projects. The
     ///   payload's keys are in this order: `escalation_id`, `trigger`,
     ///   `question`, `recommendation`, and `evidence` last. The payload is a
     ///   struct serialized by serde, which keeps its fields' declaration order;
@@ -552,29 +644,53 @@ pub trait EscalationDesk: Send {
     ///   anywhere in the payload, values included, so with this order the
     ///   column a human triages on, `trigger`, is read before any agent text, and
     ///   no question, recommendation or evidence can set it;
-    /// - **moves the ticket to `Escalated` only for a coder's escalation** on its
-    ///   own bound ticket, when that ticket is `InProgress`. It asks
-    ///   `ori-orchestrator`'s `Lifecycle::advance`, which is pure, for the move,
-    ///   as [`TicketDesk`] does for its own, before its first append, and appends
-    ///   `ticket.escalated` once `advance` accepts. A lead's
-    ///   escalation never moves the ticket: the coder working it would otherwise
-    ///   be stopped by a session it does not hold;
-    /// - **appends a session row**, when there is a session to suspend, carrying
-    ///   the ticket in its ticket column. `EscalationOpened::suspended` says
-    ///   whether the session was suspended. It is `false` in phase 1 until a
-    ///   configuration key exists, and always `false` for a lead's session.
-    ///   After a suspension the server core refuses the connection's next call
-    ///   `session_not_active` and closes it.
+    /// - **move the ticket to `Escalated` only for a coder's escalation**, which
+    ///   the checks above have made an escalation on its own bound ticket, and
+    ///   only when that ticket is `InProgress`. Ask `ori-orchestrator`'s
+    ///   `Lifecycle::advance`, which is pure, for the move, as [`TicketDesk`]
+    ///   does for its own, before the first append, and append
+    ///   `ticket.escalated` once `advance` accepts. A lead's escalation never
+    ///   moves the ticket: the coder working it would otherwise be stopped by a
+    ///   session it does not hold;
+    /// - **append one session row only when it suspends the session**,
+    ///   carrying the ticket in its ticket column. Its event kind, and the
+    ///   session's target state, are ORI-T-0192's to settle (its record in
+    ///   `ops/lock-table.md` lists them), because `spec/DATA_MODEL.md`'s
+    ///   `AgentSession` has no suspended state. `AgentIdentity` has `suspended`,
+    ///   and `AgentSession`'s `Escalated` is terminal and revokes the session's
+    ///   credentials. `EscalationOpened::suspended` says whether the session was
+    ///   suspended. In phase 1 the desk never suspends, so it appends no session
+    ///   row, and `suspended` is `false` until a configuration key exists, and
+    ///   always `false` for a lead's session.
     ///
     /// It appends at most three rows: `escalation.raised`, `ticket.escalated` and
     /// one session row.
     ///
+    /// # After a suspension
+    ///
+    /// If the engine's [`SessionDesk`] then reports the session inactive, S2
+    /// refuses the session's next `tools/call` `session_not_active` and closes
+    /// the connection. A call that S2's check 0 or check 1 refuses first is
+    /// answered `product_database_mismatch` or `rate_limited`, and `ping` and
+    /// `tools/list` do not consult `SessionDesk`.
+    ///
+    /// # Faults and retries
+    ///
+    /// A `Malformed` error is [`PortError::Unavailable`], whether it comes from a
+    /// stored identifier or from `ori-orchestrator`: it is not a refusal, and a
+    /// `Refused` without a section is recorded as `invalid`. `Unavailable` also
+    /// answers a read that failed before any append. Each `EventLog::append`
+    /// commits on its own, so an `Unavailable` after a first append leaves the
+    /// rows before it. A retry then opens a second escalation, a second
+    /// `escalation.raised`.
+    ///
     /// # Errors
     ///
     /// [`PortError::Refused`] for a refusal that `ori-core` has a refusal kind
-    /// for; [`PortError::Denied`] for one it has none for; [`PortError::Invalid`]
-    /// for a ticket the product does not hold; [`PortError::Unavailable`] when it
-    /// could not answer, which can follow appended rows.
+    /// for; [`PortError::Denied`] for one it has none for, the binding's refusals
+    /// and `escalation_refused` among them; [`PortError::Invalid`] for a ticket
+    /// the product does not hold; [`PortError::Unavailable`] when it could not
+    /// answer, which can follow appended rows.
     fn open(
         &mut self,
         db: &mut ProductDb,
@@ -588,7 +704,8 @@ pub trait EscalationDesk: Send {
 /// AICD §12.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewEscalation {
-    /// Which of the eight AICD §12 triggers applies: always one of the
+    /// Which of the eight triggers applies, AICD §12's seven and this product's
+    /// `precondition_missing`: always one of the
     /// `crate::tools::ESCALATION_TRIGGERS`, never the agent's own text.
     pub trigger: &'static str,
     /// The question for the human.
