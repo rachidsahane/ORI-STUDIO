@@ -466,6 +466,8 @@ dependencies = [
  "ori-core",
  "proptest",
  "rusqlite",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
