@@ -2,6 +2,17 @@
 
 > **This file is closed to new entries.** Ruling [[R30]] moved serially numbered records to one file each, because a shared numbered series edited on parallel branches produced a merge conflict and then cost an entire branch. R1 to R29 stay here, unmoved: an operational log is not rewritten to tidy it. **R30 onward live in `ops/rulings/`, one file per ruling.** Code and documents that cite `ops/rulings.md` for R1 to R29 are still correct and were not touched.
 
+## Index (R30 onward)
+
+R30–R44: one file each under `ops/rulings/` (see directory listing).
+
+| # | Subject | File |
+|---|---|---|
+| R45 | Four operator answers, 2026-10-18 | `ops/rulings/R45-operator-answers-of-2026-10-18.md` |
+| R46 | Operator answers, 2026-10-18 afternoon | `ops/rulings/R46-operator-answers-of-2026-10-18-afternoon.md` |
+| R47 | Three operator answers before PR 78 merge | `ops/rulings/R47-operator-answers-of-2026-10-19.md` |
+| R48 | PD-1 MCP host registry tier 2 | `ops/rulings/R48-operator-answers-of-2026-10-19-pd1-mcp-registry.md` |
+| R49 | ORI-T-0197 interim deviation; batch 12 Q7 yes | `ops/rulings/R49-operator-answers-of-2026-10-19-r1-deviation-q7.md` |
 
 Decisions the lead made under the operator's standing rule 5: anything the specification already decides, the lead decides. Each names the document that decides it. A ruling that authorizes a deviation from a specification document is recorded here **and** the document is corrected in a specification PR in the same batch, under standing rule 6. A ruling is not a specification change; it is the record of how an existing specification was read.
 
