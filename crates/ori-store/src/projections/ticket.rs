@@ -45,6 +45,10 @@
 //! way for "what kinds may exist" as it does for "which transitions are
 //! legal").
 //!
+//! The payload of a kind that reads a field must be one JSON object whose keys
+//! are distinct (`ProjectionError::UnreadablePayload` otherwise), and a kind
+//! that reads none is not parsed.
+//!
 //! # Why a missing row is created rather than refused
 //!
 //! A `ticket.categorized` event for a `ticket_id` this table has never seen
@@ -162,18 +166,32 @@ fn write_row(conn: &Connection, row: &Row) -> Result<(), ProjectionError> {
     Ok(())
 }
 
-fn required_field<'a>(event: &'a Event, key: &'static str) -> Result<&'a str, ProjectionError> {
-    payload::field(event.payload(), key).ok_or(ProjectionError::MalformedPayload {
+fn payload_object(event: &Event) -> Result<payload::Object, ProjectionError> {
+    payload::object(event.payload()).ok_or(ProjectionError::UnreadablePayload { seq: event.seq() })
+}
+
+fn required_field<'a>(
+    event: &Event,
+    object: &'a payload::Object,
+    key: &'static str,
+) -> Result<&'a str, ProjectionError> {
+    object.text(key).ok_or(ProjectionError::MalformedPayload {
         seq: event.seq(),
         field: key,
     })
 }
 
-fn required_bool_field(event: &Event, key: &'static str) -> Result<bool, ProjectionError> {
-    payload::bool_field(event.payload(), key).ok_or(ProjectionError::MalformedPayload {
-        seq: event.seq(),
-        field: key,
-    })
+fn required_bool_field(
+    event: &Event,
+    object: &payload::Object,
+    key: &'static str,
+) -> Result<bool, ProjectionError> {
+    object
+        .boolean(key)
+        .ok_or(ProjectionError::MalformedPayload {
+            seq: event.seq(),
+            field: key,
+        })
 }
 
 /// `spec/DATA_MODEL.md` section 2's `Ticket` row, folded from `ticket.*`
@@ -207,13 +225,15 @@ impl Projection for TicketProjection {
 
         match suffix {
             "filed" => {
+                let object = payload_object(event)?;
                 row.state = "Filed".to_owned();
-                row.category = Some(required_field(event, "category")?.to_owned());
-                row.kind = Some(required_field(event, "kind")?.to_owned());
+                row.category = Some(required_field(event, &object, "category")?.to_owned());
+                row.kind = Some(required_field(event, &object, "kind")?.to_owned());
             }
             "categorized" => {
+                let object = payload_object(event)?;
                 row.state = "Categorized".to_owned();
-                row.category = Some(required_field(event, "category")?.to_owned());
+                row.category = Some(required_field(event, &object, "category")?.to_owned());
             }
             "rejected" => row.state = "Rejected".to_owned(),
             "validated" => row.state = "Validated".to_owned(),
@@ -223,16 +243,19 @@ impl Projection for TicketProjection {
             "escalated" => row.state = "Escalated".to_owned(),
             "in_review" => row.state = "InReview".to_owned(),
             "merged" => {
+                let object = payload_object(event)?;
                 row.state = "Merged".to_owned();
-                row.significant = Some(required_bool_field(event, "significant")?);
+                row.significant = Some(required_bool_field(event, &object, "significant")?);
             }
             "deployed" => row.state = "Deployed".to_owned(),
             "closed" => row.state = "Closed".to_owned(),
             "category_set" => {
-                row.category = Some(required_field(event, "category")?.to_owned());
+                let object = payload_object(event)?;
+                row.category = Some(required_field(event, &object, "category")?.to_owned());
             }
             "tier_set" => {
-                row.tier = Some(required_field(event, "tier")?.to_owned());
+                let object = payload_object(event)?;
+                row.tier = Some(required_field(event, &object, "tier")?.to_owned());
             }
             _ => return Ok(()),
         }
@@ -554,6 +577,264 @@ mod tests {
         assert!(
             first_pos < second_pos,
             "dump is ordered by ticket_id ascending"
+        );
+    }
+
+    /// Appends one event carrying a ticket id: `MissingTicketId` is checked
+    /// before a payload is looked at, so these tests always give one.
+    fn append_for(
+        conn: &mut Connection,
+        kind: &str,
+        ticket: &Id,
+        payload: &str,
+    ) -> crate::event_log::Event {
+        EventLog::append(
+            conn,
+            product(),
+            ts(1),
+            agent(),
+            kind,
+            Some(ticket.clone()),
+            payload,
+        )
+        .expect("append")
+    }
+
+    fn ticket_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM proj_tickets", [], |row| row.get(0))
+            .expect("count")
+    }
+
+    #[test]
+    fn ori_t_0189_ticket_fields_are_read_as_json() {
+        let mut conn = connection();
+        let projection = TicketProjection;
+        let ticket = id("TICKET1");
+
+        // Each payload puts a value equal to the key's name ahead of the key:
+        // the first-key reader read that value as the field.
+        let event = append_for(
+            &mut conn,
+            "ticket.filed",
+            &ticket,
+            r#"{"note":"category","kind":"feature","category":"auto"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply filed");
+        let row: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT category, kind FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row exists");
+        assert_eq!(row.0, Some("auto".to_owned()));
+        assert_eq!(row.1, Some("feature".to_owned()));
+
+        let event = append_for(
+            &mut conn,
+            "ticket.categorized",
+            &ticket,
+            r#"{"note":"category","x":"auto","category":"behavioral"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply categorized");
+        let category: Option<String> = conn
+            .query_row(
+                "SELECT category FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| row.get(0),
+            )
+            .expect("row exists");
+        assert_eq!(category, Some("behavioral".to_owned()));
+
+        let event = append_for(
+            &mut conn,
+            "ticket.category_set",
+            &ticket,
+            r#"{"note":"category","x":"auto","category":"decisional"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply category_set");
+        let category: Option<String> = conn
+            .query_row(
+                "SELECT category FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| row.get(0),
+            )
+            .expect("row exists");
+        assert_eq!(category, Some("decisional".to_owned()));
+
+        let event = append_for(
+            &mut conn,
+            "ticket.tier_set",
+            &ticket,
+            r#"{"note":"tier","x":"2","tier":"1"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply tier_set");
+        let tier: Option<String> = conn
+            .query_row(
+                "SELECT tier FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| row.get(0),
+            )
+            .expect("row exists");
+        assert_eq!(tier, Some("1".to_owned()));
+
+        let event = append_for(
+            &mut conn,
+            "ticket.merged",
+            &ticket,
+            r#"{"a":"significant","b":true,"significant" : false}"#,
+        );
+        projection.apply(&conn, &event).expect("apply merged");
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, significant FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row exists");
+        assert_eq!(row.0, "Merged");
+        assert_eq!(
+            row.1,
+            Some("false".to_owned()),
+            "the first-key reader read `true` here, after the value `significant`"
+        );
+    }
+
+    #[test]
+    fn ori_t_0189_a_kind_that_reads_no_field_accepts_any_payload() {
+        let mut conn = connection();
+        let projection = TicketProjection;
+        let ticket = id("TICKET1");
+        let state_of = |conn: &Connection| -> String {
+            conn.query_row(
+                "SELECT state FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| row.get(0),
+            )
+            .expect("row exists")
+        };
+
+        let filed = append_for(
+            &mut conn,
+            "ticket.filed",
+            &ticket,
+            r#"{"category":"auto","kind":"chore"}"#,
+        );
+        projection.apply(&conn, &filed).expect("apply filed");
+
+        let queued = append_for(&mut conn, "ticket.queued", &ticket, "not json");
+        projection
+            .apply(&conn, &queued)
+            .expect("queued reads no field, so it is not parsed");
+        assert_eq!(state_of(&conn), "Queued");
+
+        let closed = append_for(&mut conn, "ticket.closed", &ticket, r#"["x"]"#);
+        projection
+            .apply(&conn, &closed)
+            .expect("closed reads no field, so it is not parsed");
+        assert_eq!(state_of(&conn), "Closed");
+
+        let before = projection.dump(&conn).expect("dump");
+        let unknown = append_for(&mut conn, "ticket.reopened", &ticket, "not json");
+        projection
+            .apply(&conn, &unknown)
+            .expect("an unknown ticket kind is applied whatever its payload");
+        assert_eq!(
+            projection.dump(&conn).expect("dump"),
+            before,
+            "an unknown kind changes nothing"
+        );
+    }
+
+    #[test]
+    fn ori_t_0189_a_ticket_payload_that_is_not_one_object_is_refused() {
+        let mut conn = connection();
+        let projection = TicketProjection;
+
+        let duplicated = id("TICKETA");
+        let event = append_for(
+            &mut conn,
+            "ticket.filed",
+            &duplicated,
+            r#"{"category":"auto","kind":"defect","kind":"chore"}"#,
+        );
+        assert_eq!(
+            projection.apply(&conn, &event),
+            Err(ProjectionError::UnreadablePayload { seq: event.seq() })
+        );
+        assert_eq!(ticket_rows(&conn), 0, "the refused event wrote no row");
+
+        let ticket = id("TICKETB");
+        let filed = append_for(
+            &mut conn,
+            "ticket.filed",
+            &ticket,
+            r#"{"category":"auto","kind":"defect"}"#,
+        );
+        projection.apply(&conn, &filed).expect("apply filed");
+
+        let merged = append_for(&mut conn, "ticket.merged", &ticket, "true");
+        assert_eq!(
+            projection.apply(&conn, &merged),
+            Err(ProjectionError::UnreadablePayload { seq: merged.seq() })
+        );
+
+        let merged = append_for(
+            &mut conn,
+            "ticket.merged",
+            &ticket,
+            r#"{"significant":"true"}"#,
+        );
+        let error = projection
+            .apply(&conn, &merged)
+            .expect_err("significant is a string, not a boolean");
+        assert!(
+            matches!(
+                error,
+                ProjectionError::MalformedPayload {
+                    field: "significant",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, significant FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row exists");
+        assert_eq!(row.0, "Filed", "a refused merge left the state alone");
+        assert_eq!(row.1, None);
+    }
+
+    #[test]
+    fn ori_t_0189_kind_is_a_json_read() {
+        // `kind` comes after a value that spells its name, with another key
+        // between: the first-key reader read that other key's value instead.
+        let mut conn = connection();
+        let projection = TicketProjection;
+        let ticket = id("TICKET1");
+        let event = append_for(
+            &mut conn,
+            "ticket.filed",
+            &ticket,
+            r#"{"note":"kind","x":"WRONG","kind":"feature","category":"auto"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply filed");
+        let kind: Option<String> = conn
+            .query_row(
+                "SELECT kind FROM proj_tickets WHERE ticket_id = ?1",
+                rusqlite::params![ticket.as_str()],
+                |row| row.get(0),
+            )
+            .expect("row exists");
+        assert_eq!(
+            kind,
+            Some("feature".to_owned()),
+            "the first-key reader gave WRONG"
         );
     }
 }

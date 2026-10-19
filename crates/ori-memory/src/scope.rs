@@ -18,9 +18,9 @@
 //! ones that enforce it. `spec/API_SPEC.md` section 3 names the three agent
 //! tools that will call it: `aicd_context` (all roles), `aicd_search` (all
 //! roles, "Scoped search over allowed layers") and `aicd_evidence` (lead, qa,
-//! operations, "Raw evidence, returned labeled untrusted, logged"). None of
-//! the three exists yet (escalation E-0005); [`ScopeEnforcer::authorize`] is
-//! what they will call. `spec/SECURITY_NOTES.md` "Authorization model" puts
+//! operations, "Raw evidence, returned labeled untrusted, logged"). Their
+//! handlers are in `ori-mcp` (slices S3, S8 and S7), and each calls
+//! [`ScopeEnforcer::authorize`]. `spec/SECURITY_NOTES.md` "Authorization model" puts
 //! the enforcement here: permissions are "enforced by the component that owns
 //! the resource (... memory for retrieval ...)".
 //!
@@ -301,9 +301,12 @@
 //! evidence through an explicit request only, logged like anyone else's.
 //!
 //! [`Actor::System`] reads nothing through this module. `spec/DATA_MODEL.md`
-//! section 4 admits `system` "only for scheduled triggers and watchers"; a
-//! watcher reads the tree through `ori-watch`, and the organizational drift
-//! audit's cross-product retrieval is K-09, phase 2.
+//! section 4 admits `system` "only for scheduled triggers, watchers, and the
+//! engine's recovery after a restart"; a watcher reads the tree through
+//! `ori-watch`, the engine's recovery revokes, terminates, releases and
+//! requeues, and none of its steps (`spec/runbooks/recover-engine.md`) reads
+//! memory, and the organizational drift audit's cross-product retrieval is
+//! K-09, phase 2.
 //!
 //! No role gets cross-product retrieval in phase 1: that is K-09. A request
 //! made against a product whose log does not register the identity is
@@ -367,9 +370,12 @@
 //! per field, appended immediately before the record's own event, by the
 //! same actor, stamped with the same time, through the single writer task
 //! `spec/LLD.md` section 5 describes. The record's blobs are that run. An
-//! evidence event naming the id anywhere else, such as one left by a
-//! submission that failed after storing some of its evidence, is not the
-//! record's and is never handed over. The request is refused
+//! evidence event naming the id anywhere else is not the record's and is
+//! never handed over. Since ORI-T-0161, `barrier::submit_report` writes every
+//! file before it appends any event and refuses an evidence id the log
+//! already names, so such an event comes only from a log refusal part way
+//! through the appends, a hand-built event, or a log older than ORI-T-0161;
+//! the checks below stand for those. The request is refused
 //! (`evidence_not_attributable`) when the run cannot be the record's alone:
 //! it holds more events than the record has fields, which is what a failed
 //! submission by the same actor at the same time leaves immediately before
@@ -379,11 +385,12 @@
 //! appended apart from it, the run would come up short and the read would be
 //! refused, never widened.
 //!
-//! What the log cannot show is not checked here: `barrier::submit_report`
-//! writes an evidence file before it appends the event, so a submission that
-//! failed between the two may have overwritten a file with no event to say
-//! so. Closing that belongs to `barrier.rs`, whose evidence ids are
-//! caller-supplied too.
+//! What the log cannot show is not checked here, and since ORI-T-0161
+//! `barrier.rs` closes it: `barrier::submit_report` creates each evidence
+//! file only where nothing stands and refuses an evidence id an earlier
+//! `memory.evidence_stored` event names, so it no longer overwrites a file.
+//! A file a failed submission left with no event is never handed over,
+//! because `barrier::read_evidence` reads the log's events only.
 //!
 //! # What is logged
 //!
@@ -7737,15 +7744,79 @@ mod tests {
         )
     }
 
-    /// Puts a directory where the evidence file `evidence` would be written,
-    /// so the barrier fails on that field after storing the ones before it:
-    /// the submission that failed half way.
-    fn block_evidence_file(p: &Product, evidence: &str) {
-        let path =
-            p.db.dir()
-                .join("evidence")
-                .join(format!("{}.txt", id(evidence)));
-        fs::create_dir_all(&path).expect("a directory where the evidence file would go");
+    /// Appends the `memory.evidence_stored` event `submit_report` appended,
+    /// before ORI-T-0161, for a field of `label` under the evidence id
+    /// `evidence`: by `author`, at `when`. `submit_report` no longer stores a
+    /// reused evidence id, or leaves an event for a file it did not write
+    /// (it writes every file before it appends any event), so these states
+    /// are planted. Only a refused append can leave one now, and a hand-built
+    /// event can name any id.
+    fn plant_evidence_event(p: &mut Product, when: i64, author: &str, label: &str, evidence: &str) {
+        let blob = id(evidence);
+        let path = p.db.dir().join("evidence").join(format!("{blob}.txt"));
+        let payload = serde_json::json!({
+            "id": blob.as_str(),
+            "record_id": id(label).as_str(),
+            "content_ref": path.to_string_lossy(),
+            "content_type": "text/plain; charset=utf-8",
+        })
+        .to_string();
+        EventLog::append(
+            p.db.connection(),
+            p.id.clone(),
+            at(when),
+            Actor::Agent(id(author)),
+            "memory.evidence_stored",
+            Some(id(label)),
+            payload,
+        )
+        .expect("a fixture event appends");
+    }
+
+    /// Plants a whole submission as `submit` stored it before ORI-T-0161:
+    /// one evidence event per `(name, evidence label)` in order, then the
+    /// record event, all by `author` at `when`.
+    fn plant_submission(
+        p: &mut Product,
+        when: i64,
+        author: &str,
+        label: &str,
+        kind: RecordKind,
+        fields: &[(&str, &str)],
+    ) {
+        for (_, evidence) in fields {
+            plant_evidence_event(p, when, author, label, evidence);
+        }
+        let structured: BTreeMap<String, String> = fields
+            .iter()
+            .map(|(name, _)| {
+                (
+                    (*name).to_owned(),
+                    format!("raw text of {label}, field {name}"),
+                )
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "id": id(label).as_str(),
+            "product_id": p.id.as_str(),
+            "layer": "operational",
+            "kind": kind.as_str(),
+            "ticket_id": id("TICKETM").as_str(),
+            "provenance": {"source": "agent", "identity": id(author).as_str(), "at": when},
+            "untrusted": true,
+            "structured": structured,
+        })
+        .to_string();
+        EventLog::append(
+            p.db.connection(),
+            p.id.clone(),
+            at(when),
+            Actor::Agent(id(author)),
+            "memory.record_created",
+            Some(id("TICKETM")),
+            payload,
+        )
+        .expect("a fixture event appends");
     }
 
     fn evidence_ids(authorization: &Authorization) -> Vec<Id> {
@@ -7787,9 +7858,11 @@ mod tests {
         let authorization = evidence_granted(&mut w.p, &qa, &x);
         assert_eq!(evidence_ids(&authorization), vec![id("EVX1"), id("EVX2")]);
 
-        // A submission under the same id that failed after the record, and
-        // one that failed before it by another author at another time: their
-        // evidence is not the record's and is not handed over.
+        // An evidence event with no record event of its own, left after the
+        // record and one left before it by another author at another time
+        // (`submit_report` leaves none on a failed write now; a refused
+        // append would): their evidence is not the record's and is not handed
+        // over.
         for (label, failed_first, when, author) in [
             ("evidence-orphan-after", false, 200, "AUTHOR"),
             ("evidence-orphan-before", true, 150, "AUTHORTWO"),
@@ -7797,16 +7870,7 @@ mod tests {
             let mut w = world(label);
             let qa = principal_for(Role::Qa, &w.ticket_m);
             let fail = |p: &mut Product| {
-                block_evidence_file(p, "EVB");
-                submit(
-                    p,
-                    when,
-                    author,
-                    "RECX",
-                    RecordKind::ClosingReport,
-                    &[("summary", "EVA"), ("detail", "EVB")],
-                )
-                .expect_err("the second field cannot be stored");
+                plant_evidence_event(p, when, author, "RECX", "EVA");
             };
             if failed_first {
                 fail(&mut w.p);
@@ -7830,7 +7894,7 @@ mod tests {
                 .into_iter()
                 .filter(|blob| blob.id() == &id("EVA") && blob.record_id() == x.id())
                 .count();
-            assert_eq!(orphans, 1, "{label}: the failed submission left its blob");
+            assert_eq!(orphans, 1, "{label}: the orphan event names its blob");
             let authorization = evidence_granted(&mut w.p, &qa, &x);
             assert_eq!(evidence_ids(&authorization), vec![id("EVX")], "{label}");
         }
@@ -7839,16 +7903,7 @@ mod tests {
         // the record, cannot be told apart from the record's own: refused.
         let mut w = world("evidence-orphan-adjacent");
         let qa = principal_for(Role::Qa, &w.ticket_m);
-        block_evidence_file(&w.p, "EVB");
-        submit(
-            &mut w.p,
-            200,
-            "AUTHOR",
-            "RECX",
-            RecordKind::ClosingReport,
-            &[("summary", "EVA"), ("detail", "EVB")],
-        )
-        .expect_err("the second field cannot be stored");
+        plant_evidence_event(&mut w.p, 200, "AUTHOR", "RECX", "EVA");
         submit(
             &mut w.p,
             200,
@@ -7867,7 +7922,8 @@ mod tests {
         );
 
         // A later record storing evidence under the same evidence id
-        // overwrote the file: the record's blob may hold the other's raw
+        // (`submit_report` refuses it now, so it is planted) would have
+        // overwritten the file: the record's blob may hold the other's raw
         // text, so it is refused.
         let mut w = world("evidence-id-reused");
         let qa = principal_for(Role::Qa, &w.ticket_m);
@@ -7880,15 +7936,14 @@ mod tests {
             &[("summary", "EVSHARED")],
         )
         .expect("a submission");
-        submit(
+        plant_submission(
             &mut w.p,
             300,
             "AUTHOR",
             "RECZ",
             RecordKind::ClosingReport,
             &[("summary", "EVSHARED")],
-        )
-        .expect("a submission");
+        );
         refused(
             &mut w.p,
             standard(),
@@ -7898,8 +7953,9 @@ mod tests {
         );
 
         // A failed resubmission under the same record id reused the record's
-        // evidence id, overwriting its file: refused, though every event
-        // naming that id names this record.
+        // evidence id (`submit_report` refuses it now, so its event is
+        // planted), which would have overwritten its file: refused, though
+        // every event naming that id names this record.
         let mut w = world("evidence-id-resubmitted");
         let qa = principal_for(Role::Qa, &w.ticket_m);
         submit(
@@ -7911,16 +7967,7 @@ mod tests {
             &one_field,
         )
         .expect("a submission");
-        block_evidence_file(&w.p, "EVB");
-        submit(
-            &mut w.p,
-            300,
-            "AUTHOR",
-            "RECX",
-            RecordKind::ClosingReport,
-            &[("summary", "EVX"), ("detail", "EVB")],
-        )
-        .expect_err("the second field cannot be stored");
+        plant_evidence_event(&mut w.p, 300, "AUTHOR", "RECX", "EVX");
         refused(
             &mut w.p,
             standard(),
@@ -7929,19 +7976,19 @@ mod tests {
             "evidence_not_attributable",
         );
 
-        // Two fields of one record stored under one evidence id: the second
-        // overwrote the first's file.
+        // Two fields of one record stored under one evidence id
+        // (`submit_report` refuses it now, so it is planted): the second
+        // would have overwritten the first's file.
         let mut w = world("evidence-id-twice-in-record");
         let qa = principal_for(Role::Qa, &w.ticket_m);
-        submit(
+        plant_submission(
             &mut w.p,
             200,
             "AUTHOR",
             "RECX",
             RecordKind::Finding,
             &[("summary", "EVX"), ("detail", "EVX")],
-        )
-        .expect("a submission");
+        );
         refused(
             &mut w.p,
             standard(),
@@ -8017,9 +8064,14 @@ mod tests {
             "registration.rs",
         ]))
         .expect("registration.rs reads");
-        let identity =
-            fs::read_to_string(repo_file(&["crates", "ori-broker", "src", "identity.rs"]))
-                .expect("identity.rs reads");
+        let identity = fs::read_to_string(repo_file(&[
+            "crates",
+            "ori-core",
+            "src",
+            "adapters",
+            "identity.rs",
+        ]))
+        .expect("identity.rs reads");
         let this = module_code();
         // The writer's layout, written the same way in both files.
         let layout = r#""{{\"id\":\"{}\",\"product_id\":\"{}\",\"role\":\"{}\",\"model\":\"{}\",\"family\":\"{}\",\"runtime\":\"{}\"}}","#;

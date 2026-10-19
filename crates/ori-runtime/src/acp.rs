@@ -1,5 +1,18 @@
-//! The ACP client and the `AgentRuntime` trait: AICD §17, ADR-0001 "Agent
+//! The ACP client, which implements `AgentRuntime`: AICD §17, ADR-0001 "Agent
 //! protocol", PRD I-04 and P-02, `spec/API_SPEC.md` §4, criterion ORI-P1-039.
+//!
+//! # Where `AgentRuntime` and the types in its signatures are declared
+//!
+//! Not here, since ORI-T-0141. `spec/API_SPEC.md` §4 and `spec/LLD.md`
+//! section 2 declare all seven adapter traits in `ori-core`, together with
+//! the types in their signatures, so this module re-exports `AgentRuntime`,
+//! [`SessionSpec`], [`SessionHandle`], [`LaunchConfig`], [`LaunchConfigError`],
+//! [`StdioMode`], [`StopReason`], [`RuntimeCaps`], [`RuntimeCapsError`] and
+//! [`RuntimeError`] from `ori_core::adapters` at the paths they always had,
+//! and `crate::transcript` does the same for `Entry` and `TranscriptError`.
+//! What stays here is everything that performs IO or is not in the trait's
+//! signatures: [`AcpClient`], [`LaunchDefect`] with its recorder and clock
+//! types, and the process helpers.
 //!
 //! # What ORI-P1-039 asks, and what answers it here
 //!
@@ -99,7 +112,7 @@
 //! - `protocol/transports`: "Messages are delimited by newlines (`\n`), and
 //!   MUST NOT contain embedded newlines"; the agent MAY write logs to
 //!   stderr. Matched already (NDJSON, one frame per line; see
-//!   `drain_stderr`).
+//!   `drain_stderr_until`).
 //! - `protocol/session-setup`: `session/new` requires `cwd` **and
 //!   `mcpServers`** ("A list of MCP servers the Agent should connect to").
 //!   The result carries `sessionId`. This file sent only `cwd` until this
@@ -167,6 +180,113 @@
 //!   C-->>E: StopReason
 //! ```
 //!
+//! # Bounded reads and writes: one deadline per call (ORI-T-0143)
+//!
+//! AICD §12: agents do get stuck, and the methodology stops them structurally
+//! (budgets, never "keep grinding") rather than hoping someone notices; this
+//! is the same idea for one round trip. A child that is alive and silent,
+//! that writes half a line and stops, that never reads its standard input, or
+//! that writes noise without end must not be able to hold the calling thread
+//! past `IO_TIMEOUT`. Before ORI-T-0143 it could, because
+//! the only deadline check sat between frames, around a blocking
+//! `BufReader::read_line`, and the write of a frame was a blocking `write_all`
+//! into a pipe the child might never empty. `std` cannot interrupt a blocked
+//! pipe read or write, so each session now owns two small helper threads (a
+//! third, the standard error drain, already existed) and `AcpClient::call`
+//! only ever waits on channels, with a timeout:
+//!
+//! ```mermaid
+//! flowchart LR
+//!   C[call: one deadline for the whole call] -->|frame bytes| W[writer thread: owns ChildStdin]
+//!   W -->|done or error| C
+//!   R[reader thread: owns ChildStdout] -->|complete line, EOF or error| C
+//!   W --> A[(agent stdin)]
+//!   A2[(agent stdout)] --> R
+//!   C -->|deadline passed| X[retire the session: cancel flag, kill and reap the child]
+//! ```
+//!
+//! - **One deadline, started before the request is written.** It covers
+//!   writing the request, every wait for a line, and every reply this client
+//!   writes (an answer to `session/request_permission`, a method-not-found
+//!   error). `spawn` makes two calls (`initialize`, `session/new`) and each has
+//!   its own deadline; so does each `prompt`. A turn that outlasts one
+//!   `IO_TIMEOUT` is cut off exactly as it was before (the old check also
+//!   fired between frames); `crate::budget::Budget` owns the real allowance.
+//!   The deadline is also checked before every wait, so an agent that never
+//!   stops talking cannot keep a deadline from being looked at.
+//! - **Reader.** Started by `spawn` immediately after the child is, before the
+//!   handshake, and kept for the life of the session. It reads with
+//!   `BufRead::fill_buf` and assembles a line itself, so no read allocates
+//!   past `MAX_LINE_BYTES` (1 MiB, no line ever had a cap before: past it the
+//!   line is refused as [`RuntimeError::Protocol`] and the session is retired
+//!   rather than resynchronised). Blank lines and lines with no `{` are
+//!   dropped in the reader and never occupy a channel slot, so an endless
+//!   stream of noise cannot slip past the deadline either. Complete lines go
+//!   through a bounded channel (`INBOUND_DEPTH`, 16), so a session holds at
+//!   most about 17 MiB of unread agent output (and one transient copy of a
+//!   line while it is converted to text); a full channel makes the
+//!   reader stop reading, the pipe fill and the agent block, which is what an
+//!   unread pipe always did.
+//! - **Writer.** Started with the reader; owns `ChildStdin`. `call` hands it
+//!   one frame at a time and waits for its answer against the deadline.
+//! - **How a timed-out call leaves the session: spent.** The child is killed
+//!   and reaped (the `IO_TIMEOUT` documentation always said so, and `spawn`
+//!   already did so after a failed handshake; `prompt` did not, and left a
+//!   wedged child running), the cancel flag is set, both channels are dropped,
+//!   and every later `prompt` is refused promptly as [`RuntimeError::Io`]. The
+//!   transcript stays readable, and `kill` still works and returns at once.
+//!   The same happens after a line past `MAX_LINE_BYTES` or a failed read,
+//!   because the stream can no longer be trusted to be in step. It does not
+//!   happen after end-of-file ([`RuntimeError::UnexpectedEof`], the child is
+//!   already going) or after a line that is not JSON ([`RuntimeError::Protocol`],
+//!   as before).
+//! - **How the threads stop.** The reader stops when it sees end-of-file, an
+//!   error or an over-long line (it reports and returns); when the cancel flag
+//!   is set, which it checks after every read, so a descendant that keeps the
+//!   pipe open and writes forever is not drained at full speed once the
+//!   session is spent, killed or dropped; and when the receiving end is
+//!   dropped, which wakes a reader blocked on a full channel. The writer
+//!   stops when the client drops its sending end (after which it closes the
+//!   child's standard input, as dropping `ChildStdin` used to) or when a
+//!   write fails. `kill` and dropping the client do both. Neither thread is
+//!   joined, because joining could wait on exactly the blocked pipe operation
+//!   this design exists to avoid.
+//! - **Standard error.** The child's standard error is drained on a third
+//!   thread so a chatty child never blocks on a full pipe; it keeps nothing
+//!   (one 4 KiB buffer). It shares the reader's cancel flag and checks it
+//!   after every read: once the session is spent, killed or dropped, the next
+//!   read that returns ends the thread, which drops the read end of the pipe,
+//!   so a descendant still writing to it gets a broken pipe instead of being
+//!   read at full speed for as long as it lives. (`crate::headless` uses the
+//!   same function with a flag of its own, set when its one-shot run is over,
+//!   when its session is killed and when it is dropped.)
+//! - **What cannot be stopped.** A reader blocked in a read, or a writer blocked
+//!   in a write, is released when every holder of the other end of its pipe
+//!   is gone. Killing the child releases them unless a descendant of the
+//!   child inherited the pipe; then the thread lingers, idle, holding at
+//!   most one line buffer, until that descendant exits. No descendant is
+//!   killed here (`std` kills only the process it spawned); that is session
+//!   teardown's business, as `crate::headless` already says. Dropping an
+//!   `AcpClient` without `kill` still does not kill the child (`std`'s
+//!   `Child` is not killed on drop); it stops the threads and closes the
+//!   child's stdin, as before.
+//! - **Windows.** Nothing in the bound is platform specific: threads and
+//!   channels are `std`, and `Child::kill` terminates the process. The
+//!   misbehaving children in the tests are re-executions of the test binary
+//!   itself, not a shell, so those tests are not `#[cfg(unix)]`; the one that
+//!   watches a descendant's writes to a closed standard error pipe is,
+//!   because what a Windows write to a closed pipe reports has not been
+//!   observed here. Windows has not been run at all in this change.
+//! - **Where the AICD references live.** A timeout is a failure of the
+//!   channel, not a refusal by a control, so [`RuntimeError::Timeout`] has no
+//!   `methodology_ref` and is not an `is_refusal`. This module records no
+//!   launch defect for it; the only launch defect `AcpClient` records is a
+//!   `session/request_permission` (AICD §17, [`LaunchDefect::reason`]).
+//!   `crate::headless` does record a defect on its own timeout (method
+//!   `headless.run`, reason AICD §17), because there a silent child is
+//!   indistinguishable from a runtime blocked on a prompt it was given no way
+//!   to answer. See [`RuntimeError::Timeout`].
+//!
 //! # The seam with `injector.rs` (ORI-T-0032, in flight)
 //!
 //! [`SessionSpec::envs`] is the seam. This module never reads a keychain,
@@ -221,11 +341,12 @@
 //! record an environment value; spawn a process outside this crate's own
 //! functions (CLAUDE.md: "Only `ori-runtime` spawns processes").
 
-use core::fmt;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
+#[cfg(test)]
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::ChildStderr;
@@ -233,11 +354,16 @@ use std::process::ChildStdin;
 use std::process::ChildStdout;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
 use ori_core::error::MethodologyRef;
 use ori_core::types::Id;
+#[cfg(test)]
 use ori_core::types::ModelFamily;
 use ori_core::types::Timestamp;
 use serde::Deserialize;
@@ -247,7 +373,20 @@ use serde_json::json;
 
 use crate::transcript::Entry;
 use crate::transcript::Transcript;
-use crate::transcript::TranscriptError;
+
+// The trait and the types in its signatures are declared in `ori-core` since
+// ORI-T-0141 (`spec/API_SPEC.md` §4, `spec/LLD.md` section 2), and re-exported
+// here at the paths they always had, so that no caller changed.
+pub use ori_core::adapters::AgentRuntime;
+pub use ori_core::adapters::LaunchConfig;
+pub use ori_core::adapters::LaunchConfigError;
+pub use ori_core::adapters::RuntimeCaps;
+pub use ori_core::adapters::RuntimeCapsError;
+pub use ori_core::adapters::RuntimeError;
+pub use ori_core::adapters::SessionHandle;
+pub use ori_core::adapters::SessionSpec;
+pub use ori_core::adapters::StdioMode;
+pub use ori_core::adapters::StopReason;
 
 /// How much of a subprocess's captured standard error is kept in an error
 /// value or reported: the same bound `crate::worktree::STDERR_CAP` uses, for
@@ -258,17 +397,38 @@ const STDERR_CAP: usize = 400;
 /// "The ACP protocol version implemented, and where it was read".
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
 
-/// How long [`AcpClient::spawn`], `AcpClient::call` and
-/// [`AcpClient::kill`]'s process wait may run before the child is killed and
-/// the call refused as [`RuntimeError::Timeout`].
+/// How long each JSON-RPC round trip of [`AcpClient::spawn`] (two of them) and
+/// [`AcpClient::prompt`] (one), and the wait in [`AcpClient::kill`], may run:
+/// the length of the one deadline `AcpClient::call` starts before it writes
+/// its request and holds through every read and every reply it writes. When it
+/// passes, the child is killed and reaped, the session is spent and the call
+/// is refused as [`RuntimeError::Timeout`]. See the module doc comment,
+/// "Bounded reads and writes: one deadline per call".
 ///
 /// Not a substitute for `crate::budget::Budget`, which is the meter that
 /// owns an agent session's real wall-clock allowance; this is a much shorter
 /// bound against a narrower failure, a single JSON-RPC round trip or a
 /// process teardown that never completes, which is what would otherwise let
 /// a stuck child hang the calling thread forever ("a child process that can
-/// hang must be run with a timeout").
+/// hang must be run with a timeout"). AICD §12.
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The longest line, in bytes and without its newline, the reader thread
+/// accepts from the agent. No line had a bound before ORI-T-0143, so one
+/// unterminated line could grow a `String` without limit; one past this is
+/// refused as [`RuntimeError::Protocol`] and the session is spent, because
+/// the stream is then out of step. 1 MiB is far above any frame this client
+/// exchanges (a `session/update` carries a chunk of text or a tool call's
+/// summary, not a file) and keeps the memory a hostile agent can make this
+/// process hold per line at one mebibyte.
+const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// How many complete lines the reader thread may have queued for `call` that
+/// `call` has not yet taken. With [`MAX_LINE_BYTES`] this bounds the unread
+/// agent output a session holds at 17 MiB (16 queued, one being assembled).
+/// A full queue makes the reader stop reading and the pipe fill, which is
+/// what an unread pipe always did.
+const INBOUND_DEPTH: usize = 16;
 
 /// How often [`wait_with_timeout`] polls [`Child::try_wait`] rather than
 /// blocking on it, so the bound above is actually enforceable: `Child` has no
@@ -276,307 +436,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 // ---------------------------------------------------------------------------
-// RuntimeCaps
-// ---------------------------------------------------------------------------
-
-/// What a runtime adapter declares about itself: `spec/API_SPEC.md` §4's
-/// `AgentRuntime::capabilities`, ADR-0001 "Model family".
-///
-/// # How the family is guaranteed
-///
-/// The operator's ruling on escalation 6 (carried by `crates/ori-broker/src/family.rs`'s
-/// own doc comment and by ADR-0001's decision row): "the runtime adapter
-/// declares the family through `RuntimeCaps`... and the engine passes it to
-/// `broker.identity.create`". [`RuntimeCaps::new`] is the only way to build
-/// one, and its first parameter is an [`ori_core::types::ModelFamily`], not
-/// an `Option<ModelFamily>` and not a `String` a caller could leave blank:
-/// [`ModelFamily::parse`] already refuses an empty or whitespace-only value
-/// (`crates/ori-core/src/types.rs`), so a value of that type reaching this
-/// constructor already passed that check once. There is no [`Default`] impl,
-/// no public field, and no second constructor, so a `RuntimeCaps` cannot be
-/// built by any path that does not supply a family: an adapter with no
-/// declared family is not constructible, the same fail-closed shape
-/// `crates/ori-broker/src/family.rs`'s own `ModelFamily::declare` uses for
-/// itself.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeCaps {
-    family: ModelFamily,
-    adapter_name: String,
-}
-
-impl RuntimeCaps {
-    /// Declares an adapter's capabilities, refusing an empty or
-    /// whitespace-only `adapter_name`. `family` cannot be empty by
-    /// construction: see this type's own doc comment.
-    ///
-    /// # Errors
-    ///
-    /// [`RuntimeCapsError::EmptyAdapterName`] when `adapter_name` is empty or
-    /// only whitespace.
-    pub fn new(
-        family: ModelFamily,
-        adapter_name: impl Into<String>,
-    ) -> Result<Self, RuntimeCapsError> {
-        let adapter_name = adapter_name.into();
-        if adapter_name.trim().is_empty() {
-            return Err(RuntimeCapsError::EmptyAdapterName);
-        }
-        Ok(Self {
-            family,
-            adapter_name,
-        })
-    }
-
-    /// The declared model family. Always present: see this type's own doc
-    /// comment, "How the family is guaranteed".
-    #[must_use]
-    pub const fn family(&self) -> &ModelFamily {
-        &self.family
-    }
-
-    /// The adapter's own name, for a launch record or a log line to say which
-    /// adapter ran, never a secret.
-    #[must_use]
-    pub fn adapter_name(&self) -> &str {
-        &self.adapter_name
-    }
-}
-
-/// Why building a [`RuntimeCaps`] was refused: ADR-0001 "Model family".
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RuntimeCapsError {
-    /// `adapter_name` was empty or only whitespace.
-    EmptyAdapterName,
-}
-
-impl fmt::Display for RuntimeCapsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyAdapterName => f.write_str("an adapter name is not empty"),
-        }
-    }
-}
-
-impl std::error::Error for RuntimeCapsError {}
-
-// ---------------------------------------------------------------------------
-// LaunchConfig: the inspectable half of ORI-P1-039
-// ---------------------------------------------------------------------------
-
-/// What standard input a launched runtime is given: PRD P-02, ORI-P1-039.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StdioMode {
-    /// The platform's null device (`/dev/null` on unix, `NUL` on Windows): a
-    /// read against it returns end-of-file immediately, on every platform.
-    Null,
-    /// A pipe this process reads and writes: what the ACP client needs, since
-    /// it *is* the protocol channel.
-    Piped,
-    /// The parent's own standard input. Never chosen by this module's own
-    /// constructors; a [`SessionSpec`] built with this is what plant 4 of
-    /// this ticket's own table exercises, and `HeadlessAdapter::spawn` (`crate::headless`)
-    /// (`crate::headless`) refuses it.
-    Inherit,
-}
-
-impl fmt::Display for StdioMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Null => "null",
-            Self::Piped => "piped",
-            Self::Inherit => "inherit",
-        })
-    }
-}
-
-/// The runtime launch configuration ORI-P1-039 says must be inspectable:
-/// "Inspect the runtime launch configuration and the session transcript".
-///
-/// Deliberately excludes the process environment. `spec/API_SPEC.md` §4:
-/// "adapters receive credentials from the broker per call or per session,
-/// never from configuration"; this type is what a test, and later an
-/// operator, reads to answer "was this launched non-interactively", and an
-/// environment variable is never part of that answer, so there is no field
-/// here that could hold one. See the module doc comment, "The seam with
-/// `injector.rs`".
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LaunchConfig {
-    program: String,
-    args: Vec<String>,
-    stdin: StdioMode,
-    non_interactive: bool,
-}
-
-impl LaunchConfig {
-    /// The launch configuration [`AcpClient::spawn`] uses: standard input
-    /// piped (the client writes JSON-RPC requests to it), which is what makes
-    /// the whole exchange the protocol substitute for a terminal prompt in
-    /// the first place, so `non_interactive` is `true` unconditionally: an
-    /// agent given a pipe instead of a pseudo-terminal has no terminal to
-    /// prompt on at all, whatever it does with the pipe.
-    ///
-    /// # Errors
-    ///
-    /// [`LaunchConfigError::EmptyProgram`] when `program` is empty or only
-    /// whitespace.
-    pub fn acp(program: impl Into<String>, args: Vec<String>) -> Result<Self, LaunchConfigError> {
-        Self::new(program, args, StdioMode::Piped)
-    }
-
-    /// The general constructor both [`LaunchConfig::acp`] and
-    /// `crate::headless::LaunchConfig::headless` (which calls this with
-    /// [`StdioMode::Null`]) share.
-    pub(crate) fn new(
-        program: impl Into<String>,
-        args: Vec<String>,
-        stdin: StdioMode,
-    ) -> Result<Self, LaunchConfigError> {
-        let program = program.into();
-        if program.trim().is_empty() {
-            return Err(LaunchConfigError::EmptyProgram);
-        }
-        Ok(Self {
-            program,
-            args,
-            stdin,
-            non_interactive: true,
-        })
-    }
-
-    /// A launch configuration built directly from its parts, without
-    /// [`LaunchConfig::new`]'s validation. Used only where a test must build
-    /// the one shape this module's own constructors refuse to build (plant
-    /// 4: standard input inherited rather than closed), so that the refusal
-    /// under test is `HeadlessAdapter::spawn`'s (`crate::headless`), not
-    /// this function's. `#[cfg(test)]` because production code never needs
-    /// the shape this deliberately skips validating.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) const fn assemble(
-        program: String,
-        args: Vec<String>,
-        stdin: StdioMode,
-        non_interactive: bool,
-    ) -> Self {
-        Self {
-            program,
-            args,
-            stdin,
-            non_interactive,
-        }
-    }
-
-    /// The program to execute. Never a path this module resolved itself:
-    /// the caller names it, the same way `crate::worktree::SystemGit` never
-    /// resolves `git`'s own path.
-    #[must_use]
-    pub fn program(&self) -> &str {
-        &self.program
-    }
-
-    /// The argv, without the program name. Never holds a credential: see the
-    /// module doc comment, "The seam with `injector.rs`".
-    #[must_use]
-    pub fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    /// What standard input the child is given.
-    #[must_use]
-    pub const fn stdin(&self) -> StdioMode {
-        self.stdin
-    }
-
-    /// Whether this launch is the runtime's non-interactive mode: PRD P-02.
-    #[must_use]
-    pub const fn non_interactive(&self) -> bool {
-        self.non_interactive
-    }
-}
-
-impl fmt::Display for LaunchConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} (stdin={}, non_interactive={})",
-            self.program,
-            self.args.join(" "),
-            self.stdin,
-            self.non_interactive
-        )
-    }
-}
-
-/// Why building a [`LaunchConfig`] was refused.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum LaunchConfigError {
-    /// `program` was empty or only whitespace.
-    EmptyProgram,
-}
-
-impl fmt::Display for LaunchConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyProgram => f.write_str("a launch program is not empty"),
-        }
-    }
-}
-
-impl std::error::Error for LaunchConfigError {}
-
-// ---------------------------------------------------------------------------
-// SessionSpec, SessionHandle
-// ---------------------------------------------------------------------------
-
-/// What the engine gives an adapter to start a session: `spec/API_SPEC.md`
-/// §4's `AgentRuntime::spawn(session: SessionSpec)`. See the module doc
-/// comment, "`SessionSpec` and `SessionHandle`, and what was chosen for
-/// them".
-#[derive(Clone, Debug)]
-pub struct SessionSpec {
-    /// The engine's own session identifier (`crate::session::Session::id`).
-    pub id: Id,
-    /// The launch configuration.
-    pub launch: LaunchConfig,
-    /// The working directory the child is spawned in: the session's
-    /// `crate::worktree::Worktree` path, in the engine's real use.
-    pub cwd: PathBuf,
-    /// The child's environment, prepared entirely by the caller. Never read
-    /// by this module for anything but passing to
-    /// [`std::process::Command::envs`]; see the module doc comment, "The
-    /// seam with `injector.rs`".
-    pub envs: Vec<(String, String)>,
-}
-
-/// An opaque handle to a spawned session: `spec/API_SPEC.md` §4's
-/// `SessionHandle`. Carries the same [`Id`] the [`SessionSpec`] it was
-/// spawned from carried; see the module doc comment for why that is also
-/// the check every later call makes.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct SessionHandle {
-    id: Id,
-}
-
-impl SessionHandle {
-    /// Wraps a session identifier a [`SessionSpec`] was built with. Public so
-    /// `crate::headless` (a sibling module, not a descendant, so it cannot
-    /// reach this type's private field directly) can build one too.
-    #[must_use]
-    pub const fn new(id: Id) -> Self {
-        Self { id }
-    }
-
-    /// The session identifier this handle names.
-    #[must_use]
-    pub const fn id(&self) -> &Id {
-        &self.id
-    }
-}
-
-// ---------------------------------------------------------------------------
-// The AgentRuntime trait
+// Launch defects, and the recorder and the clock that go with them
 // ---------------------------------------------------------------------------
 
 /// A launch defect: a permission prompt a runtime should never have raised,
@@ -633,242 +493,6 @@ pub type DefectRecorder = Box<dyn FnMut(LaunchDefect) -> Result<(), String>>;
 /// that has a real clock (or, in a test, a fixed one) supplies it, the same
 /// pattern `ori_store::event_log::EventLog::append` already uses for `at`.
 pub type ClockFn = Box<dyn FnMut() -> Timestamp>;
-
-/// Where a turn ended: ACP's `stopReason`, or this adapter's own mapping of
-/// a headless run's exit.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StopReason {
-    /// The agent finished the turn normally.
-    EndTurn,
-    /// The agent declined to continue (for instance, after this client
-    /// refused a permission request).
-    Refusal,
-    /// The turn was cancelled.
-    Cancelled,
-    /// A value this module does not otherwise recognize, carried as data
-    /// rather than dropped: `spec/API_SPEC.md` §5, "Adapter traits are
-    /// versioned by crate", which is exactly what lets an agent report a stop
-    /// reason a fixed enum here does not yet name without this client
-    /// refusing to compile against it.
-    Other(String),
-}
-
-impl StopReason {
-    /// Reads a `stopReason` string into this type.
-    #[must_use]
-    pub fn parse(text: &str) -> Self {
-        match text {
-            "end_turn" => Self::EndTurn,
-            "refusal" => Self::Refusal,
-            "cancelled" => Self::Cancelled,
-            other => Self::Other(other.to_owned()),
-        }
-    }
-}
-
-impl fmt::Display for StopReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EndTurn => f.write_str("end_turn"),
-            Self::Refusal => f.write_str("refusal"),
-            Self::Cancelled => f.write_str("cancelled"),
-            Self::Other(text) => write!(f, "{text}"),
-        }
-    }
-}
-
-/// One runtime adapter: `spec/API_SPEC.md` §4, ADR-0001 "Agent protocol".
-///
-/// Matches `spec/API_SPEC.md` §4's sketch closely now: `record_defect` and
-/// the clock used to be parameters of `spawn`/`send` themselves (this
-/// trait's own divergence from the sketch, in an earlier version of this
-/// file), which let the trait path silently drop ORI-P1-039's "recorded as a
-/// launch defect" clause; see the module doc comment, "Why the recorder and
-/// the clock are constructor parameters, not per-call ones". Both are
-/// supplied once, to each implementation's own constructor
-/// ([`AcpClient::new`], `crate::headless::HeadlessAdapter::new`), instead.
-pub trait AgentRuntime {
-    /// Starts the runtime in its non-interactive mode, inside the isolation
-    /// boundary the caller already built (`crate::worktree`,
-    /// `crate::container` once ORI-T-0031 lands): PRD P-02, PRD I-04.
-    ///
-    /// # Errors
-    ///
-    /// See each implementation's own `Error` type.
-    fn spawn(&mut self, spec: SessionSpec) -> Result<SessionHandle, RuntimeError>;
-
-    /// Sends one prompt to the session, running until the turn ends,
-    /// answering any permission prompt the agent raises with a refusal
-    /// (never a grant) and recording it through the recorder and clock this
-    /// adapter was constructed with, and this adapter's own transcript.
-    ///
-    /// # Errors
-    ///
-    /// See each implementation's own `Error` type.
-    fn send(&mut self, handle: &SessionHandle, prompt: &str) -> Result<StopReason, RuntimeError>;
-
-    /// The transcript entries recorded for this session so far.
-    ///
-    /// # Errors
-    ///
-    /// [`RuntimeError::UnknownSession`] when `handle` does not name the
-    /// session this adapter holds.
-    fn recv(&self, handle: &SessionHandle) -> Result<&[Entry], RuntimeError>;
-
-    /// Ends the session and the process backing it.
-    ///
-    /// # Errors
-    ///
-    /// See each implementation's own `Error` type.
-    fn kill(&mut self, handle: &SessionHandle) -> Result<(), RuntimeError>;
-
-    /// What this adapter declares about itself. Always carries a
-    /// [`ModelFamily`], through [`RuntimeCaps`]: see that type's own doc
-    /// comment.
-    fn capabilities(&self) -> RuntimeCaps;
-}
-
-/// Everything this module refuses or cannot do: AICD §17 for the refusals,
-/// `spec/CONVENTIONS.md`'s ruling R20 (hand-written `Display` and
-/// `std::error::Error`, deferring `thiserror`) for the shape.
-#[derive(Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum RuntimeError {
-    /// The child process could not be spawned, or an I/O operation on its
-    /// stdio failed.
-    Io {
-        /// What the operating system reported.
-        message: String,
-    },
-    /// A line read from the child was not valid JSON, or not a JSON-RPC 2.0
-    /// frame this module recognizes.
-    Protocol {
-        /// What was wrong.
-        message: String,
-    },
-    /// The agent answered one of this client's own requests with a JSON-RPC
-    /// error.
-    Rpc {
-        /// The error code the agent reported.
-        code: i64,
-        /// The error message the agent reported, carried as data.
-        message: String,
-    },
-    /// The child closed its output before answering a request this client
-    /// was waiting on.
-    UnexpectedEof,
-    /// A JSON-RPC round trip or a process teardown did not complete within
-    /// `IO_TIMEOUT`.
-    Timeout {
-        /// How long this call waited before giving up.
-        after: Duration,
-    },
-    /// The caller-supplied `record_defect` closure refused or failed.
-    DefectSink {
-        /// What it reported.
-        message: String,
-    },
-    /// Appending to this adapter's own transcript was refused.
-    Transcript(TranscriptError),
-    /// A [`SessionHandle`] that does not name the session this adapter
-    /// currently holds.
-    UnknownSession {
-        /// The identifier the handle carried.
-        id: Id,
-    },
-    /// [`AgentRuntime::spawn`] was called while a session is already active.
-    AlreadySpawned,
-    /// A call other than `spawn` was made before any session was spawned.
-    NotSpawned,
-    /// A [`SessionSpec`] whose [`LaunchConfig::stdin`] is not the mode this
-    /// adapter requires: AICD §17. ORI-P1-039's own launch-configuration
-    /// clause is a refusal here, not a silent correction, so that a caller
-    /// that built the wrong `LaunchConfig` learns that at `spawn`, not from a
-    /// runtime that turns out to prompt.
-    WrongStdinMode {
-        /// What this adapter requires.
-        required: StdioMode,
-        /// What the caller supplied.
-        found: StdioMode,
-    },
-    /// `crate::headless::HeadlessAdapter::send` was called a second time. A
-    /// one-shot, non-interactive run has exactly one turn: see
-    /// `crate::headless`'s own module doc comment.
-    AlreadyCompleted,
-}
-
-impl RuntimeError {
-    /// The methodology section a refusal is made under, for the refusals and
-    /// for nothing else.
-    #[must_use]
-    pub const fn methodology_ref(&self) -> Option<MethodologyRef> {
-        match self {
-            Self::WrongStdinMode { .. } => Some(MethodologyRef {
-                section: 17,
-                subsection: None,
-            }),
-            Self::Io { .. }
-            | Self::Protocol { .. }
-            | Self::Rpc { .. }
-            | Self::UnexpectedEof
-            | Self::Timeout { .. }
-            | Self::DefectSink { .. }
-            | Self::Transcript(_)
-            | Self::UnknownSession { .. }
-            | Self::AlreadySpawned
-            | Self::NotSpawned
-            | Self::AlreadyCompleted => None,
-        }
-    }
-
-    /// Whether a control refused the action, as opposed to an I/O or protocol
-    /// failure.
-    #[must_use]
-    pub const fn is_refusal(&self) -> bool {
-        matches!(self, Self::WrongStdinMode { .. })
-    }
-}
-
-impl fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io { message } => write!(f, "an I/O operation on the runtime failed: {message}"),
-            Self::Protocol { message } => {
-                write!(f, "not a JSON-RPC 2.0 frame this client reads: {message}")
-            }
-            Self::Rpc { code, message } => write!(f, "the agent returned error {code}: {message}"),
-            Self::UnexpectedEof => f.write_str("the agent closed its output before answering"),
-            Self::Timeout { after } => write!(f, "no answer within {after:?}"),
-            Self::DefectSink { message } => {
-                write!(f, "recording the launch defect failed: {message}")
-            }
-            Self::Transcript(inner) => write!(f, "the transcript refused this entry: {inner}"),
-            Self::UnknownSession { id } => write!(f, "no active session named {id}"),
-            Self::AlreadySpawned => f.write_str("this adapter already holds an active session"),
-            Self::NotSpawned => f.write_str("no session has been spawned yet"),
-            Self::WrongStdinMode { required, found } => write!(
-                f,
-                "refused: this adapter requires stdin={required}, and the launch configuration \
-                 gave it stdin={found} ({})",
-                MethodologyRef {
-                    section: 17,
-                    subsection: None,
-                }
-            ),
-            Self::AlreadyCompleted => {
-                f.write_str("this one-shot session already ran its single turn")
-            }
-        }
-    }
-}
-
-impl std::error::Error for RuntimeError {}
-
-impl From<TranscriptError> for RuntimeError {
-    fn from(inner: TranscriptError) -> Self {
-        Self::Transcript(inner)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The JSON-RPC 2.0 wire frame
@@ -1011,15 +635,172 @@ fn capped(value: &Value) -> String {
 // AcpClient
 // ---------------------------------------------------------------------------
 
+/// What the reader thread tells `AcpClient::call`: one thing per line it
+/// finds, and then, last, why it stopped. See the module doc comment,
+/// "Bounded reads and writes: one deadline per call".
+enum Inbound {
+    /// A complete line, trimmed and cut to start at its first `{`.
+    Line(String),
+    /// A complete line that was not valid UTF-8. The stream is still in step;
+    /// the reader carries on.
+    NotUtf8,
+    /// End of the child's standard output. Last message.
+    Eof,
+    /// A line longer than the cap. Last message: the stream is out of step.
+    TooLong,
+    /// The operating system failed a read. Last message.
+    ReadFailed(String),
+}
+
+/// One frame for the writer thread, with the place to report how the write
+/// went.
+struct WriteJob {
+    bytes: Vec<u8>,
+    done: mpsc::Sender<std::io::Result<()>>,
+}
+
+/// The two helper threads' ends held by a session, and the flag that stops
+/// the reader.
+struct SessionIo {
+    writer: mpsc::Sender<WriteJob>,
+    inbound: mpsc::Receiver<Inbound>,
+    cancel: Arc<AtomicBool>,
+}
+
 /// One session's worth of process and protocol state.
 struct ActiveAcpSession {
     id: Id,
     child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Frames to the writer thread, which owns the child's stdin. `None` once
+    /// the session is retired or closed; dropping it is what makes the writer
+    /// close the child's stdin.
+    writer: Option<mpsc::Sender<WriteJob>>,
+    /// Lines from the reader thread, which owns the child's stdout. `None`
+    /// once the session is retired; dropping it wakes a reader blocked on a
+    /// full channel.
+    inbound: Option<mpsc::Receiver<Inbound>>,
+    /// Set to tell the reader to stop; checked after every read.
+    cancel: Arc<AtomicBool>,
+    /// The line cap this session's reader was started with, for the message
+    /// when it is exceeded.
+    max_line: usize,
+    /// Whether a timeout or an unreadable stream spent this session.
+    retired: bool,
     acp_session_id: String,
     next_rpc_id: u64,
     transcript: Transcript,
+}
+
+impl Drop for ActiveAcpSession {
+    /// Dropping a session, by `kill` or by dropping the client, tells the
+    /// reader to stop. The channels drop with the fields, which releases a
+    /// reader blocked on a full queue and makes the writer close the child's
+    /// stdin. The child itself is not killed here, as before ORI-T-0143.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The refusal for a call on a session a timeout or an unreadable stream has
+/// spent.
+fn retired_error() -> RuntimeError {
+    RuntimeError::Io {
+        message: "this session was ended after a timeout or an unreadable stream and its child \
+                  was killed; spawn a new session"
+            .to_owned(),
+    }
+}
+
+impl ActiveAcpSession {
+    /// Spends the session: tells the reader to stop, drops both channels (a
+    /// blocked reader wakes, the writer closes the child's stdin once it has
+    /// nothing queued), and kills and reaps the child, which releases a
+    /// reader or writer blocked on the child's own pipes. The transcript is
+    /// kept.
+    fn retire(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.writer = None;
+        self.inbound = None;
+        let _ = kill_child(&mut self.child);
+        self.retired = true;
+    }
+
+    /// Writes one JSON-RPC frame as a line through the writer thread and
+    /// waits for the write to finish, but not past `deadline`. A write that
+    /// has not finished by then (the child is not reading and its pipe is
+    /// full) spends the session and is refused as [`RuntimeError::Timeout`]
+    /// with `timeout` as the length it waited.
+    fn send_frame<T: Serialize>(
+        &mut self,
+        frame: &T,
+        deadline: Instant,
+        timeout: Duration,
+    ) -> Result<(), RuntimeError> {
+        let mut text = serde_json::to_string(frame).map_err(|error| RuntimeError::Protocol {
+            message: error.to_string(),
+        })?;
+        text.push('\n');
+        let (done, finished) = mpsc::channel();
+        let Some(writer) = &self.writer else {
+            return Err(retired_error());
+        };
+        writer
+            .send(WriteJob {
+                bytes: text.into_bytes(),
+                done,
+            })
+            .map_err(|_| RuntimeError::Io {
+                message: "the writer thread has stopped, so the agent's stdin is closed".to_owned(),
+            })?;
+        match finished.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(RuntimeError::Io {
+                message: error.to_string(),
+            }),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.retire();
+                Err(RuntimeError::Timeout { after: timeout })
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(RuntimeError::Io {
+                message: "the writer thread ended without reporting".to_owned(),
+            }),
+        }
+    }
+
+    /// Takes the next line the reader has found, waiting until `deadline` and
+    /// no longer. End of file is [`RuntimeError::UnexpectedEof`]; the deadline
+    /// passing, a line past the cap and a failed read spend the session.
+    fn next_line(&mut self, deadline: Instant, timeout: Duration) -> Result<String, RuntimeError> {
+        let Some(inbound) = &self.inbound else {
+            return Err(retired_error());
+        };
+        match inbound.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Inbound::Line(line)) => Ok(line),
+            Ok(Inbound::NotUtf8) => Err(RuntimeError::Io {
+                message: "stream did not contain valid UTF-8".to_owned(),
+            }),
+            Ok(Inbound::Eof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(RuntimeError::UnexpectedEof)
+            }
+            Ok(Inbound::TooLong) => {
+                let limit = self.max_line;
+                self.retire();
+                Err(RuntimeError::Protocol {
+                    message: format!(
+                        "a line from the agent is longer than {limit} bytes; the session was ended"
+                    ),
+                })
+            }
+            Ok(Inbound::ReadFailed(message)) => {
+                self.retire();
+                Err(RuntimeError::Io { message })
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.retire();
+                Err(RuntimeError::Timeout { after: timeout })
+            }
+        }
+    }
 }
 
 /// Borrows the active session, refusing a `handle` that does not name it.
@@ -1047,11 +828,24 @@ fn active_mut<'session>(
 /// An ACP client: JSON-RPC 2.0 over one child process's stdio, enough to
 /// initialize, open a session, send a prompt and receive updates: ADR-0001
 /// "Agent protocol", `spec/API_SPEC.md` §4.
+///
+/// Each session owns three helper threads, a reader of the child's standard
+/// output, a writer of its standard input and a drain of its standard error,
+/// so that no call ever blocks on a pipe: every call is held to one deadline
+/// of `IO_TIMEOUT`. See the module doc comment, "Bounded reads and writes: one
+/// deadline per call", for what a timed-out call leaves behind (a spent
+/// session, a killed child) and how the threads stop.
 pub struct AcpClient {
     caps: RuntimeCaps,
     session: Option<ActiveAcpSession>,
     record_defect: DefectRecorder,
     clock: ClockFn,
+    /// The length of the deadline of each call and of `kill`'s wait:
+    /// `IO_TIMEOUT`, except in tests.
+    io_timeout: Duration,
+    /// The line cap a new session's reader is started with: `MAX_LINE_BYTES`,
+    /// except in tests.
+    max_line_bytes: usize,
 }
 
 impl AcpClient {
@@ -1072,7 +866,21 @@ impl AcpClient {
             session: None,
             record_defect: Box::new(record_defect),
             clock: Box::new(clock),
+            io_timeout: IO_TIMEOUT,
+            max_line_bytes: MAX_LINE_BYTES,
         }
+    }
+
+    /// The same client with a different call deadline and line cap, so that a
+    /// test can exercise the bounds in a fraction of a second and with a few
+    /// bytes. `#[cfg(test)]`: production code has exactly `IO_TIMEOUT` and
+    /// `MAX_LINE_BYTES`.
+    #[cfg(test)]
+    #[must_use]
+    fn with_limits(mut self, io_timeout: Duration, max_line_bytes: usize) -> Self {
+        self.io_timeout = io_timeout;
+        self.max_line_bytes = max_line_bytes;
+        self
     }
 
     /// The active session's protocol-level `sessionId`, absent before
@@ -1088,33 +896,45 @@ impl AcpClient {
     /// response arrives, answering any nested `session/request_permission`
     /// request along the way with `cancelled_outcome` and recording it,
     /// and recording any `session/update` notification into the transcript.
+    ///
+    /// The whole of it, the request's write, every wait for a line and every
+    /// reply it writes, is held to one deadline `timeout` after this call
+    /// begins; see the module doc comment, "Bounded reads and writes: one
+    /// deadline per call". Past it the call is [`RuntimeError::Timeout`] and
+    /// the session is spent.
     fn call(
         session: &mut ActiveAcpSession,
         method: &str,
         params: Value,
         at: Timestamp,
         record_defect: &mut dyn FnMut(LaunchDefect) -> Result<(), String>,
+        timeout: Duration,
     ) -> Result<Value, RuntimeError> {
+        if session.retired {
+            return Err(retired_error());
+        }
+        let deadline = Instant::now() + timeout;
         let id = Value::from(session.next_rpc_id);
         session.next_rpc_id += 1;
-        write_frame(
-            &mut session.stdin,
+        session.send_frame(
             &RpcRequest {
                 jsonrpc: "2.0",
                 id: id.clone(),
                 method: method.to_owned(),
                 params,
             },
+            deadline,
+            timeout,
         )?;
 
-        let deadline = Instant::now() + IO_TIMEOUT;
         loop {
-            if Instant::now() > deadline {
-                return Err(RuntimeError::Timeout { after: IO_TIMEOUT });
+            // Looked at before every wait, so an agent that never stops
+            // talking cannot keep the deadline from being looked at.
+            if Instant::now() >= deadline {
+                session.retire();
+                return Err(RuntimeError::Timeout { after: timeout });
             }
-            let Some(line) = read_line(&mut session.stdout)? else {
-                return Err(RuntimeError::UnexpectedEof);
-            };
+            let line = session.next_line(deadline, timeout)?;
             let frame: RawFrame =
                 serde_json::from_str(&line).map_err(|error| RuntimeError::Protocol {
                     message: error.to_string(),
@@ -1153,13 +973,14 @@ impl AcpClient {
                         &capped(&req_params),
                         &format!("refused: cancelled ({})", defect.reason),
                     )?)?;
-                    write_frame(
-                        &mut session.stdin,
+                    session.send_frame(
                         &RpcResponseOk {
                             jsonrpc: "2.0",
                             id: req_id,
                             result: cancelled_outcome(),
                         },
+                        deadline,
+                        timeout,
                     )?;
                 }
                 Incoming::Request {
@@ -1171,8 +992,7 @@ impl AcpClient {
                     // method-not-found error rather than left hanging: CLAUDE.md
                     // rule 8's "never keep grinding" applies to the agent on
                     // the other end of this pipe too.
-                    write_frame(
-                        &mut session.stdin,
+                    session.send_frame(
                         &RpcResponseErr {
                             jsonrpc: "2.0",
                             id: req_id,
@@ -1183,6 +1003,8 @@ impl AcpClient {
                                 ),
                             },
                         },
+                        deadline,
+                        timeout,
                     )?;
                 }
                 Incoming::Notification {
@@ -1237,15 +1059,30 @@ impl AcpClient {
         let stdout = child.stdout.take().ok_or_else(|| RuntimeError::Io {
             message: "the child's stdout was not piped".to_owned(),
         })?;
+        // The reader and writer threads start here, before the handshake, and
+        // live for the session: see the module doc comment, "Bounded reads and
+        // writes: one deadline per call". If one cannot start, the child is
+        // killed rather than left running unwatched.
+        let io = match start_io(stdin, stdout, self.max_line_bytes) {
+            Ok(io) => io,
+            Err(error) => {
+                let _ = kill_child(&mut child);
+                return Err(error);
+            }
+        };
         if let Some(stderr) = child.stderr.take() {
-            drain_stderr(stderr);
+            // The same flag that stops the reader stops this drain.
+            drain_stderr_until(stderr, Arc::clone(&io.cancel));
         }
 
         let mut session = ActiveAcpSession {
             id: spec.id.clone(),
             child,
-            stdin,
-            stdout: BufReader::new(stdout),
+            writer: Some(io.writer),
+            inbound: Some(io.inbound),
+            cancel: io.cancel,
+            max_line: self.max_line_bytes,
+            retired: false,
             acp_session_id: String::new(),
             next_rpc_id: 1,
             transcript: Transcript::new(),
@@ -1258,6 +1095,7 @@ impl AcpClient {
             json!({ "protocolVersion": ACP_PROTOCOL_VERSION, "clientCapabilities": {} }),
             at,
             self.record_defect.as_mut(),
+            self.io_timeout,
         );
         if let Err(error) = init_result {
             let _ = kill_child(&mut session.child);
@@ -1282,6 +1120,7 @@ impl AcpClient {
             }),
             at,
             self.record_defect.as_mut(),
+            self.io_timeout,
         );
         let acp_session_id = match new_session_result {
             Ok(value) => value
@@ -1296,7 +1135,7 @@ impl AcpClient {
         };
         session.acp_session_id = acp_session_id;
 
-        let handle = SessionHandle { id: spec.id };
+        let handle = SessionHandle::new(spec.id);
         self.session = Some(session);
         Ok(handle)
     }
@@ -1360,6 +1199,7 @@ impl AcpClient {
             }),
             at,
             self.record_defect.as_mut(),
+            self.io_timeout,
         )?;
         let stop_reason = result
             .get("stopReason")
@@ -1385,6 +1225,12 @@ impl AcpClient {
     /// Ends the session: closes stdin (which is what lets a well-behaved
     /// child see end-of-file and exit on its own), waits up to
     /// `IO_TIMEOUT`, and kills the child if it has not exited by then.
+    /// Dropping the session also stops the reader thread and the standard
+    /// error drain (their shared cancel flag is set, checked after each
+    /// read) and releases one blocked on a full queue; see the module doc
+    /// comment, "Bounded reads and writes: one deadline per call". A session
+    /// already spent by a timeout has no child left to wait for, so this
+    /// returns at once.
     ///
     /// # Errors
     ///
@@ -1405,8 +1251,10 @@ impl AcpClient {
                 });
             }
         };
-        drop(session.stdin);
-        let _ = wait_with_timeout(&mut session.child, IO_TIMEOUT);
+        // Dropping the sending end makes the writer thread close the child's
+        // stdin as soon as it has nothing queued.
+        session.writer = None;
+        let _ = wait_with_timeout(&mut session.child, self.io_timeout);
         Ok(())
     }
 }
@@ -1415,72 +1263,190 @@ impl AcpClient {
 // Shared process helpers (also used by `crate::headless`)
 // ---------------------------------------------------------------------------
 
-/// Writes one JSON-RPC frame as a line, flushing so the child sees it at
-/// once rather than sitting in this process's own output buffer.
-fn write_frame<T: Serialize>(stdin: &mut ChildStdin, frame: &T) -> Result<(), RuntimeError> {
-    let mut text = serde_json::to_string(frame).map_err(|error| RuntimeError::Protocol {
-        message: error.to_string(),
-    })?;
-    text.push('\n');
-    stdin
-        .write_all(text.as_bytes())
+/// Starts the writer and reader threads for one session and returns their
+/// ends: ORI-T-0143, AICD §12.
+///
+/// The writer owns `stdin` and writes one queued frame at a time, flushing so
+/// the child sees it at once rather than sitting in this process's own output
+/// buffer; when its queue's sending end is dropped it ends and so closes the
+/// child's stdin. The reader owns `stdout`; see [`read_frames`].
+///
+/// # Errors
+///
+/// [`RuntimeError::Io`] when a thread cannot be started. The caller kills the
+/// child.
+fn start_io(
+    mut stdin: ChildStdin,
+    stdout: ChildStdout,
+    max_line: usize,
+) -> Result<SessionIo, RuntimeError> {
+    let (writer, queue) = mpsc::channel::<WriteJob>();
+    std::thread::Builder::new()
+        .name("ori-acp-writer".to_owned())
+        .spawn(move || {
+            for job in queue {
+                let result = stdin.write_all(&job.bytes).and_then(|()| stdin.flush());
+                let failed = result.is_err();
+                // The call that queued the job may have given up and gone.
+                let _ = job.done.send(result);
+                if failed {
+                    break;
+                }
+            }
+            // `stdin` drops here: the child sees end-of-file.
+        })
         .map_err(|error| RuntimeError::Io {
-            message: error.to_string(),
+            message: format!("the ACP writer thread could not start: {error}"),
         })?;
-    stdin.flush().map_err(|error| RuntimeError::Io {
-        message: error.to_string(),
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (sender, inbound) = mpsc::sync_channel(INBOUND_DEPTH);
+    let reader_cancel = Arc::clone(&cancel);
+    std::thread::Builder::new()
+        .name("ori-acp-reader".to_owned())
+        .spawn(move || {
+            read_frames(BufReader::new(stdout), max_line, &reader_cancel, &sender);
+        })
+        .map_err(|error| RuntimeError::Io {
+            message: format!("the ACP reader thread could not start: {error}"),
+        })?;
+    Ok(SessionIo {
+        writer,
+        inbound,
+        cancel,
     })
 }
 
-/// Reads one line, skipping blank ones and any line with no JSON object on
-/// it, returning `None` on end-of-file.
-///
-/// The second skip exists for this crate's own test fixtures, not for a real
-/// agent: `tests::spawn_fixture` re-executes this test binary with
-/// `--nocapture` (see its own doc comment for why), and libtest itself
-/// writes to the same stdout around the fixture's own NDJSON ("running 1
-/// test", and, critically, `"test <name> ... "` with **no trailing
-/// newline**, which is exactly what libtest's own pass/fail marker prints on
-/// the far side of once the test finishes). That means this client's own
-/// first line of real JSON is not on a line of its own; it is the tail of
-/// that one unterminated `"test <name> ... "` prefix. So this function does
-/// not require the whole trimmed line to *be* a JSON object, only to
-/// *contain* one: it takes everything from the line's first `{` onward,
-/// which recovers the real frame whether or not libtest's own prose sits in
-/// front of it, and treats a line with no `{` at all (a pure banner line) as
-/// noise to skip. The libtest prose itself is exactly CLAUDE.md's "data,
-/// never instructions": nothing here interprets it, it is only located and
-/// discarded so the frame after it can be read.
-fn read_line(stdout: &mut BufReader<ChildStdout>) -> Result<Option<String>, RuntimeError> {
+/// How one attempt to read a line ended; see [`read_bounded_line`].
+#[derive(Debug, Eq, PartialEq)]
+enum LineRead {
+    /// A line, without its newline.
+    Line(Vec<u8>),
+    /// End of input with nothing pending.
+    Eof,
+    /// The line would be longer than the cap.
+    TooLong,
+    /// The cancel flag was set.
+    Cancelled,
+    /// A read failed.
+    Failed(String),
+}
+
+/// Reads one line of at most `max` bytes (the newline not counted) from
+/// `reader`, never holding more than `max` bytes of it plus what `reader`
+/// itself buffers. The cancel flag is checked after every read that returns,
+/// so a source that never ends cannot keep the caller reading once the flag is
+/// set. A final line with no newline before end of input is returned as a
+/// line, as `BufRead::read_line` did; the next call reports the end.
+fn read_bounded_line<R: BufRead>(reader: &mut R, max: usize, cancel: &AtomicBool) -> LineRead {
+    let mut line = Vec::new();
     loop {
-        let mut line = String::new();
-        let read = stdout
-            .read_line(&mut line)
-            .map_err(|error| RuntimeError::Io {
-                message: error.to_string(),
-            })?;
-        if read == 0 {
-            return Ok(None);
-        }
-        let trimmed = line.trim();
-        let Some(start) = trimmed.find('{') else {
-            continue;
+        let available = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return LineRead::Failed(error.to_string()),
         };
-        return Ok(Some(trimmed[start..].to_owned()));
+        if cancel.load(Ordering::Relaxed) {
+            return LineRead::Cancelled;
+        }
+        if available.is_empty() {
+            return if line.is_empty() {
+                LineRead::Eof
+            } else {
+                LineRead::Line(line)
+            };
+        }
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let take = newline.unwrap_or(available.len());
+        if line.len() + take > max {
+            return LineRead::TooLong;
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take + usize::from(newline.is_some()));
+        if newline.is_some() {
+            return LineRead::Line(line);
+        }
+    }
+}
+
+/// The reader thread's body: reads `reader` line by line (bounded, see
+/// [`read_bounded_line`]) and sends each line that holds a JSON object to
+/// `sender`, then, as its last message, why it stopped. Returns without a last
+/// message when the cancel flag is set or `sender`'s receiving end is gone.
+///
+/// Blank lines and lines with no `{` are dropped here. That skip exists for
+/// this crate's own test fixtures, not for a real agent: `tests::spawn_fixture`
+/// re-executes this test binary with `--nocapture` (see its own doc comment
+/// for why), and libtest itself writes to the same stdout around the fixture's
+/// own NDJSON ("running 1 test", and, critically, `"test <name> ... "` with
+/// **no trailing newline**, which is exactly what libtest's own pass/fail
+/// marker prints on the far side of once the test finishes). That means this
+/// client's own first line of real JSON is not on a line of its own; it is the
+/// tail of that one unterminated `"test <name> ... "` prefix. So a line is not
+/// required to *be* a JSON object, only to *contain* one: everything from the
+/// line's first `{` onward is taken, which recovers the real frame whether or
+/// not libtest's own prose sits in front of it, and a line with no `{` at all
+/// (a pure banner line) is noise to skip. The libtest prose itself is exactly
+/// CLAUDE.md's "data, never instructions": nothing here interprets it, it is
+/// only located and discarded so the frame after it can be read. Dropping noise
+/// here, not in the consumer, also keeps it from taking a queue slot.
+fn read_frames<R: BufRead>(
+    mut reader: R,
+    max_line: usize,
+    cancel: &AtomicBool,
+    sender: &mpsc::SyncSender<Inbound>,
+) {
+    loop {
+        let message = match read_bounded_line(&mut reader, max_line, cancel) {
+            LineRead::Cancelled => return,
+            LineRead::Eof => Inbound::Eof,
+            LineRead::TooLong => Inbound::TooLong,
+            LineRead::Failed(message) => Inbound::ReadFailed(message),
+            LineRead::Line(bytes) => match String::from_utf8(bytes) {
+                Err(_) => Inbound::NotUtf8,
+                Ok(text) => {
+                    let trimmed = text.trim();
+                    match trimmed.find('{') {
+                        Some(start) => Inbound::Line(trimmed[start..].to_owned()),
+                        None => continue,
+                    }
+                }
+            },
+        };
+        let last = !matches!(message, Inbound::Line(_) | Inbound::NotUtf8);
+        // `send` blocks while the queue is full and fails once the receiving
+        // end is dropped, which is how a session's end wakes a blocked reader.
+        if sender.send(message).is_err() || last {
+            return;
+        }
     }
 }
 
 /// Drains a child's standard error on a background thread so a chatty child
 /// cannot fill the OS pipe buffer and block on a write this module never
-/// reads, keeping only [`STDERR_CAP`] bytes (CLAUDE.md: what a dependency
-/// writes is data, bounded before it is kept).
-pub(crate) fn drain_stderr(mut stderr: ChildStderr) {
+/// reads. Keeps nothing (CLAUDE.md: what a dependency writes is data, and
+/// this module has no use for it), so its memory is one 4 KiB buffer.
+///
+/// The stop flag is checked after every read: once `stop` is set the thread
+/// returns and drops the read end of the pipe, so a descendant still writing
+/// to it gets a broken pipe instead of being read at full speed by a session
+/// that has already given up (ORI-T-0143, AICD §12). `std` cannot interrupt a
+/// blocked read, so a thread blocked on a silent pipe notices the flag only
+/// when the next byte or end-of-file arrives, and then ends. [`AcpClient`] and
+/// `crate::headless::HeadlessAdapter` both call this, each with a flag of its
+/// own (ORI-T-0150).
+pub(crate) fn drain_stderr_until(mut stderr: ChildStderr, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let mut buffer = [0_u8; 4096];
         loop {
             match stderr.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
                 Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+            if stop.load(Ordering::Relaxed) {
+                break;
             }
         }
     });
@@ -2114,12 +2080,12 @@ mod tests {
     fn ori_t_0033_spawn_refuses_a_launch_configuration_whose_stdin_is_not_piped() {
         let mut client = client(|_| Ok(()));
         let mut spec = spawn_fixture("well_behaved");
-        spec.launch = LaunchConfig::assemble(
+        spec.launch = LaunchConfig::new(
             spec.launch.program().to_owned(),
             spec.launch.args().to_vec(),
             StdioMode::Inherit,
-            true,
-        );
+        )
+        .expect("a non-empty program");
         let refusal = client
             .spawn(spec)
             .expect_err("stdin must be piped for the ACP client");
@@ -2153,7 +2119,7 @@ mod tests {
     #[test]
     fn ori_t_0033_a_call_against_an_unknown_handle_is_refused() {
         let mut client = client(|_| Ok(()));
-        let stranger = SessionHandle { id: id("STRNG") };
+        let stranger = SessionHandle::new(id("STRNG"));
         let refusal = client
             .prompt(&stranger, "hi")
             .expect_err("no session spawned yet");
@@ -2193,5 +2159,654 @@ mod tests {
     fn ori_t_0033_launch_config_refuses_an_empty_program() {
         let refusal = LaunchConfig::acp("   ", vec![]).expect_err("blank program refused");
         assert_eq!(refusal, LaunchConfigError::EmptyProgram);
+    }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0143: every read and write of a call is bounded by its deadline.
+    //
+    // Before this ticket `AcpClient::call` checked its deadline only between
+    // frames, around a blocking `read_line`, and wrote with a blocking
+    // `write_all`; a child that stayed alive and silent, wrote half a line,
+    // never read its stdin or wrote noise without end held the caller for as
+    // long as it lived. These tests run real children (a re-exec of this test
+    // binary, so they run on every platform) and bound every wait. The call
+    // deadline is a few hundred milliseconds, set through `with_limits` and
+    // the `io_timeout` field rather than waited out at `IO_TIMEOUT`'s twenty
+    // seconds; each misbehaving child holds for `T0143_HOLD_SECONDS`, far
+    // longer than the deadline plus `T0143_MARGIN`, so a call that waited on
+    // the child instead of the deadline fails the elapsed-time assertion (or
+    // sees the child exit and fails the error assertion) rather than passing
+    // slowly.
+    // -----------------------------------------------------------------------
+
+    const T0143_BEHAVIOR_VAR: &str = "ORI_T_0143_AGENT_BEHAVIOR";
+    const T0143_MARKER_VAR: &str = "ORI_T_0143_MARKER_PATH";
+    const T0143_AGENT_ENTRYPOINT: &str =
+        "ori_t_0143_misbehaving_agent_entrypoint_do_not_call_directly";
+    const T0143_FLOODER_ENTRYPOINT: &str =
+        "ori_t_0143_stderr_flooder_entrypoint_do_not_call_directly";
+    /// How long a misbehaving child (or its descendant) holds on before it
+    /// gives up by itself.
+    const T0143_HOLD_SECONDS: u64 = 15;
+    /// The call deadline the misbehaving-child tests use.
+    const T0143_SHORT: Duration = Duration::from_millis(500);
+    /// A deadline for a step that must succeed (a handshake in a freshly
+    /// started test binary on a loaded machine), never waited out.
+    const T0143_GENEROUS: Duration = Duration::from_secs(30);
+    /// How far past the deadline a correct call may be on a loaded machine.
+    /// Well under `T0143_HOLD_SECONDS` minus the deadline, so the margin
+    /// cannot hide the defect.
+    const T0143_MARGIN: Duration = Duration::from_secs(8);
+
+    fn t0143_write_raw(out: &mut std::io::Stdout, text: &str) -> bool {
+        out.write_all(text.as_bytes())
+            .and_then(|()| out.flush())
+            .is_ok()
+    }
+
+    fn t0143_read_request(input: &mut std::io::StdinLock<'_>) -> Option<Value> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if input.read_line(&mut line).ok()? == 0 {
+                return None;
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            return serde_json::from_str(line.trim()).ok();
+        }
+    }
+
+    fn t0143_reply(out: &mut std::io::Stdout, request: &Value, result: &Value) {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id").cloned().unwrap_or(Value::Null),
+            "result": result,
+        });
+        let _ = t0143_write_raw(out, &format!("{frame}\n"));
+    }
+
+    /// The misbehaving agent: behaves for `initialize` and `session/new`
+    /// (except the two `*_at_start` behaviours, which misbehave at once) and
+    /// then does what `behavior` names, for at most `T0143_HOLD_SECONDS`.
+    fn run_misbehaving_agent(behavior: &str) {
+        let hold = || std::thread::sleep(Duration::from_secs(T0143_HOLD_SECONDS));
+        let until = Instant::now() + Duration::from_secs(T0143_HOLD_SECONDS);
+        let mut out = std::io::stdout();
+        let stdin = std::io::stdin();
+        let mut input = stdin.lock();
+
+        match behavior {
+            "silent_at_start" => return hold(),
+            "partial_at_start" => {
+                let _ = t0143_write_raw(&mut out, "{\"jsonrpc\":\"2.0\",\"id\":1,\"resu");
+                return hold();
+            }
+            _ => {}
+        }
+
+        let Some(request) = t0143_read_request(&mut input) else {
+            return;
+        };
+        t0143_reply(
+            &mut out,
+            &request,
+            &json!({ "protocolVersion": ACP_PROTOCOL_VERSION, "agentCapabilities": {} }),
+        );
+        let Some(request) = t0143_read_request(&mut input) else {
+            return;
+        };
+        t0143_reply(&mut out, &request, &json!({ "sessionId": "t0143" }));
+
+        if behavior == "never_reads" {
+            return hold();
+        }
+        let Some(prompt) = t0143_read_request(&mut input) else {
+            return;
+        };
+        match behavior {
+            "silent" => hold(),
+            "partial" => {
+                let _ =
+                    t0143_write_raw(&mut out, "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"sto");
+                hold();
+            }
+            "noise" => {
+                let line = format!("{}\n", "noise ".repeat(600));
+                while Instant::now() < until && t0143_write_raw(&mut out, &line) {}
+            }
+            "chatty" => {
+                let note = json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": { "sessionId": "t0143", "update": { "sessionUpdate": "agent_message_chunk" } }
+                });
+                while Instant::now() < until && t0143_write_raw(&mut out, &format!("{note}\n")) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            "firehose" => {
+                // Valid notifications as fast as the pipe takes them: the
+                // reader always has a complete line queued for `call`.
+                let note = format!(
+                    "{}\n",
+                    json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "n": 1 } })
+                );
+                while Instant::now() < until && t0143_write_raw(&mut out, &note) {}
+            }
+            "long_line" => {
+                let _ = t0143_write_raw(&mut out, &format!("{{\"x\":\"{}\"}}\n", "a".repeat(5000)));
+                hold();
+            }
+            "slow_answer" => {
+                std::thread::sleep(Duration::from_millis(700));
+                t0143_reply(&mut out, &prompt, &json!({ "stopReason": "end_turn" }));
+                while t0143_read_request(&mut input).is_some() {}
+            }
+            "flood_stderr_descendant" => {
+                // A descendant that outlives this process and writes to the
+                // inherited stderr without end. Its stdout is closed so that
+                // only stderr is held.
+                if let Ok(exe) = std::env::current_exe() {
+                    let _ = Command::new(exe)
+                        .args([T0143_FLOODER_ENTRYPOINT, "--test-threads=1", "--nocapture"])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::inherit())
+                        .spawn();
+                }
+                hold();
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn ori_t_0143_misbehaving_agent_entrypoint_do_not_call_directly() {
+        let Ok(behavior) = std::env::var(T0143_BEHAVIOR_VAR) else {
+            // A normal `cargo test` run: not a re-exec, do nothing.
+            return;
+        };
+        run_misbehaving_agent(&behavior);
+    }
+
+    /// The descendant of the `flood_stderr_descendant` agent: writes to its
+    /// stderr until a write fails (the read end is gone) and then leaves a
+    /// marker file saying so, or gives up after `T0143_HOLD_SECONDS` and says
+    /// that instead.
+    #[test]
+    fn ori_t_0143_stderr_flooder_entrypoint_do_not_call_directly() {
+        let Ok(marker) = std::env::var(T0143_MARKER_VAR) else {
+            // A normal `cargo test` run: not a re-exec, do nothing.
+            return;
+        };
+        let until = Instant::now() + Duration::from_secs(T0143_HOLD_SECONDS);
+        let chunk = [b'e'; 4096];
+        let mut stderr = std::io::stderr();
+        while Instant::now() < until {
+            if stderr.write_all(&chunk).is_err() {
+                let _ = std::fs::write(&marker, "broken pipe");
+                return;
+            }
+        }
+        let _ = std::fs::write(&marker, "never saw a broken pipe");
+    }
+
+    fn t0143_spec(behavior: &str, extra_envs: &[(&str, &str)]) -> SessionSpec {
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let launch = LaunchConfig::acp(
+            exe.to_string_lossy().into_owned(),
+            vec![
+                T0143_AGENT_ENTRYPOINT.to_owned(),
+                "--test-threads=1".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+        )
+        .expect("a non-empty program");
+        let mut envs = vec![(T0143_BEHAVIOR_VAR.to_owned(), behavior.to_owned())];
+        envs.extend(
+            extra_envs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        );
+        SessionSpec {
+            id: id("FXTR1"),
+            launch,
+            cwd: std::env::temp_dir(),
+            envs,
+        }
+    }
+
+    fn t0143_client(io_timeout: Duration, max_line_bytes: usize) -> AcpClient {
+        client(|_| Ok(())).with_limits(io_timeout, max_line_bytes)
+    }
+
+    /// Spawns `behavior` with a deadline generous enough for the handshake,
+    /// then shortens the deadline for the call the test is about.
+    fn t0143_spawned(behavior: &str) -> (AcpClient, SessionHandle) {
+        let mut client = t0143_client(T0143_GENEROUS, MAX_LINE_BYTES);
+        let handle = client
+            .spawn(t0143_spec(behavior, &[]))
+            .expect("the handshake completes before the agent misbehaves");
+        client.io_timeout = T0143_SHORT;
+        (client, handle)
+    }
+
+    /// Polls `condition` every 10 ms for at most `bound`.
+    fn t0143_wait_until(bound: Duration, condition: impl Fn() -> bool) -> bool {
+        let until = Instant::now() + bound;
+        while Instant::now() < until {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        condition()
+    }
+
+    /// Asserts `prompt` timed out within the bound, and that the session was
+    /// spent the way the module doc comment says: the child killed and
+    /// reaped, a further `prompt` refused at once, the transcript still
+    /// readable, `kill` quick.
+    fn t0143_assert_timed_out_and_spent(
+        mut client: AcpClient,
+        handle: &SessionHandle,
+        started: Instant,
+        outcome: Result<StopReason, RuntimeError>,
+    ) {
+        let elapsed = started.elapsed();
+        assert_eq!(
+            outcome,
+            Err(RuntimeError::Timeout { after: T0143_SHORT }),
+            "the call is refused as a timeout"
+        );
+        assert!(
+            elapsed >= T0143_SHORT,
+            "the call waited out its deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < T0143_SHORT + T0143_MARGIN,
+            "the call returned near its deadline, not when the child gave up: {elapsed:?}"
+        );
+
+        let child = &mut client.session.as_mut().expect("the session is kept").child;
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "the timed-out call killed and reaped the child"
+        );
+
+        let again = Instant::now();
+        let refusal = client
+            .prompt(handle, "again")
+            .expect_err("a spent session refuses every later call");
+        assert!(
+            matches!(refusal, RuntimeError::Io { .. }),
+            "refused as an I/O error: {refusal:?}"
+        );
+        assert!(again.elapsed() < T0143_MARGIN, "refused promptly");
+
+        assert!(
+            client.transcript().is_some(),
+            "the transcript stays readable on a spent session"
+        );
+        let killing = Instant::now();
+        client.kill(handle).expect("kill still works");
+        assert!(
+            killing.elapsed() < T0143_MARGIN,
+            "kill on a spent session does not wait for a child"
+        );
+    }
+
+    fn t0143_assert_spawn_times_out(behavior: &str) {
+        let mut client = t0143_client(T0143_SHORT, MAX_LINE_BYTES);
+        let started = Instant::now();
+        let refusal = client
+            .spawn(t0143_spec(behavior, &[]))
+            .expect_err("an agent that never completes initialize cannot be spawned");
+        let elapsed = started.elapsed();
+        assert_eq!(refusal, RuntimeError::Timeout { after: T0143_SHORT });
+        assert!(
+            elapsed >= T0143_SHORT,
+            "spawn waited out its deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < T0143_SHORT + T0143_MARGIN,
+            "spawn returned near its deadline, not when the child gave up: {elapsed:?}"
+        );
+        assert!(
+            client.acp_session_id().is_none(),
+            "a failed spawn leaves no session"
+        );
+    }
+
+    #[test]
+    fn ori_t_0143_a_silent_child_makes_spawn_time_out_within_the_deadline() {
+        t0143_assert_spawn_times_out("silent_at_start");
+    }
+
+    #[test]
+    fn ori_t_0143_a_child_that_writes_a_partial_line_and_stops_makes_spawn_time_out() {
+        t0143_assert_spawn_times_out("partial_at_start");
+    }
+
+    #[test]
+    fn ori_t_0143_a_prompt_the_agent_never_answers_times_out_and_spends_the_session() {
+        let (mut client, handle) = t0143_spawned("silent");
+        let started = Instant::now();
+        let outcome = client.prompt(&handle, "hello");
+        t0143_assert_timed_out_and_spent(client, &handle, started, outcome);
+    }
+
+    #[test]
+    fn ori_t_0143_a_partial_line_in_reply_to_a_prompt_times_out_and_spends_the_session() {
+        let (mut client, handle) = t0143_spawned("partial");
+        let started = Instant::now();
+        let outcome = client.prompt(&handle, "hello");
+        t0143_assert_timed_out_and_spent(client, &handle, started, outcome);
+    }
+
+    #[test]
+    fn ori_t_0143_a_child_that_never_reads_its_stdin_cannot_block_a_write_past_the_deadline() {
+        let (mut client, handle) = t0143_spawned("never_reads");
+        // Far more than any pipe buffer holds (64 KiB on Linux, less
+        // elsewhere), so the write cannot complete into the pipe alone.
+        let big = "x".repeat(4 * 1024 * 1024);
+        let started = Instant::now();
+        let outcome = client.prompt(&handle, &big);
+        t0143_assert_timed_out_and_spent(client, &handle, started, outcome);
+    }
+
+    #[test]
+    fn ori_t_0143_endless_noise_lines_cannot_outlast_the_deadline() {
+        let (mut client, handle) = t0143_spawned("noise");
+        let started = Instant::now();
+        let outcome = client.prompt(&handle, "hello");
+        t0143_assert_timed_out_and_spent(client, &handle, started, outcome);
+    }
+
+    #[test]
+    fn ori_t_0143_a_chatty_agent_that_never_answers_still_times_out_and_keeps_its_transcript() {
+        let (mut client, handle) = t0143_spawned("chatty");
+        client.io_timeout = Duration::from_secs(1);
+        let started = Instant::now();
+        let outcome = client.prompt(&handle, "hello");
+        let elapsed = started.elapsed();
+        assert_eq!(
+            outcome,
+            Err(RuntimeError::Timeout {
+                after: Duration::from_secs(1)
+            })
+        );
+        assert!(elapsed >= Duration::from_secs(1), "{elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(1) + T0143_MARGIN,
+            "the deadline fires although frames keep arriving: {elapsed:?}"
+        );
+        let recorded = client.transcript().expect("kept").len();
+        assert!(
+            recorded >= 1,
+            "the notifications that arrived before the deadline were recorded: {recorded}"
+        );
+        client.kill(&handle).expect("teardown");
+    }
+
+    #[test]
+    fn ori_t_0143_an_agent_that_never_stops_sending_frames_cannot_keep_the_deadline_from_firing() {
+        let (mut client, handle) = t0143_spawned("firehose");
+        let started = Instant::now();
+        let outcome = client.prompt(&handle, "hello");
+        // The transcript grows for as long as frames keep arriving, so only
+        // the call's own outcome and time are asserted here.
+        let elapsed = started.elapsed();
+        assert_eq!(outcome, Err(RuntimeError::Timeout { after: T0143_SHORT }));
+        assert!(
+            elapsed < T0143_SHORT + T0143_MARGIN,
+            "a complete line is always queued, and the deadline still fired: {elapsed:?}"
+        );
+        client.kill(&handle).expect("teardown");
+    }
+
+    #[test]
+    fn ori_t_0143_a_line_past_the_cap_is_refused_and_spends_the_session() {
+        let mut client = t0143_client(T0143_GENEROUS, 1024);
+        let handle = client
+            .spawn(t0143_spec("long_line", &[]))
+            .expect("the handshake lines are under the cap");
+        client.io_timeout = T0143_SHORT;
+        let started = Instant::now();
+        let refusal = client
+            .prompt(&handle, "hello")
+            .expect_err("a 5000 byte line is past a 1024 byte cap");
+        match &refusal {
+            RuntimeError::Protocol { message } => {
+                assert!(message.contains("longer than 1024 bytes"), "{message}");
+            }
+            other => panic!("expected a protocol refusal, got {other:?}"),
+        }
+        assert!(
+            started.elapsed() < T0143_MARGIN,
+            "refused on the line, not at the deadline or the child's exit"
+        );
+        let child = &mut client.session.as_mut().expect("kept").child;
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "an out-of-step stream ends the child"
+        );
+        client.kill(&handle).expect("teardown");
+    }
+
+    #[test]
+    fn ori_t_0143_a_slow_agent_that_answers_within_the_deadline_is_not_cut_off() {
+        let mut client = t0143_client(T0143_GENEROUS, MAX_LINE_BYTES);
+        let handle = client
+            .spawn(t0143_spec("slow_answer", &[]))
+            .expect("the handshake completes");
+        let stop_reason = client
+            .prompt(&handle, "hello")
+            .expect("an answer 700 ms in is inside a 30 s deadline");
+        assert_eq!(stop_reason, StopReason::EndTurn);
+        assert_eq!(client.transcript().expect("kept").len(), 1);
+        client.kill(&handle).expect("teardown");
+    }
+
+    #[test]
+    fn ori_t_0143_a_timeout_is_a_failure_not_a_refusal_and_says_so() {
+        let timeout = RuntimeError::Timeout {
+            after: Duration::from_secs(1),
+        };
+        assert_eq!(timeout.methodology_ref(), None);
+        assert!(!timeout.is_refusal());
+        assert!(!timeout.to_string().is_empty());
+    }
+
+    // The pure parts of the reader, over in-memory sources.
+
+    #[test]
+    fn ori_t_0143_a_line_is_cut_at_the_cap_and_not_one_byte_later() {
+        let cancel = AtomicBool::new(false);
+        // A 3 byte buffer, so the line spans several reads.
+        let mut at_cap = BufReader::with_capacity(3, std::io::Cursor::new(b"12345678\nrest\n"));
+        assert_eq!(
+            read_bounded_line(&mut at_cap, 8, &cancel),
+            LineRead::Line(b"12345678".to_vec())
+        );
+        assert_eq!(
+            read_bounded_line(&mut at_cap, 8, &cancel),
+            LineRead::Line(b"rest".to_vec())
+        );
+        assert_eq!(read_bounded_line(&mut at_cap, 8, &cancel), LineRead::Eof);
+
+        let mut past_cap = BufReader::with_capacity(3, std::io::Cursor::new(b"123456789\n"));
+        assert_eq!(
+            read_bounded_line(&mut past_cap, 8, &cancel),
+            LineRead::TooLong
+        );
+        // And with no newline at all: the cap holds without one.
+        let mut unterminated = BufReader::with_capacity(3, std::io::Cursor::new(b"123456789"));
+        assert_eq!(
+            read_bounded_line(&mut unterminated, 8, &cancel),
+            LineRead::TooLong
+        );
+    }
+
+    #[test]
+    fn ori_t_0143_an_unterminated_final_line_is_a_line_and_then_the_end() {
+        let cancel = AtomicBool::new(false);
+        let mut reader = std::io::Cursor::new(b"ab\ncd");
+        assert_eq!(
+            read_bounded_line(&mut reader, 64, &cancel),
+            LineRead::Line(b"ab".to_vec())
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 64, &cancel),
+            LineRead::Line(b"cd".to_vec())
+        );
+        assert_eq!(read_bounded_line(&mut reader, 64, &cancel), LineRead::Eof);
+    }
+
+    #[test]
+    fn ori_t_0143_a_set_cancel_flag_ends_a_line_read_once_the_read_returns() {
+        let cancel = AtomicBool::new(true);
+        let mut reader = std::io::Cursor::new(b"ab\n");
+        assert_eq!(
+            read_bounded_line(&mut reader, 64, &cancel),
+            LineRead::Cancelled
+        );
+    }
+
+    #[test]
+    fn ori_t_0143_noise_is_dropped_and_json_is_recovered_from_its_first_brace() {
+        let cancel = AtomicBool::new(false);
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let source: &[u8] =
+            b"running 1 test\n\ntest x ... {\"a\":1}\n\xff\xfe\n  {\"b\":2}  \r\nno json\n";
+        read_frames(std::io::Cursor::new(source), 1024, &cancel, &sender);
+        drop(sender);
+        let got: Vec<String> = receiver
+            .iter()
+            .map(|message| match message {
+                Inbound::Line(text) => text,
+                Inbound::NotUtf8 => "not utf-8".to_owned(),
+                Inbound::Eof => "eof".to_owned(),
+                Inbound::TooLong => "too long".to_owned(),
+                Inbound::ReadFailed(text) => format!("failed {text}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            ["{\"a\":1}", "not utf-8", "{\"b\":2}", "eof"],
+            "banner lines are skipped, the frame after libtest's prose is recovered, a bad line \
+             is reported and the stream goes on, and the end is the last message"
+        );
+    }
+
+    /// An endless source of blank lines that ends by itself after 20 seconds,
+    /// so a test of a defective reader cannot spin for ever.
+    struct Newlines {
+        until: Instant,
+    }
+
+    impl Read for Newlines {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if Instant::now() >= self.until {
+                return Ok(0);
+            }
+            buffer.fill(b'\n');
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn ori_t_0143_the_reader_stops_draining_once_the_cancel_flag_is_set() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reader_cancel, reader_done) = (Arc::clone(&cancel), Arc::clone(&done));
+        let _reader = std::thread::spawn(move || {
+            let source = Newlines {
+                until: Instant::now() + Duration::from_secs(20),
+            };
+            read_frames(BufReader::new(source), 1024, &reader_cancel, &sender);
+            reader_done.store(true, Ordering::SeqCst);
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "an endless source keeps the reader reading until it is told to stop"
+        );
+        cancel.store(true, Ordering::SeqCst);
+        assert!(
+            t0143_wait_until(T0143_MARGIN, || done.load(Ordering::SeqCst)),
+            "the reader returned soon after the flag was set"
+        );
+        drop(receiver);
+    }
+
+    #[test]
+    fn ori_t_0143_a_reader_blocked_on_a_full_queue_stops_when_the_receiver_is_dropped() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let reader_done = Arc::clone(&done);
+        let reader_cancel = Arc::clone(&cancel);
+        let _reader = std::thread::spawn(move || {
+            let lines = "{\"a\":1}\n".repeat(100).into_bytes();
+            read_frames(std::io::Cursor::new(lines), 1024, &reader_cancel, &sender);
+            reader_done.store(true, Ordering::SeqCst);
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "a full queue holds the reader: this is the bound on unread output"
+        );
+        assert!(matches!(receiver.recv(), Ok(Inbound::Line(_))));
+        drop(receiver);
+        assert!(
+            t0143_wait_until(T0143_MARGIN, || done.load(Ordering::SeqCst)),
+            "dropping the receiving end released the reader"
+        );
+    }
+
+    // A descendant writing to stderr without end, after the session gave up.
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0143_a_descendant_writing_to_stderr_is_no_longer_drained_once_the_session_gives_up() {
+        let scratch = Scratch::new("t0143-stderr");
+        let marker = scratch.path.join("flooder-marker");
+        let marker_text = marker.to_string_lossy().into_owned();
+
+        let mut client = t0143_client(T0143_GENEROUS, MAX_LINE_BYTES);
+        let handle = client
+            .spawn(t0143_spec(
+                "flood_stderr_descendant",
+                &[(T0143_MARKER_VAR, &marker_text)],
+            ))
+            .expect("the handshake completes");
+        client.io_timeout = T0143_SHORT;
+        let refusal = client
+            .prompt(&handle, "hello")
+            .expect_err("the agent never answers");
+        assert_eq!(refusal, RuntimeError::Timeout { after: T0143_SHORT });
+
+        // The agent is dead, its descendant is not, and it is still writing to
+        // the stderr pipe. If the drain went on reading it, the descendant
+        // would never see the pipe close and would run to its own limit
+        // (`T0143_HOLD_SECONDS`) and say so; with the stop flag the drain
+        // dropped the read end and the descendant's next write failed.
+        assert!(
+            t0143_wait_until(T0143_MARGIN, || std::fs::read_to_string(&marker)
+                .is_ok_and(|text| !text.is_empty())),
+            "the descendant's stderr writes should have failed soon after the session gave up"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("the marker is readable"),
+            "broken pipe",
+            "the drain stopped and closed the read end"
+        );
+        client.kill(&handle).expect("teardown");
     }
 }

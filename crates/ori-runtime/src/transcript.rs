@@ -65,100 +65,18 @@
 //! Must not: write `spec/` or `ops/` (CLAUDE.md rule 5, `spec/LLD.md` section
 //! 2), or hold a credential (CLAUDE.md rule 4; see above).
 
-use core::fmt;
-use std::error::Error;
 use std::path::Path;
+#[cfg(test)]
 use std::path::PathBuf;
 
 use ori_core::types::Timestamp;
 
-/// One entry of a session transcript: AICD §17.
-///
-/// The per-action part of AICD §17's audit-trail sentence: "which tool, what
-/// input, what output, when", plus the attempt it belongs to. `tool` is
-/// absent for an entry that is the agent's own reasoning or a note rather than
-/// a tool call.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Entry {
-    attempt: u32,
-    at: Timestamp,
-    tool: Option<String>,
-    input: String,
-    output: String,
-}
-
-impl Entry {
-    /// One entry, refusing an attempt numbered zero, a blank tool name given
-    /// as `Some`, and an entry with neither input nor output.
-    ///
-    /// An attempt numbered from one matches
-    /// `ori_orchestrator::budgets::Approach::new`'s same refusal, for the same
-    /// reason: criterion ORI-P1-009 turns on the attempts being distinguishable
-    /// and counted, and a zeroth attempt is not a thing that happened. An entry
-    /// with nothing in either field is a line that would occupy a slot in the
-    /// record and prove nothing, which is exactly the record this criterion
-    /// asks not to be empty.
-    pub fn new(
-        attempt: u32,
-        at: Timestamp,
-        tool: Option<&str>,
-        input: &str,
-        output: &str,
-    ) -> Result<Self, TranscriptError> {
-        if attempt == 0 {
-            return Err(TranscriptError::AttemptNotNumbered);
-        }
-        let tool = match tool {
-            Some(name) if name.trim().is_empty() => {
-                return Err(TranscriptError::Blank { field: "tool" });
-            }
-            Some(name) => Some(name.trim().to_owned()),
-            None => None,
-        };
-        if input.trim().is_empty() && output.trim().is_empty() {
-            return Err(TranscriptError::Blank {
-                field: "input or output",
-            });
-        }
-        Ok(Self {
-            attempt,
-            at,
-            tool,
-            input: input.to_owned(),
-            output: output.to_owned(),
-        })
-    }
-
-    /// Which attempt this entry belongs to, numbered from one.
-    #[must_use]
-    pub const fn attempt(&self) -> u32 {
-        self.attempt
-    }
-
-    /// When this entry happened.
-    #[must_use]
-    pub const fn at(&self) -> Timestamp {
-        self.at
-    }
-
-    /// The tool this entry is about, absent for the agent's own reasoning.
-    #[must_use]
-    pub fn tool(&self) -> Option<&str> {
-        self.tool.as_deref()
-    }
-
-    /// What went in.
-    #[must_use]
-    pub fn input(&self) -> &str {
-        &self.input
-    }
-
-    /// What came out.
-    #[must_use]
-    pub fn output(&self) -> &str {
-        &self.output
-    }
-}
+// `Entry` and `TranscriptError` are declared in `ori-core` since ORI-T-0141,
+// because `AgentRuntime::recv` returns entries and `RuntimeError` holds a
+// `TranscriptError` (`spec/API_SPEC.md` section 4, `spec/LLD.md` section 2).
+// They are re-exported here at the paths they always had.
+pub use ori_core::adapters::Entry;
+pub use ori_core::adapters::TranscriptError;
 
 /// A session transcript: an ordered, append-only record of [`Entry`] values:
 /// AICD §17.
@@ -226,16 +144,16 @@ impl Transcript {
     /// replaying a stale reading or has two attempts confused with each other.
     pub fn record(&self, entry: Entry) -> Result<Self, TranscriptError> {
         if let Some(last) = self.entries.last() {
-            if entry.at < last.at {
+            if entry.at() < last.at() {
                 return Err(TranscriptError::OutOfOrder {
-                    at: entry.at,
-                    last: last.at,
+                    at: entry.at(),
+                    last: last.at(),
                 });
             }
-            if entry.attempt < last.attempt {
+            if entry.attempt() < last.attempt() {
                 return Err(TranscriptError::AttemptWentBackward {
-                    attempt: entry.attempt,
-                    last: last.attempt,
+                    attempt: entry.attempt(),
+                    last: last.attempt(),
                 });
             }
         }
@@ -331,8 +249,8 @@ fn render(entry: &Entry) -> String {
     };
     format!(
         "{}\t{}\t{}\t{}\t{}\n",
-        entry.attempt,
-        entry.at.millis(),
+        entry.attempt(),
+        entry.at().millis(),
         tool_field,
         escape(entry.input()),
         escape(entry.output())
@@ -386,107 +304,6 @@ fn parse(line: &str, path: &Path, line_no: usize) -> Result<Entry, TranscriptErr
     )
     .map_err(|_| corrupt("the recorded fields do not form a valid entry"))
 }
-
-/// Everything this module refuses or cannot read: AICD §17.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum TranscriptError {
-    /// An entry was recorded against attempt zero.
-    AttemptNotNumbered,
-    /// A required field was blank.
-    Blank {
-        /// The field, named as [`Entry::new`]'s doc comment names it.
-        field: &'static str,
-    },
-    /// An entry was timestamped before the last one recorded.
-    OutOfOrder {
-        /// The time the new entry claims.
-        at: Timestamp,
-        /// The time the last recorded entry claims.
-        last: Timestamp,
-    },
-    /// An entry's attempt number is lower than the last one recorded.
-    AttemptWentBackward {
-        /// The attempt the new entry claims.
-        attempt: u32,
-        /// The attempt the last recorded entry claims.
-        last: u32,
-    },
-    /// The filesystem refused the read or the write.
-    Io {
-        /// The path involved.
-        path: PathBuf,
-        /// What the operating system reported.
-        message: String,
-    },
-    /// A file [`Transcript::read_from`] read does not parse as one this
-    /// module would have written.
-    Corrupt {
-        /// The file.
-        path: PathBuf,
-        /// The line, numbered from one.
-        line: usize,
-        /// What about it did not parse.
-        reason: &'static str,
-    },
-}
-
-impl TranscriptError {
-    /// The methodology section this refusal rests on: AICD §17, the section
-    /// that makes the record a control in the first place. The two variants
-    /// that report a filesystem or a parse failure rather than an ordering
-    /// rule return `None`, the same split `crate::session::SessionError`
-    /// draws between a refusal and a value failing to parse.
-    ///
-    /// `spec/CONVENTIONS.md` names `thiserror` as the house convention; ruling
-    /// R20 in `ops/rulings.md` defers it and states what stands until then, "a
-    /// hand-written `Display` and `std::error::Error` implementation [...],
-    /// with a comment naming the conversion", which is what this is.
-    #[must_use]
-    pub const fn is_refusal(&self) -> bool {
-        !matches!(self, Self::Io { .. } | Self::Corrupt { .. })
-    }
-}
-
-impl fmt::Display for TranscriptError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AttemptNotNumbered => f.write_str(
-                "an entry is recorded against attempt 0, and attempts are numbered from 1",
-            ),
-            Self::Blank { field } => write!(
-                f,
-                "a transcript entry needs \"{field}\" and this one leaves it blank"
-            ),
-            Self::OutOfOrder { at, last } => {
-                write!(
-                    f,
-                    "an entry at {at} is before the last one recorded, at {last}"
-                )
-            }
-            Self::AttemptWentBackward { attempt, last } => write!(
-                f,
-                "an entry for attempt {attempt} follows one for attempt {last}, which is backward"
-            ),
-            Self::Io { path, message } => {
-                write!(
-                    f,
-                    "{} could not be read or written: {message}",
-                    path.display()
-                )
-            }
-            Self::Corrupt { path, line, reason } => {
-                write!(
-                    f,
-                    "{}:{line} does not parse as a transcript entry: {reason}",
-                    path.display()
-                )
-            }
-        }
-    }
-}
-
-impl Error for TranscriptError {}
 
 #[cfg(test)]
 mod tests {

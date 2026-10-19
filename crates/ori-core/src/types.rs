@@ -197,7 +197,8 @@ impl fmt::Display for Timestamp {
 /// action to name its performer. `spec/DATA_MODEL.md` section 2 gives `Event` the
 /// field as "actor (human identity or agent identity or system)" and its section
 /// 4 states the invariant this enum exists to make representable: "Every `Event`
-/// has an actor; `system` is allowed only for scheduled triggers and watchers".
+/// has an actor; `system` is allowed only for scheduled triggers, watchers, and
+/// the engine's recovery after a restart".
 ///
 /// The `Event` entity itself belongs to `ori-store` (`spec/LLD.md` section 2);
 /// this is only the value its actor field and `Ticket.filed_by` hold.

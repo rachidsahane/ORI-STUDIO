@@ -8,7 +8,11 @@
 //! (`spec/LLD.md` section 2).
 
 pub mod barrier;
+pub mod citation;
 pub mod code_map;
+pub mod drift;
 pub mod freshness;
 pub mod indexer;
+pub mod oplog;
+pub mod retrieval;
 pub mod scope;

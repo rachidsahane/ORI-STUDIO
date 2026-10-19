@@ -50,7 +50,7 @@ Rules: no secret in the repository, in `.env` files tracked by git, in fixtures,
 
 ## 5. Permission manifest per identity
 
-Enforced by the broker (credential scopes), the orchestrator (ticket and merge rules), the memory scope enforcer, the MCP tool scopes and the runtime (container mounts). Any deviation is a decisional ticket and an update to this table.
+Enforced by the broker (credential scopes), the orchestrator (ticket and merge rules), the memory scope enforcer, the MCP tool scopes and the runtime (container mounts). A deviation from an identity's row is a decisional ticket and an update to this table. The operator's exposure of one of the operator's own MCP servers to a role is not a change to this table: it is the operator's act, recorded as an event, and it can widen what the role reaches beyond its row (below).
 
 All identities run in auto mode: no interactive prompts; the row is what they receive at spawn.
 
@@ -66,6 +66,8 @@ All identities run in auto mode: no interactive prompts; the row is what they re
 | implementor (bootstrap only) | Read; write `spec/`, `ops/`, `.github/`, `templates/`, `scripts/aicd/` on a bootstrap branch | None | None | None | Create backlog | Write on bootstrap branch | All | Installation token scoped to the bootstrap branch |
 | operator (human) | Everything | Everything | Everything | Approves releases | Everything | Everything | Everything | Owns the keychain |
 
+Exposing a server of the operator's to a role can widen that role beyond this manifest. A tool of a server added with `project.mcp.add` reaches whatever that server reaches, which may be a file, a repository or a system that the role's row above denies it, and Ori cannot tell which (API_SPEC section 3, "Proxied tools"). The server may also hold its own credentials, and tools that act with them outside Ori's merge queue. Exposure is therefore the operator's act, never an agent's and never a default: the operator makes it with `exposed_to_roles` when adding the server, together with the explicit acknowledgement of that reach (`acknowledged_reach`, true; a server added without it is exposed to no role), and it is recorded as an event (`mcp.server_added`, which carries the acknowledgement, and `mcp.server_removed`; API_SPEC section 2). It changes no row of the table above, and it is not a deviation in the sense of the preamble above the table.
+
 ## 6. Forbidden actions (the test, AICD §23 G3)
 
 One per identity, attempted at launch, on every permission change, and in the release pipeline; each must be refused and the refusal recorded:
@@ -80,6 +82,8 @@ One per identity, attempted at launch, on every permission change, and in the re
 | product_signal | Create a ticket in a category other than product signal |
 | assistant | Write any file |
 | any | Read the keychain; read `.env*`; call a network host not in the integration configuration |
+
+The test exercises Ori's own tools and Ori's own credentials. It does not go through proxied tools, so an exposure can give a role a reach the test does not see: the refusal recorded for `qa` writing a file in the repository says nothing about a tool of an exposed server of the operator's. The operator's acknowledgement (API_SPEC section 3, "Proxied tools"), recorded in `mcp.server_added`, is the record of that reach.
 
 ## 7. Migration-time permissions
 

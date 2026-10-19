@@ -15,9 +15,19 @@ pub mod coverage;
 /// honestly report (`spec/DATA_MODEL.md` section 2).
 pub mod gate;
 
-/// The methodology's machine-readable section index and its generator (AICD §39).
-/// The detector that makes CLAUDE.md's never-modify-a-test rule real (AICD §14).
+/// The liveness definition: whether an expected workflow or agent run happened
+/// inside its window, and when a missing run makes an installed gate inert
+/// (AICD §14, `spec/PRD.md` section 4.11, O-06).
+pub mod liveness;
+
+/// The modified-test detector: reports an existing test that a diff modified,
+/// weakened or removed, the check gate 5 of `spec/CI_CD.md` section 1 names
+/// (AICD §14).
 pub mod modified_tests;
+
+/// The prover: a gate is proven only by a clean pass and a failure on its
+/// planted defect, and every other pair of outcomes is a refusal (AICD §14).
+pub mod prover;
 
 /// The [`crate::runner::Runner`] trait and [`crate::runner::Registry`], which
 /// pairs a [`crate::gate::GateDef`] with an optional runner and is the only
@@ -25,11 +35,12 @@ pub mod modified_tests;
 /// (`spec/LLD.md` section 2).
 pub mod runner;
 
+/// The methodology's machine-readable section index and its generator (AICD §39).
 pub mod sections;
 
-/// The index of this repository's own specification and the reader that
-/// resolves prose references to it (AICD §39).
 /// Gate 12: the significance labeler (AICD §15).
 pub mod significance;
 
+/// The index of this repository's own specification and the reader that
+/// resolves prose references to it (AICD §39).
 pub mod spec_refs;

@@ -5,6 +5,7 @@ Every module of the repository with its tier and the reason. Maintained with the
 | Path | Tier | Reason |
 |---|---|---|
 | crates/ori-core (state machines, permission function) | 2 | Control structure |
+| crates/ori-core/src/adapters.rs, adapters/identity.rs | 2 | Identities, credentials, the merge method's contract |
 | crates/ori-core (other types) | 1 | |
 | crates/ori-store/src/event_log.rs, migrations/ | 2 | Audit trail, data integrity |
 | crates/ori-store (projections) | 1 | Rebuildable |
@@ -21,7 +22,10 @@ Every module of the repository with its tier and the reason. Maintained with the
 | crates/ori-watch/src/attribution.rs | 2 | Unattributed change detection |
 | crates/ori-watch (watcher, hooks) | 1 | |
 | crates/ori-mcp (server tool scopes) | 2 | What agents can do |
-| crates/ori-mcp (host) | 1 | |
+| crates/ori-mcp/src/scopes.rs, ports.rs, server.rs, tools/ | 2 | What agents can do |
+| crates/ori-mcp/src/host/registry.rs | 2 | Which operator MCP servers are exposed; feeds `ToolScopes::authorize_user_tool` |
+| crates/ori-mcp (host) | 1 | MCP host client and transport; not the server registry |
+| crates/ori-mcp/src/protocol.rs | 1 | The shared MCP wire |
 | crates/ori-integrations (merge exposure, webhook verification) | 2 | |
 | crates/ori-integrations (adapters otherwise) | 1 | |
 | crates/ori-notify, ori-calibration | 1 | |

@@ -1,0 +1,15 @@
+[package]
+name = "parceltrack"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Record parcels and follow them through a carrier network from the command line."
+license = "MIT"
+publish = false
+
+# This package is its own workspace root. Without the empty table below, cargo
+# walks up from here, finds a different workspace in an enclosing directory,
+# and refuses to build this package because that workspace does not list it.
+[workspace]
+
+[dependencies]

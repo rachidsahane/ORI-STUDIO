@@ -83,6 +83,28 @@ confidence-threshold = 0.93
 multiple-versions = "deny"
 wildcards = "deny"
 allow-wildcard-paths = false
+# E-0009 (ops/escalations/E-0009-the-notify-crate.md, answered by the operator
+# on 2026-10-12): the one version-pinned exception to `multiple-versions`.
+# `windows-sys` is locked at 0.60.2 (through `keyring`, `notify` and
+# `winapi-util`) and at 0.61.2, which only `mio` 1.x brings in, under `notify`.
+# It is pinned to the version: a third `windows-sys`, a change of 0.61.2 itself,
+# and any other crate's duplicate are still refused. A bump of the 0.60 line
+# alone is not seen while 0.61.2 is skipped, because only one other version is
+# then left to count. It is not a general relaxation.
+#
+# The skip is sound only while `mio` is the one dependent of `windows-sys`
+# 0.61.2, and the `deny` entry below enforces that: any 0.61 release is banned
+# unless its direct parent is `mio`, so a second dependent of 0.61.2, such as
+# `winapi-util` after a lock refresh (it accepts windows-sys up to 0.61), fails
+# gate 7. The entry names `windows-sys@0.61` and not `windows-sys@0.61.2`,
+# because cargo-deny 0.20.2 refuses the identical spec in both `skip` and
+# `deny` ("a crate was specified in both") and accepts this one.
+skip = [
+    { crate = "windows-sys@0.61.2", reason = "E-0009: only mio 1.x under notify 8.2.0 depends on windows-sys 0.61; notify takes mio on Linux, Android, the BSDs and iOS (and on macOS only under its macos_kqueue feature) and mio takes windows-sys on Windows only, so on no single target do both windows-sys versions build" },
+]
+deny = [
+    { crate = "windows-sys@0.61", wrappers = ["mio"], reason = "E-0009: the skip of windows-sys 0.61.2 rests on mio being its only dependent; any other crate depending on a 0.61 release would let both versions build on one target" },
+]
 
 [sources]
 unknown-registry = "deny"

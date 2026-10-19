@@ -1,0 +1,121 @@
+--- a/crates/ori-watch/src/watcher.rs
++++ b/crates/ori-watch/src/watcher.rs
+@@ -310,6 +310,10 @@
+ //! 3. a loss that [`TreeWatcher::mark_reconciled`] finds is held at once and
+ //!    delivered in the next batch (only the root's can be found there).
+ //!
++//! One state overrides all three: when the backend stops, [`Health::Stopped`]
++//! replaces whatever was held, and a loss not yet delivered is not delivered.
++//! A stopped watcher is replaced, so nothing is silent.
++//!
+ //! The five are:
+ //!
+ //! - the backend reports an overflow or a rescan notice
+@@ -420,8 +424,11 @@
+ //!   backend. `ReadDirectoryChangesW` reports the entries *in* a watched
+ //!   directory and never the directory itself; when the watched directory is
+ //!   deleted the completion routine gets `ERROR_ACCESS_DENIED`, and notify
+-//!   answers it by unwatching and returning, with no event (`windows.rs`,
+-//!   `handle_event`, the `ERROR_ACCESS_DENIED` arm). The watcher's own look at
++//!   unwatches it, with no event, once the directory's name has gone from its
++//!   parent (`windows.rs`, `handle_event`, the `ERROR_ACCESS_DENIED` arm, which
++//!   asks `dir.exists()`). While the directory is delete-pending, `exists()`
++//!   still answers yes, and notify re-arms the read on the dead handle, so its
++//!   handle stays open. The watcher's own look at
+ //!   the root (above) records the removal at the next
+ //!   [`TreeWatcher::next_batch`] or at the next
+ //!   [`TreeWatcher::mark_reconciled`], whichever comes first, and
+@@ -1326,7 +1333,8 @@
+     /// [`Batch::changes`] and the counters set, so ignoring is visible.
+     ///
+     /// Every call, including one in which nothing arrived, looks at the root
+-    /// until the root is known gone: one `symlink_metadata` call, a cost
++    /// until the root is known gone: one `symlink_metadata` call and, on
++    /// Windows, one open, a cost
+     /// accepted for AICD §14 (a backend need not report the root's removal, and
+     /// a watcher that cannot say so reads as a quiet tree). The look runs after
+     /// the queue was read and before the new-directory scan, not at the end of
+@@ -1395,12 +1403,14 @@
+         // A loss `mark_reconciled` found is in the health already; the batch
+         // lists it too, and does not record it again. The backend's report of
+         // the same removal in this window was dropped by `root_gone_known`, so
+-        // the batch lists it once.
++        // the batch lists it once. It is listed first, with the time it was
++        // found, as the health holds it, ahead of what this window saw.
+         if let Some(at) = self.root_gone_undelivered.take() {
+-            match &mut batch.missed {
+-                Some(missed) => missed.record(MissedReason::RootGone),
+-                None => batch.missed = Some(MissedChanges::new(MissedReason::RootGone, at)),
++            let mut delivered = MissedChanges::new(MissedReason::RootGone, at);
++            if let Some(missed) = &batch.missed {
++                delivered.absorb(missed);
+             }
++            batch.missed = Some(delivered);
+         }
+         if received || batch.missed.is_some() {
+             Ok(Some(batch))
+@@ -4143,13 +4153,57 @@
+         assert_eq!(watcher.generation, generation + 1);
+     }
+ 
+-    // No `cfg`. The backend is live and holds the root open. Where the volume
+-    // deletes with POSIX semantics (Linux, macOS, most Windows runners) the
+-    // name goes at once and the metadata alone sees it. Where a directory
+-    // removed while a handle is open stays delete-pending, still listed but
+-    // not openable, only the look's open does: `std`'s metadata falls back to
+-    // the parent's listing there. This could not be run on Windows from the
+-    // container that wrote it; CI's Windows leg runs it.
++    // No `cfg`. A loss `mark_reconciled` found reaches the next batch beside a
++    // loss that batch saw itself: the root is listed first, with the time it
++    // was found, so the batch reads as the health holds it.
++    #[test]
++    fn ori_t_0163_a_found_loss_delivered_beside_another_keeps_its_place_and_time() {
++        let scratch = Scratch::new("rootgone-found-beside");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        fs::remove_dir_all(&root).unwrap();
++
++        let token = watcher.begin_reconcile();
++        assert!(
++            !watcher.mark_reconciled(token),
++            "a removed root was reconciled as healthy"
++        );
++        let found_at = held_missed_state(&watcher).first_observed_at;
++        std::thread::sleep(Duration::from_millis(20));
++        watcher.inject(Raw::Missed(MissedReason::Overflow, now()));
++
++        let batches = drain_until_quiet(&mut watcher);
++        let carrying: Vec<&MissedChanges> = batches
++            .iter()
++            .filter_map(|batch| batch.missed.as_ref())
++            .filter(|missed| missed.reasons.contains(&MissedReason::RootGone))
++            .collect();
++        assert_eq!(
++            carrying.len(),
++            1,
++            "the loss a reconciliation found must reach exactly one batch; got {batches:?}"
++        );
++        let delivered = carrying[0];
++        assert_eq!(
++            delivered.reasons,
++            vec![MissedReason::RootGone, MissedReason::Overflow]
++        );
++        assert_eq!(delivered.occurrences, 2);
++        assert_eq!(delivered.first_observed_at, found_at);
++        assert_eq!(
++            watcher.health(),
++            Health::MayHaveMissedChanges(delivered.clone())
++        );
++    }
++
++    // No `cfg`. The backend is live and holds the root open. On Linux and
++    // macOS the name goes at once and the metadata alone sees it. On Windows
++    // `std`'s `remove_dir` is `RemoveDirectoryW`, which marks the directory for
++    // deletion on close; with notify's handle open the root stays
++    // delete-pending, still listed but not openable, and only the look's open
++    // sees it (`std`'s metadata falls back to the parent's listing there). So
++    // CI's Windows leg exercises the open. This could not be run on Windows
++    // from the container that wrote it.
+     #[test]
+     fn ori_t_0163_a_root_removed_while_its_watch_is_open_is_recorded() {
+         let scratch = Scratch::new("rootgone-open");

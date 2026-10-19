@@ -1210,32 +1210,90 @@ fn fence_is_runnable(info: &str) -> bool {
         .all(|word| RUNNABLE_FENCE_WORDS.contains(&word.trim()))
 }
 
+/// A fence's delimiter as CommonMark 0.31 section 4.5 reads one, which is
+/// how rustdoc finds a doc test: a run of three or more backticks or three or
+/// more tildes, then the info string.
+struct FenceDelimiter {
+    /// The character of the run, a backtick or a tilde.
+    marker: char,
+    /// How long the run is.
+    len: usize,
+    /// What follows the run, trimmed. An opening fence's info string; a
+    /// closing fence has none.
+    info: String,
+}
+
+/// The fence delimiter a trimmed doc line is, if it is one. A backtick run
+/// whose info string holds a backtick is not a fence (CommonMark 0.31 section
+/// 4.5): it is inline code.
+fn fence_delimiter(trimmed: &str) -> Option<FenceDelimiter> {
+    let marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = trimmed.chars().take_while(|c| *c == marker).count();
+    if len < 3 {
+        return None;
+    }
+    // Both markers are one byte long, so the run's length in characters is
+    // its length in bytes.
+    let info = trimmed[len..].trim().to_owned();
+    if marker == '`' && info.contains('`') {
+        return None;
+    }
+    Some(FenceDelimiter { marker, len, info })
+}
+
 /// Every doc-test fence in a file, as the text between its delimiters.
 ///
 /// Keyed by content and never by position: a fence that changed is a fence
 /// present before and absent after, which is the same shape as a removal and
 /// gets the same answer.
+///
+/// Every fence is tracked, whether or not it is a doc test, and closed the
+/// way CommonMark closes it: by a run of the opening fence's marker, at least
+/// as long as its run, with no info string. Inside an open fence any other
+/// line is content. Without that, the closing fence of a block that is not a
+/// doc test (a Mermaid diagram, a `text` sample) would open a doc test of its
+/// own, and every fence after it would pair out of phase, comparing prose
+/// instead of doc tests (ORI-T-0171).
+///
+/// What this does not read as rustdoc does: a fence left open at the end of
+/// the file is not counted, and the doc comments of a whole file are read as
+/// one text, so a fence left open in one item's docs runs on into the next
+/// item's. rustdoc ends such a fence with its item's docs. Indented code
+/// blocks are not read at all.
 fn doc_tests(lines: &[CodeLine]) -> Vec<String> {
     let mut out = Vec::new();
-    let mut open: Option<Vec<String>> = None;
+    // The fence that is open, with the lines collected from it when it is a
+    // doc test.
+    let mut open: Option<(FenceDelimiter, Option<Vec<String>>)> = None;
     for line in lines {
         let Some(text) = &line.doc else {
             continue;
         };
-        let trimmed = text.trim();
-        if trimmed.starts_with("```") {
-            match open.take() {
-                Some(collected) => out.push(collected.join("\n")),
-                None => {
-                    if fence_is_runnable(trimmed.trim_start_matches('`')) {
-                        open = Some(Vec::new());
-                    }
+        let delimiter = fence_delimiter(text.trim());
+        match open.take() {
+            None => {
+                if let Some(fence) = delimiter {
+                    let collected = fence_is_runnable(&fence.info).then(Vec::new);
+                    open = Some((fence, collected));
                 }
             }
-            continue;
-        }
-        if let Some(collected) = open.as_mut() {
-            collected.push(text.clone());
+            Some((fence, mut collected)) => {
+                let closes = delimiter.is_some_and(|delimiter| {
+                    delimiter.marker == fence.marker
+                        && delimiter.len >= fence.len
+                        && delimiter.info.is_empty()
+                });
+                if closes {
+                    if let Some(collected) = collected {
+                        out.push(collected.join("\n"));
+                    }
+                } else {
+                    if let Some(lines) = collected.as_mut() {
+                        lines.push(text.clone());
+                    }
+                    open = Some((fence, collected));
+                }
+            }
         }
     }
     out
@@ -2506,6 +2564,73 @@ mod tests {
             !report.modified_an_existing_test(),
             "a text fence is not a doc test: {:?}",
             report.lines()
+        );
+    }
+
+    #[test]
+    fn ori_t_0171_a_fence_that_is_not_a_doc_test_leaves_the_next_one_paired() {
+        // A Mermaid block, prose, then a doc test. Before ORI-T-0171 the
+        // Mermaid block's closing fence opened a doc test of its own, so the
+        // prose was read as the doc test and the doc test as nothing.
+        let before = "/// Adds.\n///\n/// ```mermaid\n/// graph TD\n/// ```\n///\n/// Between.\n///\n/// ```\n/// assert_eq!(demo::add(1, 1), 2);\n/// ```\npub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n";
+        let after = before.replace("demo::add(1, 1), 2", "demo::add(1, 1), 3");
+        let report = scan(&[FileChange::modified(
+            "crates/demo/src/lib.rs",
+            before,
+            &after,
+        )])
+        .expect("the reader reads it");
+        let message = only_finding(&report);
+        assert!(
+            message.contains("a doc test was removed or changed"),
+            "the doc test after a Mermaid block must be read as one: {message}"
+        );
+
+        let prose_changed = before.replace("Between.", "In between.");
+        let report = scan(&[FileChange::modified(
+            "crates/demo/src/lib.rs",
+            before,
+            &prose_changed,
+        )])
+        .expect("the reader reads it");
+        assert!(
+            !report.modified_an_existing_test(),
+            "prose after a Mermaid block is not a doc test: {:?}",
+            report.lines()
+        );
+    }
+
+    #[test]
+    fn ori_t_0171_a_fence_closes_as_commonmark_closes_it() {
+        let doc_tests_of = |source: &str| doc_tests(&project(source).0);
+        let only_the_doc_test = vec![" assert!(true);".to_owned()];
+
+        // A tilde fence is a doc test like a backtick one.
+        assert_eq!(
+            doc_tests_of("/// ~~~\n/// assert!(true);\n/// ~~~\nfn f() {}\n"),
+            only_the_doc_test
+        );
+        // A closing fence is at least as long as the opening one, so a shorter
+        // run inside a longer fence is content.
+        assert_eq!(
+            doc_tests_of(
+                "/// ````text\n/// ```\n/// not a doc test\n/// ```\n/// ````\n///\n/// ```\n/// assert!(true);\n/// ```\nfn f() {}\n"
+            ),
+            only_the_doc_test
+        );
+        // A closing fence has no info string and the opening fence's marker.
+        assert_eq!(
+            doc_tests_of(
+                "/// ```text\n/// ```rust\n/// ~~~\n/// ```\n///\n/// ```\n/// assert!(true);\n/// ```\nfn f() {}\n"
+            ),
+            only_the_doc_test
+        );
+        // A backtick run whose info string holds a backtick is inline code.
+        assert_eq!(
+            doc_tests_of(
+                "/// ``` `code` ```\n///\n/// ```\n/// assert!(true);\n/// ```\nfn f() {}\n"
+            ),
+            only_the_doc_test
         );
     }
 

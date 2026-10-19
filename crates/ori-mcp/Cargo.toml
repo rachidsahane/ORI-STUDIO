@@ -6,5 +6,32 @@ license.workspace = true
 description = "MCP host toward the user's servers and MCP server toward agents, under scopes."
 
 [dependencies]
+# A workspace crate that `spec/LLD.md` section 2 lets `ori-mcp` name: `Role`,
+# `Id`, `Category`, `Actor` and `MethodologyRef` are items of `ori-core`
+# (`ops/batch-10-plan.md`, decisions D1 and D3). Already in this crate's
+# dependency graph through `ori-memory` and `ori-store`; added directly because
+# Rust does not let a crate name a transitive dependency's items. No external
+# crate is added.
+ori-core = { workspace = true }
 ori-memory = { workspace = true }
 ori-store = { workspace = true }
+# Approved workspace-wide by escalation E-0008 ("serde and serde_json
+# approved for the workspace, pinned"), whose own recommendation names this
+# crate: "for every crate that speaks JSON-RPC (`ori-runtime` for ACP now;
+# `ori-rpc` and `ori-mcp` later)". `src/protocol.rs`, the MCP wire shared by
+# the server and the host (`ops/batch-10-plan.md` decision D2), reads and
+# writes JSON-RPC 2.0 messages through serde's derives and `serde_json::Value`
+# instead of a hand-written reader, for the reason E-0008's rejected-option
+# table gives: "A hand-written parser for input from an external agent
+# process is itself a security surface." No MCP SDK crate is used (D2).
+# Pinned to the exact versions and the exact feature sets
+# `crates/ori-runtime/Cargo.toml` and `crates/ori-memory/Cargo.toml` already
+# pin, so `Cargo.lock` gains only this crate's two dependency edges and no
+# package: `default-features = false` plus `std` (and `derive` for serde),
+# which is the crate's own default feature set written out. None of
+# `arbitrary_precision`, `raw_value`, `preserve_order`, `float_roundtrip` or
+# `unbounded_depth` is enabled; the last matters here, because without it
+# serde_json refuses input nested deeper than 128 levels, which is the bound
+# this module relies on for a line of a million `[` characters.
+serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }

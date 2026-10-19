@@ -43,6 +43,8 @@ flowchart TB
   RT --> Iso[worktrees and containers]
 ```
 
+The arrows are runtime and data-flow interactions: who calls or talks to whom while the engine runs. They are not crate dependencies, and an arrow from one component to another does not mean the first crate depends on the second; the direction in which crates depend on one another is the graph in LLD section 2.
+
 The engine is a library crate. The desktop app links it and calls it in-process. The CLI and the headless daemon run the same library behind a socket. Every capability exists in the engine; the clients render and forward.
 
 ## 2. Components
@@ -59,7 +61,7 @@ The engine is a library crate. The desktop app links it and calls it in-process.
 | **broker** | Agent identities, credential issuance, keychain access, the forbidden-action test, audit of every issuance | 17, 27 |
 | **runtime** | Agent sessions: spawn in worktree or container, credential injection at spawn, ACP client, headless adapters, model routing per role, budgets enforcement, session transcripts | 7, 12 |
 | **mcp** | MCP host toward the user's servers; MCP server toward agents exposing memory retrieval, ticket operations and evidence access under scopes | 25 |
-| **integrations** | Adapter traits and reference adapters for the five slots; webhook receiver; polling | 16, brief principle 12 |
+| **integrations** | Reference adapters for the five slots, which implement the slot traits declared in `ori-core` (API_SPEC section 4); webhook receiver; polling | 16, brief principle 12 |
 | **notify** | Routing rules (interrupt versus review window), desktop notifications, notification slot, digest | 28, PRD N-01 |
 | **calibration** | Calibration sets, measurements, thresholds as multiples, re-run prompts | 21, 30 |
 

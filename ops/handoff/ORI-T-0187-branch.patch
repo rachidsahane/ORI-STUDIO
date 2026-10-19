@@ -1,0 +1,2310 @@
+From a1f545ccbb5bd821c1e8586062ab35b2ee44cac6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 00:29:19 +0000
+Subject: [PATCH 1/3] feat(mcp): add the aicd_report handler through the
+ barrier
+
+ReportHandler is the handler of aicd_report between S2's pipeline and
+ori_memory::barrier::submit_report. It holds the role table (coder:
+closing and blocked; documentation: closing, drift audit and blocked; qa:
+QA run and blocked; operations: blocked), the two field lists of API_SPEC
+section 3 in template order, and refuses qa_run and drift_audit as not
+available until a template names their fields.
+
+Every check comes before an identifier is drawn or a byte written: the
+ticket, the kind, the role, the content walked in template order (a
+missing or blank field before an extra key), and that the ticket is filed
+in this product, which S2's check 7 leaves open for every role but the
+coder. It then files one NewReportField per field with the raw text
+unchanged, maps every barrier error to a fixed unavailable, and answers
+with the record id and the fields the cap cut, named in template order.
+It appends no event of its own.
+
+Ticket: ORI-T-0187
+Spec: API_SPEC.md#3-agent-facing-mcp-server
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CQ4vWTcpGWb4B2jvnPi4RM
+---
+ crates/ori-mcp/src/tools/mod.rs    |    3 +
+ crates/ori-mcp/src/tools/report.rs | 1775 ++++++++++++++++++++++++++++
+ 2 files changed, 1778 insertions(+)
+ create mode 100644 crates/ori-mcp/src/tools/report.rs
+
+diff --git a/crates/ori-mcp/src/tools/mod.rs b/crates/ori-mcp/src/tools/mod.rs
+index a60f7a8..c585daf 100644
+--- a/crates/ori-mcp/src/tools/mod.rs
++++ b/crates/ori-mcp/src/tools/mod.rs
+@@ -62,6 +62,9 @@
+ /// The memory tools `aicd_context` and `aicd_search` (AICD §25). Tier 2.
+ pub mod memory;
+ 
++/// The report tool `aicd_report` (AICD §8, AICD §25). Tier 2.
++pub mod report;
++
+ use std::collections::HashMap;
+ use std::collections::hash_map::Entry;
+ use std::fmt;
+diff --git a/crates/ori-mcp/src/tools/report.rs b/crates/ori-mcp/src/tools/report.rs
+new file mode 100644
+index 0000000..6e945d5
+--- /dev/null
++++ b/crates/ori-mcp/src/tools/report.rs
+@@ -0,0 +1,1775 @@
++//! The report tool `aicd_report`: AICD §8, AICD §25,
++//! `spec/API_SPEC.md` section 3.
++//!
++//! One handler, [`crate::tools::report::ReportHandler`], that the engine
++//! registers with [`crate::tools::Handlers::register`]. In `spec/API_SPEC.md`
++//! section 3's words, `aicd_report(ticket_id, kind, content)` files "closing,
++//! blocked, QA run and drift audit reports through the sanitization barrier".
++//! It is how an agent files the closing report and the blocked report that
++//! `CLAUDE.md` and AICD appendix A.5 require. The handler is the thin layer
++//! between S2's pipeline, which admits the four roles and validates the
++//! arguments against the catalogue's schema, and `ori_memory::barrier`, which
++//! sanitizes every field, writes each raw text to its evidence file and appends
++//! the record. **It writes no event of its own and no text but fixed labels.**
++//!
++//! # The kinds and who may write them
++//!
++//! `kind` is one of `closing`, `blocked`, `qa_run` and `drift_audit`
++//! (`crate::tools::REPORT_KINDS`). Each role may write only the kinds in this
++//! table (`spec/API_SPEC.md` section 3, "Report kinds"), and the handler holds
++//! the table itself, because S2 admits a role to the tool and not to a kind:
++//!
++//! | Role | May write |
++//! |---|---|
++//! | coder | `closing`, `blocked` |
++//! | documentation | `closing`, `drift_audit`, `blocked` |
++//! | qa | `qa_run`, `blocked` |
++//! | operations | `blocked` |
++//! | any other role | nothing: S2 refuses it first |
++//!
++//! Each kind is stored as one operational-memory record kind, and the fields of
++//! `content` are the names of its template, in template order
++//! (`templates/closing-report.md`, `templates/blocked-report.md`):
++//!
++//! | Kind | Stored as | Fields of `content`, in template order |
++//! |---|---|---|
++//! | `closing` | `closing_report` | [`crate::tools::report::CLOSING_FIELDS`]: `modules_touched`, `criteria_covered`, `outcome`, `approaches_tried_and_rejected`, `deviations_from_the_plan`, `escalation_decisions`, `specification_update`, `new_criteria`, `what_the_next_agent_should_know`, `provenance` |
++//! | `blocked` | `blocked_report` | [`crate::tools::report::BLOCKED_FIELDS`]: `budget_consumed`, `approaches_tried`, `hypothesis`, `what_it_would_try_next`, `what_it_needs_from_a_human` |
++//! | `qa_run` | `finding` | none: no template defines them yet |
++//! | `drift_audit` | `finding` | none: no template defines them yet |
++//!
++//! `spec/API_SPEC.md` section 3 says no file in `templates/` is a form for
++//! `qa_run` or `drift_audit`, so "until a template defines them, the server has
++//! no list of names to hold the `content` of these two kinds to". The handler
++//! therefore refuses both, `report_kind_not_available`. A template ticket must
++//! name their fields first, and then this file gains two lists and two arms.
++//!
++//! # One call
++//!
++//! S2 has already run every check and appended `mcp.tool_called` when the
++//! handler is reached ([`crate::tools::ToolHandler`]). The handler then makes
++//! **every check before it draws an identifier or writes a byte**, in this
++//! order:
++//!
++//! ```mermaid
++//! sequenceDiagram
++//!   participant A as agent
++//!   participant S as S2: Server::receive
++//!   participant H as ReportHandler
++//!   participant L as the product's log
++//!   participant I as the IdSource
++//!   participant B as barrier::submit_report
++//!   A->>S: tools/call aicd_report
++//!   S->>S: checks 0 to 7
++//!   S->>L: append mcp.tool_called
++//!   S->>H: call(db, BoundCall, arguments)
++//!   H->>H: the ticket, the kind, the role may write it, the kind has fields
++//!   H->>H: the content, field by field in template order, then no extra key
++//!   alt any of those fails
++//!     H-->>S: Refused or Port Invalid
++//!     S->>L: append mcp.tool_failed
++//!     S-->>A: an error result
++//!   else all pass
++//!     H->>L: verify and read the log: is the ticket filed?
++//!     alt not filed
++//!       H-->>S: Refused ticket_not_in_product
++//!       S->>L: append mcp.tool_failed
++//!       S-->>A: an error result
++//!     else filed
++//!       H->>I: next_id: the record, then one per field
++//!       H->>B: submit_report(db, call.at, the agent, request, config)
++//!       B->>L: memory.evidence_stored per field, then memory.record_created
++//!       alt the barrier or the id source failed
++//!         H-->>S: Port Unavailable
++//!         S->>L: append mcp.tool_failed
++//!         S-->>A: an error result
++//!       else recorded
++//!         H-->>S: Ok, one text block
++//!         S-->>A: that result as it is
++//!       end
++//!     end
++//!   end
++//! ```
++//!
++//! 1. **The ticket** is the call's `ticket_id`. None is `Port(Invalid)` at
++//!    `ticket_id`, unreachable after S2.
++//! 2. **The kind** is the `kind` argument. Anything but one of the four is
++//!    `Port(Invalid)` at `kind`, unreachable after S2's enumeration.
++//! 3. **The role may write the kind** (the first table). If not, the handler
++//!    refuses `report_kind_not_permitted_for_role`, AICD §17, the section S2's
++//!    `tool_not_permitted_for_role` uses.
++//! 4. **The kind has fields.** `qa_run` and `drift_audit` are refused
++//!    `report_kind_not_available`, AICD §17, the section S2's
++//!    `tool_not_available` uses.
++//! 5. **The content** is the `content` argument, an object (`Port(Invalid)` at
++//!    `content` otherwise, unreachable). The method, and so the order of the
++//!    faults: the handler walks **the kind's constant list in template order**
++//!    and removes each field from the map. The first field that is missing, not
++//!    a string (unreachable after S2) or blank is `Port(Invalid)` at
++//!    `/content/<name>`, and the walk stops. Only after the whole list passes,
++//!    a key left in the map is `Port(Invalid)` at `content`. So a missing or
++//!    blank field is reported before an extra key, and the first in template
++//!    order wins. A field name in a pointer is one of the handler's constants,
++//!    never an agent's key.
++//! 6. **The ticket is filed in this product.** The handler reads the log as
++//!    `ori_memory::scope` does (`EventLog::verify`, then `read_range` to the
++//!    tip) and looks for a `ticket.filed` event whose ticket column is the
++//!    ticket. Not filed is `ticket_not_in_product`, AICD §25, the code and
++//!    section the scope enforcer uses. A log that cannot be read is
++//!    `Port(Unavailable)`.
++//! 7. **The identifiers**, drawn only now: one for the record, then one per
++//!    field in template order.
++//! 8. **The request**: one `NewReportField` per field of the kind, in template
++//!    order, its name the handler's constant and its `raw_text` the agent's
++//!    value **unchanged**; a `NewReport` of the kind's record kind and the
++//!    ticket.
++//! 9. **Submit**: `barrier::submit_report` at the call's time, as the agent.
++//!    Any `BarrierError` is `Port(Unavailable)`, with a fixed `what`: the
++//!    error's own `Display` carries paths and is never copied.
++//! 10. **The reply**: one text block, no `structuredContent`, no `isError`.
++//!     `report recorded: record <record id>`, and when the barrier cut a field
++//!     to its cap, a second line naming the cap and the cut fields. The names
++//!     come from walking the kind's constant list in template order, never from
++//!     the barrier's set, which is in alphabetical order. **No agent text is in
++//!     the reply:** no key, no value, no error's `Display`.
++//!
++//! # The decisions this module carries
++//!
++//! **The ticket check is the handler's.** S2's check 7 ties only a coder to its
++//! bound ticket. Any other role's ticket passes S2 unchecked, and S2's own
++//! documentation says this slice must check that the ticket exists in this
++//! product. The check holds for every role, the coder included. It costs a
++//! second verify of the log per call, since the barrier makes one too; that is
++//! accepted, as S3's repeated passes were.
++//!
++//! **Every field of the kind is required, and none is blank.** The blocked
++//! report's five fields are required by their template. The closing report's
++//! `new_criteria` and `provenance` are required only for some tickets, and the
++//! handler does not interpret the ticket's kind, so all ten are required: an
++//! agent writes `none` where nothing applies. `none` is ordinary text.
++//!
++//! **The cap.** S2's schema accepts 8 192 characters per field, and the barrier
++//! keeps at most `BarrierConfig::field_cap_chars` (4 000 by default) of the
++//! sanitized text in the record. The raw text stays whole in the evidence file.
++//! The handler tells the agent which fields were cut (step 10), and the
++//! catalogue's bounds stay as S2 pinned them. The engine gives the handler the
++//! product's `BarrierConfig`.
++//!
++//! **A blocked report has no side effect here.** `spec/API_SPEC.md` section 3
++//! gives it none. The engine reacts to the record, whose kind is
++//! `blocked_report`. The `report.*` events and the Report row's `session_id`
++//! (`spec/DATA_MODEL.md` section 2) are for the specification ticket that
++//! reconciles them.
++//!
++//! **`budget_consumed` is stored as the agent wrote it.** The runtime's meter is
++//! the authority, and the engine compares the two.
++//!
++//! **One `NewReportField` per `content` entry, `raw_text` unchanged.** Slice S7
++//! (`aicd_evidence`) sized the budget of the raw evidence a record can hold on
++//! this: a record's evidence is at most one blob per field of its kind, ten for a
++//! closing report, each holding the agent's whole text. This handler never
++//! trims, joins, splits or rewrites a value.
++//!
++//! # What is recorded
++//!
++//! **The handler's own code appends nothing.** Every row of a recorded call
++//! after S2's own is the barrier's.
++//!
++//! | Outcome | Rows, in order |
++//! |---|---|
++//! | recorded | `mcp.tool_called` (ticket column: the argument), then one `memory.evidence_stored` per field in template order (the barrier's; ticket column: **the record id**, as the barrier writes it), then `memory.record_created` (ticket column: the ticket). All carry `call.at` and the agent as actor |
++//! | a refusal before the barrier: a kind not permitted or not available, a ticket not filed | `mcp.tool_called`, then `mcp.tool_failed` (`failure: refused`, the code, the section) |
++//! | a content fault | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the constant field) |
++//! | the identifiers, the log or the barrier failed | `mcp.tool_called`, then any evidence rows the barrier appended before it failed, then `mcp.tool_failed` (`failure: unavailable`) |
++//!
++//! **Nothing comes between the barrier's rows.** The scope enforcer attributes a
++//! record's evidence by walking back from the record's event over evidence rows
++//! of the same actor and time (`ori_memory::scope`). The barrier appends them
++//! all in one call, with nothing between, and the handler appends nothing before
++//! or after it. A barrier failure part-way leaves evidence rows that no record
++//! claims; the enforcer never hands those out.
++//!
++//! **The row bound.** An admitted call adds at most 11 rows of the barrier's: 10
++//! evidence rows and the record. With S2's own two rows (`mcp.tool_called` and
++//! `mcp.tool_failed`, or the first and the record's), a call leaves at most 12.
++//! So **calls to this tool leave at most twelve times the window's limit plus one
++//! row per connection** (`crate::server`'s module documentation bounds S2's own
++//! rows, and asks each slice to state its handler's).
++//!
++//! # Limits
++//!
++//! - **Until the engine writes `ticket.filed` (ORI-T-0070), every report is
++//!   refused `ticket_not_in_product`.** Nothing writes that event yet, and the
++//!   check holds for every role. The memory tools state the same limit.
++//! - **`none` is accepted in every field**, including those whose template does
++//!   not allow it. **`new_criteria` is required on every ticket**, although its
++//!   template requires it only for defects. A defect closed with
++//!   `new_criteria: none` is recorded as it is, for the lead's review.
++//! - **A field over the cap is cut in the record**, as above. The reply names it
++//!   and the evidence keeps the whole text.
++//! - **`qa_run` and `drift_audit` wait on a template** that names their fields.
++//! - **`drift_audit` will be stored as `finding`**, which the scope enforcer
++//!   files under `operational_defect`, a source documentation's memory scope
++//!   cannot read (`spec/ENV_SETUP.md` section 5). That is recorded for the
++//!   template ticket.
++//! - **The role is the binding's**, until condition 6 of E-0013 is met. The
++//!   handler makes no identity check of its own, and S2's check 5 and this
++//!   handler's role table both rest on the engine's binding.
++//! - **A qa or operations session must still name a ticket**: the schema
++//!   requires one, and it must be filed.
++//! - **The barrier's own AICD §8 refusals become `unavailable`** (step 9). That
++//!   drops `EvidenceWriteRefused` to "retry later", deliberately: since the field
++//!   names are the handler's constants and the identifiers are the engine's, none
++//!   is the agent's to fix.
++//! - **A record id's uniqueness rests on the `IdSource` alone.** The barrier
++//!   checks evidence ids against the log, never record ids. A repeated record id
++//!   is stored, and both records then become unreadable as evidence. The
++//!   engine's `IdSource` (ORI-T-0070) is the guard.
++//! - **The records this tool files are readable, as records, by the roles the
++//!   scope enforcer's table gives them**: `drift_audit`'s routing to
++//!   `operational_defect` is one case.
++//!
++//! # Tier
++//!
++//! Tier 2: `spec/RISK_MAP.md` lists `crates/ori-mcp/src/tools/` (a directory
++//! module, so that gate 12 tiers it), "What agents can do".
++
++use std::fmt;
++
++use ori_core::error::MethodologyRef;
++use ori_core::types::{Actor, Id, Role};
++use ori_memory::barrier::{self, BarrierConfig, FieldName, NewReport, NewReportField, RecordKind};
++use ori_store::db::ProductDb;
++use ori_store::event_log::EventLog;
++use serde_json::Value;
++
++use crate::ports::{IdSource, PortError};
++use crate::protocol::{CallToolResult, JsonObject};
++use crate::tools::{BoundCall, HandlerError, ToolHandler};
++
++/// The fields of a `closing` report's `content`, in the order of
++/// `templates/closing-report.md`: AICD §11, `spec/API_SPEC.md` section 3,
++/// "Report kinds".
++///
++/// They are exactly the names `spec/API_SPEC.md` gives, and a test pins them to
++/// that file. The report is stored as `closing_report`.
++///
++/// **An assumption these constants rest on.** `aicd_report` files **one**
++/// `NewReportField` per entry of `content`, with `raw_text` unchanged, so a
++/// closing report's record has ten evidence blobs, each holding the agent's whole
++/// text. Slice S7 (`aicd_evidence`) sized the budget of what it reads back on
++/// that.
++pub const CLOSING_FIELDS: [&str; 10] = [
++    "modules_touched",
++    "criteria_covered",
++    "outcome",
++    "approaches_tried_and_rejected",
++    "deviations_from_the_plan",
++    "escalation_decisions",
++    "specification_update",
++    "new_criteria",
++    "what_the_next_agent_should_know",
++    "provenance",
++];
++
++/// The fields of a `blocked` report's `content`, in the order of
++/// `templates/blocked-report.md`: AICD §12, AICD appendix A.5,
++/// `spec/API_SPEC.md` section 3, "Report kinds".
++///
++/// They are exactly the names `spec/API_SPEC.md` gives, and a test pins them to
++/// that file. The report is stored as `blocked_report`. As for
++/// [`crate::tools::report::CLOSING_FIELDS`], the handler files one
++/// `NewReportField` per entry, `raw_text` unchanged.
++pub const BLOCKED_FIELDS: [&str; 5] = [
++    "budget_consumed",
++    "approaches_tried",
++    "hypothesis",
++    "what_it_would_try_next",
++    "what_it_needs_from_a_human",
++];
++
++/// The JSON pointers of [`crate::tools::report::CLOSING_FIELDS`], one for one:
++/// constants, so that a fault names a field without ever building a pointer from
++/// an agent's key.
++const CLOSING_POINTERS: [&str; 10] = [
++    "/content/modules_touched",
++    "/content/criteria_covered",
++    "/content/outcome",
++    "/content/approaches_tried_and_rejected",
++    "/content/deviations_from_the_plan",
++    "/content/escalation_decisions",
++    "/content/specification_update",
++    "/content/new_criteria",
++    "/content/what_the_next_agent_should_know",
++    "/content/provenance",
++];
++
++/// The JSON pointers of [`crate::tools::report::BLOCKED_FIELDS`], one for one.
++const BLOCKED_POINTERS: [&str; 5] = [
++    "/content/budget_consumed",
++    "/content/approaches_tried",
++    "/content/hypothesis",
++    "/content/what_it_would_try_next",
++    "/content/what_it_needs_from_a_human",
++];
++
++/// The code of a report kind the role may not write: AICD §17.
++const CODE_KIND_NOT_PERMITTED: &str = "report_kind_not_permitted_for_role";
++/// The code of a report kind no template defines yet: AICD §17.
++const CODE_KIND_NOT_AVAILABLE: &str = "report_kind_not_available";
++/// The code of a ticket not filed in this product, the scope enforcer's own:
++/// AICD §25.
++const CODE_TICKET_NOT_IN_PRODUCT: &str = "ticket_not_in_product";
++
++/// The fixed sentence of a call that reaches the handler with no ticket.
++const WHY_TICKET: &str = "the call carries no ticket";
++/// The fixed sentence of a call whose kind is missing or is not one of the four.
++const WHY_KIND: &str = "the kind argument is missing or is not one of the four";
++/// The fixed sentence of a call whose content is missing or is not an object.
++const WHY_CONTENT: &str = "the content argument is missing or is not an object";
++/// The fixed sentence of a content that holds a key that is not a field of the
++/// kind.
++const WHY_UNEXPECTED: &str = "content holds a key that is not a field of this kind";
++/// The fixed sentence of a content that lacks a field of the kind.
++const WHY_MISSING: &str = "a field of this kind is missing";
++/// The fixed sentence of a content whose field of the kind is blank.
++const WHY_BLANK: &str = "a field of this kind is blank";
++/// The fixed sentence of a content whose field of the kind is not a string.
++const WHY_NOT_TEXT: &str = "a field of this kind is not a string";
++
++/// What was unavailable when the product's log cannot be read. Never copied
++/// into a reply or an event.
++const WHAT_LOG: &str = "the product's log";
++/// What was unavailable when the barrier or a field name failed. Never copied
++/// into a reply or an event, and never the barrier error's `Display`, which
++/// carries paths.
++const WHAT_STORE: &str = "the report store";
++
++/// The event kind that files a ticket in a product: AICD §11.
++const TICKET_FILED: &str = "ticket.filed";
++
++/// The kinds of report `aicd_report` takes, with the wire names of
++/// `crate::tools::REPORT_KINDS`: AICD §17.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum ReportKind {
++    Closing,
++    Blocked,
++    QaRun,
++    DriftAudit,
++}
++
++/// What a kind with a template is: the record kind it is stored as, and its
++/// field names with their pointers, both in template order.
++struct Form {
++    record_kind: RecordKind,
++    names: &'static [&'static str],
++    pointers: &'static [&'static str],
++}
++
++impl ReportKind {
++    /// The kind a wire name spells, or `None` for anything else.
++    fn parse(text: &str) -> Option<Self> {
++        match text {
++            "closing" => Some(Self::Closing),
++            "blocked" => Some(Self::Blocked),
++            "qa_run" => Some(Self::QaRun),
++            "drift_audit" => Some(Self::DriftAudit),
++            _ => None,
++        }
++    }
++
++    /// Whether `role` may write this kind: `spec/API_SPEC.md` section 3,
++    /// "Report kinds". One exhaustive `match` on the role, no wildcard.
++    const fn written_by(self, role: Role) -> bool {
++        match role {
++            Role::Coder => matches!(self, Self::Closing | Self::Blocked),
++            Role::Documentation => {
++                matches!(self, Self::Closing | Self::DriftAudit | Self::Blocked)
++            }
++            Role::Qa => matches!(self, Self::QaRun | Self::Blocked),
++            Role::Operations => matches!(self, Self::Blocked),
++            Role::Lead | Role::ProductSignal | Role::Assistant => false,
++        }
++    }
++
++    /// The kind's template, or `None` for a kind no template defines yet.
++    const fn form(self) -> Option<Form> {
++        match self {
++            Self::Closing => Some(Form {
++                record_kind: RecordKind::ClosingReport,
++                names: &CLOSING_FIELDS,
++                pointers: &CLOSING_POINTERS,
++            }),
++            Self::Blocked => Some(Form {
++                record_kind: RecordKind::BlockedReport,
++                names: &BLOCKED_FIELDS,
++                pointers: &BLOCKED_POINTERS,
++            }),
++            Self::QaRun | Self::DriftAudit => None,
++        }
++    }
++}
++
++/// A refusal under AICD §`section`, a whole section: the handler's own refusals
++/// all name one of §17 and §25.
++fn refused(code: &'static str, section: u8) -> HandlerError {
++    HandlerError::Refused {
++        code,
++        methodology_ref: MethodologyRef {
++            section,
++            subsection: None,
++        },
++    }
++}
++
++/// An `Invalid` failure at `field`, a constant, with one of the fixed `why`
++/// sentences: never built from an agent's key or value.
++fn invalid(field: &'static str, why: &str) -> HandlerError {
++    HandlerError::Port(PortError::Invalid {
++        field,
++        why: why.to_owned(),
++    })
++}
++
++/// An `Unavailable` failure of the effect, with a fixed `what` that S2 never
++/// copies into a reply or an event.
++fn unavailable(what: &str) -> HandlerError {
++    HandlerError::Port(PortError::Unavailable {
++        what: what.to_owned(),
++    })
++}
++
++/// The texts of `form`'s fields, taken out of `content` in template order: the
++/// method of step 5, AICD §27.
++///
++/// The first field that is missing, not a string or blank (it trims to empty)
++/// is the fault, and the walk stops. Only after the whole list passes is a key
++/// left in the map a fault. The map is a `BTreeMap`, and its keys are the
++/// agent's text, so the list is walked and the map is never iterated.
++fn take_fields(form: &Form, mut content: JsonObject) -> Result<Vec<String>, HandlerError> {
++    let mut texts = Vec::with_capacity(form.names.len());
++    for (name, pointer) in form.names.iter().zip(form.pointers) {
++        match content.remove(*name) {
++            None => return Err(invalid(pointer, WHY_MISSING)),
++            Some(Value::String(text)) if text.trim().is_empty() => {
++                return Err(invalid(pointer, WHY_BLANK));
++            }
++            Some(Value::String(text)) => texts.push(text),
++            Some(_) => return Err(invalid(pointer, WHY_NOT_TEXT)),
++        }
++    }
++    if content.is_empty() {
++        Ok(texts)
++    } else {
++        Err(invalid("content", WHY_UNEXPECTED))
++    }
++}
++
++/// Whether `ticket` is filed in `db`'s product: the log, verified and read to
++/// its tip as `ori_memory::scope` reads it, holds a `ticket.filed` event whose
++/// ticket column is the ticket (AICD §25).
++///
++/// A log that cannot be verified or read is `Unavailable`, with a fixed `what`.
++fn ticket_is_filed(db: &mut ProductDb, ticket: &Id) -> Result<bool, HandlerError> {
++    let report = EventLog::verify(db.connection()).map_err(|_| unavailable(WHAT_LOG))?;
++    let Some(tip) = report.tip_seq else {
++        return Ok(false);
++    };
++    let events =
++        EventLog::read_range(db.connection(), 1, tip).map_err(|_| unavailable(WHAT_LOG))?;
++    Ok(events
++        .iter()
++        .any(|event| event.kind() == TICKET_FILED && event.ticket_id() == Some(ticket)))
++}
++
++/// The handler of `aicd_report(ticket_id, kind, content)`: closing and blocked
++/// reports through the sanitization barrier (AICD §8, AICD §25).
++///
++/// It holds the engine's source of identifiers and the product's
++/// `BarrierConfig` (`field_cap_chars`, 4 000 by default), and nothing else:
++/// **no state across calls, no event of its own and no text but fixed labels.**
++/// `ori_memory::barrier::submit_report` sanitizes every field, writes each raw
++/// text to its evidence file and appends the record. See the module
++/// documentation for the kinds, the order of the checks, the rows a call leaves
++/// and the limits.
++///
++/// # Examples
++///
++/// The engine registers one handler for the tool, with its own `IdSource` (a
++/// ULID needs a clock and a source of randomness, which only the engine has) and
++/// the product's `BarrierConfig`. This one answers nothing, since registering
++/// draws no identifier.
++///
++/// ```
++/// use ori_core::types::Id;
++/// use ori_mcp::ports::{IdSource, PortError};
++/// use ori_mcp::scopes::Tool;
++/// use ori_mcp::tools::Handlers;
++/// use ori_mcp::tools::report::ReportHandler;
++/// use ori_memory::barrier::BarrierConfig;
++///
++/// struct NoIds;
++///
++/// impl IdSource for NoIds {
++///     fn next_id(&mut self) -> Result<Id, PortError> {
++///         Err(PortError::Unavailable {
++///             what: "the example's id source".to_owned(),
++///         })
++///     }
++/// }
++///
++/// let mut handlers = Handlers::new();
++/// handlers
++///     .register(
++///         Tool::Report,
++///         Box::new(ReportHandler::new(Box::new(NoIds), BarrierConfig::default())),
++///     )
++///     .expect("one handler per tool");
++/// assert!(handlers.is_registered(Tool::Report));
++/// ```
++pub struct ReportHandler {
++    ids: Box<dyn IdSource + Send>,
++    config: BarrierConfig,
++}
++
++impl ReportHandler {
++    /// A handler that draws its identifiers from `ids` and sanitizes with
++    /// `config`: AICD §8.
++    ///
++    /// A record's uniqueness rests on `ids` alone: the barrier checks evidence
++    /// ids against the log, never record ids.
++    #[must_use]
++    pub fn new(ids: Box<dyn IdSource + Send>, config: BarrierConfig) -> Self {
++        Self { ids, config }
++    }
++}
++
++impl fmt::Debug for ReportHandler {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("ReportHandler")
++            .field("config", &self.config)
++            .finish_non_exhaustive()
++    }
++}
++
++impl ToolHandler for ReportHandler {
++    /// `aicd_report`: check the call, draw the identifiers, submit the report
++    /// through the barrier, and answer with the record's identifier: AICD §8,
++    /// AICD §25.
++    ///
++    /// # Errors
++    ///
++    /// `Refused` for a kind the role may not write
++    /// (`report_kind_not_permitted_for_role`) or no template defines
++    /// (`report_kind_not_available`), both AICD §17, and for a ticket not filed
++    /// in this product (`ticket_not_in_product`, AICD §25);
++    /// `Port(Invalid)` for a content that lacks a field of its kind, holds one
++    /// that is blank, or holds a key that is not a field, and for a call whose
++    /// ticket, kind or content S2's schema makes unreachable;
++    /// `Port(Unavailable)` for a log that cannot be read, an identifier source
++    /// that cannot answer, or a barrier that failed or refused.
++    fn call(
++        &mut self,
++        db: &mut ProductDb,
++        call: &BoundCall<'_>,
++        mut arguments: JsonObject,
++    ) -> Result<CallToolResult, HandlerError> {
++        // 1. The ticket.
++        let Some(ticket) = call.ticket_id else {
++            return Err(invalid("ticket_id", WHY_TICKET));
++        };
++
++        // 2. The kind.
++        let kind = match arguments.remove("kind") {
++            Some(Value::String(text)) => ReportKind::parse(&text),
++            _ => None,
++        };
++        let Some(kind) = kind else {
++            return Err(invalid("kind", WHY_KIND));
++        };
++
++        // 3. The role may write the kind.
++        if !kind.written_by(call.binding.role()) {
++            return Err(refused(CODE_KIND_NOT_PERMITTED, 17));
++        }
++
++        // 4. The kind has fields.
++        let Some(form) = kind.form() else {
++            return Err(refused(CODE_KIND_NOT_AVAILABLE, 17));
++        };
++
++        // 5. The content, in template order.
++        let Some(Value::Object(content)) = arguments.remove("content") else {
++            return Err(invalid("content", WHY_CONTENT));
++        };
++        let texts = take_fields(&form, content)?;
++
++        // 6. The ticket is filed in this product.
++        if !ticket_is_filed(db, ticket)? {
++            return Err(refused(CODE_TICKET_NOT_IN_PRODUCT, 25));
++        }
++
++        // 7 and 8. The identifiers, drawn only now, and the request.
++        let record_id = self.ids.next_id()?;
++        let mut fields = Vec::with_capacity(texts.len());
++        for (name, raw_text) in form.names.iter().zip(texts) {
++            let evidence_id = self.ids.next_id()?;
++            fields.push(NewReportField {
++                name: FieldName::parse(name).map_err(|_| unavailable(WHAT_STORE))?,
++                raw_text,
++                evidence_id,
++            });
++        }
++        let request = NewReport {
++            record_id: record_id.clone(),
++            kind: form.record_kind,
++            ticket_id: Some(ticket.clone()),
++            fields,
++        };
++
++        // 9. Submit.
++        let submission = barrier::submit_report(
++            db,
++            call.at,
++            Actor::Agent(call.binding.identity().clone()),
++            request,
++            &self.config,
++        )
++        .map_err(|_| unavailable(WHAT_STORE))?;
++
++        // 10. The reply: the record, and the fields the cap cut, by walking the
++        // kind's list in template order (the barrier's set is alphabetical).
++        let cut: Vec<&str> = form
++            .names
++            .iter()
++            .copied()
++            .filter(|name| {
++                submission
++                    .truncated_fields()
++                    .iter()
++                    .any(|field| field.as_str() == *name)
++            })
++            .collect();
++        let mut reply = format!("report recorded: record {record_id}\n");
++        if !cut.is_empty() {
++            reply = format!(
++                "{reply}cut at the barrier's cap of {} characters, the evidence keeps the whole text: {}\n",
++                self.config.field_cap_chars,
++                cut.join(", ")
++            );
++        }
++        Ok(CallToolResult::text(reply))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::fs;
++    use std::sync::Arc;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    use ori_core::types::Timestamp;
++    use ori_memory::barrier::{read_evidence, read_evidence_content, read_records};
++    use ori_memory::scope::{MemoryRequest, Principal, ProductStage, Query, ScopeEnforcer};
++    use serde_json::{Map, json};
++
++    use super::*;
++    use crate::scopes::Tool;
++    use crate::server::{Binding, Reply};
++    use crate::tools::memory::test_support::{
++        START, Setup, World, file_ticket, id, identity, kinds, payload, register_in, session,
++        text_of, ticket_t, wire,
++    };
++    use crate::tools::{Handlers, REPORT_KINDS};
++
++    /// A text only the tests' fields and keys carry: the planted marker.
++    const MARKER: &str = "ZEBRAQUARTZ0187";
++
++    /// The rows of a call refused or failed before any barrier row.
++    const FAILED_ROWS: [&str; 2] = ["mcp.tool_called", "mcp.tool_failed"];
++
++    /// The most bytes a test reads back from an evidence file.
++    const READ_CAP: u64 = 1 << 20;
++
++    // -------------------------------------------------------------------
++    // The scripted identifier source and the worlds
++    // -------------------------------------------------------------------
++
++    /// An identifier source that hands out ids from a list, counts how many
++    /// draws it was asked for in a counter the test shares, and can be told to
++    /// fail every draw. A list that runs out fails too, so no draw panics.
++    struct ScriptedIds {
++        script: Vec<Id>,
++        next: usize,
++        drawn: Arc<AtomicUsize>,
++        fails: bool,
++    }
++
++    impl IdSource for ScriptedIds {
++        fn next_id(&mut self) -> Result<Id, PortError> {
++            self.drawn.fetch_add(1, Ordering::SeqCst);
++            let unavailable = || PortError::Unavailable {
++                what: "the scripted id source".to_owned(),
++            };
++            if self.fails {
++                return Err(unavailable());
++            }
++            let id = self
++                .script
++                .get(self.next)
++                .cloned()
++                .ok_or_else(unavailable)?;
++            self.next += 1;
++            Ok(id)
++        }
++    }
++
++    /// The identifier of draw `n`: distinct for every `n` from 0 to 999.
++    fn numbered(n: usize) -> Id {
++        id(&format!("RPT{n:03}"))
++    }
++
++    /// The identifiers of draws `from` to `to`, both included.
++    fn numbers(from: usize, to: usize) -> Vec<Id> {
++        (from..=to).map(numbered).collect()
++    }
++
++    /// A world with a server bound to `role`, its report handler registered over
++    /// a scripted id source, and the number of identifiers drawn so far.
++    struct Rig {
++        world: World,
++        drawn: Arc<AtomicUsize>,
++    }
++
++    impl Rig {
++        fn draws(&self) -> usize {
++            self.drawn.load(Ordering::SeqCst)
++        }
++    }
++
++    fn rig_with(
++        role: Role,
++        label: &str,
++        ids: impl FnOnce(Arc<AtomicUsize>) -> ScriptedIds,
++        config: BarrierConfig,
++        filed: bool,
++    ) -> Rig {
++        let drawn = Arc::new(AtomicUsize::new(0));
++        let ids = ids(Arc::clone(&drawn));
++        // A coder is bound to its ticket; the other roles name one as an
++        // argument and are bound to none.
++        let bound = (role == Role::Coder).then(ticket_t);
++        let mut world = Setup::new(role, bound).build_with(label, move |_| {
++            let mut handlers = Handlers::new();
++            handlers
++                .register(
++                    Tool::Report,
++                    Box::new(ReportHandler::new(Box::new(ids), config)),
++                )
++                .expect("one handler per tool");
++            handlers
++        });
++        if filed {
++            let product = world.product.clone();
++            file_ticket(&mut world.db, &product, &ticket_t());
++        }
++        Rig { world, drawn }
++    }
++
++    /// A rig whose id source hands out draws 1 to 40 in order.
++    fn rig(role: Role, label: &str, filed: bool) -> Rig {
++        rig_with(
++            role,
++            label,
++            |drawn| ScriptedIds {
++                script: numbers(1, 40),
++                next: 0,
++                drawn,
++                fails: false,
++            },
++            BarrierConfig::default(),
++            filed,
++        )
++    }
++
++    // -------------------------------------------------------------------
++    // Arguments, rows and replies
++    // -------------------------------------------------------------------
++
++    /// A content map holding every name of `names`, each with its own text.
++    fn content_of(names: &[&str]) -> Map<String, Value> {
++        names
++            .iter()
++            .map(|name| ((*name).to_owned(), json!(format!("the text of {name}"))))
++            .collect()
++    }
++
++    /// The arguments of one `aicd_report` call.
++    fn arguments(ticket: &Id, kind: &str, content: Map<String, Value>) -> Value {
++        json!({"ticket_id": ticket.as_str(), "kind": kind, "content": content})
++    }
++
++    fn report(world: &mut World, ticket: &Id, kind: &str, content: Map<String, Value>) -> Reply {
++        world.call("aicd_report", arguments(ticket, kind, content))
++    }
++
++    /// The `structuredContent` of an error result that refused under `code`,
++    /// section `section`.
++    fn refused_object(code: &str, section: u8) -> Value {
++        json!({
++            "failure": "refused",
++            "reason": code,
++            "methodology_ref": {"section": section, "subsection": null},
++        })
++    }
++
++    fn invalid_object(field: &str) -> Value {
++        json!({"failure": "invalid", "field": field})
++    }
++
++    /// Asserts a failure's reply: an error result whose `structuredContent` is
++    /// exactly `expected`, with the text block that same object serialized.
++    fn assert_failure(reply: &Reply, expected: &Value) {
++        assert!(!reply.close && reply.unrecorded.is_none());
++        let message = wire(reply);
++        assert_eq!(message["result"]["isError"], true, "{message}");
++        assert_eq!(
++            message["result"]["structuredContent"], *expected,
++            "{message}"
++        );
++        let text: Value = serde_json::from_str(&text_of(reply)).expect("JSON text");
++        assert_eq!(text, *expected);
++    }
++
++    /// Asserts a recorded report's reply, and returns its one text block: no
++    /// `structuredContent` and no `isError`.
++    fn recorded_text(reply: &Reply) -> String {
++        assert!(!reply.close && reply.unrecorded.is_none());
++        let message = wire(reply);
++        let result = &message["result"];
++        assert!(result.get("isError").is_none(), "{message}");
++        assert!(result.get("structuredContent").is_none(), "{message}");
++        text_of(reply)
++    }
++
++    /// The reply of a recorded report whose record is draw `n` and which cut
++    /// nothing.
++    fn recorded_reply(n: usize) -> String {
++        format!("report recorded: record {}\n", numbered(n))
++    }
++
++    /// Asserts a call that left the two rows of a failure, drew no identifier
++    /// and wrote no file in the product's evidence directory.
++    fn assert_stopped_before_the_barrier(rig: &mut Rig, tip: u64) {
++        let rows = rig.world.rows_since(tip);
++        assert_eq!(kinds(&rows), FAILED_ROWS);
++        assert_eq!(rig.draws(), 0, "no identifier was drawn");
++        let evidence_dir = rig.world.db.dir().join("evidence");
++        assert_eq!(
++            fs::read_dir(&evidence_dir)
++                .expect("the evidence dir")
++                .count(),
++            0,
++            "no evidence file was written"
++        );
++    }
++
++    // -------------------------------------------------------------------
++    // 1. A coder files a closing report
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_a_coder_files_a_closing_report_through_the_barrier() {
++        let mut rig = rig(Role::Coder, "report-closing", true);
++        let tip = rig.world.tip();
++
++        let reply = report(
++            &mut rig.world,
++            &ticket_t(),
++            "closing",
++            content_of(&CLOSING_FIELDS),
++        );
++        assert_eq!(recorded_text(&reply), recorded_reply(1));
++        assert_eq!(rig.draws(), 11, "the record, then one per field");
++
++        // The rows: the call's, ten evidence rows in template order, the record.
++        let rows = rig.world.rows_since(tip);
++        let mut expected = vec!["mcp.tool_called"];
++        expected.extend(["memory.evidence_stored"; 10]);
++        expected.push("memory.record_created");
++        assert_eq!(kinds(&rows), expected);
++        assert_eq!(payload(&rows[0])["tool"], "aicd_report");
++        assert_eq!(rows[0].ticket_id(), Some(&ticket_t()), "the argument");
++
++        // Provenance: the agent, at the call's time, on every barrier row.
++        let at = rows[0].at();
++        assert_eq!(at, Timestamp::from_millis(START));
++        for row in &rows {
++            assert_eq!(row.actor(), &Actor::Agent(identity()), "{}", row.kind());
++            assert_eq!(row.at(), at, "{}", row.kind());
++        }
++        for row in &rows[1..11] {
++            assert_eq!(row.ticket_id(), Some(&numbered(1)), "the record id");
++        }
++        assert_eq!(rows[11].ticket_id(), Some(&ticket_t()), "the ticket");
++
++        // The record: one, of the kind, with the ten names and no other.
++        let records = read_records(&mut rig.world.db).expect("the records read");
++        assert_eq!(records.len(), 1);
++        let record = &records[0];
++        assert_eq!(record.id(), &numbered(1));
++        assert_eq!(record.kind(), RecordKind::ClosingReport);
++        assert_eq!(record.provenance().ticket_id(), Some(&ticket_t()));
++        assert_eq!(record.provenance().actor(), &Actor::Agent(identity()));
++        assert_eq!(record.provenance().at(), at);
++        let mut names: Vec<&str> = record.structured().keys().map(FieldName::as_str).collect();
++        let mut expected_names = CLOSING_FIELDS.to_vec();
++        names.sort_unstable();
++        expected_names.sort_unstable();
++        assert_eq!(names, expected_names);
++
++        // The evidence: ten blobs in template order, each the field's whole text.
++        let blobs = read_evidence(&mut rig.world.db).expect("the evidence reads");
++        assert_eq!(blobs.len(), 10);
++        for (index, (blob, name)) in blobs.iter().zip(CLOSING_FIELDS).enumerate() {
++            assert_eq!(blob.id(), &numbered(index + 2), "{name}");
++            assert_eq!(blob.record_id(), &numbered(1), "{name}");
++            let content = read_evidence_content(blob, READ_CAP).expect("the file reads");
++            assert_eq!(
++                content.bytes(),
++                format!("the text of {name}").as_bytes(),
++                "{name}"
++            );
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 2. qa and operations file blocked reports
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_qa_and_operations_file_blocked_reports() {
++        for (role, label) in [
++            (Role::Qa, "report-blocked-qa"),
++            (Role::Operations, "report-blocked-operations"),
++        ] {
++            let mut rig = rig(role, label, true);
++            let tip = rig.world.tip();
++
++            let reply = report(
++                &mut rig.world,
++                &ticket_t(),
++                "blocked",
++                content_of(&BLOCKED_FIELDS),
++            );
++            assert_eq!(recorded_text(&reply), recorded_reply(1), "{role}");
++            assert_eq!(rig.draws(), 6, "{role}");
++
++            let rows = rig.world.rows_since(tip);
++            let mut expected = vec!["mcp.tool_called"];
++            expected.extend(["memory.evidence_stored"; 5]);
++            expected.push("memory.record_created");
++            assert_eq!(kinds(&rows), expected, "{role}");
++
++            let records = read_records(&mut rig.world.db).expect("the records read");
++            assert_eq!(records.len(), 1, "{role}");
++            assert_eq!(records[0].kind(), RecordKind::BlockedReport, "{role}");
++            assert_eq!(records[0].provenance().ticket_id(), Some(&ticket_t()));
++            assert_eq!(records[0].structured().len(), 5, "{role}");
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 3 and 4. The role's kinds, and the kinds with no template
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_a_role_writes_only_its_kinds() {
++        for (role, kind, label) in [
++            (Role::Coder, "qa_run", "kinds-coder"),
++            (Role::Qa, "closing", "kinds-qa"),
++            (Role::Operations, "closing", "kinds-operations"),
++            (Role::Documentation, "qa_run", "kinds-documentation"),
++        ] {
++            let mut rig = rig(role, label, true);
++            let tip = rig.world.tip();
++
++            let reply = report(
++                &mut rig.world,
++                &ticket_t(),
++                kind,
++                content_of(&CLOSING_FIELDS),
++            );
++            assert_failure(
++                &reply,
++                &json!({
++                    "failure": "refused",
++                    "reason": "report_kind_not_permitted_for_role",
++                    "methodology_ref": {"section": 17, "subsection": null},
++                }),
++            );
++            assert_stopped_before_the_barrier(&mut rig, tip);
++        }
++    }
++
++    #[test]
++    fn ori_t_0187_a_kind_with_no_template_is_not_available() {
++        for (role, kind, label) in [
++            (Role::Qa, "qa_run", "available-qa"),
++            (
++                Role::Documentation,
++                "drift_audit",
++                "available-documentation",
++            ),
++        ] {
++            let mut rig = rig(role, label, true);
++            let tip = rig.world.tip();
++
++            let reply = report(&mut rig.world, &ticket_t(), kind, content_of(&["finding"]));
++            assert_failure(&reply, &refused_object("report_kind_not_available", 17));
++            assert_stopped_before_the_barrier(&mut rig, tip);
++            let rows = rig.world.rows_since(tip);
++            let failed = payload(&rows[1]);
++            assert_eq!(failed["failure"], "refused");
++            assert_eq!(failed["reason"], "report_kind_not_available");
++            assert_eq!(failed["methodology_ref"]["section"], 17);
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 5. The content is held to the kind's fields
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_content_is_held_to_the_kinds_fields() {
++        let mut rig = rig(Role::Coder, "content-faults", true);
++
++        // Each case is a blocked report, five fields, so an extra key stays
++        // within S2's ten. `change` edits the five good fields.
++        let mut case = |label: &str, change: &dyn Fn(&mut Map<String, Value>), field: &str| {
++            let tip = rig.world.tip();
++            let mut content = content_of(&BLOCKED_FIELDS);
++            change(&mut content);
++            let reply = report(&mut rig.world, &ticket_t(), "blocked", content);
++            assert_failure(&reply, &invalid_object(field));
++            assert_stopped_before_the_barrier(&mut rig, tip);
++            let rows = rig.world.rows_since(tip);
++            let failed = payload(&rows[1]);
++            assert_eq!(failed["failure"], "invalid", "{label}");
++            assert_eq!(failed["field"], field, "{label}");
++            assert!(failed.get("why").is_none(), "{label}: why is never copied");
++            for row in &rows {
++                assert!(
++                    !row.payload().contains(MARKER),
++                    "{label}: {}",
++                    row.payload()
++                );
++            }
++            assert!(!wire(&reply).to_string().contains(MARKER), "{label}");
++        };
++
++        case(
++            "an extra key",
++            &|content| {
++                content.insert(MARKER.to_owned(), json!("text"));
++            },
++            "content",
++        );
++        case(
++            "hypothesis missing",
++            &|content| {
++                content.remove("hypothesis");
++            },
++            "/content/hypothesis",
++        );
++        case(
++            "two missing: the first in template order wins",
++            &|content| {
++                content.remove("approaches_tried");
++                content.remove("budget_consumed");
++            },
++            "/content/budget_consumed",
++        );
++        case(
++            "only spaces",
++            &|content| {
++                content.insert("budget_consumed".to_owned(), json!("   "));
++            },
++            "/content/budget_consumed",
++        );
++        case(
++            "precedence: a blank field, a missing one and an extra key",
++            &|content| {
++                content.insert("approaches_tried".to_owned(), json!(" \t\n "));
++                content.remove("what_it_needs_from_a_human");
++                content.insert(MARKER.to_owned(), json!("text"));
++            },
++            "/content/approaches_tried",
++        );
++        for (name, pointer) in BLOCKED_FIELDS.iter().zip(BLOCKED_POINTERS) {
++            case(
++                "an empty field",
++                &|content| {
++                    content.insert((*name).to_owned(), json!(""));
++                },
++                pointer,
++            );
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 6. A ticket that is not filed
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_a_ticket_not_filed_is_refused() {
++        // A qa binding names a ticket nobody filed, with a blocked report.
++        let mut qa = rig(Role::Qa, "unfiled-qa", false);
++        let tip = qa.world.tip();
++        let reply = report(
++            &mut qa.world,
++            &ticket_t(),
++            "blocked",
++            content_of(&BLOCKED_FIELDS),
++        );
++        assert_failure(&reply, &refused_object("ticket_not_in_product", 25));
++        assert_stopped_before_the_barrier(&mut qa, tip);
++        let failed = payload(&qa.world.rows_since(tip)[1]);
++        assert_eq!(failed["reason"], "ticket_not_in_product");
++        assert_eq!(failed["methodology_ref"]["section"], 25);
++
++        // The coder is bound to ticket T, which is not filed, and files a full
++        // closing report: the check holds for every role.
++        let mut coder = rig(Role::Coder, "unfiled-coder", false);
++        let tip = coder.world.tip();
++        let reply = report(
++            &mut coder.world,
++            &ticket_t(),
++            "closing",
++            content_of(&CLOSING_FIELDS),
++        );
++        assert_failure(&reply, &refused_object("ticket_not_in_product", 25));
++        assert_stopped_before_the_barrier(&mut coder, tip);
++    }
++
++    // -------------------------------------------------------------------
++    // 7 and 8. An id source or a barrier that cannot answer
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_an_id_source_that_cannot_answer_stores_nothing() {
++        let mut rig = rig_with(
++            Role::Coder,
++            "ids-fail",
++            |drawn| ScriptedIds {
++                script: Vec::new(),
++                next: 0,
++                drawn,
++                fails: true,
++            },
++            BarrierConfig::default(),
++            true,
++        );
++        let tip = rig.world.tip();
++
++        let reply = report(
++            &mut rig.world,
++            &ticket_t(),
++            "closing",
++            content_of(&CLOSING_FIELDS),
++        );
++        assert_failure(&reply, &json!({"failure": "unavailable"}));
++        assert_eq!(rig.draws(), 1, "the first draw failed and none came after");
++
++        let rows = rig.world.rows_since(tip);
++        assert_eq!(kinds(&rows), FAILED_ROWS);
++        assert!(rows.iter().all(|row| !row.kind().starts_with("memory.")));
++        assert_eq!(payload(&rows[1])["failure"], "unavailable");
++        let evidence_dir = rig.world.db.dir().join("evidence");
++        assert_eq!(fs::read_dir(evidence_dir).expect("the dir").count(), 0);
++    }
++
++    /// Draws 1 to 11 for a first closing report, a fresh record id as draw 12,
++    /// and as draw 13 the first report's first evidence id, with four fresh ones
++    /// after it for the second report's other fields.
++    fn reuse_script() -> Vec<Id> {
++        let mut script = numbers(1, 12);
++        script.push(numbered(2));
++        script.extend(numbers(14, 17));
++        script
++    }
++
++    #[test]
++    fn ori_t_0187_a_barrier_refusal_is_unavailable_and_shows_no_path() {
++        let mut rig = rig_with(
++            Role::Coder,
++            "barrier-refusal",
++            |drawn| ScriptedIds {
++                script: reuse_script(),
++                next: 0,
++                drawn,
++                fails: false,
++            },
++            BarrierConfig::default(),
++            true,
++        );
++        let first = report(
++            &mut rig.world,
++            &ticket_t(),
++            "closing",
++            content_of(&CLOSING_FIELDS),
++        );
++        assert_eq!(recorded_text(&first), recorded_reply(1));
++        assert_eq!(rig.draws(), 11);
++
++        // The second report is a blocked report whose first evidence id is the
++        // first report's: the barrier refuses it before it writes anything.
++        let tip = rig.world.tip();
++        let second = report(
++            &mut rig.world,
++            &ticket_t(),
++            "blocked",
++            content_of(&BLOCKED_FIELDS),
++        );
++        assert_failure(&second, &json!({"failure": "unavailable"}));
++        assert_eq!(rig.draws(), 17, "the record and five evidence ids");
++        let rows = rig.world.rows_since(tip);
++        assert_eq!(kinds(&rows), FAILED_ROWS);
++        let dir = rig.world.db.dir().display().to_string();
++        assert!(!wire(&second).to_string().contains(&dir), "the reply");
++        for row in &rows {
++            assert!(!row.payload().contains(&dir), "{}", row.payload());
++        }
++
++        // A direct call with the same reuse says what it was: the fixed
++        // `what`, never the barrier's own text.
++        let mut handler = ReportHandler::new(
++            Box::new(ScriptedIds {
++                script: [vec![numbered(30), numbered(2)], numbers(31, 34)].concat(),
++                next: 0,
++                drawn: Arc::new(AtomicUsize::new(0)),
++                fails: false,
++            }),
++            BarrierConfig::default(),
++        );
++        let binding = Binding::new(
++            session(),
++            identity(),
++            Role::Coder,
++            rig.world.product.clone(),
++            Some(ticket_t()),
++        );
++        let ticket = ticket_t();
++        let call = BoundCall {
++            binding: &binding,
++            tool: Tool::Report,
++            called_seq: 1,
++            at: Timestamp::from_millis(START),
++            ticket_id: Some(&ticket),
++        };
++        let Value::Object(blocked) = arguments(&ticket, "blocked", content_of(&BLOCKED_FIELDS))
++        else {
++            panic!("an object");
++        };
++        match handler.call(&mut rig.world.db, &call, blocked) {
++            Err(HandlerError::Port(PortError::Unavailable { what })) => {
++                assert_eq!(what, WHAT_STORE);
++            }
++            other => panic!("expected the store to be unavailable, got {other:?}"),
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 9. A field cut at the cap
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_a_field_cut_at_the_cap_is_named_in_the_reply() {
++        // The default cap: one field of 5 000 characters.
++        let mut rig = rig(Role::Coder, "cap-default", true);
++        let mut content = content_of(&CLOSING_FIELDS);
++        content.insert("outcome".to_owned(), json!("x".repeat(5000)));
++        let reply = report(&mut rig.world, &ticket_t(), "closing", content);
++        assert_eq!(
++            recorded_text(&reply),
++            format!(
++                "report recorded: record {}\ncut at the barrier's cap of 4000 characters, the evidence keeps the whole text: outcome\n",
++                numbered(1)
++            )
++        );
++        let records = read_records(&mut rig.world.db).expect("the records read");
++        let name = FieldName::parse("outcome").expect("a name");
++        let stored = records[0].field(&name).expect("the field");
++        assert_eq!(stored.char_len(), 4000);
++        assert_eq!(stored.text(), "x".repeat(4000));
++        let blobs = read_evidence(&mut rig.world.db).expect("the evidence reads");
++        let whole = read_evidence_content(&blobs[2], READ_CAP).expect("the file reads");
++        assert_eq!(whole.bytes(), "x".repeat(5000).as_bytes());
++
++        // The handler's own config, and template order, the reverse of the
++        // alphabetical order of the barrier's set.
++        let mut rig = rig_with(
++            Role::Coder,
++            "cap-fifty",
++            |drawn| ScriptedIds {
++                script: numbers(1, 40),
++                next: 0,
++                drawn,
++                fails: false,
++            },
++            BarrierConfig {
++                field_cap_chars: 50,
++            },
++            true,
++        );
++        let mut content = content_of(&CLOSING_FIELDS);
++        content.insert("modules_touched".to_owned(), json!("m".repeat(60)));
++        content.insert(
++            "approaches_tried_and_rejected".to_owned(),
++            json!("a".repeat(60)),
++        );
++        let reply = report(&mut rig.world, &ticket_t(), "closing", content);
++        assert_eq!(
++            recorded_text(&reply),
++            format!(
++                "report recorded: record {}\ncut at the barrier's cap of 50 characters, the evidence keeps the whole text: modules_touched, approaches_tried_and_rejected\n",
++                numbered(1)
++            )
++        );
++    }
++
++    // -------------------------------------------------------------------
++    // 10. No agent text reaches the reply or the call's rows
++    // -------------------------------------------------------------------
++
++    /// Asserts what the marker may and may not reach: no reply, no `mcp.*` row
++    /// and no evidence row holds it.
++    fn assert_marker_stays_out(reply: &Reply, rows: &[ori_store::event_log::Event]) {
++        assert!(!wire(reply).to_string().contains(MARKER), "the reply");
++        for row in rows {
++            if row.kind().starts_with("mcp.") || row.kind() == "memory.evidence_stored" {
++                assert!(
++                    !row.payload().contains(MARKER),
++                    "{}: {}",
++                    row.kind(),
++                    row.payload()
++                );
++            }
++        }
++    }
++
++    fn marked(names: &[&str]) -> Map<String, Value> {
++        names
++            .iter()
++            .map(|name| ((*name).to_owned(), json!(format!("{MARKER} {name}"))))
++            .collect()
++    }
++
++    #[test]
++    fn ori_t_0187_no_agent_text_reaches_the_reply_or_the_calls_rows() {
++        // A recorded report: every field carries the marker.
++        let mut coder = rig(Role::Coder, "marker-coder", true);
++        let tip = coder.world.tip();
++        let reply = report(
++            &mut coder.world,
++            &ticket_t(),
++            "closing",
++            marked(&CLOSING_FIELDS),
++        );
++        assert_eq!(recorded_text(&reply), recorded_reply(1));
++        let rows = coder.world.rows_since(tip);
++        assert_marker_stays_out(&reply, &rows);
++        // The marker is expected in the record's structured text...
++        let created = rows.last().expect("the record row");
++        assert_eq!(created.kind(), "memory.record_created");
++        assert!(created.payload().contains(MARKER), "{}", created.payload());
++        // ... and in each evidence file.
++        let blobs = read_evidence(&mut coder.world.db).expect("the evidence reads");
++        assert_eq!(blobs.len(), 10);
++        for blob in &blobs {
++            let content = read_evidence_content(blob, READ_CAP).expect("the file reads");
++            assert!(content.text_lossy().contains(MARKER));
++        }
++
++        // An extra-key call: a blocked report, its five fields and a key that is
++        // the marker.
++        let tip = coder.world.tip();
++        let mut content = marked(&BLOCKED_FIELDS);
++        content.insert(MARKER.to_owned(), json!(format!("{MARKER} value")));
++        let reply = report(&mut coder.world, &ticket_t(), "blocked", content);
++        assert_failure(&reply, &invalid_object("content"));
++        let rows = coder.world.rows_since(tip);
++        assert_eq!(kinds(&rows), FAILED_ROWS);
++        assert_marker_stays_out(&reply, &rows);
++
++        // An unfiled-ticket call: a qa binding names a ticket nobody filed.
++        let mut qa = rig(Role::Qa, "marker-qa", true);
++        let tip = qa.world.tip();
++        let unfiled = id("UNFILED");
++        let reply = report(&mut qa.world, &unfiled, "blocked", marked(&BLOCKED_FIELDS));
++        assert_failure(&reply, &refused_object("ticket_not_in_product", 25));
++        let rows = qa.world.rows_since(tip);
++        assert_eq!(kinds(&rows), FAILED_ROWS);
++        assert_marker_stays_out(&reply, &rows);
++        assert_eq!(qa.draws(), 0);
++    }
++
++    // -------------------------------------------------------------------
++    // 11. The field lists are the specification's
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_the_field_lists_are_api_specs() {
++        let spec = include_str!("../../../../spec/API_SPEC.md");
++        // The cells of the table row starting with `prefix`, trimmed. Cell 0 is
++        // empty (the text before the first bar): cell 1 is the kind, cell 2 the
++        // record kind it is stored as, cell 3 the fields.
++        let cells = |prefix: &str| -> Vec<&str> {
++            let line = spec
++                .lines()
++                .find(|line| line.starts_with(prefix))
++                .unwrap_or_else(|| panic!("no row starts with {prefix}"));
++            line.split('|').map(str::trim).collect()
++        };
++        let names = |cell: &str| -> Vec<String> {
++            cell.split('`')
++                .skip(1)
++                .step_by(2)
++                .map(str::to_owned)
++                .collect()
++        };
++
++        let closing = cells("| `closing` | ");
++        assert_eq!(
++            closing[2],
++            format!("`{}`", RecordKind::ClosingReport.as_str())
++        );
++        assert_eq!(names(closing[3]), CLOSING_FIELDS);
++
++        let blocked = cells("| `blocked` | ");
++        assert_eq!(
++            blocked[2],
++            format!("`{}`", RecordKind::BlockedReport.as_str())
++        );
++        assert_eq!(names(blocked[3]), BLOCKED_FIELDS);
++
++        // The pointers are the lists' names, one for one, and the handler's
++        // kinds are the catalogue's.
++        for (name, pointer) in CLOSING_FIELDS.iter().zip(CLOSING_POINTERS) {
++            assert_eq!(pointer, format!("/content/{name}"));
++        }
++        for (name, pointer) in BLOCKED_FIELDS.iter().zip(BLOCKED_POINTERS) {
++            assert_eq!(pointer, format!("/content/{name}"));
++        }
++        assert_eq!(
++            REPORT_KINDS.map(ReportKind::parse),
++            [
++                Some(ReportKind::Closing),
++                Some(ReportKind::Blocked),
++                Some(ReportKind::QaRun),
++                Some(ReportKind::DriftAudit),
++            ]
++        );
++    }
++
++    // -------------------------------------------------------------------
++    // 12. A report's evidence is attributable
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_a_reports_evidence_is_attributable() {
++        let mut rig = rig(Role::Coder, "attributable", true);
++        let reply = report(
++            &mut rig.world,
++            &ticket_t(),
++            "closing",
++            content_of(&CLOSING_FIELDS),
++        );
++        assert_eq!(recorded_text(&reply), recorded_reply(1));
++
++        // A lead, registered in the log, asks for the record's evidence.
++        let product = rig.world.product.clone();
++        let lead = id("LEADAGENT");
++        register_in(&mut rig.world.db, &product, &lead, Role::Lead, &product);
++        let principal = Principal::authenticated(Actor::Agent(lead));
++        let request = MemoryRequest::new(Query::Evidence {
++            record_id: numbered(1),
++        });
++        let authorization = ScopeEnforcer::new(ProductStage::Standard)
++            .authorize(
++                &mut rig.world.db,
++                Timestamp::from_millis(START + 100),
++                &principal,
++                &request,
++            )
++            .expect("the lead is granted the evidence of the record");
++        let blobs = authorization.evidence();
++        assert_eq!(blobs.len(), 10);
++        for (index, blob) in blobs.iter().enumerate() {
++            assert_eq!(blob.id(), &numbered(index + 2));
++            assert_eq!(blob.record_id(), &numbered(1));
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 13. The fallbacks never panic
++    // -------------------------------------------------------------------
++
++    /// Calls the handler directly, as the coder bound to ticket T, with
++    /// `ticket` as the call's ticket argument and `arguments` as they are.
++    fn direct(
++        rig: &mut Rig,
++        ticket: Option<&Id>,
++        arguments: Value,
++    ) -> Result<CallToolResult, HandlerError> {
++        let mut handler = ReportHandler::new(
++            Box::new(ScriptedIds {
++                script: numbers(1, 40),
++                next: 0,
++                drawn: Arc::clone(&rig.drawn),
++                fails: false,
++            }),
++            BarrierConfig::default(),
++        );
++        let binding = Binding::new(
++            session(),
++            identity(),
++            Role::Coder,
++            rig.world.product.clone(),
++            Some(ticket_t()),
++        );
++        let call = BoundCall {
++            binding: &binding,
++            tool: Tool::Report,
++            called_seq: 1,
++            at: Timestamp::from_millis(START),
++            ticket_id: ticket,
++        };
++        let Value::Object(arguments) = arguments else {
++            panic!("an object");
++        };
++        handler.call(&mut rig.world.db, &call, arguments)
++    }
++
++    /// Asserts an `Invalid` failure at `field`, with `why` as the named constant.
++    fn assert_invalid(result: Result<CallToolResult, HandlerError>, field: &str, why: &str) {
++        match result {
++            Err(HandlerError::Port(PortError::Invalid {
++                field: found,
++                why: reason,
++            })) => {
++                assert_eq!(found, field);
++                assert_eq!(reason, why);
++            }
++            other => panic!("expected an invalid {field}, got {other:?}"),
++        }
++    }
++
++    #[test]
++    fn ori_t_0187_the_handlers_fallbacks_never_panic() {
++        let mut rig = rig(Role::Coder, "fallbacks", true);
++        let ticket = ticket_t();
++        let good = |kind: Value, content: Value| json!({"ticket_id": ticket.as_str(), "kind": kind, "content": content});
++
++        // No ticket on the call.
++        assert_invalid(
++            direct(
++                &mut rig,
++                None,
++                good(json!("blocked"), json!(content_of(&BLOCKED_FIELDS))),
++            ),
++            "ticket_id",
++            WHY_TICKET,
++        );
++
++        // A kind that is missing, not a string, or not one of the four.
++        for kind in [Value::Null, json!(7), json!("incident"), json!("Closing")] {
++            assert_invalid(
++                direct(
++                    &mut rig,
++                    Some(&ticket),
++                    good(kind, json!(content_of(&BLOCKED_FIELDS))),
++                ),
++                "kind",
++                WHY_KIND,
++            );
++        }
++        assert_invalid(
++            direct(
++                &mut rig,
++                Some(&ticket),
++                json!({"content": content_of(&BLOCKED_FIELDS)}),
++            ),
++            "kind",
++            WHY_KIND,
++        );
++
++        // A content that is missing or not an object.
++        for content in [Value::Null, json!("text"), json!([1, 2]), json!(7)] {
++            assert_invalid(
++                direct(&mut rig, Some(&ticket), good(json!("blocked"), content)),
++                "content",
++                WHY_CONTENT,
++            );
++        }
++        assert_invalid(
++            direct(&mut rig, Some(&ticket), json!({"kind": "blocked"})),
++            "content",
++            WHY_CONTENT,
++        );
++
++        // A field that is not a string.
++        let mut content = content_of(&BLOCKED_FIELDS);
++        content.insert("hypothesis".to_owned(), json!(7));
++        assert_invalid(
++            direct(
++                &mut rig,
++                Some(&ticket),
++                good(json!("blocked"), json!(content)),
++            ),
++            "/content/hypothesis",
++            WHY_NOT_TEXT,
++        );
++
++        // An extra key: `why` is the fixed sentence and holds no part of it.
++        let mut content = content_of(&BLOCKED_FIELDS);
++        content.insert(MARKER.to_owned(), json!("text"));
++        let result = direct(
++            &mut rig,
++            Some(&ticket),
++            good(json!("blocked"), json!(content)),
++        );
++        match &result {
++            Err(HandlerError::Port(PortError::Invalid { why, .. })) => {
++                assert!(!why.contains(MARKER) && !why.contains("ZEBRA"), "{why}");
++            }
++            other => panic!("expected an invalid content, got {other:?}"),
++        }
++        assert_invalid(result, "content", WHY_UNEXPECTED);
++
++        assert_eq!(rig.draws(), 0, "every fault came before an identifier");
++    }
++
++    // -------------------------------------------------------------------
++    // 14. Every role and every kind is decided
++    // -------------------------------------------------------------------
++
++    /// What a role writing a kind with `content: {}` is answered.
++    #[derive(Clone, Copy)]
++    enum Decision {
++        /// Permitted and available: held to the kind's fields, the first of
++        /// which is missing.
++        Invalid(&'static str),
++        /// Permitted, and no template defines the kind.
++        NotAvailable,
++        /// Not permitted for the role.
++        NotPermitted,
++    }
++
++    #[test]
++    fn ori_t_0187_every_role_and_kind_is_decided() {
++        use Decision::{Invalid, NotAvailable, NotPermitted};
++        const FIRST_CLOSING: &str = "/content/modules_touched";
++        const FIRST_BLOCKED: &str = "/content/budget_consumed";
++        let table: [(Role, &str, Decision); 16] = [
++            (Role::Coder, "closing", Invalid(FIRST_CLOSING)),
++            (Role::Coder, "blocked", Invalid(FIRST_BLOCKED)),
++            (Role::Coder, "qa_run", NotPermitted),
++            (Role::Coder, "drift_audit", NotPermitted),
++            (Role::Documentation, "closing", Invalid(FIRST_CLOSING)),
++            (Role::Documentation, "blocked", Invalid(FIRST_BLOCKED)),
++            (Role::Documentation, "qa_run", NotPermitted),
++            (Role::Documentation, "drift_audit", NotAvailable),
++            (Role::Qa, "closing", NotPermitted),
++            (Role::Qa, "blocked", Invalid(FIRST_BLOCKED)),
++            (Role::Qa, "qa_run", NotAvailable),
++            (Role::Qa, "drift_audit", NotPermitted),
++            (Role::Operations, "closing", NotPermitted),
++            (Role::Operations, "blocked", Invalid(FIRST_BLOCKED)),
++            (Role::Operations, "qa_run", NotPermitted),
++            (Role::Operations, "drift_audit", NotPermitted),
++        ];
++        // Four roles, each against every kind the catalogue lists.
++        for kind in REPORT_KINDS {
++            assert_eq!(table.iter().filter(|(_, k, _)| *k == kind).count(), 4);
++        }
++
++        for role in [Role::Coder, Role::Documentation, Role::Qa, Role::Operations] {
++            let mut rig = rig(role, &format!("matrix-{role}"), true);
++            for (_, kind, decision) in table.iter().filter(|(r, _, _)| *r == role) {
++                let tip = rig.world.tip();
++                let reply = report(&mut rig.world, &ticket_t(), kind, Map::new());
++                let expected = match decision {
++                    Invalid(field) => invalid_object(field),
++                    NotAvailable => refused_object("report_kind_not_available", 17),
++                    NotPermitted => refused_object("report_kind_not_permitted_for_role", 17),
++                };
++                assert_failure(&reply, &expected);
++                assert_stopped_before_the_barrier(&mut rig, tip);
++            }
++        }
++
++        // The roles S2 refuses first are refused by the handler too, should
++        // one ever reach it: through a direct call, for every kind.
++        for role in [Role::Lead, Role::ProductSignal, Role::Assistant] {
++            let mut rig = rig(Role::Coder, &format!("matrix-direct-{role}"), true);
++            let binding =
++                Binding::new(session(), identity(), role, rig.world.product.clone(), None);
++            let ticket = ticket_t();
++            let call = BoundCall {
++                binding: &binding,
++                tool: Tool::Report,
++                called_seq: 1,
++                at: Timestamp::from_millis(START),
++                ticket_id: Some(&ticket),
++            };
++            let mut handler = ReportHandler::new(
++                Box::new(ScriptedIds {
++                    script: Vec::new(),
++                    next: 0,
++                    drawn: Arc::clone(&rig.drawn),
++                    fails: false,
++                }),
++                BarrierConfig::default(),
++            );
++            for kind in REPORT_KINDS {
++                let Value::Object(arguments) = arguments(&ticket, kind, Map::new()) else {
++                    panic!("an object");
++                };
++                let result = handler.call(&mut rig.world.db, &call, arguments);
++                match result {
++                    Err(error @ HandlerError::Refused { .. }) => {
++                        assert_eq!(error, refused(CODE_KIND_NOT_PERMITTED, 17), "{role} {kind}");
++                    }
++                    other => panic!("{role} {kind}: expected a refusal, got {other:?}"),
++                }
++            }
++            assert_eq!(rig.draws(), 0);
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // Pins that belong to no numbered test
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_the_handlers_refusals_name_sections_that_resolve() {
++        for (code, section) in [
++            (CODE_KIND_NOT_PERMITTED, 17),
++            (CODE_KIND_NOT_AVAILABLE, 17),
++            (CODE_TICKET_NOT_IN_PRODUCT, 25),
++        ] {
++            match refused(code, section) {
++                HandlerError::Refused {
++                    code: found,
++                    methodology_ref,
++                } => {
++                    assert_eq!(found, code);
++                    assert_eq!(methodology_ref.section, section);
++                    assert!(methodology_ref.resolves(), "{code}");
++                }
++                other => panic!("expected a refusal, got {other:?}"),
++            }
++        }
++    }
++}
+-- 
+2.43.0
+
+
+From c5099753a8cb9d7de78064e9a6a80c11e5f50653 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 00:32:15 +0000
+Subject: [PATCH 2/3] docs(mcp): state the row bound of aicd_report by outcome
+
+The bound named one case twice and the other not at all. A recorded
+call is mcp.tool_called and the barrier's eleven rows; a call the
+barrier fails on part-way is mcp.tool_called, at most ten evidence rows
+and mcp.tool_failed. Both come to at most twelve.
+
+Ticket: ORI-T-0187
+Spec: API_SPEC.md#3-agent-facing-mcp-server
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CQ4vWTcpGWb4B2jvnPi4RM
+---
+ crates/ori-mcp/src/tools/report.rs | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/crates/ori-mcp/src/tools/report.rs b/crates/ori-mcp/src/tools/report.rs
+index 6e945d5..17d1b2c 100644
+--- a/crates/ori-mcp/src/tools/report.rs
++++ b/crates/ori-mcp/src/tools/report.rs
+@@ -190,11 +190,13 @@
+ //! claims; the enforcer never hands those out.
+ //!
+ //! **The row bound.** An admitted call adds at most 11 rows of the barrier's: 10
+-//! evidence rows and the record. With S2's own two rows (`mcp.tool_called` and
+-//! `mcp.tool_failed`, or the first and the record's), a call leaves at most 12.
+-//! So **calls to this tool leave at most twelve times the window's limit plus one
+-//! row per connection** (`crate::server`'s module documentation bounds S2's own
+-//! rows, and asks each slice to state its handler's).
++//! evidence rows and the record. With S2's own rows, a call leaves at most 12: a
++//! recorded call is `mcp.tool_called` and the barrier's 11, and a call the
++//! barrier fails on part-way is `mcp.tool_called`, at most 10 evidence rows and
++//! `mcp.tool_failed`. So **calls to this tool leave at most twelve times the
++//! window's limit plus one row per connection** (`crate::server`'s module
++//! documentation bounds S2's own rows, and asks each slice to state its
++//! handler's).
+ //!
+ //! # Limits
+ //!
+-- 
+2.43.0
+
+
+From 38f41aeef47e5530915064516510af32494d7677 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 01:15:35 +0000
+Subject: [PATCH 3/3] fix(mcp): pin aicd_report's raw text, check order and log
+ check
+
+Repair 1 of ORI-T-0187, from its four-lens review. Three new tests:
+each value reaches the barrier byte for byte, whitespace, line breaks
+and control characters included; an unfiled ticket is checked after
+the role, the kind and the content; and a log that cannot be verified
+is unavailable. Five calls now assert their exact rows, and test 8's
+path check also looks for the path as JSON escapes it. The diagram
+gains the unreadable log, and now draws the id source's failure before
+the barrier. The docs now state the cost of reading the log, both
+closing fields that are always required, a field that only looks
+blank, a non-coder filing against any filed ticket, and the engine's
+duties as duties. The invalid and unavailable helpers take static texts only.
+
+Ticket: ORI-T-0187
+Spec: API_SPEC.md#3-agent-facing-mcp-server
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CQ4vWTcpGWb4B2jvnPi4RM
+---
+ crates/ori-mcp/src/tools/report.rs | 227 +++++++++++++++++++++++++----
+ 1 file changed, 196 insertions(+), 31 deletions(-)
+
+diff --git a/crates/ori-mcp/src/tools/report.rs b/crates/ori-mcp/src/tools/report.rs
+index 17d1b2c..fb6ccfa 100644
+--- a/crates/ori-mcp/src/tools/report.rs
++++ b/crates/ori-mcp/src/tools/report.rs
+@@ -10,7 +10,8 @@
+ //! between S2's pipeline, which admits the four roles and validates the
+ //! arguments against the catalogue's schema, and `ori_memory::barrier`, which
+ //! sanitizes every field, writes each raw text to its evidence file and appends
+-//! the record. **It writes no event of its own and no text but fixed labels.**
++//! the record. **It writes no event of its own, and its reply holds no text but
++//! fixed labels and the engine's values (the record id, the cap).**
+ //!
+ //! # The kinds and who may write them
+ //!
+@@ -24,7 +25,7 @@
+ //! | coder | `closing`, `blocked` |
+ //! | documentation | `closing`, `drift_audit`, `blocked` |
+ //! | qa | `qa_run`, `blocked` |
+-//! | operations | `blocked` |
++//! | operations | `blocked`, until phase 4 |
+ //! | any other role | nothing: S2 refuses it first |
+ //!
+ //! Each kind is stored as one operational-memory record kind, and the fields of
+@@ -71,21 +72,31 @@
+ //!     S-->>A: an error result
+ //!   else all pass
+ //!     H->>L: verify and read the log: is the ticket filed?
+-//!     alt not filed
++//!     alt the log cannot be verified or read
++//!       H-->>S: Port Unavailable
++//!       S->>L: append mcp.tool_failed
++//!       S-->>A: an error result
++//!     else not filed
+ //!       H-->>S: Refused ticket_not_in_product
+ //!       S->>L: append mcp.tool_failed
+ //!       S-->>A: an error result
+ //!     else filed
+ //!       H->>I: next_id: the record, then one per field
+-//!       H->>B: submit_report(db, call.at, the agent, request, config)
+-//!       B->>L: memory.evidence_stored per field, then memory.record_created
+-//!       alt the barrier or the id source failed
++//!       alt the id source failed
+ //!         H-->>S: Port Unavailable
+ //!         S->>L: append mcp.tool_failed
+ //!         S-->>A: an error result
+-//!       else recorded
+-//!         H-->>S: Ok, one text block
+-//!         S-->>A: that result as it is
++//!       else every identifier drawn
++//!         H->>B: submit_report(db, call.at, the agent, request, config)
++//!         B->>L: memory.evidence_stored per field, then memory.record_created
++//!         alt the barrier failed, after any evidence rows it appended
++//!           H-->>S: Port Unavailable
++//!           S->>L: append mcp.tool_failed
++//!           S-->>A: an error result
++//!         else recorded
++//!           H-->>S: Ok, one text block
++//!           S-->>A: that result as it is
++//!         end
+ //!       end
+ //!     end
+ //!   end
+@@ -139,30 +150,37 @@
+ //! bound ticket. Any other role's ticket passes S2 unchecked, and S2's own
+ //! documentation says this slice must check that the ticket exists in this
+ //! product. The check holds for every role, the coder included. It costs a
+-//! second verify of the log per call, since the barrier makes one too; that is
+-//! accepted, as S3's repeated passes were.
++//! verified read of the whole log (`EventLog::verify`, then `read_range` to the
++//! tip) on every call that reaches it, linear in the log's length, on top of the
++//! barrier's own reads of the whole log for a report it records. A call refused
++//! `ticket_not_in_product` pays it too. That is accepted, as S3's repeated
++//! passes were.
+ //!
+ //! **Every field of the kind is required, and none is blank.** The blocked
+ //! report's five fields are required by their template. The closing report's
+ //! `new_criteria` and `provenance` are required only for some tickets, and the
+-//! handler does not interpret the ticket's kind, so all ten are required: an
+-//! agent writes `none` where nothing applies. `none` is ordinary text.
++//! handler does not interpret the ticket's kind, although it could read it from
++//! the `ticket.filed` payload, so all ten are required: an agent writes `none`
++//! where nothing applies. `none` is ordinary text.
+ //!
+ //! **The cap.** S2's schema accepts 8 192 characters per field, and the barrier
+ //! keeps at most `BarrierConfig::field_cap_chars` (4 000 by default) of the
+ //! sanitized text in the record. The raw text stays whole in the evidence file.
+ //! The handler tells the agent which fields were cut (step 10), and the
+-//! catalogue's bounds stay as S2 pinned them. The engine gives the handler the
+-//! product's `BarrierConfig`.
++//! catalogue's bounds stay as S2 pinned them. The engine is to give the handler
++//! the product's `BarrierConfig` (ORI-T-0070).
+ //!
+ //! **A blocked report has no side effect here.** `spec/API_SPEC.md` section 3
+-//! gives it none. The engine reacts to the record, whose kind is
+-//! `blocked_report`. The `report.*` events and the Report row's `session_id`
+-//! (`spec/DATA_MODEL.md` section 2) are for the specification ticket that
+-//! reconciles them.
++//! gives it none. Reacting to the record, whose kind is `blocked_report`, is the
++//! engine's (ORI-T-0070), and nothing reacts to it yet. The `report.*` events
++//! (`spec/API_SPEC.md` section 2) and the Report row (`spec/DATA_MODEL.md`
++//! section 2), neither of which this tool writes, are PD-2's to reconcile
++//! (`ops/batch-10-plan.md`).
+ //!
+-//! **`budget_consumed` is stored as the agent wrote it.** The runtime's meter is
+-//! the authority, and the engine compares the two.
++//! **`budget_consumed` is taken as the agent wrote it**: its evidence file holds
++//! the whole text, and the record the barrier's sanitized text. The runtime's
++//! meter is the authority; comparing the two is the engine's (ORI-T-0070), and
++//! nothing compares them yet.
+ //!
+ //! **One `NewReportField` per `content` entry, `raw_text` unchanged.** Slice S7
+ //! (`aicd_evidence`) sized the budget of the raw evidence a record can hold on
+@@ -204,9 +222,14 @@
+ //!   refused `ticket_not_in_product`.** Nothing writes that event yet, and the
+ //!   check holds for every role. The memory tools state the same limit.
+ //! - **`none` is accepted in every field**, including those whose template does
+-//!   not allow it. **`new_criteria` is required on every ticket**, although its
+-//!   template requires it only for defects. A defect closed with
++//!   not allow it. **`new_criteria` and `provenance` are required on every
++//!   ticket**, although their template requires the first only for defects and
++//!   the second only when content derives from production. A defect closed with
+ //!   `new_criteria: none` is recorded as it is, for the lead's review.
++//! - **A field that only looks blank passes.** The blank check trims Unicode
++//!   white space only, so a field of zero-width characters, or of a NUL (which
++//!   the barrier stores as U+FFFD), is recorded. ORI-T-0191, which decides how
++//!   format characters are scrubbed, decides this check too.
+ //! - **A field over the cap is cut in the record**, as above. The reply names it
+ //!   and the evidence keeps the whole text.
+ //! - **`qa_run` and `drift_audit` wait on a template** that names their fields.
+@@ -219,6 +242,12 @@
+ //!   handler's role table both rest on the engine's binding.
+ //! - **A qa or operations session must still name a ticket**: the schema
+ //!   requires one, and it must be filed.
++//! - **A role other than the coder files against any filed ticket.** S2's
++//!   check 7 ties only a coder to its bound ticket, so a documentation, qa or
++//!   operations session may file a record of a kind it may write for a ticket a
++//!   coder holds. The record names that session's identity as its actor, so it
++//!   is attributable, and a reader that picks a ticket's closing report by kind
++//!   and ticket alone must also check the actor.
+ //! - **The barrier's own AICD §8 refusals become `unavailable`** (step 9). That
+ //!   drops `EvidenceWriteRefused` to "retry later", deliberately: since the field
+ //!   names are the handler's constants and the identifiers are the engine's, none
+@@ -426,7 +455,7 @@ fn refused(code: &'static str, section: u8) -> HandlerError {
+ 
+ /// An `Invalid` failure at `field`, a constant, with one of the fixed `why`
+ /// sentences: never built from an agent's key or value.
+-fn invalid(field: &'static str, why: &str) -> HandlerError {
++fn invalid(field: &'static str, why: &'static str) -> HandlerError {
+     HandlerError::Port(PortError::Invalid {
+         field,
+         why: why.to_owned(),
+@@ -435,7 +464,7 @@ fn invalid(field: &'static str, why: &str) -> HandlerError {
+ 
+ /// An `Unavailable` failure of the effect, with a fixed `what` that S2 never
+ /// copies into a reply or an event.
+-fn unavailable(what: &str) -> HandlerError {
++fn unavailable(what: &'static str) -> HandlerError {
+     HandlerError::Port(PortError::Unavailable {
+         what: what.to_owned(),
+     })
+@@ -489,7 +518,8 @@ fn ticket_is_filed(db: &mut ProductDb, ticket: &Id) -> Result<bool, HandlerError
+ ///
+ /// It holds the engine's source of identifiers and the product's
+ /// `BarrierConfig` (`field_cap_chars`, 4 000 by default), and nothing else:
+-/// **no state across calls, no event of its own and no text but fixed labels.**
++/// **no state of its own across calls (the identifier source keeps its own), no
++/// event of its own, and a reply of fixed labels and the engine's values.**
+ /// `ori_memory::barrier::submit_report` sanitizes every field, writes each raw
+ /// text to its evidence file and appends the record. See the module
+ /// documentation for the kinds, the order of the checks, the rows a call leaves
+@@ -535,8 +565,8 @@ pub struct ReportHandler {
+ }
+ 
+ impl ReportHandler {
+-    /// A handler that draws its identifiers from `ids` and sanitizes with
+-    /// `config`: AICD §8.
++    /// A handler that draws its identifiers from `ids` and hands `config` to the
++    /// barrier, which sanitizes: AICD §8.
+     ///
+     /// A record's uniqueness rests on `ids` alone: the barrier checks evidence
+     /// ids against the log, never record ids.
+@@ -860,6 +890,15 @@ mod tests {
+         format!("report recorded: record {}\n", numbered(n))
+     }
+ 
++    /// The rows of a recorded report of `fields` fields, in order: the call's,
++    /// one evidence row per field, then the record.
++    fn recorded_rows(fields: usize) -> Vec<&'static str> {
++        let mut rows = vec!["memory.evidence_stored"; fields + 1];
++        rows[0] = "mcp.tool_called";
++        rows.push("memory.record_created");
++        rows
++    }
++
+     /// Asserts a call that left the two rows of a failure, drew no identifier
+     /// and wrote no file in the product's evidence directory.
+     fn assert_stopped_before_the_barrier(rig: &mut Rig, tip: u64) {
+@@ -1215,6 +1254,7 @@ mod tests {
+             BarrierConfig::default(),
+             true,
+         );
++        let tip = rig.world.tip();
+         let first = report(
+             &mut rig.world,
+             &ticket_t(),
+@@ -1223,6 +1263,7 @@ mod tests {
+         );
+         assert_eq!(recorded_text(&first), recorded_reply(1));
+         assert_eq!(rig.draws(), 11);
++        assert_eq!(kinds(&rig.world.rows_since(tip)), recorded_rows(10));
+ 
+         // The second report is a blocked report whose first evidence id is the
+         // first report's: the barrier refuses it before it writes anything.
+@@ -1237,10 +1278,16 @@ mod tests {
+         assert_eq!(rig.draws(), 17, "the record and five evidence ids");
+         let rows = rig.world.rows_since(tip);
+         assert_eq!(kinds(&rows), FAILED_ROWS);
++        // The directory as written, and as JSON escapes it (on Windows every
++        // backslash doubles), so that the check can fail on every platform.
+         let dir = rig.world.db.dir().display().to_string();
+-        assert!(!wire(&second).to_string().contains(&dir), "the reply");
+-        for row in &rows {
+-            assert!(!row.payload().contains(&dir), "{}", row.payload());
++        let escaped = serde_json::to_string(&dir).expect("a JSON string");
++        let escaped = escaped.trim_matches('"');
++        for needle in [dir.as_str(), escaped] {
++            assert!(!wire(&second).to_string().contains(needle), "the reply");
++            for row in &rows {
++                assert!(!row.payload().contains(needle), "{}", row.payload());
++            }
+         }
+ 
+         // A direct call with the same reuse says what it was: the fixed
+@@ -1291,6 +1338,7 @@ mod tests {
+         let mut rig = rig(Role::Coder, "cap-default", true);
+         let mut content = content_of(&CLOSING_FIELDS);
+         content.insert("outcome".to_owned(), json!("x".repeat(5000)));
++        let tip = rig.world.tip();
+         let reply = report(&mut rig.world, &ticket_t(), "closing", content);
+         assert_eq!(
+             recorded_text(&reply),
+@@ -1299,6 +1347,7 @@ mod tests {
+                 numbered(1)
+             )
+         );
++        assert_eq!(kinds(&rig.world.rows_since(tip)), recorded_rows(10));
+         let records = read_records(&mut rig.world.db).expect("the records read");
+         let name = FieldName::parse("outcome").expect("a name");
+         let stored = records[0].field(&name).expect("the field");
+@@ -1330,6 +1379,7 @@ mod tests {
+             "approaches_tried_and_rejected".to_owned(),
+             json!("a".repeat(60)),
+         );
++        let tip = rig.world.tip();
+         let reply = report(&mut rig.world, &ticket_t(), "closing", content);
+         assert_eq!(
+             recorded_text(&reply),
+@@ -1338,6 +1388,7 @@ mod tests {
+                 numbered(1)
+             )
+         );
++        assert_eq!(kinds(&rig.world.rows_since(tip)), recorded_rows(10));
+     }
+ 
+     // -------------------------------------------------------------------
+@@ -1380,6 +1431,7 @@ mod tests {
+         );
+         assert_eq!(recorded_text(&reply), recorded_reply(1));
+         let rows = coder.world.rows_since(tip);
++        assert_eq!(kinds(&rows), recorded_rows(10));
+         assert_marker_stays_out(&reply, &rows);
+         // The marker is expected in the record's structured text...
+         let created = rows.last().expect("the record row");
+@@ -1481,6 +1533,7 @@ mod tests {
+     #[test]
+     fn ori_t_0187_a_reports_evidence_is_attributable() {
+         let mut rig = rig(Role::Coder, "attributable", true);
++        let tip = rig.world.tip();
+         let reply = report(
+             &mut rig.world,
+             &ticket_t(),
+@@ -1488,6 +1541,7 @@ mod tests {
+             content_of(&CLOSING_FIELDS),
+         );
+         assert_eq!(recorded_text(&reply), recorded_reply(1));
++        assert_eq!(kinds(&rig.world.rows_since(tip)), recorded_rows(10));
+ 
+         // A lead, registered in the log, asks for the record's evidence.
+         let product = rig.world.product.clone();
+@@ -1774,4 +1828,115 @@ mod tests {
+             }
+         }
+     }
++
++    // -------------------------------------------------------------------
++    // 15. Each value reaches the barrier byte for byte
++    // -------------------------------------------------------------------
++
++    /// A field value with spaces at both ends, a CRLF, a line feed, a tab and a
++    /// control character: a markdown table, as the closing template draws two of
++    /// its fields.
++    fn raw_value(name: &str) -> String {
++        format!("  | {name} | why |\r\n|---|---|\n| a\tb | \u{7} |\n\t")
++    }
++
++    #[test]
++    fn ori_t_0187_each_value_reaches_the_barrier_byte_for_byte() {
++        let mut rig = rig(Role::Coder, "report-raw-text", true);
++        let content: Map<String, Value> = CLOSING_FIELDS
++            .iter()
++            .map(|name| ((*name).to_owned(), json!(raw_value(name))))
++            .collect();
++        let tip = rig.world.tip();
++        let reply = report(&mut rig.world, &ticket_t(), "closing", content);
++        assert_eq!(recorded_text(&reply), recorded_reply(1));
++        assert_eq!(kinds(&rig.world.rows_since(tip)), recorded_rows(10));
++
++        // Each evidence file holds its value unchanged: nothing trimmed, no line
++        // break folded or normalised, no control character dropped.
++        let blobs = read_evidence(&mut rig.world.db).expect("the evidence reads");
++        assert_eq!(blobs.len(), 10);
++        for (blob, name) in blobs.iter().zip(CLOSING_FIELDS) {
++            let content = read_evidence_content(blob, READ_CAP).expect("the file reads");
++            assert_eq!(content.bytes(), raw_value(name).as_bytes(), "{name}");
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 16. The ticket is checked after the role, the kind and the content
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_the_ticket_is_checked_after_the_role_the_kind_and_the_content() {
++        // Each call names a ticket nobody filed and fails an earlier step. The
++        // earlier step's answer wins, and nothing is drawn or written.
++        let mut missing_first = content_of(&BLOCKED_FIELDS);
++        missing_first.remove("budget_consumed");
++        for (label, kind, content, expected) in [
++            (
++                "unfiled-kind-not-permitted",
++                "closing",
++                content_of(&CLOSING_FIELDS),
++                refused_object("report_kind_not_permitted_for_role", 17),
++            ),
++            (
++                "unfiled-kind-not-available",
++                "qa_run",
++                Map::new(),
++                refused_object("report_kind_not_available", 17),
++            ),
++            (
++                "unfiled-content-fault",
++                "blocked",
++                missing_first,
++                invalid_object("/content/budget_consumed"),
++            ),
++        ] {
++            let mut qa = rig(Role::Qa, label, false);
++            let tip = qa.world.tip();
++            let reply = report(&mut qa.world, &ticket_t(), kind, content);
++            assert_failure(&reply, &expected);
++            assert_stopped_before_the_barrier(&mut qa, tip);
++        }
++    }
++
++    // -------------------------------------------------------------------
++    // 17. A log that cannot be verified
++    // -------------------------------------------------------------------
++
++    #[test]
++    fn ori_t_0187_a_log_that_cannot_be_verified_is_unavailable() {
++        let mut rig = rig(Role::Coder, "report-log-unverified", true);
++        // Break the hash chain: lift the append-only guard on this file and
++        // rewrite the first event, so `EventLog::verify` fails.
++        rig.world
++            .db
++            .connection()
++            .execute_batch(
++                "DROP TRIGGER events_no_update; \
++                 UPDATE events SET payload = '{\"tampered\":true}' WHERE seq = 1;",
++            )
++            .expect("the first event is rewritten");
++        let ticket = ticket_t();
++        let result = direct(
++            &mut rig,
++            Some(&ticket),
++            arguments(&ticket, "blocked", content_of(&BLOCKED_FIELDS)),
++        );
++        match result {
++            Err(HandlerError::Port(PortError::Unavailable { what })) => {
++                assert_eq!(what, WHAT_LOG);
++            }
++            other => panic!("expected the log to be unavailable, got {other:?}"),
++        }
++        assert_eq!(rig.draws(), 0, "no identifier was drawn");
++        let evidence_dir = rig.world.db.dir().join("evidence");
++        assert_eq!(
++            fs::read_dir(&evidence_dir)
++                .expect("the evidence dir")
++                .count(),
++            0,
++            "no evidence file was written"
++        );
++    }
+ }
+-- 
+2.43.0
+

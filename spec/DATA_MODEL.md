@@ -48,7 +48,7 @@ Identifiers are ULIDs unless stated. Timestamps are UTC. "Immutable" means the r
 | **Ticket** | id, product_id, title, category, kind (defect, feature, chore), tier, state, spec_anchor, declared_scope (modules), budget (attempts, wall_clock_s, tokens), filed_by, phase_id, significance (bool, set at merge), incident_id (nullable) | State machine below |
 | **Plan** | id, ticket_id, session_id, content, declared_scope, approved_by, approved_at | Immutable; a new plan supersedes |
 | **PullRequest** | id, ticket_id, remote_ref, branch, tier, state (open, ready, changes_requested, approved, merged, closed), approvals (json: identity or human, time), rollback_plan | |
-| **Escalation** | id, ticket_id, trigger (enum from methodology 12), question, recommendation, context_package_ref, state (open, answered), answered_by, answer, answered_at | Answers are audited decisions |
+| **Escalation** | id, ticket_id, trigger (enum from methodology 12), question, recommendation, evidence (json: 1 to 16 entries of `{what, found_at}`), context_package_ref, state (open, answered), answered_by, answer, answered_at | Answers are audited decisions; `evidence` is what `aicd_escalate` carries (API_SPEC section 3, "Escalation evidence") |
 | **Report** | id, ticket_id, kind (closing, blocked, qa_run, drift_audit, incident, post_mortem), content, session_id | Immutable; also written to ops/ |
 | **AgentIdentity** | id, product_id, role (coder, lead, qa, operations, documentation, product_signal, assistant), model, family, runtime (acp, headless), scopes (memory), permissions (json), state (active, suspended) | |
 | **AgentSession** | id, identity_id, ticket_id (nullable for unattended), worktree, container_id, started_at, ended_at, budget_used (attempts, seconds, tokens), outcome (completed, blocked, escalated, killed) | Transcript stored as a file, referenced |
@@ -61,7 +61,7 @@ Identifiers are ULIDs unless stated. Timestamps are UTC. "Immutable" means the r
 | **Incident** | id, product_id, kind (slo_breach, unattributed_change, credential_leak, store_rejection, other), ticket_id, opened_at, resolved_at, resolution (json) | |
 | **AppConfig** | singleton, host_connection (non-secret), default_models (json), notification_defaults, container_runtime, org_repo_path | Application level, shared by all projects |
 | **ProviderBinding** | id, product_id (nullable = application default), provider, key_ref (keychain), roles (json) | Per-project override when product_id set |
-| **McpServer** | id, product_id, name, transport, config (non-secret), credential_ref, exposed_to_roles (json) | Always project-scoped |
+| **McpServer** | id, product_id, name, transport, config (non-secret), credential_ref, exposed_to_roles (json), acknowledged_reach (bool) | Always project-scoped; `exposed_to_roles` takes effect only when `acknowledged_reach` is true (API_SPEC section 3, "Proxied tools") |
 | **Integration** | id, product_id, slot (vcs_host, error_tracking, analytics, notification, ci), adapter, config (non-secret json), credential_ref (keychain key) | |
 | **Notification** | id, product_id, kind, route (interrupt, window, digest), payload_ref, delivered_at, acknowledged_at | |
 | **CalibrationRecord** | id, product_id, model, category, sample_size, first_pass_rate, median_tokens, median_attempts, median_seconds, measured_at, budget_multiple | |
@@ -83,6 +83,7 @@ stateDiagram-v2
   InProgress --> Blocked: budget exceeded
   InProgress --> Escalated: trigger
   Blocked --> Queued: re-planned
+  InProgress --> Queued: engine recovery only
   Escalated --> InProgress: answered
   InProgress --> InReview: PR ready
   InReview --> InProgress: changes requested
@@ -92,6 +93,8 @@ stateDiagram-v2
   Closed --> [*]
 ```
 Invariants: category may be raised by an agent, lowered only by a human; a ticket cannot enter `Closed` without a `spec_update` event (or `no_change_needed`) and, if `kind` is `defect`, an accepted criterion referencing it; a ticket whose PR modified an existing test has an open `Escalation` before `InReview` can proceed.
+
+Recovery edge: `InProgress --> Queued` is the engine's move and no one else's. It is made only by the engine's recovery after a restart (`spec/runbooks/recover-engine.md`), for a ticket whose session was found `Running`; it is not a way for an agent, the lead or a human to requeue a ticket at will. It happens only once that session has been set `Killed` with reason `engine_restart`, every credential issuance of the session has been revoked, and its lock entries have been released (ORI-P1-031), and `session.recovered` is appended after it. The requeue, and every event that step 1 of that runbook appends around it (`credential.revoked` and `session.recovered` are the two it names), are recorded with actor `system`, the recovery that section 4 admits. It does not pass through `Blocked`: a ticket interrupted by an engine failure did not exhaust a budget, and `Blocked --> Queued` stays the move for a ticket that did, taken only when it is re-planned.
 
 ### Document
 ```mermaid
@@ -117,7 +120,7 @@ Invariants: only the owning seat may sign; a foundation document in any state bu
 
 ## 4. Invariants across entities
 
-- Every `Event` has an actor; `system` is allowed only for scheduled triggers and watchers.
+- Every `Event` has an actor; `system` is allowed only for scheduled triggers, watchers, and the engine's recovery after a restart (`spec/runbooks/recover-engine.md`).
 - Every `PullRequest` merge event references the approvals that satisfied its tier, and for tier 2, two distinct approvers (or the single-operator profile's substitutes, recorded).
 - Every `CredentialIssuance` is bound to one session and expires with it.
 - `MemoryRecord.structured` never contains a field longer than the configured cap, and every record derived from an integration has `untrusted = true` provenance.

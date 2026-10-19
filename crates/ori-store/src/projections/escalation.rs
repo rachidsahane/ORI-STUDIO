@@ -32,6 +32,12 @@
 //! is still created, with `trigger`, `question` and `recommendation` left
 //! `NULL`: honest about what was actually replayed, and what makes skipping
 //! an earlier event observable in the dump rather than silently absorbed.
+//!
+//! The payload of a kind that reads a field must be one JSON object whose keys
+//! are distinct (`ProjectionError::UnreadablePayload` otherwise), and a kind
+//! that reads none is not parsed. Keys this projection does not read, such as
+//! `evidence`, are accepted and ignored, because `proj_escalations` has no
+//! column for them.
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -46,8 +52,16 @@ use crate::event_log::Event;
 
 const TABLE: &str = "proj_escalations";
 
-fn required_field<'a>(event: &'a Event, key: &'static str) -> Result<&'a str, ProjectionError> {
-    payload::field(event.payload(), key).ok_or(ProjectionError::MalformedPayload {
+fn payload_object(event: &Event) -> Result<payload::Object, ProjectionError> {
+    payload::object(event.payload()).ok_or(ProjectionError::UnreadablePayload { seq: event.seq() })
+}
+
+fn required_field<'a>(
+    event: &Event,
+    object: &'a payload::Object,
+    key: &'static str,
+) -> Result<&'a str, ProjectionError> {
+    object.text(key).ok_or(ProjectionError::MalformedPayload {
         seq: event.seq(),
         field: key,
     })
@@ -154,10 +168,11 @@ impl Projection for EscalationProjection {
 
         match suffix {
             "raised" => {
-                let escalation_id = required_field(event, "escalation_id")?.to_owned();
-                let trigger = required_field(event, "trigger")?.to_owned();
-                let question = required_field(event, "question")?.to_owned();
-                let recommendation = required_field(event, "recommendation")?.to_owned();
+                let object = payload_object(event)?;
+                let escalation_id = required_field(event, &object, "escalation_id")?.to_owned();
+                let trigger = required_field(event, &object, "trigger")?.to_owned();
+                let question = required_field(event, &object, "question")?.to_owned();
+                let recommendation = required_field(event, &object, "recommendation")?.to_owned();
                 let row = Row {
                     escalation_id,
                     product_id: event.product_id().as_str().to_owned(),
@@ -174,9 +189,10 @@ impl Projection for EscalationProjection {
                 write_row(conn, &row)
             }
             "answered" => {
-                let escalation_id = required_field(event, "escalation_id")?.to_owned();
-                let answered_by = required_field(event, "answered_by")?.to_owned();
-                let answer = required_field(event, "answer")?.to_owned();
+                let object = payload_object(event)?;
+                let escalation_id = required_field(event, &object, "escalation_id")?.to_owned();
+                let answered_by = required_field(event, &object, "answered_by")?.to_owned();
+                let answer = required_field(event, &object, "answer")?.to_owned();
                 let mut row = read_row(conn, &escalation_id)?.unwrap_or(Row {
                     escalation_id: escalation_id.clone(),
                     product_id: event.product_id().as_str().to_owned(),
@@ -499,5 +515,253 @@ mod tests {
             .position(|window| window == b"E2")
             .expect("E2 present");
         assert!(e1_pos < e2_pos, "escalation_id order is ascending");
+    }
+
+    /// Appends one event carrying a ticket id: `MissingTicketId` is checked
+    /// before a payload is looked at, so these tests always give one.
+    fn append_for(
+        conn: &mut Connection,
+        kind: &str,
+        ticket: &Id,
+        payload: &str,
+    ) -> crate::event_log::Event {
+        EventLog::append(
+            conn,
+            product(),
+            ts(1),
+            agent(),
+            kind,
+            Some(ticket.clone()),
+            payload,
+        )
+        .expect("append")
+    }
+
+    fn escalation_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM proj_escalations", [], |row| {
+            row.get(0)
+        })
+        .expect("count")
+    }
+
+    #[test]
+    fn ori_t_0189_raised_and_answered_keep_escaped_text_whole() {
+        let mut conn = connection();
+        let projection = EscalationProjection;
+        let ticket = id("TICKET1");
+
+        // The JSON text a serde writer produces for these three values: a
+        // quote, a backslash, a tab, a line feed and a carriage return, each
+        // escaped.
+        let raised = append_for(
+            &mut conn,
+            "escalation.raised",
+            &ticket,
+            r#"{"escalation_id":"E1","trigger":"adr_area","question":"Line one.\nShe said \"stop\" at C:\\tmp\tnow.","recommendation":"a\r\nb"}"#,
+        );
+        projection.apply(&conn, &raised).expect("apply raised");
+        let answered = append_for(
+            &mut conn,
+            "escalation.answered",
+            &ticket,
+            r#"{"escalation_id":"E1","answered_by":"HUMAN","answer":"ok \"go\""}"#,
+        );
+        projection.apply(&conn, &answered).expect("apply answered");
+
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT question, recommendation, answer FROM proj_escalations \
+                 WHERE escalation_id = 'E1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row exists");
+        assert_eq!(row.0, "Line one.\nShe said \"stop\" at C:\\tmp\tnow.");
+        assert_eq!(row.1, "a\r\nb");
+        assert_eq!(row.2, "ok \"go\"");
+    }
+
+    #[test]
+    fn ori_t_0189_a_value_equal_to_a_key_name_is_not_read_as_that_key() {
+        let mut conn = connection();
+        let projection = EscalationProjection;
+        let ticket = id("TICKET1");
+        let event = append_for(
+            &mut conn,
+            "escalation.raised",
+            &ticket,
+            r#"{"question":"recommendation","trigger":"question","escalation_id":"E1","recommendation":"stop"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply");
+
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT trigger, question, recommendation FROM proj_escalations \
+                 WHERE escalation_id = 'E1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row exists");
+        assert_eq!(row.0, "question");
+        assert_eq!(row.1, "recommendation");
+        assert_eq!(
+            row.2, "stop",
+            "the first-key reader gave `question` here, the value of the key after the decoy (`trigger`'s)"
+        );
+    }
+
+    #[test]
+    fn ori_t_0189_keys_this_projection_does_not_read_are_ignored_wherever_they_sit() {
+        let with_evidence = r#"{"evidence":[{"what":"the lock table refuses it","found_at":"crates/a.rs:1"},{"what":"a second finding","found_at":"crates/b.rs:2"}],"escalation_id":"E1","trigger":"adr_area","question":"may this proceed?","recommendation":"stop"}"#;
+        let without_evidence = r#"{"escalation_id":"E1","trigger":"adr_area","question":"may this proceed?","recommendation":"stop"}"#;
+        let ticket = id("TICKET1");
+        let projection = EscalationProjection;
+
+        let mut with = connection();
+        let event = append_for(&mut with, "escalation.raised", &ticket, with_evidence);
+        projection
+            .apply(&with, &event)
+            .expect("an evidence array is accepted and ignored");
+
+        let mut without = connection();
+        let event = append_for(&mut without, "escalation.raised", &ticket, without_evidence);
+        projection.apply(&without, &event).expect("apply");
+
+        let row: (String, String, String) = with
+            .query_row(
+                "SELECT trigger, question, recommendation FROM proj_escalations \
+                 WHERE escalation_id = 'E1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row exists");
+        assert_eq!(row.0, "adr_area");
+        assert_eq!(row.1, "may this proceed?");
+        assert_eq!(row.2, "stop");
+        assert_eq!(
+            projection.dump(&with).expect("dump"),
+            projection.dump(&without).expect("dump"),
+            "the projected row is the same as if `evidence` were absent"
+        );
+    }
+
+    #[test]
+    fn ori_t_0189_an_escalation_payload_that_is_not_one_object_is_refused_and_writes_nothing() {
+        let mut conn = connection();
+        let projection = EscalationProjection;
+        let ticket = id("TICKET1");
+
+        let payloads = [
+            "not json",
+            r#"["E1","adr_area","q","r"]"#,
+            r#"{"escalation_id":"E1","trigger":"adr_area","question":"q","question":"q2","recommendation":"r"}"#,
+            r#"{"escalation_id":"E1","trigger":"adr_area","question":"q","recommendation":"r"} x"#,
+        ];
+        for (index, payload) in payloads.into_iter().enumerate() {
+            let event = append_for(&mut conn, "escalation.raised", &ticket, payload);
+            assert_eq!(event.seq(), index as u64 + 1);
+            let error = projection
+                .apply(&conn, &event)
+                .expect_err("a payload that is not one object with distinct keys is refused");
+            assert_eq!(
+                error,
+                ProjectionError::UnreadablePayload { seq: event.seq() },
+                "{payload:?}"
+            );
+            assert_eq!(escalation_rows(&conn), 0, "{payload:?} wrote a row");
+        }
+
+        let answered = append_for(&mut conn, "escalation.answered", &ticket, "not json");
+        assert_eq!(
+            projection.apply(&conn, &answered),
+            Err(ProjectionError::UnreadablePayload {
+                seq: answered.seq()
+            })
+        );
+        assert_eq!(escalation_rows(&conn), 0);
+
+        // A kind this projection does not know reads no field, so it is not
+        // parsed and cannot be refused for what it holds.
+        let unknown = append_for(&mut conn, "escalation.withdrawn", &ticket, "not json");
+        projection
+            .apply(&conn, &unknown)
+            .expect("an unknown escalation kind is applied whatever its payload");
+        assert_eq!(escalation_rows(&conn), 0);
+    }
+
+    #[test]
+    fn ori_t_0189_a_field_of_the_wrong_type_is_named() {
+        let mut conn = connection();
+        let projection = EscalationProjection;
+        let ticket = id("TICKET1");
+        let event = append_for(
+            &mut conn,
+            "escalation.raised",
+            &ticket,
+            r#"{"escalation_id":"E1","trigger":"t","question":5,"recommendation":"r"}"#,
+        );
+        let error = projection
+            .apply(&conn, &event)
+            .expect_err("question is a number, not a string");
+        assert!(
+            matches!(
+                error,
+                ProjectionError::MalformedPayload {
+                    field: "question",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(escalation_rows(&conn), 0);
+    }
+
+    #[test]
+    fn ori_t_0189_escalation_ids_trigger_and_answered_by_are_json_reads() {
+        // Each field comes after a value that spells its name, with another key
+        // between: the first-key reader read that other key's value instead.
+        let mut conn = connection();
+        let projection = EscalationProjection;
+        let ticket = id("TICKET1");
+        let event = append_for(
+            &mut conn,
+            "escalation.raised",
+            &ticket,
+            r#"{"note":"escalation_id","x":"WRONG","escalation_id":"E1","t":"trigger","y":"WRONG2","trigger":"adr_area","question":"q","recommendation":"r"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply raised");
+        let trigger: String = conn
+            .query_row(
+                "SELECT trigger FROM proj_escalations WHERE escalation_id = 'E1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the row is keyed E1, not WRONG");
+        assert_eq!(trigger, "adr_area", "the first-key reader gave WRONG2");
+
+        let event = append_for(
+            &mut conn,
+            "escalation.answered",
+            &ticket,
+            r#"{"note":"escalation_id","x":"WRONG","escalation_id":"E1","by":"answered_by","y":"WRONG2","answered_by":"HUMAN","answer":"ok"}"#,
+        );
+        projection.apply(&conn, &event).expect("apply answered");
+        assert_eq!(
+            escalation_rows(&conn),
+            1,
+            "the answer made no row keyed WRONG"
+        );
+        let answered_by: Option<String> = conn
+            .query_row(
+                "SELECT answered_by FROM proj_escalations WHERE escalation_id = 'E1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("row exists");
+        assert_eq!(
+            answered_by,
+            Some("HUMAN".to_owned()),
+            "the first-key reader gave WRONG2"
+        );
     }
 }
