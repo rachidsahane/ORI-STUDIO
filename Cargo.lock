@@ -377,8 +377,11 @@ dependencies = [
 name = "ori-flows"
 version = "0.1.0"
 dependencies = [
+ "ori-core",
  "ori-orchestrator",
  "ori-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
