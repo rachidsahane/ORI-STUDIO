@@ -2035,3 +2035,42 @@ The ORI-T-0054 comment F8 names stays a `test_modified` follow-up, as recorded b
   - no row between the barrier's rows, pinned by an evidence grant in a test.
 
 **State after this section:** the claims held are 20, 112 (repair 1) and 114 (repair 1). The next free identifier is ORI-T-0188 (ORI-T-0184 to ORI-T-0187 are allocated).
+
+---
+
+## ORI-T-0181 (slices S3 and S8) integrated after two repairs; claim 115 for S7
+
+Written by the lead on 2026-10-19 under [[R31]] and [[R44]].
+
+**The focused re-review of repair 1** used two lenses (docs truth; test honesty), one skeptic per finding, 3 agents (`review-0181-r1-full.json`):
+- **One should-fix, the lead's.** The repair package told the coder to write that a granted call reads the log "up to twice". It reads it up to three times: once in `authorize`, then twice in `OperationalLog::read`, which reads the records and then the events behind them. The reviewer reproduced this by counting `EventLog::verify` calls.
+- **Notes:**
+  - the enforcer row's `detail` is the refusal reason's `Display`;
+  - `lock.claimed` also settles a coder's assignment, with refusals of its own;
+  - `lock_inputs`' doc pointed other modules at the private `read_inputs`;
+  - the new event row and `# Errors` left out a missing query;
+  - one more path to `ProductMismatch`, unreachable for the same reason.
+- No test assertion was weakened. m9, m10 and m12 each fail their tests, re-run by the reviewer.
+- The F3 claim was reproduced with a tampered log through `Server::receive`: a store fault is answered `log_unreadable`, with the enforcer's row.
+
+**Repair 2** (Haiku 5.5): seven doc replacements, written and proved in a copy by the lead (fmt, clippy, strict doc, `ori-mcp` and `ori-gates` tests). The coder's commit `90d3b62` equals the proved file byte for byte.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 114 | ORI-T-0181, batch 10 slices S3 (`aicd_context`) and S8 (`aicd_search`), with repair 1 (Sonnet 5.5) and repair 2 (Haiku 5.5) | First review: 4 lenses, 13 agents, nothing blocking. Repair 1: 4 should-fix and 11 notes taken, mutations m1 to m14 killed. Re-review: 1 should-fix, the lead's wording, fixed in repair 2 | Cherry-picked as `f132659`, `ef00e75`, `3518ee2` and `256b31c`. Their diff equals the branch's `e872247..90d3b62`, byte for byte. fmt 0, clippy `-D warnings` 0, Windows clippy (`x86_64-pc-windows-gnu`) 0, strict doc 0, `cargo test --workspace --locked` 0 (1734 passed, 0 failed), gate 13 over the four commits 0 |
+
+Claim 114 is released. S3 and S8 are complete on this branch. Tier 2: the operator merges, with the rest of the pull request.
+
+Recorded as follow-ups, not in this ticket:
+- **An outbound line has no cap.** Nothing caps an outbound line or an agent-chosen request id (W0 and S2).
+- **The claims' reading in `scope.rs` (F8).** From these tools, a `claim_contradicted` row means the engine's binding and the log disagree, but `scope.rs` documents a contradicted claim as impersonation.
+- **Untested pass-throughs (F10).** No test shows that the stage and the code map's build time reach ori-memory.
+- **S2's module doc (F20)** lists a memory-scope refusal as two rows; there are three.
+
+**ORI-T-0184 (claim 115)**, slice S7, `aicd_evidence`, is dispatched on Sonnet 5.5. Its committed package (`ops/tickets/ORI-T-0184-s7-aicd-evidence.md`) passed two critiques. It now uses S3's `lock_inputs` as it stands.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 115 | ORI-T-0184, batch 10 slice S7 (`aicd_evidence`) | `crates/ori-mcp/src/tools/evidence.rs` (new); in `tools/mod.rs` one module line; in `tools/memory.rs` two module-doc sentences | 2 | `/home/user/wt/ORI-T-0184`, `feat/ORI-T-0184-evidence-tool` | Sonnet 5.5 | 2026-10-19 |
+
+**State after this section:** the claims held are 20, 112 (repair 1 under re-review) and 115. The next free identifier is ORI-T-0189 (ORI-T-0185 to ORI-T-0188 are allocated: S5, S4 and S9 have their packages under critique).
