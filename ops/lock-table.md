@@ -2236,3 +2236,69 @@ None of these can end a line or forge a label. Tag characters can, however, carr
 **S9 (ORI-T-0188) is back:** commits `10494c5` and `971d511`. The scope is the five declared files only. The coder reports 14 new tests, mutations m1 to m9 killed, and gates exit 0, with `gates.sh` at 3 for gate 7's missing tools. Its five-lens adversarial review is running, with a fifth lens on whether the desk contracts can be implemented by ORI-T-0070.
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115 (repair 1), 116, 117 and 118. The next free identifier is ORI-T-0192.
+
+---
+
+## 2026-10-19, S4 and S5 reviewed; both repairs 1 written by the lead and committed by Haiku; S7 repair 1 committed
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**S7 (ORI-T-0184) repair 1** is committed as `5bc7206`. It equals the lead's proved files byte for byte (`evidence.rs`, `memory.rs`, `barrier.rs`), and the coder's six checks all exit 0. One cosmetic result of the lead's script stands: a `memory.rs` doc line near line 299 runs to 105 columns, because the old text ended mid-line. A focused re-review of the lead's own words and tests is running (two lenses).
+
+**S4 (ORI-T-0187) review.** Four lenses, two skeptics per finding, 7 agents (`review-0187-full.json`). Nothing is blocking. One finding is confirmed should-fix:
+- **F1.** No test shows that each value reaches the barrier unchanged. A trim, a folding of line breaks or a CRLF normalisation of `raw_text` survives the whole suite. That breaks evidence fidelity and S7's assumption. Reproduced by both lenses and one skeptic. The gap came from the lead's package.
+
+There are nineteen notes. Taken in the repair:
+- F2: the order of the ticket check;
+- F3: a log that cannot be verified;
+- F4: five calls without exact rows;
+- F5: test 8's path check, which cannot fail on Windows;
+- F9: a non-coder filing against any filed ticket;
+- F10: the log cost;
+- F11: the diagram;
+- F12 to F17: the D2 clause, `provenance`, PD-2, the API_SPEC section 2 citation, the engine's duties written as present fact, and "until phase 4";
+- F18: wording;
+- F19: `&'static str` helpers.
+
+F8 (a field of zero-width characters or a NUL passes the blank check) is stated as a limit and **folded into ORI-T-0191**, which decides the scrub of format characters and now decides this check too.
+
+Recorded, not changed:
+- F6: the coder's extra test is redundant but harmless;
+- F7: the coder's "m1 fails nine other tests" was not reproduced, though m1 does fail test 5;
+- F20: an undeclared `Debug` impl, accepted.
+
+**S4 repair 1** (lead-written, `edits-0187-r1/apply.py`, 22 edits). The lead proved it in a clean copy:
+- fmt, clippy, strict doc and the Windows compile check exit 0;
+- `ori-mcp` passed 234 and `ori-gates` 194;
+- mutations o9 (trim the raw text), o3 (the ticket check before the role) and o18 (a verify failure read as not filed) each fail exactly one new test.
+
+**A lead error in the package's prose.** It said one test helper was added; the script adds two (`recorded_rows` and `raw_value`). The Haiku coder stopped on the mismatch, as the package told it to, with the file already byte-equal to the proved one. The lead corrected one sentence of the commit message. Committed as `38f41ae`, byte-equal to the proved file, with six checks at 0.
+
+**S5 (ORI-T-0186) review.** Four lenses, two skeptics per finding, 15 agents (`review-0186-full.json`). Nothing is blocking. Five findings are confirmed should-fix:
+- **F1.** Only LF is tested among the control characters the reference rule refuses. A rule that admits CR, tab, ESC, NUL or DEL survives. Reproduced. The gap came from the lead's package.
+- **F2.** The module doc's Mermaid diagram does not parse: a `;` inside a message ends the statement. This was reproduced with Mermaid's own parser. The lead then scanned every sequence diagram in the workspace and in the four slices. This was the only one.
+- **F3.** The reference rule cited AICD §17. It is AICD §27.
+- **F4.** "The second promise" of API_SPEC section 3 is the first. The same wrong citation sits in `ports.rs`'s `SpecDesk::propose` doc (S1's). It is carried to **S9's repair**, whose scope holds that doc.
+- **F5.** The proposal port's gap was worded as settled. PW does not say that, and a ticketless documentation binding has no ticket to name a branch after.
+
+There are ten notes. Taken: F7 to F14 (the desk's own row as a future requirement, who checks a lead's ticket, the retry after a failed append, the events table, future facts as duties, "the narrowest", "AICD §17", the matrix attribution). Recorded, not changed:
+- F6: the rule's early stop on a huge reference is true but untested; a timing test would be flaky;
+- F15: test 8 registers no handlers.
+
+**S5 repair 1** (lead-written, `edits-0186-r1/apply.py`, 17 edits). The lead proved it in a clean copy:
+- fmt, clippy, strict doc and the Windows compile check exit 0;
+- `ori-mcp` passed 225 and `ori-gates` 194;
+- the mutations "admit any ASCII but space and LF" and "admit U+007F" each fail exactly the new test.
+
+Committed as `c0c0e87`, byte-equal to the proved file, with six checks at 0.
+
+**Recorded for ORI-T-0070 (the engine).** The S5 desks must:
+- append at most one row per call;
+- route the upgrade through `Lifecycle::advance`, and append `ticket.category_set` only on success;
+- keep a pull request reference they record from reaching an agent except through S5's reference rule;
+- decide how a proposal finds its session, ticket, branch, title and body, including for a ticketless documentation binding;
+- avoid a second pull request on a retry after a failed append.
+
+A focused re-review of both repairs (two lenses each, one skeptic per finding) is running.
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115, 116, 117 and 118. The next free identifier is ORI-T-0192.
