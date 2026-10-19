@@ -46,15 +46,17 @@
 //! a `ticket.*`, `lock.*` or `escalation.*` event yet: `ori_core::ticket`,
 //! `ori_orchestrator::lock_table` and `ori_orchestrator::escalation` are pure
 //! functions with no writer wired to this crate's log. So the event kind
-//! vocabulary and the payload fields `crate::projections::payload` reads (one
-//! JSON object for the escalation and ticket projections, since ORI-T-0189)
-//! are ORI-T-0025's design, and no production writer relies on them yet;
-//! ORI-T-0025's pull request report says so under "Whether this payload
-//! convention is load-bearing elsewhere" and names the follow-up (wiring the
-//! real writer to emit it) as a finding, not silently assumed. One reader
-//! does rely on them: `ori-memory`'s lock fold mirrors the lock projection's
-//! reading of `module` (`crate::projections::payload`'s module doc). It does
-//! not weaken the identity proof:
+//! vocabulary and the payload fields `crate::projections::payload` reads are
+//! ORI-T-0025's design, and the rule that an escalation or ticket payload is
+//! one JSON object is ORI-T-0189's. No production writer relies on them yet.
+//! ORI-T-0025's pull request report (pull request 55, "What the projectors
+//! assume, and what nothing yet provides") hands the convention to whoever
+//! builds the writer, to adopt or replace. Two contracts already name these
+//! rows, S5's and S9's desks (`crates/ori-mcp/src/tools/desk.rs`,
+//! `crates/ori-mcp/src/ports.rs`), and `ori-memory` reads `lock.claimed`'s
+//! `module` and `session_id` as the lock projection does
+//! (`crate::projections::payload`'s module doc). None of this weakens the
+//! identity proof:
 //! [`crate::rebuild::rebuild`] and the ordinary incremental path both call the
 //! exact same [`Projection::apply`] over the exact same stored rows, so
 //! whatever the convention says, both paths agree on what it says.
@@ -237,7 +239,8 @@ pub enum ProjectionError {
     /// array, a string, a number), text after the object, a key given twice,
     /// or JSON that `serde_json` refuses although its grammar allows it: a
     /// number too large for `f64`, a lone surrogate escape, or nesting 128
-    /// levels deep or more. A refusal under AICD §8, as `MalformedPayload` is.
+    /// levels deep or more, counting the top object. A refusal under AICD §8,
+    /// as `MalformedPayload` is.
     UnreadablePayload {
         /// The `seq` of the offending event.
         seq: u64,

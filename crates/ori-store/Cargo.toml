@@ -41,13 +41,15 @@ sha2 = { version = "=0.11.0", default-features = false }
 # `multiple-versions = "deny"` stays satisfied and `Cargo.lock` gains this
 # crate's two dependency edges and no package.
 #
-# Why JSON: the escalation projection reads agent and human text, and the
-# ticket projection reads enum spellings today, that a serde writer will write
-# (S9's desk contract; ORI-T-0070 writes the events). A serde writer escapes
-# characters the first-key reader `payload::field` cannot undo (a quote, a
-# backslash, every control character below U+0020). E-0008's rejected-option
-# table names that very reader as one that "already states it is not a JSON
-# parser and names what it gets wrong".
+# Why JSON: the escalation projection reads agent and human text that is to be
+# written as JSON (S9's desk contract fixes serde for `escalation.raised`;
+# ORI-T-0070 writes the events), and a JSON writer escapes characters the
+# first-key reader `payload::field` cannot undo (a quote, a backslash, every
+# control character below U+0020). The ticket projection reads enum spellings
+# and a boolean, and reads them as JSON because the first-key reader takes the
+# first `"key"` it finds in any payload, values included. E-0008's
+# rejected-option table names that very reader as one that "already states it
+# is not a JSON parser and names what it gets wrong".
 #
 # Why `serde` without `derive`: `projections/payload.rs` implements
 # `Deserialize` by hand for one type, so as to refuse a key given twice, and
@@ -59,8 +61,9 @@ sha2 = { version = "=0.11.0", default-features = false }
 # `preserve_order`, `float_roundtrip` or `unbounded_depth` is enabled in the
 # normal dependency graph (tree-sitter's build script enables `preserve_order`
 # on its own host build, which does not reach this crate). Without
-# `unbounded_depth`, serde_json refuses nesting 128 levels deep or more, which
-# bounds how deep its parser recurses. It does not bound a payload's size.
+# `unbounded_depth`, serde_json refuses nesting 128 levels deep or more,
+# counting the top object, which bounds how deep its parser recurses. It does
+# not bound a payload's size.
 serde = { version = "=1.0.229", default-features = false, features = ["std"] }
 serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
 

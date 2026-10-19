@@ -746,18 +746,22 @@ mod tests {
             r#"{"note":"escalation_id","x":"WRONG","escalation_id":"E1","by":"answered_by","y":"WRONG2","answered_by":"HUMAN","answer":"ok"}"#,
         );
         projection.apply(&conn, &event).expect("apply answered");
+        assert_eq!(
+            escalation_rows(&conn),
+            1,
+            "the answer made no row keyed WRONG"
+        );
         let answered_by: Option<String> = conn
             .query_row(
                 "SELECT answered_by FROM proj_escalations WHERE escalation_id = 'E1'",
                 [],
                 |row| row.get(0),
             )
-            .expect("the answer lands on E1");
+            .expect("row exists");
         assert_eq!(
             answered_by,
             Some("HUMAN".to_owned()),
             "the first-key reader gave WRONG2"
         );
-        assert_eq!(escalation_rows(&conn), 1, "no row keyed WRONG was written");
     }
 }

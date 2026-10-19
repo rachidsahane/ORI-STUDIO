@@ -9,10 +9,11 @@
 //!   workspace-wide by `ops/escalations/E-0008-json-serialization.md`), and
 //!   gives back its top-level keys. The escalation and ticket projections use
 //!   it, because the text they read, an escalation's question and answer above
-//!   all, will be written by a serde writer (S9's desk contract; ORI-T-0070
-//!   writes the events), which escapes `"`, `\` and every control character
-//!   below U+0020, and a reader that undoes none of that hands the human
-//!   queue a cut-short or doubled-backslash question.
+//!   all, is to be written as JSON (S9's desk contract fixes serde for
+//!   `escalation.raised`; ORI-T-0070 writes the events), and a JSON writer
+//!   escapes `"`, `\` and every control character below U+0020: a reader that
+//!   undoes none of that hands the human queue a cut-short or doubled-backslash
+//!   question.
 //! - [`field`] is the first-key reader of ORI-T-0025: it finds the first
 //!   `"key"` in the text and cuts the value at the next `"`. Only the lock
 //!   projection (`crate::projections::lock`) uses it.
@@ -62,10 +63,13 @@ use serde_json::Value;
 /// rebuild of its product (`crate::rebuild::rebuild` stops at the first
 /// refusal). No writer contract written so far would produce one:
 ///
-/// - the only one, S9's desk contract for `escalation.raised`
-///   (`crates/ori-mcp/src/ports.rs`), serializes a struct through serde, which
-///   writes each field once; the ticket events have no writer contract yet
-///   (ORI-T-0070 writes them), and theirs must do the same;
+/// - the one contract that fixes how such a payload is serialized, S9's for
+///   `escalation.raised` (`crates/ori-mcp/src/ports.rs`), serializes a struct
+///   through serde, which writes each field once;
+/// - the other contracts name a row and leave its payload open: S5's
+///   `ticket.category_set` (`crates/ori-mcp/src/tools/desk.rs`), and S9's
+///   `ticket.escalated`, whose payload no projection reads. ORI-T-0070, which
+///   writes them, must write each key once;
 /// - a `#[serde(flatten)]` map, two fields renamed onto one name, or a
 ///   hand-written `Serialize` could repeat a key, and S9's contract uses none
 ///   of them.
@@ -91,9 +95,11 @@ pub(crate) struct Object {
 ///
 /// - text that is not JSON;
 /// - JSON whose top level is not an object: an array, a string, a number, a
-///   boolean or `null`. For a JSON value that does not begin with `{`,
-///   `serde_json`'s `deserialize_map` reports an invalid type, naming the
-///   visitor's `expecting` text, and never calls the visitor;
+///   boolean or `null`. `serde_json`'s `deserialize_map` reads such a value
+///   and reports an invalid type, using the visitor's `expecting` text and
+///   never its `visit_map`; a top-level number too large for `f64`, or a
+///   string with a lone surrogate escape, is refused while it is read, as
+///   below;
 /// - an object followed by anything but JSON whitespace;
 /// - nesting 128 levels deep or more, counting the top object. The pin leaves
 ///   `serde_json`'s `unbounded_depth` off, which bounds how deep the parser
@@ -105,16 +111,17 @@ pub(crate) struct Object {
 /// Refused by this module's visitor: a key given twice at the top level,
 /// whatever the two values.
 ///
-/// Accepted: any top-level object with distinct keys, whatever the values,
-/// including nested values and keys the caller does not read, with JSON
+/// Accepted: every other top-level object with distinct keys, nested values
+/// and keys the caller does not read included, with JSON
 /// whitespace (space, tab, line feed, carriage return) around the object and
 /// between tokens. Any other character around it, a byte order mark or a
 /// no-break space included, is refused.
 ///
 /// A limit: `serde_json` writes a value of any depth, so a payload that
-/// carried free-form JSON nested 127 levels or more below the top object would
-/// be written and then refused here. No writer contract carries one: S9's
-/// `evidence` is three levels deep.
+/// carried free-form JSON nested 128 levels deep or more, counting the top
+/// object, would be written and then refused here. No writer contract carries
+/// one: S9's `evidence` makes a payload three levels deep, counting the top
+/// object.
 #[must_use]
 pub(crate) fn object(payload: &str) -> Option<Object> {
     serde_json::from_str::<Object>(payload).ok()
@@ -302,9 +309,10 @@ mod tests {
 
     #[test]
     fn ori_t_0189_object_undoes_every_json_escape() {
-        // The two `\u` escapes, the second a surrogate pair that makes U+1F600,
-        // are spelled with `\x5c` (a backslash) in a plain string, so that no
-        // tool decodes them before the compiler does.
+        // The three `\u` escapes (U+00E9, then a surrogate pair that makes
+        // U+1F600) are spelled with `\x5c`, a backslash, in a plain string: the
+        // compiler turns each `\x5c` into a backslash, so no tool on the way can
+        // decode a typed escape early, and `object` decodes them at run time.
         let payload = concat!(
             r#"{"q":"\"\\\/\n\t\r\b\f"#,
             "\x5cu00e9\x5cud83d\x5cude00",
@@ -353,6 +361,8 @@ mod tests {
             "{\"a\":\"x\ny\"}",
             r#"{"a":"\ud800"}"#,
             r#"{"a":1e400}"#,
+            // A form feed, a no-break space and a byte order mark are not JSON
+            // whitespace.
             "\x0c{\"a\":\"1\"}",
             "{\"a\":\"1\"}\u{a0}",
             "\u{feff}{\"a\":\"1\"}",
@@ -368,6 +378,10 @@ mod tests {
         assert!(
             object(r#"  {"a":"1"}  "#).is_some(),
             "whitespace around the object is accepted"
+        );
+        assert!(
+            object("\t{\"a\":\"1\"}\r\n").is_some(),
+            "tab, carriage return and line feed around the object are JSON whitespace"
         );
         assert!(
             object(r#"{"a":{"b":"1","b":"2"}}"#).is_some(),
