@@ -67,7 +67,10 @@
 //! product's log: the stage, the code map and when it was built, the freshness
 //! tracker and the package bounds. The engine (ORI-T-0070) builds it per product
 //! and keeps it current; every connection's handlers share one
-//! ([`crate::tools::memory::SharedMemoryInputs`]). A handler takes the read lock
+//! ([`crate::tools::memory::SharedMemoryInputs`]). `aicd_evidence`
+//! ([`crate::tools::evidence::EvidenceHandler`]) is the exception to the rest of
+//! this paragraph: it holds the guard only to copy the stage, and makes no cap
+//! check. A handler takes the read lock
 //! **for the whole call**, because `Retrieval` borrows the map and the tracker,
 //! and it checks three things before it asks anything, then fails closed the same
 //! way for each:
@@ -87,6 +90,9 @@
 //!   `Unavailable`;
 //! - the scope of a failure: each of the three is `Unavailable` with a fixed
 //!   `what`, and S2 never copies `what` into a reply or an event.
+//!
+//! `aicd_evidence` makes the first two checks, through `lock_inputs`, and never
+//! the third: it builds no package, and it holds the guard only to copy the stage.
 //!
 //! **Lock order.** The engine never holds the write lock while it waits for the
 //! database writer, because a handler holds the read lock while it holds the
