@@ -174,6 +174,50 @@
 //! reports which hooks are installed, stale, missing, replaced or not
 //! executable.
 //!
+//! # A script not run by git for its own event records nothing (AICD §13)
+//!
+//! Git runs a hook as `<hooks directory>/<its event's name>`. A script that
+//! finds it was run under another name, or from `ori-original/`, was reached
+//! through a link or run by another script: git did not run it for its own
+//! event. It prints one line on standard error, reads its standard input
+//! unless that is a terminal, records nothing, runs nothing and exits 0. It
+//! reads its input first so that a writer that feeds this event is never cut
+//! off by a closed pipe, and it exits 0 because git takes a non-zero status
+//! from `post-checkout` as the checkout's own status, and from a vetoing event
+//! as a veto: a script reached by mistake must not block git, which is the
+//! principle of the section above for an unwritable spool.
+//!
+//! This closes, at run time, the false records that a link in the hooks
+//! directory can make: `post-checkout -> post-merge` would otherwise record a
+//! `post-merge` event at every checkout, and a link in `ori-original/` to an
+//! engine script would run it a second time. The install-time checks of the
+//! links ([`GitHooks::install`], [`GitHooks::status`]) judge the hooks
+//! directory as it stands, and cannot judge what a later checkout puts on a
+//! way that passes through the working tree. The script's check does not
+//! depend on the tree: whatever a checkout puts on the way of a hook that git
+//! runs, the name it was run under is the name of the event or it is not. The
+//! install-time checks stay, because they keep a veto from being silently
+//! replaced, which a run-time check cannot restore.
+//!
+//! What the check does not stop, each of which needs code that already runs
+//! as the user, or a change to the hooks directory itself, which
+//! [`GitHooks::status`] and the next [`GitHooks::install`] judge:
+//!
+//! - a script that runs the engine's hook by its own path
+//!   (`"$(dirname "$0")/post-merge"`) passes the check and records;
+//! - a preserved hook that runs `"$(dirname "$0")/../post-commit"` passes it
+//!   too, and records again for each round it makes: this is the `$0`-relative
+//!   change the section "What is installed" already names;
+//! - a process of the same user that writes the spool directly records
+//!   whatever it likes;
+//! - a later checkout that changes what a kept link's working-tree script does:
+//!   that script runs under the hook's own name and does what the branch now
+//!   says, and it records falsely only by running the engine's script by its
+//!   path, the first limit. Likewise a checkout can turn a file that another
+//!   script runs, by a path whose last name is a hook's (`tools/post-merge`),
+//!   into a link to the engine's script, and that run passes the check and
+//!   records.
+//!
 //! # Nothing from the repository is interpolated unquoted
 //!
 //! The generated script is a constant template with exactly two values
@@ -2125,7 +2169,7 @@ fn shell_quote(text: &str) -> String {
 
 /// The constant template, with `@HOOK@` and `@SPOOL@` the only holes.
 const HEADER: &str = "#!/bin/sh
-# ori-studio-hook v2: written by Ori Studio (ori-watch). The engine rewrites this file.
+# ori-studio-hook v3: written by Ori Studio (ori-watch). The engine rewrites this file.
 # Reports this git event to the engine by appending one line to the spool below,
 # then runs the hook that was here before Ori Studio, if any: it is kept as
 # ori-original/<this file's name> beside this file, so it runs under its own name.
@@ -2162,6 +2206,19 @@ ori_emit() {
     fi
     return 0
 }
+
+# Git runs a hook as <hooks directory>/<its event's name>. Run under another
+# name, or from ori-original/, this script was reached through a link or run by
+# another script, not by git for its own event: it records nothing, runs
+# nothing, and lets git go on. It reads its standard input first, so a writer
+# that feeds this event is never cut off.
+ori_run_as=$(basename -- \"$0\")
+ori_run_from=$(basename -- \"$(dirname -- \"$0\")\")
+if [ \"$ori_run_as\" != \"$ori_hook\" ] || [ \"$ori_run_from\" = 'ori-original' ]; then
+    printf 'ori-studio: the %s hook was run as %s, not by git for its own event; it recorded nothing and ran nothing.\\n' \"$ori_hook\" \"$(ori_clean \"$0\")\" >&2
+    [ -t 0 ] || cat >/dev/null 2>&1
+    exit 0
+fi
 
 ori_head=$(git rev-parse HEAD 2>/dev/null) || ori_head='?'
 ";
@@ -5558,6 +5615,154 @@ esac
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
+        }
+
+        #[test]
+        fn ori_t_0185_a_checkout_that_makes_a_kept_link_reach_the_engine_records_nothing() {
+            // Layout B. On `main`, `d` does not exist, so `post-checkout ->
+            // ../../d/post-merge` reaches nothing and the install keeps it. On
+            // `other` the tree has `d -> .git/hooks`, and the same link then
+            // reaches the engine's own `post-merge`: what a checkout will put
+            // at a path cannot be known at the install, so the script checks
+            // the name it was run under.
+            let scratch = Scratch::new("checkout-layout-b");
+            let repo = real_repo(&scratch);
+            let spool = scratch.path.join("spool");
+            git_ok(&scratch, &repo, &["commit", "-q", "-m", "first"]);
+            git_ok(&scratch, &repo, &["checkout", "-q", "-b", "other"]);
+            std::os::unix::fs::symlink(".git/hooks", repo.join("d")).unwrap();
+            git_ok(&scratch, &repo, &["add", "d"]);
+            git_ok(
+                &scratch,
+                &repo,
+                &["commit", "-q", "-m", "a link to the hooks"],
+            );
+            git_ok(&scratch, &repo, &["checkout", "-q", "main"]);
+            assert!(
+                fs::symlink_metadata(repo.join("d")).is_err(),
+                "`d` is still in the tree on main"
+            );
+            let hooks_dir = repo.join(".git").join("hooks");
+            fs::create_dir_all(&hooks_dir).unwrap();
+            std::os::unix::fs::symlink("../../d/post-merge", hooks_dir.join("post-checkout"))
+                .unwrap();
+
+            GitHooks::new(&repo, &spool)
+                .unwrap()
+                .install()
+                .expect("this ticket does not refuse the layout at the install");
+
+            let output = git(&scratch, &repo, &["checkout", "other"]);
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            assert!(output.status.success(), "the checkout failed: {stderr}");
+            assert!(
+                fs::symlink_metadata(repo.join("d")).is_ok(),
+                "the checkout did not make `d`, so the test proves nothing"
+            );
+            assert!(
+                !log_of(&spool).contains("\tpost-merge\t"),
+                "a checkout recorded a false post-merge: {:?}",
+                log_of(&spool)
+            );
+            assert!(
+                stderr.contains("not by git for its own event"),
+                "the script did not say it was not run for its own event: {stderr:?}"
+            );
+        }
+
+        #[test]
+        fn ori_t_0185_a_script_run_from_ori_original_records_once() {
+            let scratch = Scratch::new("run-from-ori-original");
+            let repo = real_repo(&scratch);
+            let spool = scratch.path.join("spool");
+            GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+            // `ori-original/post-commit` links to the engine's own script: run
+            // by the script that just recorded, it is the same script a second
+            // time, under its own name but from `ori-original/`.
+            let kept = repo.join(".git").join("hooks").join(PRESERVED_DIR);
+            fs::create_dir_all(&kept).unwrap();
+            std::os::unix::fs::symlink("../post-commit", kept.join("post-commit")).unwrap();
+
+            let output = git(&scratch, &repo, &["commit", "-q", "-m", "first"]);
+            assert!(
+                output.status.success(),
+                "the commit failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let log = log_of(&spool);
+            assert_eq!(log.lines().count(), 1, "{log:?}");
+            assert!(log.contains("\tpost-commit\t"), "{log:?}");
+        }
+
+        #[test]
+        fn ori_t_0185_a_script_run_under_another_name_reads_all_its_input_and_exits_zero() {
+            let scratch = Scratch::new("another-name");
+            let repo = real_repo(&scratch);
+            let spool = scratch.path.join("spool");
+            GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+            let hooks_dir = repo.join(".git").join("hooks");
+            let link = hooks_dir.join("not-a-hook");
+            // 256 lines of 1024 bytes: more than a pipe holds, so a script that
+            // exits without reading would close the pipe on the writer.
+            let line = format!("{}\n", "x".repeat(1023));
+            for hook in ["pre-push", "post-rewrite"] {
+                let _ = fs::remove_file(&link);
+                std::os::unix::fs::symlink(hook, &link).unwrap();
+                let mut child = Command::new(&link)
+                    .arg("origin")
+                    .current_dir(&repo)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let mut input = child.stdin.take().unwrap();
+                for _ in 0..256 {
+                    input
+                        .write_all(line.as_bytes())
+                        .unwrap_or_else(|error| panic!("{hook}: the writer was cut off: {error}"));
+                }
+                drop(input);
+                let output = child.wait_with_output().unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                assert_eq!(output.status.code(), Some(0), "{hook}: {stderr}");
+                assert_eq!(log_of(&spool), "", "{hook}: a record was written");
+                assert!(
+                    stderr.contains("not by git for its own event"),
+                    "{hook}: {stderr:?}"
+                );
+                assert!(
+                    stderr.contains("not-a-hook") && stderr.contains(&format!("the {hook} hook")),
+                    "{hook}: {stderr:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn ori_t_0185_the_script_records_under_its_own_name() {
+            // The other side of the guard, through the same `Command` path as
+            // the test above: run directly as `post-merge`, the script records.
+            let scratch = Scratch::new("own-name");
+            let repo = real_repo(&scratch);
+            let spool = scratch.path.join("spool");
+            GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+            let output = Command::new(hook_path(&repo, GitHook::PostMerge))
+                .arg("0")
+                .current_dir(&repo)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let drain = HookSpool::open(&spool).drain().unwrap();
+            assert_eq!(drain.malformed, 0);
+            assert_eq!(drain.events.len(), 1, "{:?}", log_of(&spool));
+            assert_eq!(drain.events[0].hook, GitHook::PostMerge);
+            assert_eq!(drain.events[0].fields[0], "0");
         }
     }
 }
