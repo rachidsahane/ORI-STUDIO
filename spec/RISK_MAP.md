@@ -23,7 +23,8 @@ Every module of the repository with its tier and the reason. Maintained with the
 | crates/ori-watch (watcher, hooks) | 1 | |
 | crates/ori-mcp (server tool scopes) | 2 | What agents can do |
 | crates/ori-mcp/src/scopes.rs, ports.rs, server.rs, tools/ | 2 | What agents can do |
-| crates/ori-mcp (host) | 1 | |
+| crates/ori-mcp/src/host/registry.rs | 2 | Which operator MCP servers are exposed; feeds `ToolScopes::authorize_user_tool` |
+| crates/ori-mcp (host) | 1 | MCP host client and transport; not the server registry |
 | crates/ori-mcp/src/protocol.rs | 1 | The shared MCP wire |
 | crates/ori-integrations (merge exposure, webhook verification) | 2 | |
 | crates/ori-integrations (adapters otherwise) | 1 | |

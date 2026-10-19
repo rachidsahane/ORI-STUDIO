@@ -75,6 +75,7 @@ Permissions are a function of (actor, role, resource, action) evaluated in `ori-
 | `ori-orchestrator::merge_queue` | Ori's own merge path: the only caller of `VcsHost::merge` |
 | `ori-orchestrator::lifecycle` (tier and category rules) | Control structure |
 | `ori-mcp::scopes`, `ori-mcp::ports`, `ori-mcp::server`, `ori-mcp::tools` | What agents can do |
+| `ori-mcp::host::registry` | Which operator MCP servers are exposed to agents |
 | `ori-memory::barrier`, `ori-memory::scope` | Injection and scope boundaries |
 | `ori-runtime::container`, `ori-runtime::injector` | Isolation and credential injection |
 | `ori-watch::attribution` | Detection of unattributed changes |
