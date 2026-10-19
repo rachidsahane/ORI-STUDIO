@@ -128,6 +128,7 @@
 //! |---|---|
 //! | done, a reference withheld included | `mcp.tool_called` (ticket column: the argument for the upgrade; the binding's ticket, or none, for the proposal), then whatever row the desk appends |
 //! | a desk's refusal, `Port(Refused(e))` | `mcp.tool_called`, then `mcp.tool_failed` (`failure: refused`, `e.code()` or S2's fallback `refused` for a refusal with no code, and `e`'s section; for a downgrade `E_UPGRADE_ONLY`, AICD §11). A refusal with no section is `failure: invalid` |
+//! | a desk's refusal with no `ori-core` refusal kind, `Port(Denied { code, methodology_ref })` | `mcp.tool_called`, then `mcp.tool_failed` (`failure: refused`, the code, the section). A section that does not resolve is `failure: invalid` |
 //! | a ticket the caller's product does not hold, or a document that is not one of the specification's, `Port(Invalid)` | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
 //! | a desk that could not answer | `mcp.tool_called`, then the desk's row if it appended one before failing, then `mcp.tool_failed` (`failure: unavailable`) |
 //! | a missing or malformed argument (unreachable through S2; test 8 calls the handler directly) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
@@ -180,9 +181,10 @@
 //!   one proposal.
 //! - **A desk refusal with no `ori-core` refusal kind** (an AICD §17 matrix
 //!   refusal from the lifecycle, a specification refusal with no `RefusalKind`)
-//!   can reach the server today only as `Invalid` or `Unavailable`, so its section
-//!   is lost. Slice S9 (ORI-T-0188) will add `PortError::Denied { code,
-//!   methodology_ref }` for it.
+//!   reaches the server as `PortError::Denied { code, methodology_ref }`, which
+//!   slice S9 (ORI-T-0188) added, and S2 answers it `refused` with its code and
+//!   section. Which codes each desk uses, beside `product_database_mismatch`, is
+//!   ORI-T-0070's to decide.
 //! - **The reference rule keeps a hostile reference from reading as a line of its
 //!   own, and no more.** Punctuation-joined words pass it. The label says so, and
 //!   an agent must treat the reference as data.
