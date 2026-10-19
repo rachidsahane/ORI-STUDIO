@@ -2471,3 +2471,50 @@ Written by the lead under [[R31]], [[R39]] and [[R44]].
 Claim 118 is released. **Batch 10 slices S3, S5, S7, S8 and S9 are complete on this branch.** S4 (claim 117) is complete through repair 1, and its repair 2 is with the operator (classifier refusal). Tier 2: the operator merges.
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator) and 117 (ORI-T-0187, repair 2 with the operator). The next free identifier is ORI-T-0193.
+
+---
+
+## 2026-10-19, ORI-T-0189 and ORI-T-0185 designed and dispatched on Sonnet after a fact-check; ORI-T-0193 allocated; CI green on `93dfaec`
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**CI is green on `93dfaec`**: all 17 checks, Windows tests included. Slice S9 is confirmed on every platform.
+
+**Both designs come from a mapping run** (workflow `whtxp2z2z`: two mappers per ticket and a synthesis that re-read each claim in the code and with real git). The lead decided each open question. Before dispatch, a fact-check (four agents, two per package; three built prototypes) found three blocking errors of the lead's and about thirty smaller ones. All were corrected:
+- **ORI-T-0189:**
+  - a sentence for the code saying serde cannot write a key twice; a flattened map or two fields renamed onto one name can;
+  - a trait-level `# Errors` sentence the lock projection would make false;
+  - a wrong account of how serde_json refuses a top level that is not an object.
+- **ORI-T-0185:** two rules no test would have held (the text reading's second look and its fallback), now tests 13 and 14; three more passages and two more test comments that go stale; and a stated limit that described nothing git does.
+
+**ORI-T-0189, the lead's decisions.**
+- **JSON for escalations and tickets.** The escalation and ticket projections read their payloads as JSON through a reader in `payload.rs`. That reader refuses anything other than one object whose keys are distinct, under a new refusal, `ProjectionError::UnreadablePayload` (AICD §8). It parses only in the arms that read fields, so a kind that reads none never blocks a rebuild.
+- **The lock projection keeps the first-key reader.** ori-memory's tier 2 test `ori_p1_022_the_lock_fold_keeps_the_rows_the_lock_projection_keeps` holds the two lock readers to the same rows. Neither the desk nor S9's quote refusal can write a module value on which they differ. Moving both is ORI-T-0193.
+- **Dependencies.** `serde` (`std` only) and `serde_json` are added to ori-store on ori-runtime's exact pins, under E-0008's answer ("pinned, workspace-wide"). `Cargo.lock` gains two edges and no package.
+- **Tier 1.**
+
+**ORI-T-0185, the lead's decisions.**
+- **Case 1: the script checks the name it was run under.** Refusing every hook link whose way enters the working tree is not adopted: it refuses common layouts and still misses linked worktrees, `core.worktree` and mounts. Run under another name, or from `ori-original/`, the script records nothing, runs nothing, drains its input and exits 0. The lead proved it with real git 2.43 on layout B, on the `ori-original` chain and on the drain. Four limits are stated in the module doc, among them a script that runs the engine's hook by its own path.
+- **Case 2:** `status()` refuses what `install()` refuses: a linked or non-directory hooks directory, a link that reaches a managed hook, a way through a per-process directory.
+- **Case 3:** a way past a missing directory is read physically, under the walk the per-process check already uses, refactored into a shared `walk_the_way`. The text reading stays as a one-hop look at a hook's place, and as the fallback.
+- **Tier 1.**
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 119 | ORI-T-0189, the escalation and ticket projections read their payloads as JSON | in `crates/ori-store/src/projections/`: `payload.rs`, `escalation.rs`, `ticket.rs`, and in `mod.rs` the new `UnreadablePayload` variant, `MalformedPayload`'s docs, `Projection::apply`'s `# Errors` and one module doc phrase; `crates/ori-store/Cargo.toml` (two dependencies); `Cargo.lock` (ori-store's entry) | 1 | `/home/user/wt/ORI-T-0189`, `fix/ORI-T-0189-payload-json` | Sonnet 5.5 | 2026-10-19 |
+| 120 | ORI-T-0185, hook links: the script's own-name guard, `status()` aligned with `install()`, a missing directory read physically | `crates/ori-watch/src/hooks.rs` | 1 | `/home/user/wt/ORI-T-0185`, `fix/ORI-T-0185-hook-links` | Sonnet 5.5 | 2026-10-19 |
+
+The held claims are 20 (`.github/workflows/ci.yml`, `scripts/gates.sh`, `fixtures/planted/gate-13/**`), 112 (`crates/ori-watch/src/watcher.rs`) and 117 (`crates/ori-mcp/src/tools/report.rs`, one line of `tools/mod.rs`). Neither new claim overlaps them. Claim 120 is `hooks.rs` and claim 112 is `watcher.rs`, in the same crate but not the same file.
+
+**Follow-up ORI-T-0193, allocated (tier 2, for the operator): what ORI-T-0189 leaves.**
+- **Whether the lock projection and ori-memory's lock fold move to JSON together.** That needs `test_modified` on `scope.rs`'s `ori_p1_022_the_lock_fold_keeps_the_rows_the_lock_projection_keeps` and, if ori-memory's copy moves, on two more of its tests. For the lock it is defense in depth only: the desk writes no module value on which the readers differ.
+- **The docs ORI-T-0189 makes stale outside its tier 1 scope:**
+  - `crates/ori-store/src/event_log.rs`'s "a parser this crate does not have";
+  - `crates/ori-mcp/src/ports.rs`'s first-`"key"` sentences;
+  - `crates/ori-mcp/src/tools/orchestration.rs`'s passage on how the queue shows escalation text;
+  - `crates/ori-broker/src/keychain.rs:162-165` ("no `serde` line exists anywhere in this workspace's dependency graph for `ori-broker`": ori-store now brings serde in);
+  - `crates/ori-store/src/rebuild.rs`'s `interpret` doc.
+
+  The migrations' comments are compared byte for byte and stay as they are.
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator), 119 and 120. The next free identifier is ORI-T-0194.
