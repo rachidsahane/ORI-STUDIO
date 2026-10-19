@@ -2113,3 +2113,56 @@ The operator decides between three courses:
 Claim 112 stays held. ORI-T-0163 must land before ORI-T-0055.
 
 **State after this section:** the claims held are 20, 112 (repair 2 blocked, with the operator) and 115. The next free identifier is ORI-T-0189.
+
+---
+
+## S5 and S4 critiqued and revised, claims 116 and 117; two follow-ups found by the critiques
+
+Written by the lead on 2026-10-19 under [[R31]] and [[R44]].
+
+**The pre-dispatch critique of S5 and S4** used two lenses per package and one skeptic per issue, 30 agents (`critique-0186-0187-full.json`). It found nothing blocking. Every verified issue is decided in the revised packages, committed as `ops/tickets/ORI-T-0186-s5-desk-tools.md` and `ops/tickets/ORI-T-0187-s4-aicd-report.md`.
+
+S5:
+- **A reference that fails the check** is now a success with the reference withheld, not `unavailable`. The desk returned `Ok`, so a failure would invite a retry that opens a second pull request;
+- the reference rule's stated property is corrected: it refuses whitespace, control characters and non-ASCII, not words joined by punctuation;
+- test 1 binds the lead to another ticket, pinning the argument over the binding's ticket;
+- test 3 drives both desks, a proposal refusal included;
+- test 6 has exact replies and a token for each case;
+- test 7 has a scripted `Ok`.
+
+S4:
+- **the order of content faults is decided:** the constant list first, in template order, then any leftover key;
+- the extra-key cases use a blocked report, since S2 refuses an eleventh key;
+- the cut fields are named in template order, never the set's alphabetical order, with a 50-character config case;
+- m7 becomes a barrier mutation in the throwaway copy, since the handler cannot place a row between the barrier's rows;
+- test 8's draws are scripted outright, and the fault is named correctly (`FileAlreadyExists`);
+- provenance is asserted;
+- a role-and-kind matrix and a coder ticket-filed case are added;
+- record-id uniqueness is stated as a limit.
+
+**Follow-ups allocated:**
+- **ORI-T-0189, `ori-store`'s projection payload reader.** It is not a JSON parser:
+  - it takes the first `"key"` anywhere in a payload, values included;
+  - it cuts a value at its first `"`.
+
+  So agent text in an escalation can be cut in the human queue, and a value equal to a key name can be read as that key. S9's desk contract orders `escalation.raised`'s keys so `trigger` is read first. The reader must parse JSON. Tier: ori-store's row.
+- **ORI-T-0190, a security finding for the operator: a category can be lowered in two agent calls.** `ori-core`'s `Ticket::apply` treats any move to or from `product_signal` as off the ladder. So `decisional` → `product_signal` → `auto` passes with no `E_UPGRADE_ONLY`. That defeats AICD §11's "only a human can downgrade", and the catalogue's "a category is never lowered". `crates/ori-core/src/ticket.rs` is tier 2; the operator decides the rule. S5 states it as a limit and adds no second enforcement.
+
+**S9 (ORI-T-0188):** its critique (19 agents) found one blocking defect of the lead's. Test 6 compared pointers into a `const` array, and the critic reproduced a correct handler failing it. Several should-fix issues were also found:
+- the projection reader's first-match hazard on the `trigger` column;
+- the plan bound is 67, not 66;
+- the scope and doc list for `ports.rs` were incomplete;
+- three refusal codes were left unnamed;
+- the over-cap paths are testable;
+- the escalation desk's refuse-before-append was unstated.
+
+All of them are decided in the revision, which is under a focused re-critique.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 116 | ORI-T-0186, batch 10 slice S5 (`aicd_ticket_upgrade`, `aicd_spec_propose`) | `crates/ori-mcp/src/tools/desk.rs` (new); in `tools/mod.rs` one module line | 2 | `/home/user/wt/ORI-T-0186`, `feat/ORI-T-0186-desk-tools` | Sonnet 5.5 | 2026-10-19 |
+| 117 | ORI-T-0187, batch 10 slice S4 (`aicd_report`) | `crates/ori-mcp/src/tools/report.rs` (new); in `tools/mod.rs` one module line | 2 | `/home/user/wt/ORI-T-0187`, `feat/ORI-T-0187-report-tool` | Sonnet 5.5 | 2026-10-19 |
+
+Claims 115, 116 and 117 each add one line to `tools/mod.rs`, at a different place in alphabetical order. The lead resolves the adjacent lines when cherry-picking.
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115, 116 and 117. The next free identifier is ORI-T-0191 (ORI-T-0185 and ORI-T-0188 to ORI-T-0190 are allocated).
