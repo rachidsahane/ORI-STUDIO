@@ -68,9 +68,9 @@
 //! tracker and the package bounds. The engine (ORI-T-0070) builds it per product
 //! and keeps it current; every connection's handlers share one
 //! ([`crate::tools::memory::SharedMemoryInputs`]). `aicd_evidence`
-//! ([`crate::tools::evidence::EvidenceHandler`]) is the exception to the rest of
-//! this paragraph: it holds the guard only to copy the stage, and makes no cap
-//! check. A handler takes the read lock
+//! ([`crate::tools::evidence::EvidenceHandler`]) is an exception to the whole-call
+//! lock and to the cap check below: it holds the guard only to copy the stage.
+//! A handler takes the read lock
 //! **for the whole call**, because `Retrieval` borrows the map and the tracker,
 //! and it checks three things before it asks anything, then fails closed the same
 //! way for each:
@@ -296,9 +296,10 @@ const WHY_NO_QUERY: &str = "the query argument is missing or is not a string";
 /// The engine (ORI-T-0070) builds it per product and keeps it current; every
 /// connection's handlers share one ([`crate::tools::memory::SharedMemoryInputs`]).
 ///
-/// **Lock order.** A handler takes the read lock for the whole call, because
-/// `Retrieval` borrows the map and the tracker, and it holds the database writer
-/// while it does. The engine therefore never holds the write lock while it waits
+/// **Lock order.** `aicd_context` and `aicd_search` take the read lock for the
+/// whole call, because `Retrieval` borrows the map and the tracker, and they hold
+/// the database writer while they do. `aicd_evidence` holds it only to copy the
+/// stage, while it also holds the writer. The engine therefore never holds the write lock while it waits
 /// for the database writer: that is a deadlock with a handler that holds the
 /// writer and waits for the read lock. A poisoned lock fails closed.
 ///
@@ -366,9 +367,9 @@ pub struct MemoryInputs {
     pub code_map_built_at: Option<Timestamp>,
     /// The product's freshness tracker.
     pub freshness: FreshnessTracker,
-    /// The bounds of a package. `cap_bytes` above
-    /// [`crate::tools::memory::MAX_PACKAGE_REPLY_BYTES`] is refused as
-    /// unavailable.
+    /// The bounds of a package. `aicd_context` and `aicd_search` refuse a
+    /// `cap_bytes` above [`crate::tools::memory::MAX_PACKAGE_REPLY_BYTES`] as
+    /// unavailable; `aicd_evidence` builds no package and does not read it.
     pub config: PackageConfig,
 }
 

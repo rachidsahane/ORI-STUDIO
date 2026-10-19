@@ -403,9 +403,9 @@
 //! `spec/API_SPEC.md` section 3 says `aicd_evidence` returns "Raw evidence,
 //! returned labeled untrusted", so something has to read the file a blob
 //! names. [`read_evidence_content`] is that read, and the only read of
-//! evidence content in the workspace. `aicd_evidence` does not exist yet
-//! (escalation E-0005); slice S7's handler for it in `ori-mcp`, not built yet,
-//! is to call this function, and never to open a path by hand. The read
+//! evidence content in the workspace. `aicd_evidence`'s handler in `ori-mcp`
+//! (slice S7, ORI-T-0184) calls this function, and never opens a path by hand.
+//! The read
 //! belongs here, next to the type whose content it reads. The decisions, each
 //! with its reason:
 //!
