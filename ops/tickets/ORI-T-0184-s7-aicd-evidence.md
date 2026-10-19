@@ -5,7 +5,7 @@
 | Worktree | `<WORKTREE>` |
 | Branch | `<BRANCH>`, at `<BASE>` (the session head, where S2, PM3, PM4 and S3/S8 are integrated) |
 | Tier | **2** (`spec/RISK_MAP.md`: `crates/ori-mcp/src/tools/`); the operator merges |
-| Declared scope (claim <CLAIM>) | `crates/ori-mcp/src/tools/evidence.rs` (new). In `crates/ori-mcp/src/tools/mod.rs`, **only** the line `pub mod evidence;` with a `///` line above it. In `crates/ori-mcp/src/tools/memory.rs`, **only** the split of `read_inputs` that Decision 1 gives, with its doc lines, and one sentence in each of the module doc's two passages on the shared inputs ("for the whole call" and the three checks) saying that `aicd_evidence` holds the guard only to copy the stage and makes no cap check. Nothing else. No existing test changes |
+| Declared scope (claim <CLAIM>) | `crates/ori-mcp/src/tools/evidence.rs` (new). In `crates/ori-mcp/src/tools/mod.rs`, **only** the line `pub mod evidence;` with a `///` line above it. In `crates/ori-mcp/src/tools/memory.rs`, **only** one sentence in each of the module doc's two passages on the shared inputs ("for the whole call" and the three checks) saying that `aicd_evidence` holds the guard only to copy the stage and makes no cap check. Nothing else. No existing test changes |
 | Spec trailer | `Spec: API_SPEC.md#3-agent-facing-mcp-server` |
 | Ticket trailer | `Ticket: ORI-T-0184`, **one per commit** (gate 13 refuses two) |
 | Commit types | only `feat`, `fix`, `docs`, `ci`, `chore`. **Never `test(...)`** |
@@ -94,7 +94,7 @@ The third assert is what keeps `REPORT_FIELDS_MAX` used in the library build; wi
 
 Test 10 pins both `REPORT_*` constants against the catalogue, and it pins the record they describe.
 
-**The inputs.** The handler reads only `stage` from them. Split S3's private `read_inputs` in `memory.rs` in two:
+**The inputs.** The handler reads only `stage` from them. S3's repair 1 (ORI-T-0181) already split its private `read_inputs` in `memory.rs` in two. Your base has:
 
 ```rust
 /// The read lock of the shared inputs, after two checks: the lock is not
@@ -103,9 +103,9 @@ pub(crate) fn lock_inputs<'a>(shared: &'a SharedMemoryInputs, binding: &Binding)
     -> Result<RwLockReadGuard<'a, MemoryInputs>, HandlerError>;
 ```
 
-- `read_inputs` keeps its name, its signature and its doc's three checks. It calls `lock_inputs`, then makes the cap check. Nothing else in `memory.rs` changes, and S3's tests pass unchanged.
+- `read_inputs`, private, keeps its three checks: it calls `lock_inputs`, then makes the cap check.
 - `aicd_evidence` calls `lock_inputs`, copies `stage` (it is `Copy`), and **drops the guard** before it authorizes. It never makes the cap check: `config.cap_bytes` is the package's bound, and evidence does not depend on it. So the engine's writer waits for a lock held only that long.
-- If your base's `memory.rs` already has a `pub(crate)` function doing exactly the lock and product checks, use it, leave `memory.rs` alone, and say so.
+- **Do not change `lock_inputs` or `read_inputs`.** In `memory.rs` you write only the two module-doc sentences the declared scope names. Without them, the passages on the shared inputs ("for the whole call", the three checks) would be untrue of `aicd_evidence`.
 
 The engine registers the handler with `Handlers::register(Tool::Evidence, ..)`.
 
