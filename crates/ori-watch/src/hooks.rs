@@ -172,7 +172,7 @@
 //! availability fault when the ref poller still sees the push as a moved
 //! `refs/remotes/*` ref. [`GitHooks::status`] is the liveness check: it
 //! reports which hooks are installed, stale, missing, replaced or not
-//! executable.
+//! executable, and it judges the links as an install does.
 //!
 //! # A script not run by git for its own event records nothing (AICD §13)
 //!
@@ -676,11 +676,12 @@ pub struct HookStatus {
     pub hook: GitHook,
     /// How it stands.
     pub state: HookState,
-    /// Whether a preserved hook from before the engine sits beside it and is
-    /// run after recording. It is computed only once `ori-original/` has been
-    /// found to be absent or a real directory: [`GitHooks::status`] refuses
-    /// ([`HooksError::HooksDirNotADirectory`]) before it reports anything
-    /// otherwise.
+    /// Whether a preserved hook from before the engine sits beside it. The
+    /// script runs it after recording when it is executable; this field
+    /// reports only that an entry is there. It is computed only once
+    /// `ori-original/` has been found to be absent or a real directory:
+    /// [`GitHooks::status`] refuses ([`HooksError::HooksDirNotADirectory`])
+    /// before it reports anything otherwise.
     pub chains_to_original: bool,
 }
 
@@ -797,20 +798,7 @@ impl GitHooks {
         check_git_dir(&self.git_dir)?;
         self.refuse_if_hooks_path_is_configured()?;
         let hooks_dir = self.hooks_dir();
-        match fs::symlink_metadata(&hooks_dir) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(HooksError::HooksDirNotADirectory { path: hooks_dir });
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(HooksError::Io {
-                    path: hooks_dir,
-                    source,
-                });
-            }
-        }
+        refuse_a_hooks_dir_that_is_not_a_directory(&hooks_dir)?;
         // `ori-original/` is the installer's: absent, or a real directory,
         // whatever the hooks are, and the links in it that the scripts run
         // (those named for a hook this installer replaces) are judged below
@@ -845,19 +833,33 @@ impl GitHooks {
     /// reports that the files are in place, not that git will run them (see
     /// the module doc's "What is not covered").
     ///
+    /// It judges the hooks directory, and the links in it and in
+    /// `ori-original/`, exactly as [`GitHooks::install`] does, and in the same
+    /// order. A link made after an install that reaches a hook this installer
+    /// replaces, or whose way depends on the process that follows it, makes it
+    /// refuse and not report the hooks healthy: the next `install` would
+    /// refuse that link, and a report that every hook is installed beside it
+    /// would be false. It does not look at `core.hooksPath`.
+    ///
     /// # Errors
     ///
     /// [`HooksError::GitDirNotADirectory`] when `.git` has become a link or a
-    /// file since [`GitHooks::new`], [`HooksError::HookNotAFile`] when a
-    /// directory sits where a hook belongs, [`HooksError::HooksDirNotADirectory`]
-    /// when the `ori-original` in the hooks directory is a link or not a
-    /// directory (as for [`GitHooks::install`]: each script would run itself, or
-    /// whatever the link leads to, and a report that every hook is installed
-    /// would be false), [`HooksError::Io`] when a hook file cannot be examined.
+    /// file since [`GitHooks::new`], [`HooksError::HooksDirNotADirectory`] when
+    /// the hooks directory is a link or not a directory, or when the
+    /// `ori-original` in it is (as for [`GitHooks::install`]: each script would
+    /// run itself, or whatever the link leads to, and a report that every hook
+    /// is installed would be false), [`HooksError::HookLinksToManagedHook`] and
+    /// [`HooksError::HookLinkDependsOnProcess`] when a link in the hooks
+    /// directory, or one in `ori-original/` named for a hook this installer
+    /// replaces, is one that `install` refuses, [`HooksError::HookNotAFile`]
+    /// when a directory sits where a hook belongs, [`HooksError::Io`] when the
+    /// scan of the links cannot be made or a hook file cannot be examined.
     pub fn status(&self) -> Result<Vec<HookStatus>, HooksError> {
         check_git_dir(&self.git_dir)?;
         let hooks_dir = self.hooks_dir();
+        refuse_a_hooks_dir_that_is_not_a_directory(&hooks_dir)?;
         refuse_a_preserved_dir_that_is_not_ours(&hooks_dir)?;
+        self.refuse_if_a_link_reaches_a_managed_hook(&hooks_dir)?;
         let mut statuses = Vec::new();
         for hook in GitHook::ALL {
             let path = hooks_dir.join(hook.file_name());
@@ -1086,9 +1088,9 @@ impl GitHooks {
         })
     }
 
-    /// Refuses the installation if any entry of the hooks directory is a link
-    /// that, followed to its end, reaches the place of a hook this installer
-    /// replaces: AICD §13.
+    /// Refuses the installation, or the status report, if any entry of the
+    /// hooks directory is a link that, followed to its end, reaches the place
+    /// of a hook this installer replaces: AICD §13.
     ///
     /// Every entry is looked at, not only the four hooks, and a chain is
     /// followed, not one link (`follow_chain_to_managed_hook`). For each link
@@ -1110,7 +1112,8 @@ impl GitHooks {
     ///
     /// The entries of `ori-original/` that the installed scripts run, which are
     /// those named for a hook this installer replaces, are looked at too when
-    /// `ori-original/` is a real directory (`install` refused it otherwise):
+    /// `ori-original/` is a real directory (`install` and `status` refused it
+    /// otherwise):
     /// each that is a link goes through the same two checks, the per-process
     /// walk and then the chain, and a refusal names that entry. A link a first
     /// install kept there was judged where it stood in the hooks directory, so it
@@ -1219,6 +1222,38 @@ impl GitHooks {
             Some(value) => Err(HooksError::HooksPathConfigured { value }),
             None => Ok(()),
         }
+    }
+}
+
+/// Refuses the hooks directory unless it is absent or a real directory:
+/// AICD §13.
+///
+/// A link in its place would make every write, and every read of a hook, go
+/// wherever the link leads. This is looked at by [`GitHooks::install`] before
+/// anything is decided and by [`GitHooks::status`] before anything is
+/// reported. A hooks directory that is not there passes: `install` makes it,
+/// and `status` reports every hook missing.
+///
+/// # Errors
+///
+/// [`HooksError::HooksDirNotADirectory`] when it is a link or not a directory,
+/// [`HooksError::Io`] when it cannot be looked at for a reason other than not
+/// being there.
+fn refuse_a_hooks_dir_that_is_not_a_directory(hooks_dir: &Path) -> Result<(), HooksError> {
+    match fs::symlink_metadata(hooks_dir) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(HooksError::HooksDirNotADirectory {
+                    path: hooks_dir.to_path_buf(),
+                });
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(HooksError::Io {
+            path: hooks_dir.to_path_buf(),
+            source,
+        }),
     }
 }
 
@@ -5132,6 +5167,151 @@ mod tests {
             other => panic!("expected HooksDirNotADirectory, got {other}"),
         }
         assert_eq!(error.methodology_ref().unwrap().section, 13);
+    }
+
+    // ---- ORI-T-0185: status judges the links as an install does ----
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_status_refuses_a_link_added_after_an_install() {
+        let scratch = Scratch::new("status-link-after");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        assert!(
+            hooks
+                .status()
+                .unwrap()
+                .iter()
+                .all(|status| status.state == HookState::Installed)
+        );
+        // A link in the hooks directory, made after the install: every
+        // checkout would record a false `post-merge`.
+        let link = repo.join(".git").join("hooks").join("post-checkout");
+        std::os::unix::fs::symlink("post-merge", &link).unwrap();
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HookLinksToManagedHook { path, target } => {
+                assert_eq!(path, &link);
+                assert_eq!(target, Path::new("post-merge"));
+            }
+            other => panic!("expected HookLinksToManagedHook, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+
+        // A link in `ori-original/` named for a hook the installer replaces,
+        // made after the install: the script would run the engine's own.
+        // `pre-push` and not the kept `post-commit`, so no kept hook is lost.
+        let scratch = Scratch::new("status-link-in-ori-original-after");
+        let (repo, spool, hooks_dir, _) = repository_with_a_users_post_commit(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        assert!(fs::symlink_metadata(preserved(&repo, GitHook::PostCommit)).is_ok());
+        assert!(hooks.status().is_ok());
+        let entry = hooks_dir.join(PRESERVED_DIR).join("pre-push");
+        std::os::unix::fs::symlink("../post-merge", &entry).unwrap();
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HookLinksToManagedHook { path, target } => {
+                assert_eq!(path, &entry);
+                assert_eq!(target, Path::new("../post-merge"));
+            }
+            other => panic!("expected HookLinksToManagedHook, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_status_refuses_a_link_through_a_per_process_directory() {
+        let scratch = Scratch::new("status-per-process");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        let link = repo.join(".git").join("hooks").join("post-checkout");
+        let target = Path::new("/proc/self/cwd/.git/hooks/post-merge");
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        // Matched here and not through `expect_refused_for_the_process`, which
+        // is Linux-only and calls `install`. Where `/proc` is not there the
+        // walk still stops on its name.
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HookLinkDependsOnProcess {
+                path,
+                through,
+                target: seen,
+            } => {
+                assert_eq!(path, &link);
+                assert_eq!(seen, target);
+                assert_eq!(through, Path::new("/proc"));
+            }
+            other => panic!("expected HookLinkDependsOnProcess, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_status_refuses_a_hooks_directory_that_is_a_link_or_a_file() {
+        let scratch = Scratch::new("status-hooks-dir-link");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        let hooks_dir = repo.join(".git").join("hooks");
+        let aside = repo.join(".git").join("hooks-aside");
+        fs::rename(&hooks_dir, &aside).unwrap();
+        std::os::unix::fs::symlink("hooks-aside", &hooks_dir).unwrap();
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HooksDirNotADirectory { path } => assert_eq!(path, &hooks_dir),
+            other => panic!("expected HooksDirNotADirectory, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+
+        let scratch = Scratch::new("status-hooks-dir-file");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::rename(&hooks_dir, repo.join(".git").join("hooks-aside")).unwrap();
+        fs::write(&hooks_dir, "not a directory\n").unwrap();
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HooksDirNotADirectory { path } => assert_eq!(path, &hooks_dir),
+            other => panic!("expected HooksDirNotADirectory, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_status_accepts_a_link_a_first_install_kept() {
+        // A user's `pre-push -> ../shared-hook.sh`, kept by the first install
+        // as a link one level down, was judged where it stood and is judged
+        // again by `status`, which must not refuse what `install` kept.
+        let scratch = Scratch::new("status-kept-link");
+        let (repo, spool) = skeleton(&scratch);
+        let target = repo.join(".git").join("shared-hook.sh");
+        fs::write(&target, "#!/bin/sh\necho shared\n").unwrap();
+        let path = hook_path(&repo, GitHook::PrePush);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../shared-hook.sh", &path).unwrap();
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+
+        let statuses = hooks.status().expect("status accepts what install kept");
+        let pre_push = statuses
+            .iter()
+            .find(|status| status.hook == GitHook::PrePush)
+            .unwrap();
+        assert_eq!(pre_push.state, HookState::Installed);
+        assert!(pre_push.chains_to_original);
+        assert!(
+            statuses
+                .iter()
+                .filter(|status| status.hook != GitHook::PrePush)
+                .all(|status| !status.chains_to_original)
+        );
     }
 
     // ---- the scripts, run by a real shell and by real git ----
