@@ -5803,6 +5803,27 @@ mod tests {
             fs::read_to_string(spool.join(SPOOL_LOG_NAME)).unwrap_or_default()
         }
 
+        /// Spawns `command`, again while the kernel refuses to run a script
+        /// that is "busy". Another test's `fork` can hold the write handle of a
+        /// script this test wrote a moment ago until that child's own `exec`,
+        /// and the kernel then refuses to run the script. The refusal passes in
+        /// milliseconds.
+        fn spawn_when_not_busy(command: &mut Command) -> std::process::Child {
+            let mut busy = 0;
+            loop {
+                match command.spawn() {
+                    Ok(child) => return child,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::ExecutableFileBusy && busy < 100 =>
+                    {
+                        busy += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(error) => panic!("the command could not be run: {error}"),
+                }
+            }
+        }
+
         #[test]
         fn ori_t_0054_installing_hooks_leaves_the_working_tree_untouched() {
             let scratch = Scratch::new("tree");
@@ -6305,14 +6326,14 @@ esac
             for hook in ["pre-push", "post-rewrite"] {
                 let _ = fs::remove_file(&link);
                 std::os::unix::fs::symlink(hook, &link).unwrap();
-                let mut child = Command::new(&link)
+                let mut command = Command::new(&link);
+                command
                     .arg("origin")
                     .current_dir(&repo)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .unwrap();
+                    .stderr(Stdio::piped());
+                let mut child = spawn_when_not_busy(&mut command);
                 let mut input = child.stdin.take().unwrap();
                 for _ in 0..256 {
                     input
@@ -6381,15 +6402,15 @@ esac
             .unwrap();
 
             let run = |script: &Path| -> Output {
-                let mut child = Command::new(script)
+                let mut command = Command::new(script);
+                command
                     .arg("origin")
                     .current_dir(&repo)
                     .env("PATH", &path)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .unwrap();
+                    .stderr(Stdio::piped());
+                let mut child = spawn_when_not_busy(&mut command);
                 let mut input = child.stdin.take().unwrap();
                 // A few lines. A writer that is cut off is the business of the
                 // test that sends more than a pipe holds, so a failure to write
