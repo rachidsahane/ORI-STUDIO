@@ -292,7 +292,7 @@ enum Resolution {
     Unresolved(#[allow(dead_code)] &'static str),
 }
 
-/// `spec/RISK_MAP.md`'s tier 2 rows, fourteen of them, each with the concrete
+/// `spec/RISK_MAP.md`'s tier 2 rows, fifteen of them, each with the concrete
 /// declared-scope prefixes it resolves to, or the reason it does not.
 ///
 /// The `spec/` row (tier 1, escalating to tier 2 for four named documents) and
@@ -433,13 +433,27 @@ const RISK_MAP_TIER_TWO: &[RiskMapRow] = &[
         // `event_log.rs` row above gives: the map tiers paths before their
         // first commit. `host.rs` (the tier 1 row "crates/ori-mcp (host)"),
         // `protocol.rs` (tier 1, "The shared MCP wire") and `lib.rs` are not
-        // listed, so they are not significant by this row.
+        // listed, so they are not significant by this row; the host registry
+        // is tier 2 in its own row that follows this one.
         resolution: Resolution::Boundary(&[
             "crates/ori-mcp/src/scopes.rs",
             "crates/ori-mcp/src/ports.rs",
             "crates/ori-mcp/src/server.rs",
             "crates/ori-mcp/src/tools",
         ]),
+    },
+    RiskMapRow {
+        text: "crates/ori-mcp/src/host/registry.rs",
+        // ORI-T-0194 (PD-1): records which operator MCP servers the engine
+        // exposes and feeds `ToolScopes::authorize_user_tool`. The Path cell
+        // names one file under `crates/ori-mcp/src/host/`; it is not the tier
+        // 1 row `crates/ori-mcp (host)`, which `spec/RISK_MAP.md` narrows to
+        // MCP host client and transport only. `crates/ori-mcp/src/host.rs` is
+        // a sibling module file, not under this row's prefix, and other paths
+        // under `host/` that the map does not name are not significant by this
+        // row until the map adds them. The file may not exist on every branch
+        // yet; the map tiers paths before their first commit.
+        resolution: Resolution::Boundary(&["crates/ori-mcp/src/host/registry.rs"]),
     },
     RiskMapRow {
         text: "crates/ori-integrations (merge exposure, webhook verification)",
@@ -1388,5 +1402,43 @@ mod tests {
                 "{file} is not under crates/ori-mcp/src/tools/"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ORI-T-0194: the tier 2 row PD-1 added to spec/RISK_MAP.md for the MCP
+    // host registry that decides which operator MCP servers agents may reach.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0194_the_mcp_host_registry_is_significant_and_the_host_client_is_not() {
+        assert_eq!(
+            verdict_for_scope_of("crates/ori-mcp/src/host/registry.rs"),
+            Verdict::Significant(SignificantBecause::Scope(
+                "crates/ori-mcp/src/host/registry.rs".to_owned()
+            )),
+            "crates/ori-mcp/src/host/registry.rs is a tier 2 path of spec/RISK_MAP.md \
+             (Which operator MCP servers are exposed)"
+        );
+
+        // The tier 1 host row is client and transport only; it must not widen
+        // into the registry file, and the registry row must not widen into it.
+        for file in [
+            "crates/ori-mcp/src/host.rs",
+            "crates/ori-mcp/src/protocol.rs",
+        ] {
+            assert_eq!(
+                verdict_for_scope_of(file),
+                Verdict::NotSignificant { copy_only: false },
+                "{file} is tier 1 in spec/RISK_MAP.md and the registry row must not widen to it"
+            );
+        }
+
+        // A path under `host/` that the map does not name is not significant
+        // by the registry row alone.
+        assert_eq!(
+            verdict_for_scope_of("crates/ori-mcp/src/host/transport.rs"),
+            Verdict::NotSignificant { copy_only: false },
+            "only registry.rs is named tier 2 under host/"
+        );
     }
 }
