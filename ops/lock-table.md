@@ -2621,3 +2621,49 @@ Claim 120 is released. Tier 1: the lead merges under ADR-0002 when the session's
 **Outside this ticket's scope, for a later documentation pass:** `crates/ori-watch/src/watcher.rs:413-414` presents a commit made with `--no-verify` as what the ref poller catches. `git commit --no-verify` skips only `pre-commit` and `commit-msg`, so `post-commit` still runs; the case that holds is `git push --no-verify`. The same sentence in `hooks.rs` is corrected.
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator) and 117 (ORI-T-0187, repair 2 with the operator). The next free identifier is ORI-T-0194.
+
+---
+
+## 2026-10-19, ORI-T-0194 (batch 10 slice H1, the registry of the operator's MCP servers) designed, fact-checked twice, and dispatched on claim 121
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**CI is green on `2ab7e63`**: all 17 checks. ORI-T-0185 is confirmed on every platform. The red aggregate on `0501848` was its three test jobs, cancelled by the push of `2ab7e63`; every other job of that run passed.
+
+**ORI-T-0194 is allocated**: slice H1 of `ops/batch-10-plan.md`, the first half of ORI-T-0056 (the MCP host). It is the record of which servers the operator added to a product (`mcp.server_added`, `mcp.server_removed`), the rules an addition must satisfy, and the `ExposedServer` that S6 (later) passes to `ToolScopes::authorize_user_tool`.
+
+**The checks before dispatch.** A fact-check (five agents: code, specification, security, correctness, tests; several built prototypes against the pinned crates) found one blocking error of the lead's and about thirty smaller ones. A re-check of the revision (three agents) found three should-fix items and five notes. All were corrected before dispatch. The blocking error: serde's derive also reads a struct from a JSON **array**, which the lead's proof had not tried, so the fold would have accepted payloads that are not objects. The reader now checks the shape on a `serde_json::Value` first, then deserializes the same text, which refuses a repeated key.
+
+**The lead's decisions.**
+- **Files.** `crates/ori-mcp/src/host.rs` becomes a module root and the registry goes to `host/registry.rs`, so that H2 (later) adds `host/client.rs` beside it. The batch 10 plan declared `src/host.rs` for both slices; RISK_MAP's `crates/ori-mcp (host)` row covers both.
+- **Tier 2, raised by the lead.** RISK_MAP gives the host tier 1. But the registry supplies the facts `scopes.rs` grants on, so a defect in its fold widens what agents can reach. The backlog lets an agent raise a tier.
+- **The events carry the whole `McpServer` row.** That is the id, name, transport, configuration, credential reference, exposed roles and acknowledgement, because `spec/DATA_MODEL.md` rebuilds every projection from the log. Both are appended under `Actor::Human`, and the fold refuses an agent's or the system's.
+- **The credential reference is derived, never chosen:** `MCP_<NAME>_<ID>`. A server added again after a removal never inherits the old server's secret, and no two references collide.
+- **The configuration is non-secret by the operator's contract, not by a check.** It refuses control and bidirectional formatting characters, the set ori-memory's retrieval scrubs. `StdioConfig`'s `Debug` prints no argument.
+- **A verified read before every fold**, as ori-broker and ori-memory make: `EventLog::verify`, a read counted against the tip, and the read anchored on the digest of the last event folded (`LogMoved` otherwise).
+- **A refused event blocks the product.** The first event the fold refuses sets `blocked`. From then on `exposed` answers `None` for every name, `add`, `remove` and `refresh` answer the recorded refusal, and a fresh `load` refuses too. The log is append-only, so the way out is a change to the fold, decided by a human. **This is the trade [[R45]] point 3 accepted for evidence, now made for the registry, and it is put to the operator** (below).
+- **`Registry` has no `Clone`**, so no snapshot of it can keep granting a removed server. `remove` returns the seq it produced (API_SPEC's rule for mutating methods).
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 121 | ORI-T-0194, batch 10 slice H1: the registry of the operator's MCP servers | `crates/ori-mcp/src/host.rs` (new), `crates/ori-mcp/src/host/registry.rs` (new), one module declaration in `crates/ori-mcp/src/lib.rs` | 2 (raised by the lead) | `/home/user/wt/ORI-T-0194`, `feat/ORI-T-0194-mcp-registry` | Sonnet 5.5 | 2026-10-19 |
+
+The held claims are 20 (`.github/workflows/ci.yml`, `scripts/gates.sh`, `fixtures/planted/gate-13/**`), 112 (`crates/ori-watch/src/watcher.rs`) and 117 (`crates/ori-mcp/src/tools/report.rs`, one line of `tools/mod.rs`). Claim 121 overlaps none of them: `lib.rs` is not in claim 117.
+
+**Put to the operator:**
+- **The registry's lockout.** One defective `mcp.server_*` event, appended by any code holding the product's `ProductDb`, stops every exposure and every addition or removal of a server for that product, permanently, until a later ticket changes the fold. It is the same trade R45 point 3 accepted for evidence. ORI-T-0164, the recovery path for locked evidence, is widened to cover the registry too.
+- **The registry's tier.** Whether `spec/RISK_MAP.md` should list `crates/ori-mcp/src/host/registry.rs` at tier 2 beside `scopes.rs`. Until the operator decides, the lead raises each ticket that changes it.
+
+**ORI-T-0192 (the specification reconciliation) is widened** to own:
+- API_SPEC section 3's "The `mcp.*` events carry identifiers and lengths, never agent free text", which reads as all `mcp.*` kinds and is about the content of a call;
+- its list of what `mcp.server_added` carries (name, transport, exposed roles, `acknowledged_reach`), which leaves out the id, configuration and credential reference the rebuild needs;
+- ENV_SETUP section 4's `MCP_<SERVER>_*`, whose `*` the registry fills with the server's id.
+
+**Recorded against ORI-T-0191:** `crates/ori-mcp/src/host/registry.rs` repeats ori-memory's `is_unsafe_char` set, which is `pub(crate)` there. A widening decided under ORI-T-0191 must be repeated there too.
+
+**For H2 and PR1 (later):**
+- key connections and caches by server id, never by name;
+- resolve a credential reference by product and reference together, because the broker's keychain is one namespace for every product;
+- delete a removed server's keychain entry.
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 121. The next free identifier is ORI-T-0195.
