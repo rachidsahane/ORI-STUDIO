@@ -2074,3 +2074,42 @@ Recorded as follow-ups, not in this ticket:
 | 115 | ORI-T-0184, batch 10 slice S7 (`aicd_evidence`) | `crates/ori-mcp/src/tools/evidence.rs` (new); in `tools/mod.rs` one module line; in `tools/memory.rs` two module-doc sentences | 2 | `/home/user/wt/ORI-T-0184`, `feat/ORI-T-0184-evidence-tool` | Sonnet 5.5 | 2026-10-19 |
 
 **State after this section:** the claims held are 20, 112 (repair 1 under re-review) and 115. The next free identifier is ORI-T-0189 (ORI-T-0185 to ORI-T-0188 are allocated: S5, S4 and S9 have their packages under critique).
+
+---
+
+## ORI-T-0163 repair 1 re-reviewed; repair 2 refused by the safety classifier and left with the operator
+
+Written by the lead on 2026-10-19 under [[R31]], [[R44]] and [[R46]].
+
+**The focused re-review of repair 1** (`d31679b`) used two lenses, one skeptic per finding, 4 agents (`review-0163-r1-full.json`). It found nothing blocking:
+- every root-loss path was traced, and nine mutations against the new tests were each killed;
+- 40 parallel runs of the whole `ori-watch` suite under load: no flake;
+- the Windows clippy check passes.
+
+It confirmed two should-fix findings:
+- **The delivery step's order and time** (the lead's Decision 2 prescribed `record()`). A batch that delivers a root loss `mark_reconciled` found, beside another loss of its own, lists `RootGone` last and carries the later `first_observed_at`. The health lists it first, at the discovery time. Reproduced with a QueueFull and an Overflow. The fix makes the delivered state the found loss with the batch's own absorbed into it.
+- **The Windows bullet contradicts itself.** It still says notify unwatches a deleted root. While the root is delete-pending, notify's `dir.exists()` answers yes through `std`'s listing fallback, and notify re-arms the read on the dead handle.
+
+Notes:
+- a stopped backend overrides the three new rules;
+- `next_batch`'s cost sentence leaves out the Windows open;
+- the delete-pending test's comment says "most Windows runners" delete with POSIX semantics. `std`'s `remove_dir` is `RemoveDirectoryW`, a classic delete, so CI's Windows leg exercises the open.
+
+**Repair 2** was written and proved by the lead in a copy as six replacements in `watcher.rs`:
+- the delivery fix;
+- one new test, `ori_t_0163_a_found_loss_delivered_beside_another_keeps_its_place_and_time`, which passed 20 runs out of 20 and fails under the old delivery code;
+- the three doc fixes;
+- a reworded comment on this ticket's own new test.
+
+All checks exited 0: fmt, clippy, the Windows clippy, strict doc, `ori-watch` (143 passed) and `ori-gates` (194).
+
+The Haiku coder's command that runs the lead's script was **refused by the auto-mode safety classifier** with the reason "Security Test Removal". The script removes no test. It adds one, and rewords the comment above a test this ticket itself added in `d31679b`, which has not reached `main`. The coder stopped, as `CLAUDE.md` requires, and applied nothing. **The lead tried no other route, and applies none:** `CLAUDE.md` forbids working around a refusal, as for ORI-T-0165. The script is `edits-0163-r2/apply.py` in the session scratchpad, and the proved file is beside it.
+
+The operator decides between three courses:
+- run the proved edits themselves, or authorize them;
+- have ORI-T-0163 integrated at `d31679b`, with the two should-fix findings allocated as a follow-up;
+- leave it waiting.
+
+Claim 112 stays held. ORI-T-0163 must land before ORI-T-0055.
+
+**State after this section:** the claims held are 20, 112 (repair 2 blocked, with the operator) and 115. The next free identifier is ORI-T-0189.
