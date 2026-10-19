@@ -26,7 +26,7 @@ What the exception governs is not a corner of the product. It is the control str
 | Memory boundaries | `ori-memory::barrier`, `ori-memory::scope` |
 | Audit trail and data | `ori-store::event_log`; schema migrations |
 | Gate integrity | `ori-gates::prover`, `ori-gates::liveness` |
-| What agents can reach | `ori-mcp::scopes`, `ori-mcp::ports`, `ori-mcp::server`, `ori-mcp::tools` |
+| What agents can reach | `ori-mcp::scopes`, `ori-mcp::ports`, `ori-mcp::server`, `ori-mcp::tools`; `ori-mcp::host::registry` |
 | Detection | `ori-watch::attribution` |
 | Supply chain | the release pipeline and signing; `.github/workflows` and `scripts/release*` (`RISK_MAP`) |
 | Specification | `SECURITY_NOTES`, `ENV_SETUP`, `RISK_MAP` and the ADRs, tiered at 2 by `RISK_MAP`; the `SECURITY_NOTES` table does not list them |
@@ -123,6 +123,7 @@ On 2026-10-18 the operator answered two questions that touch this ADR (ruling R4
 
 1. **The merge-queue guarantee covers Ori's own merge path.** Where this ADR, or a document it cites, says that the merge queue alone merges, that is Ori's own merge path: the merge queue alone calls `VcsHost::merge`, with Ori's credentials. An operator's MCP server may hold its own credentials, and tools that act with them outside Ori's merge queue, and Ori cannot tell which tools those are (API_SPEC section 3, "Proxied tools"). A server acting with its own credentials is outside the guarantee. Exposing such a server to a role requires the operator's explicit acknowledgement of exactly that, recorded in the `mcp.server_added` event (`acknowledged_reach`, true), and a server added without it is exposed to no role.
 2. **The `ori-mcp` tier 2 row is confirmed as the `adr_area` decision this ADR asks for.** The escalation scope above makes a change to the tier 2 surface in `SECURITY_NOTES` or `RISK_MAP` decisional. The operator confirmed the `RISK_MAP` row `crates/ori-mcp/src/scopes.rs, ports.rs, server.rs, tools/` on 2026-10-18 (review finding 0156-F9). The surface table above and the tier 2 table of `SECURITY_NOTES` name the same four modules: `ori-mcp::scopes`, `ori-mcp::ports`, `ori-mcp::server` and `ori-mcp::tools`.
+3. **The operator MCP server registry is tier 2 with them.** ORI-T-0194 built `host/registry.rs`, which records which servers the operator exposed and feeds `ToolScopes::authorize_user_tool`. The lead review on pull request 78 found that substance tier 2 though `RISK_MAP` had left it under the abstract `crates/ori-mcp (host)` row at tier 1. `RISK_MAP`, `SECURITY_NOTES` and the surface table above now name `ori-mcp::host::registry` at tier 2 alongside the four modules of point 2; the remaining `(host)` row covers the MCP host client and transport only.
 
 This amendment does not change who merges a pull request of this repository, which "Who merges while this repository is built: amended 2026-09-27" decides.
 
