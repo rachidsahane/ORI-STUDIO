@@ -24,6 +24,11 @@
 //! `spec/API_SPEC.md` section 3, or expose a proxied tool except on the
 //! conditions of that section's "Proxied tools".
 
+/// The host toward the operator's MCP servers: the registry of the servers the
+/// operator added to the product, the events that record them, and the rules
+/// an addition must satisfy (AICD §17, AICD §26).
+pub mod host;
+
 /// What the server reaches through the engine: the traits `ori-engine`
 /// implements for identifiers, ticket upgrades, specification proposals, the
 /// operator's MCP servers, the time, a session's state, plans and escalations,
