@@ -1,0 +1,104 @@
+--- a/crates/ori-mcp/src/tools/report.rs
++++ b/crates/ori-mcp/src/tools/report.rs
+@@ -152,16 +152,18 @@
+ //! product. The check holds for every role, the coder included. It costs a
+ //! verified read of the whole log (`EventLog::verify`, then `read_range` to the
+ //! tip) on every call that reaches it, linear in the log's length, on top of the
+-//! barrier's own reads of the whole log for a report it records. A call refused
+-//! `ticket_not_in_product` pays it too. That is accepted, as S3's repeated
+-//! passes were.
++//! barrier's own verified read of the whole log, which it makes for every report
++//! it is handed, before it writes anything. A call refused `ticket_not_in_product`
++//! pays the handler's read alone. That is accepted, as S3's repeated passes
++//! were.
+ //!
+ //! **Every field of the kind is required, and none is blank.** The blocked
+ //! report's five fields are required by their template. The closing report's
+-//! `new_criteria` and `provenance` are required only for some tickets, and the
+-//! handler does not interpret the ticket's kind, although it could read it from
+-//! the `ticket.filed` payload, so all ten are required: an agent writes `none`
+-//! where nothing applies. `none` is ordinary text.
++//! `new_criteria` is required only for defects, which the handler could tell
++//! from the `ticket.filed` payload's kind, and `provenance` only when content
++//! derives from production, which no ticket field records. The handler interprets
++//! neither, so all ten are required: an agent writes `none` where nothing
++//! applies. `none` is ordinary text.
+ //!
+ //! **The cap.** S2's schema accepts 8 192 characters per field, and the barrier
+ //! keeps at most `BarrierConfig::field_cap_chars` (4 000 by default) of the
+@@ -174,8 +176,9 @@
+ //! gives it none. Reacting to the record, whose kind is `blocked_report`, is the
+ //! engine's (ORI-T-0070), and nothing reacts to it yet. The `report.*` events
+ //! (`spec/API_SPEC.md` section 2) and the Report row (`spec/DATA_MODEL.md`
+-//! section 2), neither of which this tool writes, are PD-2's to reconcile
+-//! (`ops/batch-10-plan.md`).
++//! section 2), neither of which this tool writes, are ORI-T-0192's to
++//! reconcile: the specification ticket that settles batch 10's event names and
++//! rows (`ops/lock-table.md`).
+ //!
+ //! **`budget_consumed` is taken as the agent wrote it**: its evidence file holds
+ //! the whole text, and the record the barrier's sanitized text. The runtime's
+@@ -1278,8 +1281,9 @@
+         assert_eq!(rig.draws(), 17, "the record and five evidence ids");
+         let rows = rig.world.rows_since(tip);
+         assert_eq!(kinds(&rows), FAILED_ROWS);
+-        // The directory as written, and as JSON escapes it (on Windows every
+-        // backslash doubles), so that the check can fail on every platform.
++        // No path reaches the reply or S2's rows by any route: the directory as
++        // written, and as JSON escapes it (on Windows every backslash doubles).
++        // The handler's own `what` is checked by the direct call below.
+         let dir = rig.world.db.dir().display().to_string();
+         let escaped = serde_json::to_string(&dir).expect("a JSON string");
+         let escaped = escaped.trim_matches('"');
+@@ -1833,9 +1837,9 @@
+     // 15. Each value reaches the barrier byte for byte
+     // -------------------------------------------------------------------
+ 
+-    /// A field value with spaces at both ends, a CRLF, a line feed, a tab and a
+-    /// control character: a markdown table, as the closing template draws two of
+-    /// its fields.
++    /// A field value with spaces in front, a line feed and a tab behind, a CRLF,
++    /// a tab inside and a control character: a markdown table, as the closing
++    /// template draws two of its fields.
+     fn raw_value(name: &str) -> String {
+         format!("  | {name} | why |\r\n|---|---|\n| a\tb | \u{7} |\n\t")
+     }
+@@ -1869,7 +1873,8 @@
+     #[test]
+     fn ori_t_0187_the_ticket_is_checked_after_the_role_the_kind_and_the_content() {
+         // Each call names a ticket nobody filed and fails an earlier step. The
+-        // earlier step's answer wins, and nothing is drawn or written.
++        // earlier step's answer wins: no identifier is drawn, and nothing is
++        // written past S2's two rows.
+         let mut missing_first = content_of(&BLOCKED_FIELDS);
+         missing_first.remove("budget_consumed");
+         for (label, kind, content, expected) in [
+@@ -1907,16 +1912,21 @@
+     #[test]
+     fn ori_t_0187_a_log_that_cannot_be_verified_is_unavailable() {
+         let mut rig = rig(Role::Coder, "report-log-unverified", true);
+-        // Break the hash chain: lift the append-only guard on this file and
+-        // rewrite the first event, so `EventLog::verify` fails.
++        // Break the log where only `EventLog::verify` looks: lift the
++        // append-only guard on this file and give the last event another
++        // product. No later event links to it, so `read_range` alone would not
++        // see the change, and a handler that skipped the verify would go on to
++        // the barrier.
++        let sql = format!(
++            "DROP TRIGGER events_no_update; \
++             UPDATE events SET product_id = '{}' WHERE seq = (SELECT MAX(seq) FROM events);",
++            id("PRODUCTB")
++        );
+         rig.world
+             .db
+             .connection()
+-            .execute_batch(
+-                "DROP TRIGGER events_no_update; \
+-                 UPDATE events SET payload = '{\"tampered\":true}' WHERE seq = 1;",
+-            )
+-            .expect("the first event is rewritten");
++            .execute_batch(&sql)
++            .expect("the last event is rewritten");
+         let ticket = ticket_t();
+         let result = direct(
+             &mut rig,

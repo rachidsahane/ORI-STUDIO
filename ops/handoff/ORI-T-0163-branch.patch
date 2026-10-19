@@ -1,0 +1,1467 @@
+From f454a3ed2bcc3795efee3c28380e52aa1aa34e9e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 16:38:46 +0000
+Subject: [PATCH 1/3] fix(watch): look at the root itself so a lost root is
+ recorded on every platform
+
+MissedReason::RootGone was recorded only when the backend reported the
+root's own removal. inotify does; ReadDirectoryChangesW never reports
+the watched directory, so on Windows a watcher whose root was removed
+answered as a quiet tree and Health::Watching vouched for a tree nobody
+watched. A root replaced by another directory at the same path, by a
+rename away and a new directory, was recorded on no platform and a
+reconciliation cleared the state back to Watching.
+
+TreeWatcher now records which directory its root is (device and inode
+on unix, none elsewhere) and looks at the root's path without following
+a link: on every next_batch, including a call where nothing arrived,
+and in mark_reconciled. A root that cannot be looked at, is not a
+directory, is a link, or is another directory records RootGone once and
+for good. mark_reconciled refuses a watcher whose root is gone, so it is
+replaced, not reconciled, like a stopped one. The accumulator is told
+when the root is already held gone so a removal the backend reports as
+well is not counted again, in that batch or a later one.
+
+Module doc, MissedReason::RootGone, mark_reconciled and next_batch say
+what changed. Five new tests; no existing test is touched.
+
+Ticket: ORI-T-0163
+Spec: ARCHITECTURE.md#5-data-flows
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CQ4vWTcpGWb4B2jvnPi4RM
+---
+ crates/ori-watch/src/watcher.rs | 433 +++++++++++++++++++++++++++++---
+ 1 file changed, 396 insertions(+), 37 deletions(-)
+
+diff --git a/crates/ori-watch/src/watcher.rs b/crates/ori-watch/src/watcher.rs
+index 849ad12..f08dd6e 100644
+--- a/crates/ori-watch/src/watcher.rs
++++ b/crates/ori-watch/src/watcher.rs
+@@ -300,7 +300,7 @@
+ //! # A dropped event is a recorded state, never silence (AICD §14)
+ //!
+ //! A watcher that has lost events and says nothing is the defect AICD §14
+-//! names "present but reporting nothing". Four things make the watcher lose
++//! names "present but reporting nothing". Five things make the watcher lose
+ //! events, and each one sets [`MissedChanges`], which is delivered in the next
+ //! [`Batch`] and held by [`TreeWatcher::health`] until the engine reconciles:
+ //!
+@@ -310,8 +310,14 @@
+ //! - this module's own bounded queue filled because the consumer did not drain
+ //!   it ([`MissedReason::QueueFull`]), counted at the producer so it cannot be
+ //!   lost;
+-//! - the root itself was removed ([`MissedReason::RootGone`]), or a directory
+-//!   scan ran out of budget ([`MissedReason::ScanBudget`]).
++//! - the root is no longer the directory that is watched
++//!   ([`MissedReason::RootGone`]): it was removed, it was replaced by another
++//!   directory at the same path (told apart on unix, where the root's identity
++//!   is known), or it can no longer be looked at. The backend reports it where
++//!   the backend reports it, and the watcher's own look at the root reports it
++//!   on every platform, in [`TreeWatcher::next_batch`] on every call and in
++//!   [`TreeWatcher::mark_reconciled`] (below);
++//! - a directory scan ran out of budget ([`MissedReason::ScanBudget`]).
+ //!
+ //! Reconciling means finding out what changed since: a full comparison of the
+ //! tree against git is the engine's to run (it spawns processes; this crate
+@@ -321,6 +327,29 @@
+ //! only if nothing was recorded after the token was taken: a loss during the
+ //! comparison is not covered by it.
+ //!
++//! **The root is looked at, not only listened to.** A backend reports what
++//! happens to the entries *in* the watched directory, and not every backend
++//! reports the directory itself going away: a watcher whose root was removed
++//! would answer as a quiet tree, and [`Health::Watching`] would vouch for a
++//! tree nobody watches. So the watcher records, when it starts, which directory
++//! its root is (on unix the device and inode of the canonical root; elsewhere
++//! stable `std` gives no file identity, so there is none), and looks at the
++//! root's path again, without following a link, on every
++//! [`TreeWatcher::next_batch`], including a call in which nothing arrived, and
++//! in [`TreeWatcher::mark_reconciled`]. The root passes only if it can be
++//! looked at, is a directory and not a link, and, where the identity is known,
++//! is the same directory. Anything else records [`MissedReason::RootGone`]
++//! once, and the watcher holds that for good: it never reads
++//! [`Health::Watching`] again and [`TreeWatcher::mark_reconciled`] refuses it.
++//! **A watcher whose root is gone is replaced, not reconciled**, like a stopped
++//! one; [`Health`] has no variant of its own for it. The look is one
++//! `symlink_metadata` call per [`TreeWatcher::next_batch`], a cost accepted
++//! for AICD §14, and it is not repeated once the root is recorded gone. A
++//! removal the backend also reports is not counted a second time, in that batch
++//! or a later one. One limit of an identity: a root that is removed and a new
++//! directory made at its path at once may be given the removed directory's
++//! inode number, and then only a removal the backend reports is recorded.
++//!
+ //! **On Linux, a backend that stops is reported.** There the handler is the
+ //! only owner of the queue's sender, so when the backend's thread ends (notify
+ //! panics in it, for one) the queue disconnects, [`TreeWatcher::next_batch`]
+@@ -339,9 +368,12 @@
+ //! # What `Health::Watching` does not vouch for
+ //!
+ //! The states above are the losses this module can see. These notify does not
+-//! report, so none of them sets [`MissedChanges`]; treat [`Health::Watching`]
+-//! as "the backend reported nothing wrong", and keep the periodic comparison
+-//! of the tree with git as the check that does not depend on the backend:
++//! report, so none of them sets [`MissedChanges`] (but for the root's own
++//! removal, which the watcher's own look at the root catches, as the Windows
++//! bullet says); treat [`Health::Watching`] as "the backend reported nothing
++//! wrong, and the root is still the directory that is watched", and keep the
++//! periodic comparison of the tree with git as the check that does not depend
++//! on the backend:
+ //!
+ //! - On Linux, the walk that registers the initial watches skips a directory
+ //!   it cannot read, with no error (`filter_dir` in notify's `inotify.rs`).
+@@ -354,16 +386,21 @@
+ //! - On Windows, notify does not flag a `ReadDirectoryChangesW` buffer
+ //!   overflow, and a directory whose watch hits an unidentified error is
+ //!   unwatched and only logged (`windows.rs`, `handle_event`).
+-//! - On Windows, the removal of the watched root itself is not reported, so
+-//!   [`MissedReason::RootGone`] is not reachable there from the backend.
+-//!   `ReadDirectoryChangesW` reports the entries *in* a watched directory and
+-//!   never the directory itself; when the watched directory is deleted the
+-//!   completion routine gets `ERROR_ACCESS_DENIED`, and notify answers it by
+-//!   unwatching and returning, with no event (`windows.rs`, `handle_event`,
+-//!   the `ERROR_ACCESS_DENIED` arm). The root's removal is one more thing only
+-//!   the periodic comparison of the tree with git sees there, and
+-//!   `tests::ori_t_0054_the_removal_of_the_root_is_recorded_as_a_missed_state`
+-//!   is not run on Windows for that reason.
++//! - On Windows, the backend does not report the removal of the watched root
++//!   itself, so [`MissedReason::RootGone`] is not reachable there from the
++//!   backend. `ReadDirectoryChangesW` reports the entries *in* a watched
++//!   directory and never the directory itself; when the watched directory is
++//!   deleted the completion routine gets `ERROR_ACCESS_DENIED`, and notify
++//!   answers it by unwatching and returning, with no event (`windows.rs`,
++//!   `handle_event`, the `ERROR_ACCESS_DENIED` arm). The watcher's own look at
++//!   the root (above) records the removal at the next
++//!   [`TreeWatcher::next_batch`] or at the next
++//!   [`TreeWatcher::mark_reconciled`], whichever comes first, and
++//!   `tests::ori_t_0163_the_removal_of_the_root_is_recorded_on_every_platform`
++//!   runs there. A root replaced by another directory at the same path is not
++//!   told apart there, because stable `std` gives no file identity on Windows.
++//!   That is the limit that remains: only the periodic comparison of the tree
++//!   with git sees it.
+ //! - On macOS and Windows, a backend that stops is **not** reported. notify
+ //!   runs the handler inside an `extern "C"` callback on macOS
+ //!   (`fsevent.rs`, `callback`) and an `extern "system"` completion routine on
+@@ -539,7 +576,15 @@ pub enum MissedReason {
+         /// How many events were dropped.
+         dropped: u32,
+     },
+-    /// The watched root itself was removed.
++    /// The watched root is no longer the directory the backend watches: it was
++    /// removed, it was replaced by another directory at the same path (told
++    /// apart where the root's identity is known, which is on unix), or it can
++    /// no longer be looked at. The backend reports a removal where it reports
++    /// one (inotify does; `ReadDirectoryChangesW` does not), and the watcher's
++    /// own look at the root reports it on every platform: in
++    /// [`TreeWatcher::next_batch`] and in [`TreeWatcher::mark_reconciled`].
++    /// Recorded once, and for good: a watcher whose root is gone is replaced,
++    /// not reconciled (AICD §14).
+     RootGone,
+     /// A scan of a newly created directory stopped at its budget, or could
+     /// not read a directory.
+@@ -902,6 +947,14 @@ pub struct TreeWatcher {
+     health: Health,
+     /// Counts the times a missed state was recorded, for [`ReconcileToken`].
+     generation: u64,
++    /// Which directory the root was when the watch started: its device and
++    /// inode, read from the metadata that checked it is a directory. `None`
++    /// where `std` gives no file identity (everywhere but unix).
++    root_identity: Option<(u64, u64)>,
++    /// Set, for good, when the root was found to be no longer the directory
++    /// that is watched. [`MissedReason::RootGone`] is recorded once, when it is
++    /// set.
++    root_gone: bool,
+     /// A second sender, so a test can put a notice on the queue as the backend
+     /// would. It exists only in test builds: in a production build the
+     /// backend's handler holds the only sender, so on Linux the queue
+@@ -976,6 +1029,12 @@ impl TreeWatcher {
+         if !metadata.is_dir() {
+             return Err(WatchError::RootNotADirectory { path: root });
+         }
++        // Read before the backend registers its watch, from the metadata that
++        // just showed the root is a directory. A directory swapped in between
++        // is then the one the backend watches and not the one recorded here,
++        // which the look at the root reports as gone: the error is towards
++        // recording a loss (AICD §14).
++        let identity = root_identity(&metadata);
+         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity.max(1));
+         let shared = Arc::new(Shared::default());
+         #[cfg(test)]
+@@ -1015,6 +1074,8 @@ impl TreeWatcher {
+             shared,
+             health: Health::Watching,
+             generation: 0,
++            root_identity: identity,
++            root_gone: false,
+             #[cfg(test)]
+             injector,
+             backend: Some(backend),
+@@ -1053,26 +1114,86 @@ impl TreeWatcher {
+     /// leaves the state as it is when a missed state was recorded after
+     /// `token` was taken (the comparison began before the loss, so it may not
+     /// include it), when events were dropped that no batch has reported yet,
+-    /// or when the backend has stopped. A notice still waiting in the queue
+-    /// is recorded when the next batch takes it, after which the state is not
+-    /// clear: a token only ever errs towards keeping the state.
++    /// when the backend has stopped, or when the root is gone. A notice still
++    /// waiting in the queue is recorded when the next batch takes it, after
++    /// which the state is not clear: a token only ever errs towards keeping the
++    /// state.
++    ///
++    /// **A watcher whose root is gone is never reconciled back.** Once
++    /// [`MissedReason::RootGone`] is recorded this returns `false` for good,
++    /// whatever the token: such a watcher is replaced, not reconciled, like a
++    /// stopped one. A watcher that is not yet known to have lost its root
++    /// looks at the root first (one `symlink_metadata` call, the look
++    /// [`TreeWatcher::next_batch`] makes). If the root is no longer the
++    /// directory that is watched, this records [`MissedReason::RootGone`], as
++    /// the next batch would, and returns `false`, so a periodic reconciliation,
++    /// the only check a backend that never reports the root's removal has, finds
++    /// a removed or replaced root even if no batch was drained since.
+     pub fn mark_reconciled(&mut self, token: ReconcileToken) -> bool {
+-        if matches!(self.health, Health::Stopped)
+-            || token.generation != self.generation
+-            || self.shared.dropped.load(Ordering::SeqCst) > 0
+-        {
++        if matches!(self.health, Health::Stopped) || self.root_gone {
++            return false;
++        }
++        if !self.root_is_the_one_watched() {
++            self.root_gone = true;
++            self.record_missed(&MissedChanges::new(MissedReason::RootGone, now()));
++            return false;
++        }
++        if token.generation != self.generation || self.shared.dropped.load(Ordering::SeqCst) > 0 {
+             return false;
+         }
+         self.health = Health::Watching;
+         true
+     }
+ 
++    /// Holds a missed state the way [`TreeWatcher::health`] reports it: counts
++    /// it for [`ReconcileToken`], then sets it or absorbs it into the one held.
++    fn record_missed(&mut self, missed: &MissedChanges) {
++        self.generation += 1;
++        match &mut self.health {
++            Health::Watching => self.health = Health::MayHaveMissedChanges(missed.clone()),
++            Health::MayHaveMissedChanges(held) => held.absorb(missed),
++            Health::Stopped => {}
++        }
++    }
++
++    /// Whether the root's path still leads to the directory that is watched:
++    /// AICD §14.
++    ///
++    /// True only when the path can be looked at without following a link, is a
++    /// directory and not a link, and, where the root's identity was recorded
++    /// (on unix), is the same directory. Any error is `false`: a root that
++    /// cannot be looked at is not vouched for. One `symlink_metadata` call.
++    fn root_is_the_one_watched(&self) -> bool {
++        let Ok(metadata) = fs::symlink_metadata(&self.root) else {
++            return false;
++        };
++        let file_type = metadata.file_type();
++        if !file_type.is_dir() || file_type.is_symlink() {
++            return false;
++        }
++        match self.root_identity {
++            Some(watched) => root_identity(&metadata) == Some(watched),
++            None => true,
++        }
++    }
++
+     /// Waits up to `wait` for a change, then collects until the tree is quiet,
+     /// and returns the coalesced batch: AICD §23.
+     ///
+-    /// Returns `Ok(None)` when nothing at all arrived within `wait`. A batch
+-    /// whose events were all ignored is still returned, with empty
+-    /// [`Batch::changes`] and the counters set, so ignoring is visible.
++    /// Returns `Ok(None)` when nothing at all arrived within `wait` and the
++    /// root is still the directory that is watched. A batch whose events were
++    /// all ignored is still returned, with empty [`Batch::changes`] and the
++    /// counters set, so ignoring is visible.
++    ///
++    /// Every call, including one in which nothing arrived, ends by looking at
++    /// the root: one `symlink_metadata` call, a cost accepted for AICD §14 (a
++    /// backend need not report the root's removal, and a watcher that cannot
++    /// say so reads as a quiet tree). A root that was removed, replaced by
++    /// another directory (on unix) or can no longer be looked at is recorded as
++    /// [`MissedReason::RootGone`] in the batch this returns, once: the look is
++    /// not repeated after that, and a removal the backend reports as well is
++    /// not counted twice. See the module doc's "A dropped event is a recorded
++    /// state, never silence".
+     ///
+     /// # Errors
+     ///
+@@ -1087,8 +1208,9 @@ impl TreeWatcher {
+                 return Err(WatchError::Stopped);
+             }
+         };
+-        let mut accumulator =
+-            Accumulator::new(&self.root, &self.config.ignore).with_fidelity(PLATFORM_FIDELITY);
++        let mut accumulator = Accumulator::new(&self.root, &self.config.ignore)
++            .with_fidelity(PLATFORM_FIDELITY)
++            .with_root_gone_known(self.root_gone);
+         let received = first.is_some();
+         if let Some(raw) = first {
+             accumulator.push(raw);
+@@ -1114,14 +1236,16 @@ impl TreeWatcher {
+         if dropped > 0 {
+             accumulator.miss(MissedReason::QueueFull { dropped }, now());
+         }
++        // The look at the root: after the queue was read, on every call.
++        if accumulator.holds_root_gone() {
++            self.root_gone = true;
++        } else if !self.root_gone && !self.root_is_the_one_watched() {
++            accumulator.miss(MissedReason::RootGone, now());
++            self.root_gone = true;
++        }
+         let batch = accumulator.finish();
+         if let Some(missed) = &batch.missed {
+-            self.generation += 1;
+-            match &mut self.health {
+-                Health::Watching => self.health = Health::MayHaveMissedChanges(missed.clone()),
+-                Health::MayHaveMissedChanges(held) => held.absorb(missed),
+-                Health::Stopped => {}
+-            }
++            self.record_missed(missed);
+         }
+         if received || batch.missed.is_some() {
+             Ok(Some(batch))
+@@ -1151,6 +1275,22 @@ impl TreeWatcher {
+     }
+ }
+ 
++/// The device and inode of a directory, where the platform has them.
++///
++/// `std` gives a file's identity on unix only; on Windows the stable `std` has
++/// none, so the root there is told from its replacement by nothing but being
++/// a directory at the same path. `hooks.rs` does the same for a file.
++#[cfg(unix)]
++fn root_identity(metadata: &fs::Metadata) -> Option<(u64, u64)> {
++    use std::os::unix::fs::MetadataExt;
++    Some((metadata.dev(), metadata.ino()))
++}
++
++#[cfg(not(unix))]
++fn root_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
++    None
++}
++
+ /// The current time as a [`Timestamp`]; before the epoch reads as zero.
+ fn now() -> Timestamp {
+     let millis = SystemTime::now()
+@@ -1434,6 +1574,9 @@ struct Accumulator<'a> {
+     rejected: usize,
+     missed: Option<MissedChanges>,
+     fidelity: Fidelity,
++    /// Whether the watcher already holds the root as gone, so the backend's
++    /// report of the same removal is not counted again.
++    root_gone_known: bool,
+     /// Paths a creation was seen for in this window. Kept for
+     /// [`Fidelity::Coalesced`] only.
+     created: BTreeSet<PathBuf>,
+@@ -1471,6 +1614,7 @@ impl<'a> Accumulator<'a> {
+             rejected: 0,
+             missed: None,
+             fidelity: Fidelity::Exact,
++            root_gone_known: false,
+             created: BTreeSet::new(),
+             departed: BTreeSet::new(),
+             removed: BTreeSet::new(),
+@@ -1485,6 +1629,20 @@ impl<'a> Accumulator<'a> {
+         self
+     }
+ 
++    /// The same accumulator for a watcher that already holds its root as
++    /// gone: the backend's report of the root's removal adds nothing.
++    fn with_root_gone_known(mut self, known: bool) -> Self {
++        self.root_gone_known = known;
++        self
++    }
++
++    /// Whether this window already records the root as gone.
++    fn holds_root_gone(&self) -> bool {
++        self.missed
++            .as_ref()
++            .is_some_and(|missed| missed.reasons.contains(&MissedReason::RootGone))
++    }
++
+     fn miss(&mut self, reason: MissedReason, at: Timestamp) {
+         match &mut self.missed {
+             Some(missed) => missed.record(reason),
+@@ -1527,8 +1685,9 @@ impl<'a> Accumulator<'a> {
+         };
+         if relative.as_os_str().is_empty() {
+             // The root itself: its removal is the watch dying; anything else
+-            // is a directory event.
+-            if kind == ChangeKind::Removed {
++            // is a directory event. A removal the watcher already holds is not
++            // counted again.
++            if kind == ChangeKind::Removed && !self.root_gone_known {
+                 self.miss(MissedReason::RootGone, at);
+             }
+             return;
+@@ -3353,6 +3512,206 @@ mod tests {
+         assert!(matches!(watcher.health(), Health::MayHaveMissedChanges(_)));
+     }
+ 
++    /// Drains `watcher` until a batch carries `RootGone`, under `PATIENCE`, and
++    /// returns that batch's missed state. Whichever of the backend and the
++    /// watcher's own look at the root reports it first ends the wait.
++    fn drain_until_the_root_is_recorded(watcher: &mut TreeWatcher) -> MissedChanges {
++        let deadline = Instant::now() + PATIENCE;
++        loop {
++            assert!(
++                Instant::now() < deadline,
++                "the removal of the watched root was never recorded"
++            );
++            let batch = watcher
++                .next_batch(Duration::from_millis(300))
++                .expect("the watcher is still running");
++            if let Some(missed) = batch.and_then(|batch| batch.missed)
++                && missed.reasons.contains(&MissedReason::RootGone)
++            {
++                return missed;
++            }
++        }
++    }
++
++    /// The missed state the watcher holds, or a failure naming what it holds.
++    fn held_missed_state(watcher: &TreeWatcher) -> MissedChanges {
++        match watcher.health() {
++            Health::MayHaveMissedChanges(missed) => missed,
++            other => panic!("the watcher holds no missed state: {other:?}"),
++        }
++    }
++
++    // No `cfg`: on Windows the backend never reports the root's removal, so
++    // there only the watcher's own look at the root can make this pass.
++    #[test]
++    fn ori_t_0163_the_removal_of_the_root_is_recorded_on_every_platform() {
++        let scratch = Scratch::new("rootgone-every");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        assert_eq!(watcher.health(), Health::Watching);
++        fs::remove_dir_all(&root).unwrap();
++        let missed = drain_until_the_root_is_recorded(&mut watcher);
++        assert!(missed.reasons.contains(&MissedReason::RootGone));
++        assert!(
++            held_missed_state(&watcher)
++                .reasons
++                .contains(&MissedReason::RootGone),
++            "the health the watcher holds does not name the lost root"
++        );
++    }
++
++    #[test]
++    fn ori_t_0163_a_watcher_whose_root_is_gone_is_never_reconciled_back() {
++        let scratch = Scratch::new("rootgone-never");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        fs::remove_dir_all(&root).unwrap();
++        drain_until_the_root_is_recorded(&mut watcher);
++        let held = held_missed_state(&watcher);
++
++        let token = watcher.begin_reconcile();
++        assert!(
++            !watcher.mark_reconciled(token),
++            "a watcher whose root is gone was reconciled back to healthy"
++        );
++        assert_eq!(
++            watcher.health(),
++            Health::MayHaveMissedChanges(held.clone()),
++            "the refusal changed the state it was asked to clear"
++        );
++
++        // Drain again: the removal is recorded once, however many calls look.
++        for _ in 0..3 {
++            if let Some(batch) = watcher.next_batch(Duration::from_millis(150)).unwrap() {
++                assert!(
++                    batch
++                        .missed
++                        .is_none_or(|missed| !missed.reasons.contains(&MissedReason::RootGone)),
++                    "a later batch recorded the lost root a second time"
++                );
++            }
++        }
++        assert_eq!(
++            held_missed_state(&watcher).occurrences,
++            held.occurrences,
++            "the lost root was counted again after it was recorded"
++        );
++
++        // And it still cannot be reconciled back, whatever the token.
++        let token = watcher.begin_reconcile();
++        assert!(!watcher.mark_reconciled(token));
++        assert_eq!(watcher.health(), Health::MayHaveMissedChanges(held));
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn ori_t_0163_a_root_replaced_by_another_directory_is_gone() {
++        let scratch = Scratch::new("rootswap");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        fs::rename(&root, scratch.path.join("moved")).unwrap();
++        fs::create_dir(&root).unwrap();
++
++        // No `next_batch`: only the look in `mark_reconciled` can find this,
++        // whatever the backend reports.
++        let token = watcher.begin_reconcile();
++        assert!(
++            !watcher.mark_reconciled(token),
++            "a root replaced by another directory was reconciled as healthy"
++        );
++        let held = held_missed_state(&watcher);
++        assert_eq!(held.reasons, vec![MissedReason::RootGone]);
++        assert_eq!(held.occurrences, 1);
++
++        let token = watcher.begin_reconcile();
++        assert!(!watcher.mark_reconciled(token));
++        assert_eq!(held_missed_state(&watcher), held);
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn ori_t_0163_the_root_probe_answers_only_for_the_directory_watched() {
++        // A fresh watcher on a fresh root for each way the root can change.
++        let watched = |label: &str| {
++            let scratch = Scratch::new(label);
++            let root = scratch.dir("root");
++            let watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++            (scratch, root, watcher)
++        };
++
++        let (_scratch, _root, watcher) = watched("probe-intact");
++        assert!(
++            watcher.root_identity.is_some(),
++            "no identity was recorded for the root on unix"
++        );
++        assert!(watcher.root_is_the_one_watched(), "an intact root");
++
++        let (scratch, root, watcher) = watched("probe-replaced");
++        fs::rename(&root, scratch.path.join("moved")).unwrap();
++        fs::create_dir(&root).unwrap();
++        assert!(
++            !watcher.root_is_the_one_watched(),
++            "another directory at the root's path is not the root"
++        );
++
++        let (_scratch, root, watcher) = watched("probe-removed");
++        fs::remove_dir(&root).unwrap();
++        assert!(!watcher.root_is_the_one_watched(), "a removed root");
++
++        let (_scratch, root, watcher) = watched("probe-file");
++        fs::remove_dir(&root).unwrap();
++        fs::write(&root, b"x").unwrap();
++        assert!(
++            !watcher.root_is_the_one_watched(),
++            "a file at the root's path is not the root"
++        );
++
++        // The root's path becomes a link to the original directory, moved
++        // elsewhere. Followed, the link leads to the very directory that is
++        // watched, so only looking at the path without following tells it.
++        let (scratch, root, watcher) = watched("probe-link");
++        let moved = scratch.path.join("moved");
++        fs::rename(&root, &moved).unwrap();
++        std::os::unix::fs::symlink(&moved, &root).unwrap();
++        assert!(
++            fs::metadata(&root).unwrap().is_dir(),
++            "the link leads to a directory, which is what makes it a trap"
++        );
++        assert!(
++            !watcher.root_is_the_one_watched(),
++            "a link to the watched directory is not the root"
++        );
++    }
++
++    #[test]
++    fn ori_t_0163_an_intact_root_reconciles_as_before() {
++        let scratch = Scratch::new("rootintact");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        watcher.inject(Raw::Missed(
++            MissedReason::Overflow,
++            Timestamp::from_millis(9),
++        ));
++        let batch = watcher
++            .next_batch(PATIENCE)
++            .unwrap()
++            .expect("a recorded overflow is delivered");
++        let missed = batch.missed.expect("the batch carries the missed state");
++        assert_eq!(
++            missed.reasons,
++            vec![MissedReason::Overflow],
++            "looking at an intact root recorded a loss that did not happen"
++        );
++        assert!(matches!(watcher.health(), Health::MayHaveMissedChanges(_)));
++
++        let token = watcher.begin_reconcile();
++        assert!(
++            watcher.mark_reconciled(token),
++            "the look at the root blocked an honest reconciliation"
++        );
++        assert_eq!(watcher.health(), Health::Watching);
++    }
++
+     #[test]
+     fn ori_t_0054_a_root_that_is_missing_or_not_a_directory_is_refused() {
+         let scratch = Scratch::new("badroot");
+-- 
+2.43.0
+
+
+From fd5ee062f8d839ef37801b650ff72e7e7e3949d3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 16:40:06 +0000
+Subject: [PATCH 2/3] fix(watch): prove the look at the root alone and counted
+ once, backend silenced
+
+On Linux the backend reports a root's removal too, so tests that run
+the real backend cannot tell the watcher's own look at the root from the
+backend's report, nor catch a removal counted twice. Two tests end the
+backend and keep the queue alive, so the test is the only source of what
+the watcher is told, as on Windows: one shows a removal the backend
+never reports is recorded by the look at the root alone, on a call in
+which nothing arrived; the other shows a removal reported by both, in one
+batch or a later one, is counted once.
+
+Ticket: ORI-T-0163
+Spec: ARCHITECTURE.md#5-data-flows
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CQ4vWTcpGWb4B2jvnPi4RM
+---
+ crates/ori-watch/src/watcher.rs | 78 +++++++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/crates/ori-watch/src/watcher.rs b/crates/ori-watch/src/watcher.rs
+index f08dd6e..6138825 100644
+--- a/crates/ori-watch/src/watcher.rs
++++ b/crates/ori-watch/src/watcher.rs
+@@ -3712,6 +3712,84 @@ mod tests {
+         assert_eq!(watcher.health(), Health::Watching);
+     }
+ 
++    /// Ends the backend and keeps the queue alive, so the test is the only
++    /// source of what the watcher is told: the way `ReadDirectoryChangesW`
++    /// leaves a watcher whose root was removed, with nothing said.
++    fn silence_the_backend(watcher: &mut TreeWatcher) {
++        let backend = watcher.backend.take().expect("the backend is running");
++        drop(backend);
++    }
++
++    #[test]
++    fn ori_t_0163_a_removal_the_backend_never_reports_is_recorded_by_the_look_at_the_root() {
++        let scratch = Scratch::new("rootgone-silent");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        silence_the_backend(&mut watcher);
++        // Whatever the backend queued before it was ended is delivered first;
++        // an intact root adds no loss to it.
++        while let Some(batch) = watcher.next_batch(Duration::from_millis(50)).unwrap() {
++            assert!(
++                batch.missed.is_none(),
++                "an intact root was recorded as lost: {:?}",
++                batch.missed
++            );
++        }
++        assert_eq!(watcher.health(), Health::Watching);
++
++        fs::remove_dir(&root).unwrap();
++        // Nothing arrived within the wait, and the answer is a batch anyway.
++        let batch = watcher
++            .next_batch(Duration::from_millis(50))
++            .unwrap()
++            .expect("a root that is gone is delivered, not read as a quiet tree");
++        let missed = batch.missed.expect("the batch carries the missed state");
++        assert_eq!(missed.reasons, vec![MissedReason::RootGone]);
++        assert_eq!(missed.occurrences, 1);
++        assert_eq!(watcher.health(), Health::MayHaveMissedChanges(missed));
++    }
++
++    #[test]
++    fn ori_t_0163_a_removal_reported_by_both_the_backend_and_the_look_is_counted_once() {
++        let scratch = Scratch::new("rootgone-twice");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        silence_the_backend(&mut watcher);
++        fs::remove_dir(&root).unwrap();
++        let removal = |at: i64| Raw::Change {
++            path: root.clone(),
++            kind: ChangeKind::Removed,
++            at: Timestamp::from_millis(at),
++        };
++
++        // The backend's report and the look at the root meet in one batch.
++        watcher.inject(removal(5));
++        let batch = watcher
++            .next_batch(PATIENCE)
++            .unwrap()
++            .expect("the removal is delivered");
++        let missed = batch.missed.expect("the batch carries the missed state");
++        assert_eq!(missed.reasons, vec![MissedReason::RootGone]);
++        assert_eq!(missed.first_observed_at, Timestamp::from_millis(5));
++        assert_eq!(
++            missed.occurrences, 1,
++            "the look at the root counted a removal the backend had reported"
++        );
++
++        // The backend reports it again, in a later batch: held already.
++        watcher.inject(removal(6));
++        let batch = watcher
++            .next_batch(PATIENCE)
++            .unwrap()
++            .expect("the notice arrives as a batch");
++        assert!(
++            batch.missed.is_none(),
++            "a removal already held was recorded again: {:?}",
++            batch.missed
++        );
++        assert_eq!(held_missed_state(&watcher).occurrences, 1);
++    }
++
+     #[test]
+     fn ori_t_0054_a_root_that_is_missing_or_not_a_directory_is_refused() {
+         let scratch = Scratch::new("badroot");
+-- 
+2.43.0
+
+
+From d31679bf37e1c4922f1978efbdcb7e88d1b47ad4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 23:46:02 +0000
+Subject: [PATCH 3/3] fix(watch): deliver a loss mark_reconciled finds, always
+ list a lost root
+
+A review of the look at the root found that a loss mark_reconciled finds
+was held in the health and never reached a batch: the backend's own
+report was dropped as already known, so a consumer of Batch::missed was
+never told. TreeWatcher now remembers the discovery and the next batch
+lists RootGone, even when nothing else arrived, without recording it in
+the health again. The module doc and the docs of MissedChanges, Health
+and mark_reconciled now say every loss is delivered in the next batch,
+and every loss but RootGone is held until a reconciliation clears it.
+
+RootGone is exempt from the cap on a missed state's reasons, so sixteen
+other causes cannot push it out, and a RootGone already listed is not
+counted again, so two reports in one window count once.
+
+On Windows a root deleted while the backend's handle on it is open stays
+delete-pending: still listed in its parent, so std's metadata passes it,
+but not openable. The look now also opens the root there, with backup
+semantics and no access, and an open that fails reads as gone.
+
+Also: the docs say the look does not follow a link at the root itself,
+that a replaced root is not told apart on Windows, that on ext4 an
+immediate rm -rf and mkdir often reuses the inode, that FSEvents watches
+a path and not a directory, and what next_batch's None does and does not
+mean. Six new tests; no existing test is touched.
+
+Ticket: ORI-T-0163
+Spec: ARCHITECTURE.md#5-data-flows
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CQ4vWTcpGWb4B2jvnPi4RM
+---
+ crates/ori-watch/src/watcher.rs | 531 ++++++++++++++++++++++++++++----
+ 1 file changed, 470 insertions(+), 61 deletions(-)
+
+diff --git a/crates/ori-watch/src/watcher.rs b/crates/ori-watch/src/watcher.rs
+index 6138825..9931fe0 100644
+--- a/crates/ori-watch/src/watcher.rs
++++ b/crates/ori-watch/src/watcher.rs
+@@ -301,8 +301,16 @@
+ //!
+ //! A watcher that has lost events and says nothing is the defect AICD §14
+ //! names "present but reporting nothing". Five things make the watcher lose
+-//! events, and each one sets [`MissedChanges`], which is delivered in the next
+-//! [`Batch`] and held by [`TreeWatcher::health`] until the engine reconciles:
++//! events, and each one sets [`MissedChanges`]. Three rules hold for all of
++//! them:
++//!
++//! 1. every loss is delivered in the next [`Batch`];
++//! 2. every loss is held by [`TreeWatcher::health`] until a reconciliation
++//!    clears it, except [`MissedReason::RootGone`], which is held for good;
++//! 3. a loss that [`TreeWatcher::mark_reconciled`] finds is held at once and
++//!    delivered in the next batch (only the root's can be found there).
++//!
++//! The five are:
+ //!
+ //! - the backend reports an overflow or a rescan notice
+ //!   ([`MissedReason::Overflow`]), such as an inotify queue overflow;
+@@ -334,21 +342,42 @@
+ //! tree nobody watches. So the watcher records, when it starts, which directory
+ //! its root is (on unix the device and inode of the canonical root; elsewhere
+ //! stable `std` gives no file identity, so there is none), and looks at the
+-//! root's path again, without following a link, on every
++//! root's path again, without following a link at the root itself, on every
+ //! [`TreeWatcher::next_batch`], including a call in which nothing arrived, and
+-//! in [`TreeWatcher::mark_reconciled`]. The root passes only if it can be
+-//! looked at, is a directory and not a link, and, where the identity is known,
+-//! is the same directory. Anything else records [`MissedReason::RootGone`]
+-//! once, and the watcher holds that for good: it never reads
+-//! [`Health::Watching`] again and [`TreeWatcher::mark_reconciled`] refuses it.
+-//! **A watcher whose root is gone is replaced, not reconciled**, like a stopped
+-//! one; [`Health`] has no variant of its own for it. The look is one
+-//! `symlink_metadata` call per [`TreeWatcher::next_batch`], a cost accepted
+-//! for AICD §14, and it is not repeated once the root is recorded gone. A
+-//! removal the backend also reports is not counted a second time, in that batch
+-//! or a later one. One limit of an identity: a root that is removed and a new
+-//! directory made at its path at once may be given the removed directory's
+-//! inode number, and then only a removal the backend reports is recorded.
++//! in [`TreeWatcher::mark_reconciled`]. A link above the root is followed: the
++//! path is looked at as a whole, unix's identity still catches a root replaced
++//! through one, and Windows does not. The root passes only if it can be looked
++//! at, is a directory and not a link, and, where the identity is known, is the
++//! same directory. On Windows it must also open (see the Windows bullet in the
++//! next section). Anything else records [`MissedReason::RootGone`] once, and
++//! the watcher holds that for good: it never reads [`Health::Watching`] again
++//! and [`TreeWatcher::mark_reconciled`] refuses it. **A watcher whose root is
++//! gone is replaced, not reconciled**, like a stopped one; [`Health`] has no
++//! variant of its own for it. The look is one `symlink_metadata` call per
++//! [`TreeWatcher::next_batch`] (and, on Windows, one open), a cost accepted for
++//! AICD §14, and it is not repeated once the root is recorded gone.
++//!
++//! The loss is counted once, however it is found. The accumulator does not
++//! count a `RootGone` twice in one window, so two reports of the root in a
++//! batch are one; a removal the backend reports after the watcher holds the
++//! root gone is dropped, in that batch or a later one; and the look is not
++//! repeated. A loss that [`TreeWatcher::mark_reconciled`] finds is held in
++//! [`TreeWatcher::health`] at once and is delivered in the next batch, which
++//! lists `RootGone` even if nothing else arrived. The health is not told of it
++//! a second time.
++//!
++//! Two limits of an identity:
++//!
++//! - On ext4 a directory removed and made again at once usually gets the same
++//!   inode number. So for `rm -rf root && mkdir root` on Linux the identity
++//!   matches, and only the backend's report records the loss. A reconciliation
++//!   taken before that notice is drained passes the look and returns `true`,
++//!   and the next batch then records `RootGone`. That is the token rule's
++//!   documented case of a notice still waiting in the queue.
++//! - macOS's FSEvents watches a path, not a directory. After a rename away and
++//!   a new directory at the path, the backend still reports the new one, but
++//!   the look records `RootGone` because the identity differs. That errs
++//!   towards recording a loss, which AICD §14 allows.
+ //!
+ //! **On Linux, a backend that stops is reported.** There the handler is the
+ //! only owner of the queue's sender, so when the backend's thread ends (notify
+@@ -371,9 +400,9 @@
+ //! report, so none of them sets [`MissedChanges`] (but for the root's own
+ //! removal, which the watcher's own look at the root catches, as the Windows
+ //! bullet says); treat [`Health::Watching`] as "the backend reported nothing
+-//! wrong, and the root is still the directory that is watched", and keep the
+-//! periodic comparison of the tree with git as the check that does not depend
+-//! on the backend:
++//! wrong, and the root was the directory that is watched at the last
++//! `next_batch` or `mark_reconciled`", and keep the periodic comparison of the
++//! tree with git as the check that does not depend on the backend:
+ //!
+ //! - On Linux, the walk that registers the initial watches skips a directory
+ //!   it cannot read, with no error (`filter_dir` in notify's `inotify.rs`).
+@@ -397,10 +426,16 @@
+ //!   [`TreeWatcher::next_batch`] or at the next
+ //!   [`TreeWatcher::mark_reconciled`], whichever comes first, and
+ //!   `tests::ori_t_0163_the_removal_of_the_root_is_recorded_on_every_platform`
+-//!   runs there. A root replaced by another directory at the same path is not
+-//!   told apart there, because stable `std` gives no file identity on Windows.
+-//!   That is the limit that remains: only the periodic comparison of the tree
+-//!   with git sees it.
++//!   runs there. The look sees a removal on Windows in two ways: the name has
++//!   gone from the parent, or the root is delete-pending, which the open sees.
++//!   A directory deleted while notify's handle on it is open stays
++//!   delete-pending, still listed in its parent but no longer openable, and
++//!   `std`'s `symlink_metadata` falls back to the parent's listing when the
++//!   open is refused, so it still answers for it. The look therefore also
++//!   opens the root, and an open that fails reads as gone. A root replaced by
++//!   another directory at the same path is not told apart there, because
++//!   stable `std` gives no file identity on Windows. That is the limit that
++//!   remains: only the periodic comparison of the tree with git sees it.
+ //! - On macOS and Windows, a backend that stops is **not** reported. notify
+ //!   runs the handler inside an `extern "C"` callback on macOS
+ //!   (`fsevent.rs`, `callback`) and an `extern "system"` completion routine on
+@@ -498,8 +533,14 @@ pub const NEW_DIRECTORY_SCAN_ENTRY_CAP: usize = 10_000;
+ /// The deepest a scan of a newly created directory descends.
+ pub const NEW_DIRECTORY_SCAN_DEPTH_CAP: usize = 64;
+ 
+-/// The most distinct reasons one [`MissedChanges`] lists; further ones only
+-/// raise [`MissedChanges::occurrences`].
++/// The most distinct reasons one [`MissedChanges`] lists, plus
++/// [`MissedReason::RootGone`], which is exempt and always listed; further
++/// reasons only raise [`MissedChanges::occurrences`].
++///
++/// The cap is there so a flood of distinct causes cannot grow the state
++/// without bound. `RootGone` is the one cause a consumer must never lose to
++/// it: it says the watcher is to be replaced, not reconciled (AICD §14), and
++/// there is only one of it.
+ const MISSED_REASON_CAP: usize = 16;
+ 
+ /// A pause before scanning a newly created directory, so the backend has
+@@ -583,8 +624,14 @@ pub enum MissedReason {
+     /// one (inotify does; `ReadDirectoryChangesW` does not), and the watcher's
+     /// own look at the root reports it on every platform: in
+     /// [`TreeWatcher::next_batch`] and in [`TreeWatcher::mark_reconciled`].
++    ///
+     /// Recorded once, and for good: a watcher whose root is gone is replaced,
+-    /// not reconciled (AICD §14).
++    /// not reconciled (AICD §14). It is recorded once in three ways. The
++    /// accumulator does not count it twice in one window, so two reports of the
++    /// root in a batch are one. Its `root_gone_known` drops the backend's later
++    /// report once the watcher holds the root gone. And the look at the root is
++    /// not repeated. It is exempt from the cap on a missed state's reasons, so
++    /// it is always listed.
+     RootGone,
+     /// A scan of a newly created directory stopped at its budget, or could
+     /// not read a directory.
+@@ -596,13 +643,18 @@ pub enum MissedReason {
+ 
+ /// The recorded state "this watcher may have missed changes": AICD §14.
+ ///
+-/// Delivered once in the [`Batch`] that follows it and held by
+-/// [`TreeWatcher::health`] until [`TreeWatcher::mark_reconciled`].
++/// Every loss is delivered once in the [`Batch`] that follows it, and held by
++/// [`TreeWatcher::health`] until a reconciliation clears it
++/// ([`TreeWatcher::mark_reconciled`]), except [`MissedReason::RootGone`], which
++/// is held for good. A loss that `mark_reconciled` finds (only the root's) is
++/// held at once and delivered in the next batch.
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub struct MissedChanges {
+-    /// The distinct causes, in the order first seen, at most sixteen.
++    /// The distinct causes, in the order first seen: at most sixteen, plus
++    /// [`MissedReason::RootGone`], which is always listed.
+     pub reasons: Vec<MissedReason>,
+-    /// How many times a cause was recorded, counting repeats.
++    /// How many times a cause was recorded, counting repeats. A
++    /// [`MissedReason::RootGone`] already listed is not counted again.
+     pub occurrences: u32,
+     /// When the first one was recorded.
+     pub first_observed_at: Timestamp,
+@@ -617,18 +669,43 @@ impl MissedChanges {
+         }
+     }
+ 
++    /// Whether one more reason fits under [`MISSED_REASON_CAP`]. `RootGone`
++    /// is exempt, so it neither needs room nor takes any.
++    fn has_room(&self) -> bool {
++        let held = self
++            .reasons
++            .iter()
++            .filter(|held| **held != MissedReason::RootGone)
++            .count();
++        held < MISSED_REASON_CAP
++    }
++
++    /// Lists `reason` if it is new and fits, and counts it.
++    ///
++    /// A `RootGone` that is already listed changes nothing: it is one loss
++    /// however many times it is reported, and neither the list nor
++    /// `occurrences` rises. A new `RootGone` is listed whatever else is held.
+     fn record(&mut self, reason: MissedReason) {
++        let listed = self.reasons.contains(&reason);
++        if listed && reason == MissedReason::RootGone {
++            return;
++        }
+         self.occurrences = self.occurrences.saturating_add(1);
+-        if self.reasons.len() < MISSED_REASON_CAP && !self.reasons.contains(&reason) {
++        if !listed && (reason == MissedReason::RootGone || self.has_room()) {
+             self.reasons.push(reason);
+         }
+     }
+ 
++    /// Folds `other` into this one: adds its occurrences and lists the reasons
++    /// it holds that are new, `RootGone` past the cap like any other time.
+     fn absorb(&mut self, other: &Self) {
+         self.occurrences = self.occurrences.saturating_add(other.occurrences);
+         self.first_observed_at = self.first_observed_at.min(other.first_observed_at);
+         for reason in &other.reasons {
+-            if self.reasons.len() < MISSED_REASON_CAP && !self.reasons.contains(reason) {
++            if self.reasons.contains(reason) {
++                continue;
++            }
++            if *reason == MissedReason::RootGone || self.has_room() {
+                 self.reasons.push(reason.clone());
+             }
+         }
+@@ -640,7 +717,11 @@ impl MissedChanges {
+ pub enum Health {
+     /// Nothing is known to have been missed.
+     Watching,
+-    /// Something may have been missed and nobody has reconciled yet.
++    /// Something may have been missed and nobody has reconciled yet. Held until
++    /// a reconciliation clears it ([`TreeWatcher::mark_reconciled`]), except
++    /// [`MissedReason::RootGone`], which is held for good. A loss that
++    /// `mark_reconciled` finds is held here at once and delivered in the next
++    /// [`Batch`].
+     MayHaveMissedChanges(MissedChanges),
+     /// The backend's thread has ended and no further event will ever arrive.
+     /// Set when [`TreeWatcher::next_batch`] sees it, and for good: a stopped
+@@ -955,6 +1036,12 @@ pub struct TreeWatcher {
+     /// that is watched. [`MissedReason::RootGone`] is recorded once, when it is
+     /// set.
+     root_gone: bool,
++    /// When [`TreeWatcher::mark_reconciled`] found the root gone, until the
++    /// next batch delivers it. The health already holds the loss, recorded when
++    /// it was found; this is only what makes the next batch list it too, so a
++    /// consumer of [`Batch::missed`] is told. Taken by `next_batch`, which does
++    /// not record it in the health again.
++    root_gone_undelivered: Option<Timestamp>,
+     /// A second sender, so a test can put a notice on the queue as the backend
+     /// would. It exists only in test builds: in a production build the
+     /// backend's handler holds the only sender, so on Linux the queue
+@@ -1032,8 +1119,8 @@ impl TreeWatcher {
+         // Read before the backend registers its watch, from the metadata that
+         // just showed the root is a directory. A directory swapped in between
+         // is then the one the backend watches and not the one recorded here,
+-        // which the look at the root reports as gone: the error is towards
+-        // recording a loss (AICD §14).
++        // which the look at the root reports as gone where the root's identity
++        // is known (unix): the error is towards recording a loss (AICD §14).
+         let identity = root_identity(&metadata);
+         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity.max(1));
+         let shared = Arc::new(Shared::default());
+@@ -1076,6 +1163,7 @@ impl TreeWatcher {
+             generation: 0,
+             root_identity: identity,
+             root_gone: false,
++            root_gone_undelivered: None,
+             #[cfg(test)]
+             injector,
+             backend: Some(backend),
+@@ -1114,28 +1202,39 @@ impl TreeWatcher {
+     /// leaves the state as it is when a missed state was recorded after
+     /// `token` was taken (the comparison began before the loss, so it may not
+     /// include it), when events were dropped that no batch has reported yet,
+-    /// when the backend has stopped, or when the root is gone. A notice still
+-    /// waiting in the queue is recorded when the next batch takes it, after
+-    /// which the state is not clear: a token only ever errs towards keeping the
+-    /// state.
++    /// or when the backend has stopped. It also returns `false` when the root
++    /// is gone: the state is left as it is if the root was already recorded
++    /// gone, and on the first discovery this records `RootGone` (below). A
++    /// notice still waiting in the queue is recorded when the next batch takes
++    /// it, after which the state is not clear: a token only ever errs towards
++    /// keeping the state.
+     ///
+     /// **A watcher whose root is gone is never reconciled back.** Once
+     /// [`MissedReason::RootGone`] is recorded this returns `false` for good,
+     /// whatever the token: such a watcher is replaced, not reconciled, like a
+     /// stopped one. A watcher that is not yet known to have lost its root
+-    /// looks at the root first (one `symlink_metadata` call, the look
+-    /// [`TreeWatcher::next_batch`] makes). If the root is no longer the
+-    /// directory that is watched, this records [`MissedReason::RootGone`], as
+-    /// the next batch would, and returns `false`, so a periodic reconciliation,
+-    /// the only check a backend that never reports the root's removal has, finds
+-    /// a removed or replaced root even if no batch was drained since.
++    /// looks at the root first (the look [`TreeWatcher::next_batch`] makes). If
++    /// the root is no longer the directory that is watched, this records
++    /// [`MissedReason::RootGone`] on that first discovery and returns `false`,
++    /// so a periodic reconciliation, the only check a backend that never
++    /// reports the root's removal has, finds a removed root, or on unix a
++    /// replaced one, even if no batch was drained since. A replaced root is not
++    /// told apart on Windows, which has no file identity (see the module doc).
++    ///
++    /// A loss found here is held in [`TreeWatcher::health`] at once, and is
++    /// delivered in the next [`TreeWatcher::next_batch`], which lists
++    /// `RootGone` even if nothing else arrived. The health is not told of it a
++    /// second time, and the backend's own report of the same removal, which
++    /// that batch may also hold, is dropped: it is counted once.
+     pub fn mark_reconciled(&mut self, token: ReconcileToken) -> bool {
+         if matches!(self.health, Health::Stopped) || self.root_gone {
+             return false;
+         }
+         if !self.root_is_the_one_watched() {
++            let at = now();
+             self.root_gone = true;
+-            self.record_missed(&MissedChanges::new(MissedReason::RootGone, now()));
++            self.record_missed(&MissedChanges::new(MissedReason::RootGone, at));
++            self.root_gone_undelivered = Some(at);
+             return false;
+         }
+         if token.generation != self.generation || self.shared.dropped.load(Ordering::SeqCst) > 0 {
+@@ -1159,10 +1258,20 @@ impl TreeWatcher {
+     /// Whether the root's path still leads to the directory that is watched:
+     /// AICD §14.
+     ///
+-    /// True only when the path can be looked at without following a link, is a
+-    /// directory and not a link, and, where the root's identity was recorded
+-    /// (on unix), is the same directory. Any error is `false`: a root that
+-    /// cannot be looked at is not vouched for. One `symlink_metadata` call.
++    /// True only when the path can be looked at without following a link at
++    /// the root itself (a link above it is followed), is a directory and not a
++    /// link, and, where the root's identity was recorded (on unix), is the same
++    /// directory. On Windows the root must also open (see below). Any error is
++    /// `false`: a root that cannot be looked at is not vouched for. One
++    /// `symlink_metadata` call, and on Windows one open.
++    ///
++    /// On Windows `std`'s `symlink_metadata` falls back to the parent
++    /// directory's listing (`FindFirstFileExW`) when opening the path fails
++    /// with `ERROR_ACCESS_DENIED`. A root deleted while the backend's handle on
++    /// it is open stays delete-pending: still listed, no longer openable. So
++    /// the metadata alone passes it, and the open is what sees it. A root that
++    /// is genuinely refused to this process reads as gone too, which is the
++    /// rule above: a root that cannot be looked at is not vouched for.
+     fn root_is_the_one_watched(&self) -> bool {
+         let Ok(metadata) = fs::symlink_metadata(&self.root) else {
+             return false;
+@@ -1171,29 +1280,65 @@ impl TreeWatcher {
+         if !file_type.is_dir() || file_type.is_symlink() {
+             return false;
+         }
++        #[cfg(windows)]
++        if !self.root_opens() {
++            return false;
++        }
+         match self.root_identity {
+             Some(watched) => root_identity(&metadata) == Some(watched),
+             None => true,
+         }
+     }
+ 
++    /// Whether the root can be opened, which on Windows a delete-pending
++    /// directory cannot (`CreateFileW` fails on it with `ERROR_ACCESS_DENIED`,
++    /// and unlike `std`'s metadata calls it has no fallback to the parent's
++    /// listing). The handle is dropped at once.
++    #[cfg(windows)]
++    fn root_opens(&self) -> bool {
++        use std::os::windows::fs::OpenOptionsExt;
++        // `libc` and `windows-sys` are not dependencies of this crate and adding
++        // one is an escalation, so these are the Windows SDK's own values, as
++        // `code_map.rs` defines its own for `open_regular_file_no_follow`.
++        /// A directory can be opened only with backup semantics. With no access
++        /// requested, the open reads nothing and writes nothing.
++        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
++        /// Keeps a link from being followed: the open is of the path itself.
++        /// The open has no listing fallback, so it fails on a delete-pending
++        /// root, which is why it is made.
++        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
++        fs::OpenOptions::new()
++            .access_mode(0)
++            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
++            .open(&self.root)
++            .is_ok()
++    }
++
+     /// Waits up to `wait` for a change, then collects until the tree is quiet,
+     /// and returns the coalesced batch: AICD §23.
+     ///
+-    /// Returns `Ok(None)` when nothing at all arrived within `wait` and the
+-    /// root is still the directory that is watched. A batch whose events were
+-    /// all ignored is still returned, with empty [`Batch::changes`] and the
+-    /// counters set, so ignoring is visible.
++    /// Returns `Ok(None)` when nothing arrived within `wait` and no missed
++    /// state is to be delivered. It does not mean the root is still the
++    /// directory that is watched: the look at the root is one input, and a
++    /// loss that [`TreeWatcher::mark_reconciled`] found and no batch has
++    /// delivered yet is another, and either makes the call return a batch. A
++    /// batch whose events were all ignored is still returned, with empty
++    /// [`Batch::changes`] and the counters set, so ignoring is visible.
+     ///
+-    /// Every call, including one in which nothing arrived, ends by looking at
+-    /// the root: one `symlink_metadata` call, a cost accepted for AICD §14 (a
+-    /// backend need not report the root's removal, and a watcher that cannot
+-    /// say so reads as a quiet tree). A root that was removed, replaced by
++    /// Every call, including one in which nothing arrived, looks at the root
++    /// until the root is known gone: one `symlink_metadata` call, a cost
++    /// accepted for AICD §14 (a backend need not report the root's removal, and
++    /// a watcher that cannot say so reads as a quiet tree). The look runs after
++    /// the queue was read and before the new-directory scan, not at the end of
++    /// the call, and it is skipped in a window where the backend already
++    /// reported the root's removal. A root that was removed, replaced by
+     /// another directory (on unix) or can no longer be looked at is recorded as
+     /// [`MissedReason::RootGone`] in the batch this returns, once: the look is
+     /// not repeated after that, and a removal the backend reports as well is
+-    /// not counted twice. See the module doc's "A dropped event is a recorded
+-    /// state, never silence".
++    /// not counted twice. A root that [`TreeWatcher::mark_reconciled`] found
++    /// gone is already held by [`TreeWatcher::health`], and the first batch
++    /// after that lists it too, without recording it again. See the module
++    /// doc's "A dropped event is a recorded state, never silence".
+     ///
+     /// # Errors
+     ///
+@@ -1243,10 +1388,20 @@ impl TreeWatcher {
+             accumulator.miss(MissedReason::RootGone, now());
+             self.root_gone = true;
+         }
+-        let batch = accumulator.finish();
++        let mut batch = accumulator.finish();
+         if let Some(missed) = &batch.missed {
+             self.record_missed(missed);
+         }
++        // A loss `mark_reconciled` found is in the health already; the batch
++        // lists it too, and does not record it again. The backend's report of
++        // the same removal in this window was dropped by `root_gone_known`, so
++        // the batch lists it once.
++        if let Some(at) = self.root_gone_undelivered.take() {
++            match &mut batch.missed {
++                Some(missed) => missed.record(MissedReason::RootGone),
++                None => batch.missed = Some(MissedChanges::new(MissedReason::RootGone, at)),
++            }
++        }
+         if received || batch.missed.is_some() {
+             Ok(Some(batch))
+         } else {
+@@ -3790,6 +3945,260 @@ mod tests {
+         assert_eq!(held_missed_state(&watcher).occurrences, 1);
+     }
+ 
++    /// Drains `watcher` until two calls in a row return `Ok(None)`, under
++    /// `PATIENCE`, and returns the batches it got on the way.
++    fn drain_until_quiet(watcher: &mut TreeWatcher) -> Vec<Batch> {
++        let deadline = Instant::now() + PATIENCE;
++        let mut batches = Vec::new();
++        let mut quiet_calls = 0;
++        while quiet_calls < 2 {
++            assert!(
++                Instant::now() < deadline,
++                "the watcher never fell quiet; drained {batches:?}"
++            );
++            match watcher
++                .next_batch(Duration::from_millis(150))
++                .expect("the watcher is still running")
++            {
++                Some(batch) => {
++                    quiet_calls = 0;
++                    batches.push(batch);
++                }
++                None => quiet_calls += 1,
++            }
++        }
++        batches
++    }
++
++    #[test]
++    fn ori_t_0163_a_root_gone_recorded_twice_is_listed_and_counted_once() {
++        let mut missed = MissedChanges::new(MissedReason::RootGone, Timestamp::from_millis(1));
++        missed.record(MissedReason::RootGone);
++        assert_eq!(missed.reasons, vec![MissedReason::RootGone]);
++        assert_eq!(
++            missed.occurrences, 1,
++            "a root recorded gone twice was counted twice"
++        );
++
++        // Another cause still counts each time it is recorded; the root, once.
++        missed.record(MissedReason::Overflow);
++        missed.record(MissedReason::RootGone);
++        missed.record(MissedReason::Overflow);
++        assert_eq!(
++            missed.reasons,
++            vec![MissedReason::RootGone, MissedReason::Overflow]
++        );
++        assert_eq!(missed.occurrences, 3);
++    }
++
++    #[test]
++    fn ori_t_0163_the_reason_cap_exempts_root_gone_and_nothing_else() {
++        let distinct = |count: usize| -> Vec<MissedReason> {
++            (1..=count)
++                .map(|n| MissedReason::QueueFull {
++                    dropped: u32::try_from(n).unwrap(),
++                })
++                .collect()
++        };
++        let at = Timestamp::from_millis(1);
++
++        // `record`: sixteen others held, then the root: listed, and counted.
++        let mut missed = MissedChanges::new(distinct(1).remove(0), at);
++        for reason in distinct(MISSED_REASON_CAP).into_iter().skip(1) {
++            missed.record(reason);
++        }
++        assert_eq!(missed.reasons.len(), MISSED_REASON_CAP);
++        missed.record(MissedReason::Overflow);
++        assert_eq!(
++            missed.reasons.len(),
++            MISSED_REASON_CAP,
++            "a seventeenth ordinary reason was listed past the cap"
++        );
++        assert_eq!(
++            missed.occurrences, 17,
++            "the refused reason is still counted"
++        );
++        missed.record(MissedReason::RootGone);
++        assert_eq!(missed.reasons.len(), MISSED_REASON_CAP + 1);
++        assert_eq!(missed.reasons.last(), Some(&MissedReason::RootGone));
++        assert_eq!(missed.occurrences, 18);
++
++        // `absorb`: the same, for a state folded into one that is full.
++        let mut held = MissedChanges::new(distinct(1).remove(0), at);
++        for reason in distinct(MISSED_REASON_CAP).into_iter().skip(1) {
++            held.record(reason);
++        }
++        held.absorb(&MissedChanges::new(MissedReason::Overflow, at));
++        assert_eq!(held.reasons.len(), MISSED_REASON_CAP);
++        held.absorb(&MissedChanges::new(MissedReason::RootGone, at));
++        assert_eq!(held.reasons.len(), MISSED_REASON_CAP + 1);
++        assert_eq!(held.reasons.last(), Some(&MissedReason::RootGone));
++        assert_eq!(held.occurrences, 18);
++
++        // The root counts for nothing against the cap: listed first, sixteen
++        // others still fit, and the seventeenth ordinary one does not.
++        let mut rooted = MissedChanges::new(MissedReason::RootGone, at);
++        for reason in distinct(MISSED_REASON_CAP) {
++            rooted.record(reason);
++        }
++        assert_eq!(rooted.reasons.len(), MISSED_REASON_CAP + 1);
++        rooted.record(MissedReason::Overflow);
++        assert_eq!(rooted.reasons.len(), MISSED_REASON_CAP + 1);
++    }
++
++    #[test]
++    fn ori_t_0163_root_gone_is_listed_past_the_reason_cap() {
++        let scratch = Scratch::new("rootgone-cap");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++
++        // Sixteen distinct causes, drained and not reconciled: the held state
++        // is as full as it can be.
++        for dropped in 1..=u32::try_from(MISSED_REASON_CAP).unwrap() {
++            watcher.inject(Raw::Missed(
++                MissedReason::QueueFull { dropped },
++                Timestamp::from_millis(i64::from(dropped)),
++            ));
++        }
++        drain_until_quiet(&mut watcher);
++        let full = held_missed_state(&watcher);
++        assert_eq!(full.reasons.len(), MISSED_REASON_CAP, "{full:?}");
++        assert!(!full.reasons.contains(&MissedReason::RootGone));
++
++        // Then the root is lost.
++        fs::remove_dir_all(&root).unwrap();
++        drain_until_the_root_is_recorded(&mut watcher);
++        // Anything the backend reports late is dropped, not counted.
++        drain_until_quiet(&mut watcher);
++
++        let held = held_missed_state(&watcher);
++        assert!(
++            held.reasons.contains(&MissedReason::RootGone),
++            "the lost root was dropped for want of room: {held:?}"
++        );
++        assert_eq!(
++            held.occurrences,
++            full.occurrences + 1,
++            "the lost root was not counted exactly once"
++        );
++        assert_eq!(
++            held.reasons[..MISSED_REASON_CAP],
++            full.reasons[..],
++            "the causes held before it were disturbed"
++        );
++        let token = watcher.begin_reconcile();
++        assert!(
++            !watcher.mark_reconciled(token),
++            "a watcher whose root is gone was reconciled back"
++        );
++    }
++
++    // No `cfg`: on Windows the backend never reports the root's removal, and
++    // on Linux the look finds it first, so nothing here depends on the backend.
++    #[test]
++    fn ori_t_0163_a_loss_found_by_mark_reconciled_is_held_and_delivered_once() {
++        let scratch = Scratch::new("rootgone-found");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        assert_eq!(watcher.health(), Health::Watching);
++        let generation = watcher.generation;
++        fs::remove_dir_all(&root).unwrap();
++
++        // No `next_batch`: the reconciliation finds the loss, and holds it.
++        let token = watcher.begin_reconcile();
++        assert!(
++            !watcher.mark_reconciled(token),
++            "a removed root was reconciled as healthy"
++        );
++        let held = held_missed_state(&watcher);
++        assert_eq!(held.reasons, vec![MissedReason::RootGone]);
++        assert_eq!(held.occurrences, 1);
++        assert_eq!(watcher.generation, generation + 1);
++
++        // Asked again, it changes nothing: neither the health nor the count.
++        let token = watcher.begin_reconcile();
++        assert!(!watcher.mark_reconciled(token));
++        assert_eq!(watcher.health(), Health::MayHaveMissedChanges(held.clone()));
++        assert_eq!(watcher.generation, generation + 1);
++
++        // The loss is delivered, in one batch, once. Whatever the backend
++        // reports of the same removal is dropped.
++        let batches = drain_until_quiet(&mut watcher);
++        let carrying: Vec<&MissedChanges> = batches
++            .iter()
++            .filter_map(|batch| batch.missed.as_ref())
++            .filter(|missed| missed.reasons.contains(&MissedReason::RootGone))
++            .collect();
++        assert_eq!(
++            carrying.len(),
++            1,
++            "the loss a reconciliation found must reach exactly one batch; got {batches:?}"
++        );
++        let delivered = carrying[0];
++        assert_eq!(delivered.reasons, vec![MissedReason::RootGone]);
++        assert_eq!(delivered.occurrences, 1);
++
++        // Delivering it did not record it again.
++        assert_eq!(watcher.health(), Health::MayHaveMissedChanges(held));
++        assert_eq!(watcher.generation, generation + 1);
++    }
++
++    // No `cfg`. The backend is live and holds the root open. Where the volume
++    // deletes with POSIX semantics (Linux, macOS, most Windows runners) the
++    // name goes at once and the metadata alone sees it. Where a directory
++    // removed while a handle is open stays delete-pending, still listed but
++    // not openable, only the look's open does: `std`'s metadata falls back to
++    // the parent's listing there. This could not be run on Windows from the
++    // container that wrote it; CI's Windows leg runs it.
++    #[test]
++    fn ori_t_0163_a_root_removed_while_its_watch_is_open_is_recorded() {
++        let scratch = Scratch::new("rootgone-open");
++        let root = scratch.dir("root");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        fs::remove_dir(&root).unwrap();
++
++        let token = watcher.begin_reconcile();
++        assert!(
++            !watcher.mark_reconciled(token),
++            "a root removed under an open watch was reconciled as healthy"
++        );
++        assert!(
++            held_missed_state(&watcher)
++                .reasons
++                .contains(&MissedReason::RootGone),
++            "the health does not name the lost root"
++        );
++    }
++
++    // No `cfg`. On unix the directory that comes back is the one that was
++    // watched, so its identity matches again; Windows has none. Either way the
++    // look passes, and the watcher still refuses: a root that was gone is
++    // recorded for good, and the state it left is not the comparison's to
++    // clear. If the rename fails on Windows because the backend's handle
++    // blocks it, that is a finding, not a reason to gate this off.
++    #[test]
++    fn ori_t_0163_a_root_that_comes_back_is_still_never_reconciled() {
++        let scratch = Scratch::new("rootgone-back");
++        let root = scratch.dir("root");
++        let moved = scratch.path.join("moved");
++        let mut watcher = TreeWatcher::watch_with(&root, quick()).unwrap();
++        fs::rename(&root, &moved).unwrap();
++        drain_until_the_root_is_recorded(&mut watcher);
++        let held = held_missed_state(&watcher);
++
++        fs::rename(&moved, &root).unwrap();
++        assert!(
++            watcher.root_is_the_one_watched(),
++            "the root is back, and the look must pass for the test to mean anything"
++        );
++        let token = watcher.begin_reconcile();
++        assert!(
++            !watcher.mark_reconciled(token),
++            "a root that was gone and came back was reconciled as healthy"
++        );
++        assert_eq!(watcher.health(), Health::MayHaveMissedChanges(held));
++    }
++
+     #[test]
+     fn ori_t_0054_a_root_that_is_missing_or_not_a_directory_is_refused() {
+         let scratch = Scratch::new("badroot");
+-- 
+2.43.0
+
