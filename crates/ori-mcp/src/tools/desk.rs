@@ -1,12 +1,12 @@
 //! The desk tools `aicd_ticket_upgrade` and `aicd_spec_propose`: AICD §11,
-//! AICD §9, AICD §17, `spec/API_SPEC.md` section 3.
+//! AICD §9, AICD §17, AICD §27, `spec/API_SPEC.md` section 3.
 //!
 //! Two handlers, [`crate::tools::desk::TicketUpgradeHandler`] and
-//! [`crate::tools::desk::SpecProposeHandler`], that the engine registers with
+//! [`crate::tools::desk::SpecProposeHandler`], that the engine is to register with
 //! [`crate::tools::Handlers::register`]. Each holds one desk, a port slice S1
 //! declared and the engine is to implement (ORI-T-0070), and passes a call to it:
-//! **no policy of their own, no event of their own, no text of their own** beyond
-//! fixed labels. The desk decides, because it routes the change through the
+//! **no policy of their own but the reference rule below, no event of their own,
+//! no text of their own** beyond fixed labels. The desk decides, because it routes the change through the
 //! component that owns the rule ([`crate::ports::TicketDesk`],
 //! [`crate::ports::SpecDesk`]); the handler builds the call from the engine's
 //! binding and the validated arguments, and answers with what the desk said, a
@@ -17,8 +17,9 @@
 //! | `aicd_ticket_upgrade` | `ticket_id`, `category` | lead | "Upgrade only" |
 //! | `aicd_spec_propose` | `document_id`, `content` | documentation | "Opens a specification PR" |
 //!
-//! Slice S1's role matrix (`crate::scopes::ToolScopes::permits`), which S2's
-//! check 5 applies, admits only the lead to the first and only documentation to
+//! Slice S1's tool table (`crate::scopes::ToolScopes::permits`, `spec/API_SPEC.md`
+//! section 3's roles column), which S2's check 5 applies, admits only the lead to
+//! the first and only documentation to
 //! the second, and S2 checks the arguments against the catalogue's schema before
 //! a handler is reached, so a handler sees a
 //! canonical `ticket_id`, a `category` that is one of the four and a canonical
@@ -67,7 +68,7 @@
 //!    session, and the upgrade is a lead's. A call that carries none is
 //!    `Port(Invalid)` for `ticket_id`. The handler does not check that the
 //!    ticket exists in the caller's product: `crate::ports::TicketDesk::upgrade`
-//!    does, as `crate::server`'s check 7 table assigns.
+//!    must, as `crate::server`'s check 7 table assigns.
 //! 2. The category is the `category` argument, parsed by
 //!    `ori_core::types::Category`'s `FromStr`. Anything else is `Port(Invalid)`
 //!    for `category`.
@@ -137,7 +138,8 @@
 //! most three times the window's limit plus one row per connection: S2 bounds its
 //! own rows in one window to twice the limit plus one row per connection
 //! (`crate::server`'s module documentation), and a desk's one row adds the limit
-//! again. The requirement is recorded for ORI-T-0070, which implements the desks;
+//! again. The requirement is recorded for ORI-T-0070, which is to implement the
+//! desks (`ops/lock-table.md`);
 //! nothing here can enforce it, because a desk writes through the `ProductDb` it
 //! is given. The rate window is per session and covers every tool.
 //!
@@ -162,8 +164,8 @@
 //!   the desk finds the session, the ticket, the branch, the title and the body
 //!   is ORI-T-0070's to decide. Prerequisite PW of `ops/batch-10-plan.md` says
 //!   only that the engine implements every port and registers session bindings,
-//!   and a documentation binding with no ticket (the weekly drift audit) has no
-//!   ticket to name a branch after. Whose credential opens the pull request is
+//!   and a documentation binding with no ticket, which an unattended session may
+//!   be (`spec/DATA_MODEL.md` section 2), has no ticket to name a branch after. Whose credential opens the pull request is
 //!   the engine's decision too.
 //! - **The proposal holds the product's single writer across a network call.**
 //!   [`crate::ports::SpecDesk::propose`] takes `&mut ProductDb`, so a slow host
@@ -173,9 +175,9 @@
 //!   `mcp.tool_called` when the store refuses S2's failure row too. S2's rule
 //!   still holds: the call was recorded before the effect. The agent is answered
 //!   `unavailable`, which S2 defines as "retry later", so a retry can open a
-//!   second pull request. ORI-T-0070 chooses between answering `Ok` with the
-//!   reference withheld and a desk that opens at most one pull request for one
-//!   proposal.
+//!   second pull request. ORI-T-0070 decides how a retry is kept from opening a
+//!   second one, for example by a desk that opens at most one pull request for
+//!   one proposal.
 //! - **A desk refusal with no `ori-core` refusal kind** (an AICD §17 matrix
 //!   refusal from the lifecycle, a specification refusal with no `RefusalKind`)
 //!   can reach the server today only as `Invalid` or `Unavailable`, so its section
