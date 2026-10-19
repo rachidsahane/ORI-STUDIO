@@ -7,8 +7,8 @@
 //! [`GitHook::PostMerge`], [`GitHook::PostRewrite`] and [`GitHook::PrePush`],
 //! each of which appends one line to a *spool* directory the engine owns;
 //! [`HookSpool`] is how the engine reads those lines back. The ref poller in
-//! `crate::watcher` is the detector that does not depend on a hook (a commit
-//! made with `--no-verify` still moves a ref).
+//! `crate::watcher` is the detector that does not depend on a hook (a push
+//! made with `--no-verify`, which skips `pre-push`, still moves a ref).
 //!
 //! ```mermaid
 //! sequenceDiagram
@@ -194,10 +194,10 @@
 //! finds it was run under another name, or from `ori-original/`, was reached
 //! through a link or run by another script: git did not run it for its own
 //! event. It prints one line on standard error, which gives the name it was
-//! run as and then the directory it was run in, each through `ori_clean` (so
-//! that a long path cannot hide the name), reads its standard input unless that
-//! is a terminal, records nothing, runs nothing and exits 0. It
-//! reads its input first so that a writer that feeds this event is never cut
+//! run as and then the directory of the path it was run by, each through
+//! `ori_clean` (so that a long path cannot hide the name), reads its standard
+//! input unless that is a terminal, records nothing, runs nothing and exits 0.
+//! It reads its input first so that a writer that feeds this event is never cut
 //! off by a closed pipe, and it exits 0 because git takes a non-zero status
 //! from `post-checkout` as the checkout's own status, and from a vetoing event
 //! as a veto: a script reached by mistake must not block git, which is the
@@ -218,7 +218,8 @@
 //! What the check does not stop, each of which needs code that already runs
 //! as the user, a change to the hooks directory itself (which
 //! [`GitHooks::status`] and the next [`GitHooks::install`] judge), or, for the
-//! last item, an arrangement made in another repository:
+//! last item, an arrangement outside this repository, in another one or in the
+//! user's global configuration:
 //!
 //! - a script that runs the engine's hook under its own name passes the check
 //!   and records. That covers running it by its path
@@ -237,14 +238,23 @@
 //!   another script runs, by a path whose last name is a hook's
 //!   (`tools/post-merge`), into a link to the engine's script, and that run
 //!   passes the check and records;
-//! - another repository whose hooks are links into this hooks directory, or
-//!   whose `core.hooksPath` (its own or the user's global one) names it, runs
-//!   the engine's scripts under their own names. Each of its events passes the
-//!   check and is recorded in this spool, with that repository's object ids.
-//!   The hooks kept in `ori-original/` do not run for it, and neither does any
-//!   hook of its own that its link stood for, a veto included. Nothing in this
-//!   repository shows it, and `status` reports the hooks installed. ORI-T-0055
-//!   is to drop a record whose object ids this repository does not hold.
+//! - another repository can run the engine's scripts under their own names:
+//!   through hooks that are links into this hooks directory, a hooks directory
+//!   that is itself a link to this one, a `core.hooksPath` (its own or the
+//!   user's global one) that names this directory, or copies of the scripts
+//!   (made by `git init --template` or `init.templateDir` from a copy of this
+//!   directory, or by copying the whole repository). Each of its events passes
+//!   the check and is recorded in this spool, with that repository's object
+//!   ids. What runs after the record depends on the arrangement. Through single
+//!   linked hooks, `ori-original/<hook>` is looked for beside the link, in the
+//!   other repository, so the hooks kept here do not run for it, and neither
+//!   does the hook its link stood for, a veto included. Through a linked hooks
+//!   directory or a `core.hooksPath`, the hooks kept here do run for its
+//!   events, with its arguments and its working directory, so a veto kept here
+//!   vetoes its pushes. A copy runs the copied `ori-original/` hooks, if any
+//!   were copied. Nothing in this repository shows it, and `status` reports the
+//!   hooks installed. ORI-T-0055 is to drop a record whose object ids this
+//!   repository does not hold.
 //!
 //! One false negative is known. A hooks directory that is itself named
 //! `ori-original` makes every run skip. Only a `core.hooksPath` can make git
@@ -872,8 +882,10 @@ impl GitHooks {
     /// order. A link made after an install that reaches a hook this installer
     /// replaces, or whose way depends on the process that follows it, makes it
     /// refuse and not report the hooks healthy: the next `install` would
-    /// refuse that link, and the hook such a link stood for no longer runs. It
-    /// does not look at `core.hooksPath`.
+    /// refuse that link. One that reaches a managed hook leaves the hook it
+    /// stood for unrun, and one whose way depends on the process cannot be
+    /// judged as git's process will follow it. It does not look at
+    /// `core.hooksPath`.
     ///
     /// # Errors
     ///
@@ -887,8 +899,9 @@ impl GitHooks {
     /// directory, or one in `ori-original/` named for a hook this installer
     /// replaces, is one that `install` refuses, [`HooksError::HookNotAFile`]
     /// when a directory sits where a hook belongs, [`HooksError::Io`] when
-    /// `.git`, the hooks directory, `ori-original/`, a link or a hook file
-    /// cannot be looked at.
+    /// `.git`, the hooks directory, `ori-original/`, a link, a directory on a
+    /// link's way or a hook file cannot be looked at, or when a link's physical
+    /// reading meets more than `LINK_HOPS_CAP` links.
     pub fn status(&self) -> Result<Vec<HookStatus>, HooksError> {
         check_git_dir(&self.git_dir)?;
         let hooks_dir = self.hooks_dir();
@@ -1848,11 +1861,15 @@ fn way_enters_what_the_install_creates(
 /// carries a name too long for the file system, is not a missing entry: it
 /// refuses the installation as an IO error. That fails closed, and is
 /// accepted. It holds where the operating system's own resolution meets the
-/// regular file. Behind a missing directory, a way through a regular file is
-/// read as reaching nothing, and the link passes, unless that way first fails
-/// at what the install creates, rule (a), or the physical reading of rule (b)
-/// reaches a hook, or its text lands on a hook's place. The physical reading
-/// treats a file with steps after it as a directory that is not there. On
+/// regular file. Behind a missing directory, a way through a regular file
+/// reaches nothing on its physical reading (a file with steps after it is read
+/// as a directory that is not there, and a file at the last step ends the
+/// reading), and the link passes, unless that way first fails at what the
+/// install creates, rule (a), or rule (b) reaches a hook: the physical reading
+/// lands on one, its text lands on one, or, where the physical reading lands
+/// on no directory that is there, the walk that goes on from the text's
+/// landing reaches one (`hooks/L -> ../refs` with `L/../nowhere/../sub/relay`,
+/// where `.git/sub` is a file and `hooks/sub/relay` links to a hook). On
 /// Windows, opening a path through a regular file reports it as not found, so
 /// such a way is always read this way there.
 ///
@@ -5642,7 +5659,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ori_t_0185_status_checks_ori_original_before_the_link_scan() {
-        // `ori-original` is a link named for a hook. The scan of the links would
+        // `ori-original` is a link to a hook. The scan of the links would
         // meet it first and refuse it as a link to a managed hook; `status`
         // judges in the order `install` does, `ori-original` first, so what it
         // says is that `ori-original` is not a directory.
@@ -5804,8 +5821,9 @@ mod tests {
             fs::read_to_string(spool.join(SPOOL_LOG_NAME)).unwrap_or_default()
         }
 
-        /// Spawns `command`, again while the kernel refuses to run a script
-        /// that is "busy". Another test's `fork` can hold the write handle of a
+        /// Spawns `command`, again, up to 100 times 20 ms apart, while the
+        /// kernel refuses to run a script that is "busy", and panics after
+        /// that. Another test's `fork` can hold the write handle of a
         /// script this test wrote a moment ago until that child's own `exec`,
         /// and the kernel then refuses to run the script. The refusal passes in
         /// milliseconds.
@@ -6482,11 +6500,15 @@ esac
             let repo = real_repo(&scratch);
             let spool = scratch.path.join("spool");
             GitHooks::new(&repo, &spool).unwrap().install().unwrap();
-            let output = Command::new(hook_path(&repo, GitHook::PostMerge))
+            let mut command = Command::new(hook_path(&repo, GitHook::PostMerge));
+            command
                 .arg("0")
                 .current_dir(&repo)
                 .stdin(Stdio::null())
-                .output()
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let output = spawn_when_not_busy(&mut command)
+                .wait_with_output()
                 .unwrap();
             assert_eq!(
                 output.status.code(),
