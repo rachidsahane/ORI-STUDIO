@@ -4,151 +4,167 @@
 |---|---|
 | Worktree | assigned at dispatch |
 | Branch | `feat/ORI-T-0197-flows-registry` |
-| Tier | **1.** `spec/RISK_MAP.md:21` tiers `crates/ori-flows` at 1. Seat-holder enforcement lives in this slice; PD-1 will amend the row reason to "approvals checked in core and by `registry::record`" (`ops/batch-12-plan.md`, lead decision). No tier-2 path change in R1 unless the operator adds `registry.rs` via Q12 |
-| Declared scope (claim TBD at dispatch) | **New:** `crates/ori-flows/src/registry.rs`, `crates/ori-flows/src/ports.rs`, `crates/ori-flows/src/migrate/mod.rs` (module stub, doc header only), `crates/ori-flows/tests/ori_t_0060_registry.rs`. **Queue:** `crates/ori-flows/Cargo.toml` (add `ori-core`, `serde`, `serde_json` per plan), `crates/ori-flows/src/lib.rs`, `Cargo.lock`. **Nothing else.** No `init.rs`, `readiness.rs`, `documents.rs`, `launch.rs`, `migrate/env.rs`, `migrate/m2.rs`, `migrate/divergence.rs`. **No existing test changes** |
-| Spec anchor | `spec/DATA_MODEL.md` §2 Document, §3 transitions; `spec/API_SPEC.md` §2 event kinds (`product.created`, `document.*`), preamble on mutating methods; `spec/LLD.md` §2 ori-flows; AICD §9, §18, §23 G1 (methodology html:880); `spec/SECURITY_NOTES.md` Secrets (:58-61), paths (:53); `spec/ENV_SETUP.md` where init remote rules apply by analogy |
-| Spec trailer | `Spec: DATA_MODEL.md#3-document-lifecycle` |
+| Tier | **1.** `spec/RISK_MAP.md:21` tiers `crates/ori-flows` at 1. Seat-holder enforcement lives in this slice; batch 12 PD-1 amends the row *reason* to include `registry::record`'s holder check (`ops/batch-12-plan.md`). No tier-2 path in R1 unless Q12 adds `registry.rs` |
+| Declared scope (claim 122) | **New:** `crates/ori-flows/src/registry.rs`, `crates/ori-flows/src/ports.rs`, `crates/ori-flows/src/migrate/mod.rs` (module stub, doc header only), `crates/ori-flows/tests/ori_t_0197_registry.rs`. **Queue:** `crates/ori-flows/Cargo.toml` (add `ori-core`, `serde`, `serde_json` per plan), `crates/ori-flows/src/lib.rs`, `Cargo.lock`. **Nothing else.** **No existing test changes** |
+| Spec anchor | `spec/DATA_MODEL.md` §2 Document, §3 Document state machine (`### Document`); `spec/criteria/phase-1.md` ORI-P1-001 (`product.created` at init); `spec/API_SPEC.md` §2 `document.*` kinds and mutating-method preamble; PD-2 for `product.created` kind documentation; `spec/LLD.md` §2 ori-flows; AICD §9, §18, §23 (methodology html:837, G1 exit html:885); `spec/SECURITY_NOTES.md` Secrets (:58-61), paths (:53) |
+| Spec trailer | `Spec: DATA_MODEL.md#document` |
 | Ticket trailer | `Ticket: ORI-T-0197` |
 | Commit types | `feat`, `fix`, `docs`, `ci`, `chore` only |
 | Model | Sonnet 5.5 |
 
 ## Why
 
-Batch 12 decision D1–D2, D5, D12–D13 (`ops/batch-12-plan.md`). Every later slice (R2, RD, DOC, E0, L1, M2b) consumes **`DocumentRegistry`**, **`registry::record`**, **`registry::create_product`**, and shared **`ports.rs`**. Without R1, three folds and three payload writers would collide (ORI-T-0063/0065 risks).
+Batch 12 D1–D2, D5, D12–D13 (`ops/batch-12-plan.md`). Every later slice consumes **`DocumentRegistry`**, **`registry::record`**, **`registry::create_product`**, and shared **`ports.rs`**.
 
-**Preconditions:** batches 2 and 3 present at HEAD. ORI-T-0194 fold precedents apply (two-pass JSON read; lockout on first refused event — behaviour matches H1; operator affirms trade in plan Q11).
+**Preconditions:** batches 2 and 3 at HEAD. ORI-T-0194 fold precedents (two-pass JSON; lockout — Q11 / [[R45]] point 3).
 
 ## Read first
 
-- `ops/batch-12-plan.md` (D1, D2, D3 payloads for kinds R1 writes, D5, D12, D13, FOUNDATION table);
-- `ops/tickets/ORI-T-0194-mcp-registry.md` Decision 3 (two-pass payloads) and Decision 4 (verified read / lockout pattern — adapt for documents);
-- `crates/ori-core/src/document.rs` (`DocumentEvent`, `Document::apply`, `fires_from`, `as_str`, `disables_launch`);
-- `crates/ori-core/src/types.rs` (`Actor`, `Seat`, `Id`, `Timestamp`);
-- `crates/ori-core/src/error.rs` (`Error`, `RefusalKind`, `MethodologyRef`);
-- `crates/ori-store/src/event_log.rs` (`append`, `read_range`, `verify`);
-- `crates/ori-store/src/db.rs` (`ProductDb`);
-- `crates/ori-mcp/src/ports.rs` (`IdSource`, `Clock`, `PortError` — copy shapes, not the type);
-- `crates/ori-watch/src/hooks.rs` test `ori_t_0054_a_remote_url_and_the_credential_in_it_are_never_recorded` (remote credential precedent).
+- `ops/batch-12-plan.md` (D1, D2, D12, D13, FOUNDATION table);
+- `ops/tickets/ORI-T-0194-mcp-registry.md` Decision 3–4 (payload read, fold lockout);
+- `crates/ori-core/src/document.rs`, `types.rs`, `error.rs`;
+- `crates/ori-store/src/event_log.rs`, `db.rs`;
+- `crates/ori-mcp/src/ports.rs` (shapes only);
+- `crates/ori-watch/src/hooks.rs` `ori_t_0054_a_remote_url_and_the_credential_in_it_are_never_recorded`.
 
 ## Decision 1: module layout
 
-- `registry.rs` — registry, fold, payloads, `create_product`, `record`, constants `FOUNDATION`, kinds.
-- `ports.rs` — shared ports only (Decision 5).
-- `migrate/mod.rs` — `//! Migration procedures (M0..M5).` only; submodules added by later slices.
-- `lib.rs` — `pub mod ports;`, `pub mod registry;`, `pub mod migrate;` (alphabetical: migrate, ports, registry — match existing style when adding).
-- Integration test crate: `tests/ori_t_0060_registry.rs` calling public API.
+- `registry.rs` — registry, fold, payloads, `create_product`, `record`, `FOUNDATION`, kinds.
+- `ports.rs` — shared ports (Decision 6).
+- `migrate/mod.rs` — doc header only; submodules added later.
+- `lib.rs` — `pub mod migrate;`, `pub mod ports;`, `pub mod registry;`.
+- Integration tests: **`tests/ori_t_0197_registry.rs`** (ticket id; backlog ORI-T-0060 is satisfied by the same tests).
 
 ## Decision 2: FOUNDATION and owner derivation (D12)
 
-Public constant **`FOUNDATION`**: eleven rows `(DocumentKind or kind str, path)` exactly as `ops/batch-12-plan.md` FOUNDATION table. Parallel **`owner_for_kind(kind) -> Seat`** from plan D12 interim mapping (documented as lead reading in module doc).
+Public **`FOUNDATION`**: eleven rows exactly as `ops/batch-12-plan.md` FOUNDATION table. **`owner_for_kind(kind) -> Seat`** from plan D12 (lead reading in module doc).
 
-**No `owner` field in any event payload.** The fold derives the owning seat from kind when applying `document.*` via `Document::apply`.
+**No `owner` in event payloads.** Fold derives owner for `Document::apply`.
 
-## Decision 3: event kinds and payloads (R1 writer scope)
+## Decision 3: event kinds and payloads
 
 Kinds written only through **`registry::create_product`** and **`registry::record`**:
 
-| Kind | Payload fields (JSON keys) |
-|---|---|
-| `product.created` | `name`, `repo_path`, `repo_remote` (optional null), `aicd_version`, `origin` (`"new"` \| `"migrated"`), `seats`: `[{seat, holder}]`, `documents`: `[{id, kind, path, set}]` |
-| `document.registered` | `document_id`, `kind`, `path`, `set` |
-| `document.created` | `document_id`, `pr`, `content_len`, `citations_unresolved` |
-| `document.revised` | same shape as created |
-| `document.changes_requested` | `document_id`, `instructions` |
-| `document.approved` | `document_id`, `seat` |
+| Kind | Payload fields | Validation (create_product, record, and fold) |
+|---|---|---|
+| `product.created` | `name`, `repo_path`, `repo_remote?`, `aicd_version`, `origin`, `seats`, `documents` | Human actor on append. **Remote:** refuse password userinfo (`https://user:pass@`, `http(s)://…@` with secret); never echo secret (AICD §27). **repo_path:** canonical **absolute** path stored. **seats:** four PRD S-01 seats, each once, human holders. **documents:** for `origin: "new"`, must match FOUNDATION; for `origin: "migrated"`, may be empty. |
+| `document.registered` | `document_id`, `kind`, `path`, `set` | Registration rules (Decision 5). |
+| `document.created` / `document.revised` | `document_id`, `pr`, `content_len`, `citations_unresolved` | **All required.** **`pr`:** validated reference (numeric id or URL **without userinfo secrets**). |
+| `document.changes_requested` | `document_id`, `instructions` | **Human actor only.** **Non-blank**; **control characters refused**; **max 8192 bytes** UTF-8. |
+| `document.approved` | `document_id`, `seat` | Human actor; holder check (Decision 4). |
 
-**Not appended by R1:** `document.submitted`, `document.drifted` — if seen in log, fold refuses with defect until Q7/P-F define payloads.
+**Not appended by R1:** `document.submitted`, `document.drifted` — fold **refuses** until Q7 / P-F.
 
-**Write:** `serde_json::to_string` from private `Serialize` structs, `#[serde(deny_unknown_fields)]`. **Read:** two-pass per ORI-T-0194 (Value must be object; then `from_str` on same text).
-
-**`create_product` validation before append:**
-- Actor must be `Actor::Human`.
-- **`seats`:** exactly the four PRD S-01 seats, each once, each holder parses as human identity.
-- **`documents`:** for `origin: "new"`, must match FOUNDATION ids/paths/sets; for `origin: "migrated"`, may be empty (as-built registered later).
-- **`repo_remote`:** refuse password userinfo (`https://user:pass@`, etc.); never echo secret in error (AICD §27). Accept `git@host:path`, `ssh://user@host/path` without password.
-- **`repo_path`:** canonical absolute path in payload (caller supplies; registry canonicalizes and refuses non-absolute).
+**Write:** `serde_json::to_string`, `#[serde(deny_unknown_fields)]`. **Read:** two-pass (Value object check, then `from_str`) per ORI-T-0194.
 
 ## Decision 4: `registry::record`
 
-Single entry for all `document.*` appends in ori-flows. Checks before append (order documented in code):
+Checks before append (document in code):
 1. Registry not **blocked** (Decision 5).
-2. Actor rules: `document.approved` and `document.changes_requested` → human only.
-3. For `document.approved`: human **holds** the signing seat in folded `product.created.seats` (D13).
-4. Target document exists; `Document::apply` accepts transition with derived owner seat; `fires_from` true.
-5. Payload struct serializes.
+2. **`document.approved` / `document.changes_requested`:** actor **`Actor::Human`** only.
+3. **`document.changes_requested`:** instructions non-blank, no unsafe control chars, ≤8192 bytes.
+4. **`document.created` / `document.revised`:** all fields present; `pr` passes same remote/userinfo rules as `product.created` (no password in URL).
+5. **`document.approved`:** human **holds** signing seat in folded `product.created.seats` (D13, AICD §18).
+6. **Migrated product, phase 1 (D13):** if folded `product.created.origin == "migrated"` and **`seats` is empty**, **`document.approved` for `set == "migration"` documents is refused** (no as-built approval without seat holders; full M2 approval waits ORI-T-0198 / import).
+7. Target document exists; `Document::apply` + derived owner; `fires_from` true.
+8. Payload serializes.
 
-Returns appended seq. **`pub`** so integration tests in other crates may build state (L1, DOC tests use it — plan D13).
+Returns seq. **`pub`** for L1/DOC integration tests.
 
 ## Decision 5: fold, load, lockout
 
-**`DocumentRegistry::read(db) -> Result<DocumentRegistry, RegistryError>`** verifies log (`EventLog::verify`), reads new range, folds `product.created`, `document.registered`, and supported `document.*` transitions into document map + seat map.
+**`DocumentRegistry::read(db)`** — verified read, fold in order.
 
-**Fold is authoritative** (D1): re-validates seat holder on every `document.approved` in log even if appended elsewhere.
+**On every `product.created` (whoever appended it), the fold re-checks:**
+- human actor;
+- remote userinfo rule (no password);
+- **`repo_path` canonical absolute**;
+- seat list (four seats, once each, human holders);
+- for `origin: "new"`, documents match FOUNDATION;
+- for `origin: "migrated"`, documents may be empty.
 
-**Lockout:** first `EventDefect` sets `blocked: Option<(seq, defect)>`. While blocked: `read`/`record`/`create_product` refuse with same error; document state from last good fold still readable for operator diagnostics (mirror ORI-T-0194 pattern). Module doc states append-only log implication and Q11 operator trade.
+Defect → **`EventDefect`**, sets **lockout** (same seq recorded).
 
-**Refused kinds:** `document.submitted`, `document.drifted` → defect until defined.
+**On every `document.*` and `document.registered`, the fold re-checks:**
+- payload two-pass validity and field rules from Decision 3;
+- **human actor** on `document.approved` and `document.changes_requested`;
+- **seat holder** on every `document.approved` (even if appended outside `record`);
+- **`Document::apply`** with derived owner seat;
+- **`fires_from`**;
+- **registration rules:** path under `spec/` (DATA_MODEL:44); unique id and path; kind valid; `set` in `foundation` | `phase` | `migration`.
 
-Registration rules on fold: path under `spec/` (DATA_MODEL:44), unique id/path, kind valid, migration-set rules for as-built kinds (defer detailed as-built rules to M2; fold accepts `set` values `foundation`, `phase`, `migration`).
+**Lockout:** first defect sets `blocked`. While blocked: `read`, `record`, **`create_product`** refuse with the same error; last good state readable for diagnostics.
+
+**Refused kinds:** `document.submitted`, `document.drifted`.
 
 ## Decision 6: `ports.rs`
 
-- **`IdSource`**: same contract as `ori_mcp::ports::IdSource` (doc cites ori-core Id generation rule).
-- **`Clock`**: same as `ori_mcp::ports::Clock` (`Send`, `now() -> Timestamp`).
-- **`PortError`**: variants `Refused(Error)`, `Denied { code, methodology_ref }`, `Invalid { field, why }`, `Unavailable { what }`; `methodology_ref()` like ori-mcp.
-
-No other traits in R1.
+`IdSource`, `Clock`, `PortError` (`Refused`, `Denied`, `Invalid`, `Unavailable`) — shapes match `ori_mcp::ports.rs`.
 
 ## Decision 7: errors and MethodologyRef
 
-Every refusal that is a control refusal carries **`MethodologyRef`** (CLAUDE.md rule 9). Map defects to sections (§8 malformed payload, §13 log, §18 human/seat, §23 foundation, §27 secrets). **`PortError::Invalid`** for malformed caller input without MethodologyRef when appropriate (D14 repo_path symlink).
+Control refusals carry **`MethodologyRef`** (§8 payload, §13 log, §18 human/seat, §23 foundation, §27 secrets).
 
-## Tests (`tests/ori_t_0060_registry.rs` + unit tests in `registry.rs`)
+## Tests
 
-**22 tests**, each named `ori_t_0197_<snake_case>` (ticket id) or `ori_t_0060_<snake_case>` (backlog id) — **use `ori_t_0197_*` prefix** for new file. Real `ProductDb` in temp dirs; plant bad events with `EventLog::append` where needed.
+**34 tests total: 32 in `tests/ori_t_0197_registry.rs`, 2 in `registry.rs` `mod tests`** (payload/`pr`/instruction bounds without a full `ProductDb`).
 
-1. **`ori_t_0197_foundation_rows_match_plan`** — FOUNDATION len 11; paths match plan table.
-2. **`ori_t_0197_create_product_new_origin_writes_one_event`** — human actor; payload byte-stable; seats four; eleven documents.
-3. **`ori_t_0197_create_product_refuses_remote_with_password`** — `https://u:tok@h/r.git`; no event; error lacks `tok`.
-4. **`ori_t_0197_create_product_accepts_git_at_host`** — scp-style remote accepted.
-5. **`ori_t_0197_create_product_refuses_non_human_actor`**
-6. **`ori_t_0197_create_product_refuses_duplicate_seat`**
-7. **`ori_t_0197_record_created_from_missing`** — `document.created`; state Draft.
-8. **`ori_t_0197_record_refuses_agent_approved`**
-9. **`ori_t_0197_record_refuses_approver_not_holding_seat`**
-10. **`ori_t_0197_record_approver_holding_seat_succeeds`**
-11. **`ori_t_0197_record_refuses_changes_requested_by_agent`**
-12. **`ori_t_0197_payload_refuses_json_array`** — two-pass shape check.
-13. **`ori_t_0197_payload_refuses_duplicate_key`**
-14. **`ori_t_0197_payload_refuses_trailing_text`**
-15. **`ori_t_0197_fold_refuses_document_submitted_kind`**
-16. **`ori_t_0197_fold_refuses_document_drifted_kind`**
-17. **`ori_t_0197_lockout_blocks_record_after_bad_event`**
-18. **`ori_t_0197_lockout_survives_reload`**
-19. **`ori_t_0197_owner_derived_matches_kind_for_apply`**
-20. **`ori_t_0197_document_registered_birth_edge`**
-21. **`ori_t_0197_ports_port_error_denied_carries_methodology_ref`**
-22. **`ori_t_0197_migrated_origin_empty_documents`**
+Each integration test is named **`ori_t_0197_*`**. Plant bad events with `EventLog::append` where noted.
 
-Mutations: at least 5 re-run after feat commit (fold skips seat check; create_product skips remote scan; array payload accepted — kill each).
+| # | Test name | Decisions | Criteria |
+|---|---|---|---|
+| 1 | `ori_t_0197_foundation_rows_match_plan` | D2 | — |
+| 2 | `ori_t_0197_create_product_new_origin_writes_one_event` | D3 | ORI-P1-001 (payload half) |
+| 3 | `ori_t_0197_create_product_refuses_remote_with_password` | D3 | ORI-P1-001 / secrets |
+| 4 | `ori_t_0197_create_product_accepts_git_at_host` | D3 | — |
+| 5 | `ori_t_0197_create_product_refuses_non_human_actor` | D3 | ORI-P1-001 |
+| 6 | `ori_t_0197_create_product_refuses_duplicate_seat` | D3 | D13 |
+| 7 | `ori_t_0197_create_product_refuses_non_absolute_repo_path` | D3, D5 | — |
+| 8 | `ori_t_0197_create_product_refuses_when_registry_locked` | D5 | — |
+| 9 | `ori_t_0197_record_created_from_missing` | D4 | ORI-P1-016 (state half, later slice) |
+| 10 | `ori_t_0197_record_refuses_agent_approved` | D4 | ORI-P1-040 |
+| 11 | `ori_t_0197_record_refuses_approver_not_holding_seat` | D4, D13 | ORI-P1-040 |
+| 12 | `ori_t_0197_record_approver_holding_seat_succeeds` | D4, D13 | ORI-P1-040 |
+| 13 | `ori_t_0197_record_refuses_changes_requested_by_agent` | D4 | ORI-P1-040 |
+| 14 | `ori_t_0197_record_refuses_overlong_instructions` | D3, D4 | — |
+| 15 | `ori_t_0197_record_refuses_pr_with_password_userinfo` | D3, D4 | — |
+| 16 | `ori_t_0197_migrated_origin_empty_documents` | D3 | — |
+| 17 | `ori_t_0197_migrated_origin_refuses_as_built_approval_without_seats` | D4, D13 | ORI-P1-040 (phase 1 limit) |
+| 18 | `ori_t_0197_payload_refuses_json_array` | D3 | — |
+| 19 | `ori_t_0197_payload_refuses_duplicate_key` | D3 | — |
+| 20 | `ori_t_0197_payload_refuses_trailing_text` | D3 | — |
+| 21 | `ori_t_0197_fold_refuses_document_submitted_kind` | D5 | — |
+| 22 | `ori_t_0197_fold_refuses_document_drifted_kind` | D5 | — |
+| 23 | `ori_t_0197_fold_lockout_on_planted_product_created_bad_remote` | D5 | ORI-P1-001 |
+| 24 | `ori_t_0197_fold_lockout_on_planted_product_created_non_absolute_path` | D5 | — |
+| 25 | `ori_t_0197_fold_refuses_planted_approval_without_seat_holder` | D5, D13 | ORI-P1-040 |
+| 26 | `ori_t_0197_fold_refuses_planted_changes_requested_control_char` | D5 | — |
+| 27 | `ori_t_0197_lockout_blocks_record_after_bad_event` | D5 | — |
+| 28 | `ori_t_0197_lockout_blocks_create_product_after_bad_event` | D5 | — |
+| 29 | `ori_t_0197_lockout_survives_reload` | D5 | — |
+| 30 | `ori_t_0197_owner_derived_matches_kind_for_apply` | D2 | ORI-P1-002 (owner half, later RD) |
+| 31 | `ori_t_0197_document_registered_birth_edge` | D5 | — |
+| 32 | `ori_t_0197_ports_port_error_denied_carries_methodology_ref` | D6 | — |
+| 33 | `unit_payload_pr_rejects_userinfo` | D3 | mod tests |
+| 34 | `unit_instructions_cap_and_control` | D3 | mod tests |
+
+**Mutations** (re-run after feat commit; each must fail at least one test):
+
+1. fold skips `product.created` remote re-check;
+2. fold skips seat-holder re-check on planted `document.approved`;
+3. `create_product` skips non-absolute `repo_path` check;
+4. reader skips Value object check (array payload);
+5. lockout not enforced on `create_product`;
+6. `record` skips instruction length cap.
 
 ## Checks
 
-- `cargo fmt --all --check`
-- `cargo clippy -p ori-flows --all-targets --locked -- -D warnings`
-- `CARGO_TARGET_DIR=target/win cargo clippy -p ori-flows --all-targets --locked --target x86_64-pc-windows-gnu -- -D warnings`
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p ori-flows --no-deps --locked`
-- `cargo test -p ori-flows --locked`
-- Gate 13 on commits
+fmt, clippy (native + Windows), strict doc, `cargo test -p ori-flows --locked`, gate 13.
 
 ## Commits
 
-Conventional Commits; one `Ticket: ORI-T-0197`, one `Spec:` trailer per commit. Suggested: `feat(flows): add document registry and shared ports`.
-
-## Deviations
-
-If spec and plan conflict, stop and report. Narrowest reading only with listed deviation.
+`feat(flows): add document registry and shared ports` with `Ticket: ORI-T-0197`, `Spec: DATA_MODEL.md#document`.
 
 ## What you hand back
 
-Commit hashes, check exit codes, test counts, mutation table, deviations, not-tested list, self-assessed tier 1.
+Commit hashes, check exit codes, **34** test results, mutation table, deviations, not-tested list, tier 1.
