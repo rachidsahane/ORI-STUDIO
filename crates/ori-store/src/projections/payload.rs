@@ -95,11 +95,12 @@ pub(crate) struct Object {
 ///
 /// - text that is not JSON;
 /// - JSON whose top level is not an object: an array, a string, a number, a
-///   boolean or `null`. `serde_json`'s `deserialize_map` reads such a value
-///   and reports an invalid type, using the visitor's `expecting` text and
-///   never its `visit_map`; a top-level number too large for `f64`, or a
-///   string with a lone surrogate escape, is refused while it is read, as
-///   below;
+///   boolean or `null`. `serde_json`'s `deserialize_map` reports an invalid
+///   type, using the visitor's `expecting` text and never its `visit_map`: it
+///   reads a literal, a number or a string to report it, and refuses an array
+///   on its `[` alone, so a defect inside the array is never reached. A
+///   top-level number too large for `f64`, or a top-level string with a lone
+///   surrogate escape, is refused while it is read, as below;
 /// - an object followed by anything but JSON whitespace;
 /// - nesting 128 levels deep or more, counting the top object. The pin leaves
 ///   `serde_json`'s `unbounded_depth` off, which bounds how deep the parser

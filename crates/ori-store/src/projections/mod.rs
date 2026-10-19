@@ -47,16 +47,18 @@
 //! `ori_orchestrator::lock_table` and `ori_orchestrator::escalation` are pure
 //! functions with no writer wired to this crate's log. So the event kind
 //! vocabulary and the payload fields `crate::projections::payload` reads are
-//! ORI-T-0025's design, and the rule that an escalation or ticket payload is
-//! one JSON object is ORI-T-0189's. No production writer relies on them yet.
+//! ORI-T-0025's design, and the rule that the payload of an escalation or
+//! ticket kind that reads a field is one JSON object whose keys are distinct
+//! is ORI-T-0189's. No production writer relies on them yet.
 //! ORI-T-0025's pull request report (pull request 55, "What the projectors
 //! assume, and what nothing yet provides") hands the convention to whoever
 //! builds the writer, to adopt or replace. Two contracts already name these
 //! rows, S5's and S9's desks (`crates/ori-mcp/src/tools/desk.rs`,
 //! `crates/ori-mcp/src/ports.rs`), and `ori-memory` reads `lock.claimed`'s
 //! `module` and `session_id` as the lock projection does
-//! (`crate::projections::payload`'s module doc). None of this weakens the
-//! identity proof:
+//! (`crate::projections::payload`'s module doc for `module`;
+//! `crates/ori-memory/src/scope.rs`'s `projection_field` for both). None of
+//! this weakens the identity proof:
 //! [`crate::rebuild::rebuild`] and the ordinary incremental path both call the
 //! exact same [`Projection::apply`] over the exact same stored rows, so
 //! whatever the convention says, both paths agree on what it says.
