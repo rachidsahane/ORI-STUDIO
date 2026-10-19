@@ -2334,3 +2334,39 @@ The coder's commit `0432aec` equals the proved files byte for byte. **Claim 115 
 Claim 115 is released. Slices S3, S7 and S8, the three memory tools, are complete on this branch. Tier 2: the operator merges.
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 116, 117 and 118. The next free identifier is ORI-T-0192.
+
+---
+
+## 2026-10-19, S4 and S5 repairs 1 re-reviewed; repairs 2 being proved; follow-up ORI-T-0192
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**The focused re-review of both repairs 1** examined the lead's own words and tests: two lenses per ticket, one skeptic per finding, 7 agents (`rereview-0186-0187-r1.json`).
+
+S4 (ORI-T-0187): three should-fix findings, all the lead's:
+- **The PD-2 citation.** The repair made `report.*` and the Report row "PD-2's to reconcile (`ops/batch-10-plan.md`)". But that plan row names neither, and PD-2 was delivered as ORI-T-0156 (claim 87). So no open item owned them. **ORI-T-0192 (below) now owns them.**
+- **The log-cost sentence miscounted the barrier.** The barrier makes one verified read of the whole log, not several, and it makes it for every report it is handed, not only for those it records.
+- **Test 17 was only half a fix for review F3.** Its tamper (seq 1's payload) also breaks `read_range`'s link check. So a handler that skipped `EventLog::verify` still passed. The repair tampers the last event's product instead, which only `verify` sees.
+
+S4 notes taken: the `provenance` clause (the ticket's kind settles only `new_criteria`), and three test comments.
+
+S5 (ORI-T-0186): notes only, all taken:
+- two present-tense engine statements left over;
+- the retry clause offered an option the port does not give;
+- "no policy of their own" beside the reference rule;
+- the drift audit stated as a ticketless binding;
+- "role matrix", a new name that clashes with AICD §17's matrix;
+- the header without AICD §27.
+
+**Repairs 2** are lead-written (`edits-0187-r2`, 7 edits; `edits-0186-r2`, 8 edits) and being proved in clean copies, with mutation o18 (skip the verify) against S4's test 17.
+
+**ORI-T-0192, the specification reconciliation batch 10 left open.** A documentation ticket. It settles the event names and rows that the batch 10 slices name, but that PD-2 (delivered as ORI-T-0156) did not cover:
+- the `report.*` events (`spec/API_SPEC.md` section 2), which `aicd_report` does not write;
+- the Report row of `spec/DATA_MODEL.md` section 2, including its `session_id`, which nothing writes;
+- `escalation.opened` (API_SPEC section 2) against `escalation.raised`, the kind ori-store projects (S9, D5);
+- the kind of the plan row `PlanDesk` appends (S9);
+- the escalation template's "Options rejected" and "What is blocked" fields, and the Escalation row's `context_package_ref`, which `aicd_escalate` does not carry (S9).
+
+Tier: the documents it touches decide. S9's code names PD-2 for these items, and its repair will name ORI-T-0192 instead.
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 116, 117 and 118. The next free identifier is ORI-T-0193.
