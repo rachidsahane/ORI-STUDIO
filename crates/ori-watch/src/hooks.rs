@@ -8,7 +8,8 @@
 //! each of which appends one line to a *spool* directory the engine owns;
 //! [`HookSpool`] is how the engine reads those lines back. The ref poller in
 //! `crate::watcher` is the detector that does not depend on a hook (a push
-//! made with `--no-verify`, which skips `pre-push`, still moves a ref).
+//! made with `--no-verify`, which skips `pre-push`, still moves the
+//! remote-tracking ref of a branch pushed to a named remote).
 //!
 //! ```mermaid
 //! sequenceDiagram
@@ -900,8 +901,9 @@ impl GitHooks {
     /// replaces, is one that `install` refuses, [`HooksError::HookNotAFile`]
     /// when a directory sits where a hook belongs, [`HooksError::Io`] when
     /// `.git`, the hooks directory, `ori-original/`, a link, a directory on a
-    /// link's way or a hook file cannot be looked at, or when a link's physical
-    /// reading meets more than `LINK_HOPS_CAP` links.
+    /// link's way or a hook file cannot be looked at, when a link's way runs
+    /// through a regular file or carries a name too long for the file system,
+    /// or when a link's physical reading meets more than `LINK_HOPS_CAP` links.
     pub fn status(&self) -> Result<Vec<HookStatus>, HooksError> {
         check_git_dir(&self.git_dir)?;
         let hooks_dir = self.hooks_dir();
@@ -1861,17 +1863,15 @@ fn way_enters_what_the_install_creates(
 /// carries a name too long for the file system, is not a missing entry: it
 /// refuses the installation as an IO error. That fails closed, and is
 /// accepted. It holds where the operating system's own resolution meets the
-/// regular file. Behind a missing directory, a way through a regular file
-/// reaches nothing on its physical reading (a file with steps after it is read
-/// as a directory that is not there, and a file at the last step ends the
-/// reading), and the link passes, unless that way first fails at what the
-/// install creates, rule (a), or rule (b) reaches a hook: the physical reading
-/// lands on one, its text lands on one, or, where the physical reading lands
-/// on no directory that is there, the walk that goes on from the text's
-/// landing reaches one (`hooks/L -> ../refs` with `L/../nowhere/../sub/relay`,
-/// where `.git/sub` is a file and `hooks/sub/relay` links to a hook). On
-/// Windows, opening a path through a regular file reports it as not found, so
-/// such a way is always read this way there.
+/// regular file. Behind a missing directory, a way through a regular file is
+/// judged like any other way there, by rules (a) and (b): its physical reading
+/// treats a file with steps after it as a directory that is not there, until a
+/// `..` climbs back past it, and ends at a file at the last step, and the link
+/// is refused if either reading, followed as bullet (b) says, reaches a hook
+/// (`hooks/L -> ../refs` with `L/../nowhere/../sub/relay`, where `.git/sub` is
+/// a file and `hooks/sub/relay` links to a hook, is refused through the text's
+/// landing). Otherwise it passes. On Windows, opening a path through a regular
+/// file reports it as not found, so such a way is always read this way there.
 ///
 /// # Errors
 ///
