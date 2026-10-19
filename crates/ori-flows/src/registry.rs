@@ -970,6 +970,18 @@ mod tests {
     }
 
     #[test]
+    fn unit_read_object_payload_rejects_non_object() {
+        assert!(matches!(
+            read_object_payload::<serde_json::Value>("[]"),
+            Err(EventDefect::Payload)
+        ));
+        assert!(matches!(
+            read_object_payload::<serde_json::Value>("\"text\""),
+            Err(EventDefect::Payload)
+        ));
+    }
+
+    #[test]
     fn unit_instructions_cap_and_control() {
         assert!(validate_instructions("  ").is_err());
         assert!(validate_instructions(&"x".repeat(INSTRUCTIONS_MAX + 1)).is_err());
