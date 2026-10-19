@@ -26,8 +26,8 @@
 
 /// What the server reaches through the engine: the traits `ori-engine`
 /// implements for identifiers, ticket upgrades, specification proposals, the
-/// operator's MCP servers, the time and a session's state, and the error they
-/// share (AICD §17). Tier 2.
+/// operator's MCP servers, the time, a session's state, plans and escalations,
+/// and the error they share (AICD §17). Tier 2.
 pub mod ports;
 
 /// The MCP wire both halves of this crate share: JSON-RPC 2.0 framing and

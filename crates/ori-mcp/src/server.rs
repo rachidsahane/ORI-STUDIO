@@ -270,6 +270,7 @@
 //! | `Port(PortError::Refused(e))`, with `e.methodology_ref()` and `e.code()` | `refused` | `e.code()` | always |
 //! | `Port(PortError::Refused(e))`, a reference and no code | `refused` | `refused` (a fixed fallback) | the reference |
 //! | `Port(PortError::Refused(e))`, no reference | `invalid` | none | none |
+//! | `Port(PortError::Denied { code, methodology_ref })` | `refused` | `code` | always |
 //! | `Port(PortError::Invalid { field, .. })` | `invalid` | none | none, and `field` (a constant) is added; `why` is never copied |
 //! | `Port(PortError::Unavailable { .. })` | `unavailable` | none | none |
 //! | `Ok(result)` with `isError` | `error_result` | none | none |
@@ -927,6 +928,10 @@ impl Failure {
                     (None, _) => Self::bare("invalid"),
                 }
             }
+            HandlerError::Port(PortError::Denied {
+                code,
+                methodology_ref,
+            }) => Self::refused(code, methodology_ref.clone()),
             HandlerError::Port(PortError::Invalid { field, .. }) => Self {
                 failure: "invalid",
                 reason: None,
