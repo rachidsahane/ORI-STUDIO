@@ -2187,3 +2187,52 @@ No other open claim touches `ports.rs`, `server.rs` or `lib.rs`.
 | 118 | ORI-T-0188, batch 10 slice S9 (`aicd_plan_submit`, `aicd_escalate`, `PlanDesk`, `EscalationDesk`, `PortError::Denied`) | `crates/ori-mcp/src/tools/orchestration.rs` (new); in `ports.rs` the `Denied` variant, the two desks, their value types, `use` lines, docs and new tests; in `server.rs` the `Denied` arm and its failure-table row; in `lib.rs` the `pub mod ports` doc lines; in `tools/mod.rs` one module line | 2 | `/home/user/wt/ORI-T-0188`, `feat/ORI-T-0188-plan-escalate` | Sonnet 5.5 | 2026-10-19 |
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115, 116, 117 and 118. The next free identifier is ORI-T-0191.
+
+---
+
+## 2026-10-19, S7 reviewed and repair 1 dispatched; S9 back and under review; follow-up ORI-T-0191
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**S7 (ORI-T-0184) review.** Four lenses, two skeptics per finding, 11 agents (`review-0184-full.json` in the session scratchpad). Nothing is blocking. Three findings are confirmed should-fix:
+- **F1, a test gap.** No `aicd_evidence` test pins the binding's role claim. Replacing `memory::request(call.binding, ..)` with a request that carries no claim survives the whole suite. A qa-bound session whose identity the log registers as lead would then read a closing report's raw evidence. The code is right. Reproduced by both skeptics.
+- **F2, a doc limit left out.** On the unix targets outside the verified set, a link renamed into the path after the grant is followed, and its target is returned. The doc stated the `evidence_file_not_regular` outcome with no platform qualifier. The wording came from the lead's package. The skeptics rated it a note; it is taken as should-fix.
+- **F3, a wrong table row.** It said a malformed `memory.record_created` also refuses the other memory tools. Those tools are granted, and their retrieval fails as `unavailable` when the grant allows a record source. The wording came from the lead's package.
+
+Fifteen notes. These are taken in the repair:
+- F4: a `memory.rs` sentence that overstated the exception;
+- F5: the tests that pin two lockout causes;
+- F6: a carriage return before a line feed is dropped;
+- F7: the `# Errors` grouping;
+- F8 and F9: the pieces table, and `ori_memory::code_map`;
+- F10: what the budget covers;
+- F11: five small claims about other modules;
+- F12: three stale passages in `memory.rs` and `barrier.rs`;
+- F18: a test that plants forged labels.
+
+These are recorded and not changed:
+- F13 and F14: two commit messages misdescribe their changes. History is not rewritten.
+- F15: the enforcer's `memory.access_refused` row carries the event's host path in `reason.detail`. This predates S7. The path is already in every `memory.evidence_stored` payload, and it never reaches a reply.
+- F16: the 1 MiB line bound depends on a short request id. This is the open W0/S2 item.
+- F17: becomes **ORI-T-0191** (below).
+
+**Repair 1 (Haiku 5.5).** The lead wrote every edit and both tests as `edits-0184-r1/apply.py` (19 edits) and proved them in a clean copy:
+- fmt, workspace clippy `-D warnings`, strict doc and the Windows compile check all exit 0;
+- `ori-gates` passed 194, `ori-mcp` 231 and `ori-memory` 544;
+- mutation x13 (the request without the claim) fails the new claim test;
+- mutation mq (content prefixed without the scrub) fails the new forged-label test and test 1.
+
+The proved files are kept beside the script. The lead compares the coder's commit with them byte for byte.
+
+**Claim 115 is widened for this repair** to three more doc passages in `crates/ori-mcp/src/tools/memory.rs` and one module-doc sentence in `crates/ori-memory/src/barrier.rs` (tier 2). No other open claim touches either file.
+
+**ORI-T-0191, the scrub lets invisible format characters through** (S7 review, F17). The retrieval's `is_unsafe_char`, which PM4's `EvidenceContent::quoted` and the context packages share, scrubs category Cc, the bidirectional controls and U+2028/U+2029, but not:
+- the zero-width characters U+200B to U+200D, U+2060 to U+2064 and U+FEFF;
+- the soft hyphen U+00AD;
+- the tag characters U+E0000 to U+E007F.
+
+None of these can end a line or forge a label. Tag characters can, however, carry text that a model reads and a human reviewing the same reply does not see. The ticket is to decide and implement a scrub for category Cf, at least the tag characters, in `crates/ori-memory/src/retrieval.rs`. RISK_MAP decides its tier, and the operator sees it as a security item.
+
+**S9 (ORI-T-0188) is back:** commits `10494c5` and `971d511`. The scope is the five declared files only. The coder reports 14 new tests, mutations m1 to m9 killed, and gates exit 0, with `gates.sh` at 3 for gate 7's missing tools. Its five-lens adversarial review is running, with a fifth lens on whether the desk contracts can be implemented by ORI-T-0070.
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115 (repair 1), 116, 117 and 118. The next free identifier is ORI-T-0192.
