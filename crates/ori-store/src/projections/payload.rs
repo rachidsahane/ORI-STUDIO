@@ -1,30 +1,160 @@
-//! Reading one flat field out of an event's `payload`, without a JSON parser.
+//! Reading fields out of an event's `payload`: a JSON reader for the escalation
+//! and ticket projections, and the first-key reader the lock projection keeps.
 //!
-//! `crates/ori-store/src/event_log.rs`'s own module doc, "What this module
-//! deliberately does not enforce", already states the reason this crate has no
-//! JSON library: `payload` is stored and hashed as opaque, non-empty text,
-//! "interpreting JSON would need a parser this crate does not have ... and a
-//! grammar `spec/DATA_MODEL.md` does not draw". `crates/ori-store/Cargo.toml`
-//! lists exactly three dependencies, `rusqlite`, `sha2`, and the dev-only
-//! `proptest`; adding a fourth is `CLAUDE.md` absolute rule 6, an escalation
-//! this ticket does not raise because it does not need to (see the pull
-//! request report, "Dependencies").
+//! The event log stores and hashes `payload` as opaque, non-empty text and
+//! never interprets it (`crates/ori-store/src/event_log.rs`'s module doc);
+//! reading one is the projections' job. This module has two readers.
 //!
-//! What the three projectors in this module's parent need from a payload is
-//! narrower than JSON: one flat, single-level object of string-valued fields,
-//! a convention this ticket defines for its own three event kinds because
-//! nothing in the workspace writes these events yet (`crates/ori-orchestrator`'s
-//! `Ticket::apply`, `LockTable` and `Escalation` are pure functions over their
-//! own types today, wired to no writer; see the pull request report, "Whether
-//! this payload convention is load-bearing elsewhere"). [`field`] and
-//! [`bool_field`] read exactly that shape and nothing more: a value containing
-//! a literal `"` cannot be represented, and every payload this module's own
-//! tests and the parent's projectors write never needs one.
+//! - [`object`] parses the payload as JSON, through `serde_json` (approved
+//!   workspace-wide by `ops/escalations/E-0008-json-serialization.md`), and
+//!   gives back its top-level keys. The escalation and ticket projections use
+//!   it, because the text they read, an escalation's question and answer above
+//!   all, is written by a serde writer, which escapes `"`, `\` and every
+//!   control character below U+0020, and a reader that undoes none of that
+//!   hands the human queue a cut-short or doubled-backslash question.
+//! - [`field`] is the first-key reader of ORI-T-0025: it finds the first
+//!   `"key"` in the text and cuts the value at the next `"`. Only the lock
+//!   projection (`crate::projections::lock`) uses it.
+//!
+//! # Why the lock projection keeps `field`
+//!
+//! `ori-memory`'s lock fold reads `module` out of a `lock.claimed` payload
+//! through its own copy of `field`, and a tier 2 test there holds that fold to
+//! the same rows the lock projection keeps. A lock projection that read
+//! `module` as JSON would fail that test, and so would a copy moved along with
+//! it; changing either is a `test_modified` escalation and a tier 2 change.
+//! The desk can write no `module` value on which the two readers differ
+//! (`ModulePath::parse` refuses a backslash and a control character, and the
+//! plan tool's handler in `ori-mcp` refuses a `"`), so nothing is wrong in the
+//! meantime. Moving the lock projection and `ori-memory`'s copy together is
+//! ORI-T-0193.
 //!
 //! No methodology section applies to the reader itself: it is a parsing
 //! convenience, not a control. `crates/ori-store/src/projections/mod.rs`'s
 //! module doc cites the sections that govern what callers do with what this
 //! reads.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::de::Error as _;
+use serde::de::MapAccess;
+use serde::de::Visitor;
+use serde_json::Value;
+
+/// One event payload read as a JSON object: the top-level keys and their
+/// values, each key once.
+///
+/// Built by [`object`] and nowhere else. [`Object::text`] and
+/// [`Object::boolean`] read a key as the JSON type it was written as, and read
+/// nothing out of another key's value: a value that spells a key name is only
+/// a value.
+///
+/// # Why a duplicate key is refused
+///
+/// Two values for one key have no single reading. A first-wins reader (`field`,
+/// and every reader like it) and a last-wins reader (`serde_json::Value`) would
+/// disagree on the same row, and refusing is the only rule that cannot
+/// disagree with another reader. The cost is that such an event blocks every
+/// rebuild of its product (`crate::rebuild::rebuild` stops at the first
+/// refusal). No writer the engine has or plans would produce one:
+///
+/// - every planned writer serializes one derived struct through serde, which
+///   writes each field once (S9's desk contract for `escalation.raised`,
+///   `crates/ori-mcp/src/ports.rs`);
+/// - a `#[serde(flatten)]` map, two fields renamed onto one name, or a
+///   hand-written `Serialize` could repeat a key, and no planned payload uses
+///   any of them.
+///
+/// `ori-memory`'s `LockClaimWire` likewise refuses a `lock.claimed` payload
+/// that gives `module` or `session_id` twice, through serde's derive.
+///
+/// Only the top level is checked for a repeated key: a duplicate inside a
+/// nested value (S9's `evidence` array, say) is that value's own business and
+/// is not looked at.
+///
+/// `ProjectionError::UnreadablePayload` is the refusal a projection gives when
+/// [`object`] returns `None`.
+#[derive(Debug)]
+pub(crate) struct Object {
+    fields: BTreeMap<String, Value>,
+}
+
+/// Reads `payload` as one JSON object whose top-level keys are distinct, or
+/// `None` when it is not one.
+///
+/// Refused, each by `serde_json` as pinned in `crates/ori-store/Cargo.toml`:
+///
+/// - text that is not JSON;
+/// - JSON whose top level is not an object: an array, a string, a number, a
+///   boolean or `null`. `serde_json`'s `deserialize_map` reports an invalid
+///   type, naming the visitor's `expecting` text, for anything that does not
+///   begin with `{`, and never calls the visitor;
+/// - an object followed by anything but whitespace;
+/// - a key given twice at the top level, whatever the two values;
+/// - nesting 128 levels deep or more, counting the top object (the pin leaves
+///   `serde_json`'s `unbounded_depth` off, which is what bounds the work one
+///   payload can cause);
+/// - a raw control character inside a string, a lone surrogate escape, and a
+///   number outside `f64`'s range.
+///
+/// Accepted: any top-level object with distinct keys, whatever the values,
+/// including nested values and keys the caller does not read, and whitespace
+/// around the object and between tokens.
+#[must_use]
+pub(crate) fn object(payload: &str) -> Option<Object> {
+    serde_json::from_str::<Object>(payload).ok()
+}
+
+impl<'de> Deserialize<'de> for Object {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(ObjectVisitor)
+    }
+}
+
+/// Builds an [`Object`] from a JSON map, refusing the first key it sees twice.
+struct ObjectVisitor;
+
+impl<'de> Visitor<'de> for ObjectVisitor {
+    type Value = Object;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("one JSON object whose keys are distinct")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Object, A::Error> {
+        let mut fields = BTreeMap::new();
+        while let Some(key) = map.next_key::<String>()? {
+            // The repeat is refused before its value is read, so the second
+            // value never has to be parsed to be turned away.
+            if fields.contains_key(&key) {
+                return Err(A::Error::custom("a key is given twice"));
+            }
+            let value = map.next_value::<Value>()?;
+            fields.insert(key, value);
+        }
+        Ok(Object { fields })
+    }
+}
+
+impl Object {
+    /// The value of `key` when it is a JSON string, with every escape undone;
+    /// `None` for an absent key and for a number, boolean, `null`, array or
+    /// object.
+    #[must_use]
+    pub(crate) fn text(&self, key: &str) -> Option<&str> {
+        self.fields.get(key).and_then(Value::as_str)
+    }
+
+    /// The value of `key` when it is a JSON boolean; `None` for an absent key
+    /// and for any other type, a string `"true"` included.
+    #[must_use]
+    pub(crate) fn boolean(&self, key: &str) -> Option<bool> {
+        self.fields.get(key).and_then(Value::as_bool)
+    }
+}
 
 /// Reads one string-valued field, `"key":"value"`, out of a flat JSON-shaped
 /// object, wherever it appears in `payload`.
@@ -35,6 +165,13 @@
 /// `"tier_set"` is `_`, not the closing quote the needle itself supplies.
 /// Returns `None` for an absent key, a key whose value is not a quoted
 /// string, or an unterminated value.
+///
+/// It cuts a value at the next `"` and undoes no escape, so a value that holds
+/// a `"` cannot be represented, and a backslash sequence comes back as the
+/// backslash and the characters after it. It also takes the first `"key"` it
+/// finds anywhere in the text, values included. Only
+/// `crate::projections::lock` calls it, for the reason in the module doc, "Why
+/// the lock projection keeps `field`".
 #[must_use]
 pub(crate) fn field<'a>(payload: &'a str, key: &str) -> Option<&'a str> {
     let needle = format!("\"{key}\"");
@@ -48,29 +185,25 @@ pub(crate) fn field<'a>(payload: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// Reads one boolean-valued field, `"key":true` or `"key":false` (unquoted,
-/// JSON's own spelling), out of a flat JSON-shaped object.
+/// JSON's own spelling), out of a payload that is one JSON object.
 ///
-/// `None` for an absent key or a value that is neither literal.
+/// `None` for an absent key, a value that is not a JSON boolean, and a payload
+/// that [`object`] refuses.
+///
+/// Kept, test-only, for its two ORI-T-0025 tests, which `CLAUDE.md` rule 3
+/// forbids changing: no projection calls it any more, because the ticket
+/// projection reads `significant` through [`Object::boolean`].
+#[cfg(test)]
 #[must_use]
 pub(crate) fn bool_field(payload: &str, key: &str) -> Option<bool> {
-    let needle = format!("\"{key}\"");
-    let start = payload.find(needle.as_str())?;
-    let after_key = &payload[start + needle.len()..];
-    let colon = after_key.find(':')?;
-    let after_colon = after_key[colon + 1..].trim_start();
-    if after_colon.starts_with("true") {
-        Some(true)
-    } else if after_colon.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
+    object(payload)?.boolean(key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::bool_field;
     use super::field;
+    use super::object;
 
     #[test]
     fn ori_t_0025_field_reads_a_simple_string_value() {
@@ -140,5 +273,92 @@ mod tests {
     fn ori_t_0025_bool_field_is_none_for_absent_or_non_boolean() {
         assert_eq!(bool_field("{}", "significant"), None);
         assert_eq!(bool_field(r#"{"significant":"true"}"#, "significant"), None);
+    }
+
+    #[test]
+    fn ori_t_0189_object_reads_top_level_strings_and_booleans_by_key() {
+        let read = object(r#"{"a":"x","b":true,"c":false,"d":1,"e":null,"f":[],"g":{}}"#)
+            .expect("one object with distinct keys");
+        assert_eq!(read.text("a"), Some("x"));
+        for key in ["b", "d", "e", "f", "g", "absent"] {
+            assert_eq!(read.text(key), None, "text({key:?}) is not a JSON string");
+        }
+        assert_eq!(read.boolean("b"), Some(true));
+        assert_eq!(read.boolean("c"), Some(false));
+        assert_eq!(read.boolean("a"), None);
+    }
+
+    #[test]
+    fn ori_t_0189_object_undoes_every_json_escape() {
+        let read = object(r#"{"q":"\"\\\/\n\t\r\b\fé😀"}"#).expect("an object");
+        // Rust has no `\b` or `\f` escape, so those two are spelled `\u{..}`.
+        assert_eq!(read.text("q"), Some("\"\\/\n\t\r\u{8}\u{c}\u{e9}\u{1F600}"));
+    }
+
+    #[test]
+    fn ori_t_0189_object_does_not_read_a_key_out_of_a_value() {
+        // The first-key reader gives `recommendation` the value "E1" here.
+        let read =
+            object(r#"{"question":"recommendation","escalation_id":"E1","recommendation":"r"}"#)
+                .expect("an object");
+        assert_eq!(read.text("recommendation"), Some("r"));
+        assert_eq!(read.text("question"), Some("recommendation"));
+
+        // The first-key reader gives `tier` the value "2" here.
+        let read = object(r#"{"note":"tier","x":"2","tier":"1"}"#).expect("an object");
+        assert_eq!(read.text("tier"), Some("1"));
+
+        // The first-key boolean reader gives `significant` `Some(true)` here.
+        let read = object(r#"{"a":"significant","b":true}"#).expect("an object");
+        assert_eq!(read.boolean("significant"), None);
+    }
+
+    #[test]
+    fn ori_t_0189_object_refuses_what_is_not_one_object_with_distinct_keys() {
+        let refused = [
+            "",
+            "not json",
+            r#"["E1","adr_area","q","r"]"#,
+            r#""text""#,
+            "1",
+            "true",
+            "null",
+            r#"{"a":"1"} x"#,
+            r#"{"a":"1"}{"b":"2"}"#,
+            r#"{"a":"1","a":"1"}"#,
+            r#"{"a":"1","a":"2"}"#,
+            r#"{"a":"1","b":"2","a":3}"#,
+            r#"{"a":"1",}"#,
+            r#"{a:"1"}"#,
+            "{\"a\":\"x\ny\"}",
+            r#"{"a":"\ud800"}"#,
+            r#"{"a":1e400}"#,
+        ];
+        for payload in refused {
+            assert!(
+                object(payload).is_none(),
+                "{payload:?} must be refused, got {:?}",
+                object(payload)
+            );
+        }
+
+        assert!(
+            object(r#"  {"a":"1"}  "#).is_some(),
+            "whitespace around the object is accepted"
+        );
+        assert!(
+            object(r#"{"a":{"b":"1","b":"2"}}"#).is_some(),
+            "a duplicate inside a nested value is that value's own business"
+        );
+    }
+
+    #[test]
+    fn ori_t_0189_object_refuses_nesting_deeper_than_serde_jsons_bound() {
+        let nested = |depth: usize| format!("{{\"a\":{}{}}}", "[".repeat(depth), "]".repeat(depth));
+        assert!(
+            object(&nested(200)).is_none(),
+            "200 levels exceed serde_json's recursion bound"
+        );
+        assert!(object(&nested(100)).is_some(), "100 levels are accepted");
     }
 }

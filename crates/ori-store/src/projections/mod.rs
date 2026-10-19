@@ -46,9 +46,9 @@
 //! a `ticket.*`, `lock.*` or `escalation.*` event yet: `ori_core::ticket`,
 //! `ori_orchestrator::lock_table` and `ori_orchestrator::escalation` are pure
 //! functions with no writer wired to this crate's log. So the event kind
-//! vocabulary and the flat-field payload shape
-//! `crate::projections::payload` reads are this ticket's own design, not a
-//! contract already relied on elsewhere; the pull request report says this
+//! vocabulary and the payload fields `crate::projections::payload` reads (one
+//! JSON object for the escalation and ticket projections) are this ticket's
+//! own design, not a contract already relied on elsewhere; the pull request report says this
 //! plainly under "Whether this payload convention is load-bearing elsewhere"
 //! and names the follow-up (wiring the real writer to emit it) as a finding,
 //! not silently assumed. It does not weaken the identity proof:
@@ -166,9 +166,14 @@ pub trait Projection {
     /// malformed data, refused rather than silently dropped (this is the
     /// guard against the "skip every event whose `ticket_id` is `NULL`"
     /// defect the pull request report's plant table names).
+    /// [`ProjectionError::UnreadablePayload`] when the ticket or escalation
+    /// projection, for an event kind that reads payload fields, finds that
+    /// `event.payload()` is not one JSON object whose keys are distinct.
     /// [`ProjectionError::MalformedPayload`] when a required field is absent
-    /// from `event.payload()`. [`ProjectionError::Sql`] on an underlying
-    /// statement failure.
+    /// from, or of the wrong type in, `event.payload()`. The lock projection
+    /// reads its fields with `payload::field`, not as JSON, so it reports a
+    /// payload that is not JSON as `MalformedPayload` too.
+    /// [`ProjectionError::Sql`] on an underlying statement failure.
     fn apply(&self, conn: &Connection, event: &Event) -> Result<(), ProjectionError>;
 
     /// A deterministic byte encoding of every row this projection currently
@@ -211,11 +216,25 @@ pub enum ProjectionError {
     },
     /// A payload this projection needed a field from did not carry it, or the
     /// field was not the shape the projection reads it as.
+    ///
+    /// From the ticket and escalation projections, the payload is a readable
+    /// object that lacks a required field or carries it as another JSON type.
+    /// From the lock projection, `payload::field` finds no such field in the
+    /// payload.
     MalformedPayload {
         /// The `seq` of the offending event.
         seq: u64,
-        /// The field name that was required and absent.
+        /// The field name that was required and absent, or of another type.
         field: &'static str,
+    },
+    /// From the ticket and escalation projections, for an event kind that reads
+    /// payload fields: the payload is not one JSON object whose keys are
+    /// distinct. That is text that is not JSON, JSON of another shape (an
+    /// array, a string, a number), text after the object, or a key given
+    /// twice.
+    UnreadablePayload {
+        /// The `seq` of the offending event.
+        seq: u64,
     },
     /// `rusqlite` reported a failure this module does not classify further.
     Sql {
@@ -244,11 +263,15 @@ impl ProjectionError {
             // (`crates/ori-store/src/lib.rs`), reused here because a payload
             // this projection cannot read is this store failing to stand in
             // for state it cannot vouch for, the same ground `db.rs`'s
-            // `DbError` cites throughout.
-            Self::MalformedPayload { .. } => Some(ori_core::error::MethodologyRef {
-                section: 8,
-                subsection: None,
-            }),
+            // `DbError` cites throughout. A payload that is not one JSON
+            // object with distinct keys is the same failure one step earlier,
+            // before any field is looked for.
+            Self::MalformedPayload { .. } | Self::UnreadablePayload { .. } => {
+                Some(ori_core::error::MethodologyRef {
+                    section: 8,
+                    subsection: None,
+                })
+            }
             Self::Sql { .. } => None,
         }
     }
@@ -259,7 +282,9 @@ impl ProjectionError {
     pub const fn is_refusal(&self) -> bool {
         matches!(
             self,
-            Self::MissingTicketId { .. } | Self::MalformedPayload { .. }
+            Self::MissingTicketId { .. }
+                | Self::MalformedPayload { .. }
+                | Self::UnreadablePayload { .. }
         )
     }
 }
@@ -275,6 +300,11 @@ impl fmt::Display for ProjectionError {
             Self::MalformedPayload { seq, field } => write!(
                 f,
                 "refused: event at seq {seq}'s payload carries no readable {field:?} field"
+            ),
+            Self::UnreadablePayload { seq } => write!(
+                f,
+                "refused: event at seq {seq}'s payload is not one JSON object whose keys are \
+                 distinct"
             ),
             Self::Sql { message } => write!(f, "{message}"),
         }
@@ -512,5 +542,21 @@ mod tests {
         };
         assert!(!sql.is_refusal());
         assert_eq!(sql.methodology_ref(), None);
+    }
+
+    #[test]
+    fn ori_t_0189_an_unreadable_payload_is_a_refusal_under_aicd_8() {
+        let unreadable = ProjectionError::UnreadablePayload { seq: 7 };
+        assert!(unreadable.is_refusal());
+        assert_eq!(
+            unreadable.methodology_ref(),
+            Some(ori_core::error::MethodologyRef {
+                section: 8,
+                subsection: None,
+            })
+        );
+        let text = unreadable.to_string();
+        assert!(text.contains("seq 7"), "{text}");
+        assert!(text.contains("JSON object"), "{text}");
     }
 }
