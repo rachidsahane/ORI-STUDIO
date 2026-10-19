@@ -1254,6 +1254,23 @@ fn fold(state: &mut State, product_id: &Id, event: &Event) -> Result<(), EventDe
     Ok(())
 }
 
+/// Whether the events [`Registry::refresh`] read are the continuation of the log
+/// it folded: the `first` of them chains from the last event folded (from
+/// `EventHash::GENESIS` when none was), and the `last` of them is the tip the
+/// verified read reported (AICD §8).
+///
+/// A read that fails either is not the log the registry folded, however the two
+/// reads came to disagree, and the registry folds none of it.
+fn chains_to_tip(
+    first: &Event,
+    last: &Event,
+    last_digest: Option<EventHash>,
+    tip_digest: Option<EventHash>,
+) -> bool {
+    first.hash_prev() == last_digest.unwrap_or(EventHash::GENESIS)
+        && Some(last.digest()) == tip_digest
+}
+
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
@@ -1383,8 +1400,7 @@ impl Registry {
                 read,
             }));
         };
-        let anchor = self.state.last_digest.unwrap_or(EventHash::GENESIS);
-        if first.hash_prev() != anchor || Some(last.digest()) != report.tip_digest {
+        if !chains_to_tip(first, last, self.state.last_digest, report.tip_digest) {
             return Err(moved);
         }
         let mut next = self.state.clone();
@@ -3513,6 +3529,59 @@ mod tests {
             assert!(!text.is_empty());
             assert!(!text.contains(MARKER), "{text}");
         }
+    }
+
+    #[test]
+    fn ori_t_0194_a_read_chains_to_the_tip_only_from_the_folded_event_to_the_verified_tip() {
+        let mut home = Home::new("chains", PRODUCT_A);
+        for n in 1..=3 {
+            plant_human_added(&mut home, n, &format!("server-{n}"));
+        }
+        let events = all_events(&mut home);
+        assert_eq!(events.len(), 3);
+        let digests: Vec<EventHash> = events.iter().map(Event::digest).collect();
+
+        // From nothing folded to the tip.
+        assert!(chains_to_tip(
+            &events[0],
+            &events[2],
+            None,
+            Some(digests[2])
+        ));
+        // From the first event folded to the tip.
+        assert!(chains_to_tip(
+            &events[1],
+            &events[2],
+            Some(digests[0]),
+            Some(digests[2])
+        ));
+        // The last event read is not the tip the verified read reported.
+        assert!(!chains_to_tip(
+            &events[0],
+            &events[2],
+            None,
+            Some(digests[1])
+        ));
+        assert!(!chains_to_tip(&events[0], &events[2], None, None));
+        // The first event read does not chain from the event folded.
+        assert!(!chains_to_tip(
+            &events[1],
+            &events[2],
+            Some(digests[1]),
+            Some(digests[2])
+        ));
+        assert!(!chains_to_tip(
+            &events[1],
+            &events[2],
+            None,
+            Some(digests[2])
+        ));
+        assert!(!chains_to_tip(
+            &events[0],
+            &events[2],
+            Some(digests[0]),
+            Some(digests[2])
+        ));
     }
 
     #[test]
