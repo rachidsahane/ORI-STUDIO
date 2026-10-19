@@ -2370,3 +2370,41 @@ S5 (ORI-T-0186): notes only, all taken:
 Tier: the documents it touches decide. S9's code names PD-2 for these items, and its repair will name ORI-T-0192 instead.
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 116, 117 and 118. The next free identifier is ORI-T-0193.
+
+---
+
+## 2026-10-19, ORI-T-0186 (slice S5) integrated after two repairs; claim 116 released; ORI-T-0187 repair 2 refused by the classifier
+
+Written by the lead under [[R31]], [[R39]], [[R44]] and [[R46]].
+
+**S5 repair 2** (Haiku 5.5, lead-written, `edits-0186-r2/apply.py`, 8 doc replacements, all from the re-review's notes). The lead proved it in a clean copy: fmt, clippy, strict doc and the Windows compile check exit 0; `ori-mcp` passed 225 and `ori-gates` 194. The coder's commit `7e8636a` equals the proved file byte for byte.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 116 | ORI-T-0186, batch 10 slice S5 (`aicd_ticket_upgrade`, `aicd_spec_propose`), with repair 1 and repair 2 (Haiku 5.5, both written by the lead) | Review: 4 lenses, 15 agents; nothing blocking; 5 should-fix and 10 notes, taken or recorded. Re-review of repair 1: notes only, taken in repair 2 | Cherry-picked as `a072c5d`, `46b5e31` and `c8c9465`. `desk.rs`'s diff equals the branch's `4121562..7e8636a` byte for byte. The one `tools/mod.rs` conflict, two adjacent module lines, was resolved in alphabetical order (desk, evidence, memory). fmt 0, clippy `-D warnings` 0, Windows clippy 0, strict doc 0, `cargo test --workspace --locked --no-fail-fast` 0 (**1759 passed**, 0 failed), gate 13 over the three commits 0 |
+
+Claim 116 is released. Tier 2: the operator merges.
+
+**ORI-T-0187 (S4) repair 2 was refused by the auto-mode safety classifier.** The Haiku coder copied the lead's proved script (`edits-0187-r2/apply.py`, 7 edits, proved with mutation o18) into its worktree's `target/`, read it, and ran it with `python3 -I`. The classifier refused the command with the reason "Code from External". The coder stopped, as its package and `CLAUDE.md` require; nothing was applied, and the branch is at `38f41ae`.
+
+The same pattern ran without refusal for:
+- S7 repairs 1 and 2;
+- S4 repair 1;
+- S5 repairs 1 and 2, the last one minutes later.
+
+**The lead tried no other route and applies none**, as for ORI-T-0163 and ORI-T-0165.
+
+The repair touches only S4's own docs and tests:
+- test 17 now breaks the log where only `EventLog::verify` looks;
+- the log-cost sentence is corrected;
+- the PD-2 citation becomes ORI-T-0192;
+- the `provenance` clause and three test comments are corrected.
+
+The operator decides between three courses:
+- run the proved script themselves, or authorize it;
+- have S4 integrated at `38f41ae` with repair 2 allocated as a follow-up;
+- leave it waiting.
+
+Claim 117 stays held.
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 117 (repair 2 with the operator) and 118 (S9 under review). The next free identifier is ORI-T-0193.
