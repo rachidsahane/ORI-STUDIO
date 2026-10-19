@@ -2721,16 +2721,16 @@ Written by the lead (continuation session) from `ops/handoff/README.md` step 3, 
 
 | Identifier | Purpose | Claim |
 |---|---|---|
-| ORI-T-0195 | Apply ORI-T-0187 repair 2 (`tools/report.rs`) | none (follow-up on PR 78) |
+| ORI-T-0195 | Apply ORI-T-0187 repair 2 (`tools/report.rs`); S4 blank check via `is_blank_after_untrusted_scrub` when S4 lands ([[R48]]) | none (follow-up on PR 78) |
 | ORI-T-0196 | Apply ORI-T-0163 repair 2 (`watcher.rs`) | none (follow-up on PR 78) |
 | ORI-T-0197 | Batch 12 slice **R1**: document registry + shared ports | **122** (reserved at dispatch; not held until coder starts) |
 | ORI-T-0198 | **P-I:** migrated `create_product` / `products.import` precursor | none (allocate at dispatch before M0a) |
 
 | # | Ticket | Modules (declared scope) | Tier | Recorded |
 |---|---|---|---|---|
-| 122 | ORI-T-0197, batch 12 slice R1 | `crates/ori-flows/src/registry.rs`, `ports.rs`, `migrate/mod.rs` (stub), `tests/ori_t_0060_registry.rs`; queue `Cargo.toml`, `lib.rs`, `Cargo.lock` | 1 | 2026-10-19 |
+| 122 | ORI-T-0197, batch 12 slice R1 | `crates/ori-flows/src/registry.rs`, `ports.rs`, `migrate/mod.rs` (stub), `tests/ori_t_0197_registry.rs`; queue `Cargo.toml`, `lib.rs`, `Cargo.lock` | 1 | 2026-10-19 |
 
-Package: `ops/tickets/ORI-T-0197-flows-registry.md` (**22** acceptance tests named). Fact-checked against `f3d624b` before finish (see plan fact-check table).
+Package: `ops/tickets/ORI-T-0197-flows-registry.md` (**34** tests: 32 integration + 2 unit). Fact-checked against `f3d624b`; revised 2026-10-19 after independent fact-check (see plan fact-check table).
 
 **State after this section:** claims held unchanged (20, 112, 117, 121). ORI-T-0197 claim 122 is **designed, not dispatched**. Next free identifier: **ORI-T-0199**.
 
@@ -2752,8 +2752,24 @@ The operator answered three PR 78 escalations after reading decision briefs ([[R
 
 | # | Ticket | Modules (declared scope) | Tier | Model | Branch | Recorded |
 |---|---|---|---|---|---|---|
-| 123 | ORI-T-0191, scrub Unicode format characters (S7 F17, S4 F8) | `crates/ori-memory/src/retrieval.rs`; every copy of the scrub predicate including `crates/ori-mcp/src/host/registry.rs`; the S4 blank check in `crates/ori-mcp/src/tools/report.rs` | per RISK_MAP for `retrieval.rs`; registry/report touch tier 2 paths | Sonnet 5.5 (coder designs repair — operator deviation from [[R44]]) | `fix/ORI-T-0191-scrub-format-chars` | 2026-10-19, at dispatch |
+| 123 | ORI-T-0191, scrub Unicode format characters (S7 F17; S4 F8 → ORI-T-0195) | `crates/ori-memory/src/retrieval.rs`; scrub copies in `crates/ori-mcp/src/host/registry.rs` (**not** `tools/report.rs` at session HEAD) | **2** (registry.rs per [[R48]]); [PR 83](https://github.com/rachidsahane/ORI-STUDIO/pull/83) | Sonnet 5.5 (coder designs repair — operator deviation from [[R44]]) | `fix/ORI-T-0191-scrub-format-chars` | 2026-10-19, at dispatch |
 
 **Lead review owed** on ORI-T-0191 before merge (operator directed the coder to design from lock-table ticket text, not from a lead package).
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and **123** (ORI-T-0191). Claim **121 released**. ORI-T-0197 claim 122 remains designed, not dispatched. Next free identifier: **ORI-T-0199**.
+
+---
+
+## R48 recorded; PD-1 MCP registry tier 2; ORI-T-0195 widened; PR 83
+
+Written by the lead on 2026-10-19 under [[R31]] and [[R48]].
+
+**PD-1 (MCP registry).** Operator approved **`crates/ori-mcp/src/host/registry.rs | 2`** ([[R48]]). Spec: [PR 81](https://github.com/rachidsahane/ORI-STUDIO/pull/81) (squash trailer must be `Ticket: ORI-T-0194`, not ORI-T-0195). Gate 12 restatement stacked on PR 81, same ticket; merge together.
+
+**ORI-T-0195** (allocated PR 78): apply ORI-T-0187 repair 2 to `tools/report.rs` when S4 lands on the session branch. **Added scope:** S4 must call **`ori_memory::retrieval::is_blank_after_untrusted_scrub`** for the blank check (moved from ORI-T-0191 because `tools/report.rs` is absent at session HEAD; S4 exists only as `ops/handoff/ORI-T-0187-branch.patch`).
+
+**ORI-T-0191 ([PR 83](https://github.com/rachidsahane/ORI-STUDIO/pull/83), claim 123).** Scope now: `retrieval.rs` and scrub copies in `host/registry.rs` only. **Tier 2 merge** (registry path tier 2 per [[R48]]). Independent review in progress. **`tools/report.rs` → ORI-T-0195.**
+
+**Documentation pair:** [PR 80](https://github.com/rachidsahane/ORI-STUDIO/pull/80) (`spec/agents/CLAUDE.md` source) and [PR 82](https://github.com/rachidsahane/ORI-STUDIO/pull/82) (regenerated root `CLAUDE.md`, stacked on 80).
+
+**State after this section:** unchanged claims (20, 112, 117, 123). ORI-T-0197 package revised on PR 79 (34 tests). Next free identifier: **ORI-T-0199**.
