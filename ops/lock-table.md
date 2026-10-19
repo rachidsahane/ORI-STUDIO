@@ -2708,3 +2708,28 @@ Written by the lead under [[R31]] and [[R44]]. The operator asked for every chan
 Both carry a status line saying so. The lead's calls on the review, and the adopted plan, will be `ops/batch-12-plan.md`. The advisory secret scan (`scripts/secret-scan.sh`) found nothing in the tree or the history after both were staged.
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 121 (ORI-T-0194, integrated, review owed). The next free identifier is ORI-T-0195.
+
+---
+
+## 2026-10-19, batch 12 plan adopted; ORI-T-0197 (slice R1) designed
+
+Written by the lead (continuation session) from `ops/handoff/README.md` step 3, `ops/batch-12-plan-draft.md`, `ops/batch-12-plan-review.md`, and **The lead's calls on the batch 12 review**. Base: `f3d624b` on `claude/sweet-maxwell-jkaiie`.
+
+**Adopted plan:** `ops/batch-12-plan.md` (replaces draft status; draft and review remain historical).
+
+**Identifier allocations** (recorded here and on PR 78 comment for repair follow-ups):
+
+| Identifier | Purpose | Claim |
+|---|---|---|
+| ORI-T-0195 | Apply ORI-T-0187 repair 2 (`tools/report.rs`) | none (follow-up on PR 78) |
+| ORI-T-0196 | Apply ORI-T-0163 repair 2 (`watcher.rs`) | none (follow-up on PR 78) |
+| ORI-T-0197 | Batch 12 slice **R1**: document registry + shared ports | **122** (reserved at dispatch; not held until coder starts) |
+| ORI-T-0198 | **P-I:** migrated `create_product` / `products.import` precursor | none (allocate at dispatch before M0a) |
+
+| # | Ticket | Modules (declared scope) | Tier | Recorded |
+|---|---|---|---|---|
+| 122 | ORI-T-0197, batch 12 slice R1 | `crates/ori-flows/src/registry.rs`, `ports.rs`, `migrate/mod.rs` (stub), `tests/ori_t_0060_registry.rs`; queue `Cargo.toml`, `lib.rs`, `Cargo.lock` | 1 | 2026-10-19 |
+
+Package: `ops/tickets/ORI-T-0197-flows-registry.md` (**22** acceptance tests named). Fact-checked against `f3d624b` before finish (see plan fact-check table).
+
+**State after this section:** claims held unchanged (20, 112, 117, 121). ORI-T-0197 claim 122 is **designed, not dispatched**. Next free identifier: **ORI-T-0199**.
