@@ -2667,3 +2667,22 @@ The held claims are 20 (`.github/workflows/ci.yml`, `scripts/gates.sh`, `fixture
 - delete a removed server's keychain entry.
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 121. The next free identifier is ORI-T-0195.
+
+---
+
+## 2026-10-19, paused at the operator's request
+
+Written by the lead under [[R31]] and [[R44]]. Nothing is running. Two background jobs were stopped unfinished; neither had written anything to the repository.
+
+**ORI-T-0194 (claim 121, held), built and unreviewed.** The coder (Sonnet 5.5) committed `c7858ac`, `a5ba350` and `b8aef1c` on `feat/ORI-T-0194-mcp-registry` (`/home/user/wt/ORI-T-0194`, base `ecdcfab`), touching only the declared files. It reports 292 ori-mcp unit tests passing (35 new), clean clippy (native and Windows) and strict rustdoc, gate 13 passing, and every package mutation killed.
+- The lead read the core logic (the state checks, the fold, `refresh`, `add`, `remove`, `exposed`) against the package and re-ran `cargo test -p ori-mcp` in a clean copy at `b8aef1c`: 292 passed.
+- The five-lens review was stopped before it reported. On resume it is re-run from the start, and then the work is integrated.
+- The coder's full `scripts/gates.sh` run failed on gate 2, because the disk ran out (ENOSPC). The lead then freed about 12 GB of build output from integrated worktrees and finished proofs.
+
+**Batch 12 plan, not adopted yet.** The planner's draft (six per-ticket planners and a synthesis, read-only) and a four-reviewer review of it are in the lead's scratchpad. The review found two blocking items and about 48 should-fix items, with mostly "adopt with change" verdicts. The blocking items:
+- a repository remote can carry a credential into the log;
+- the seat check must sit in the one document writer.
+
+The lead's calls on the review are recorded in the stopped synthesis prompt, and will be restated when the plan is written to `ops/batch-12-plan.md`. Slice R1 (the document registry and the shared ports) is the only batch 12 slice that needs no operator answer.
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 121 (ORI-T-0194, awaiting review). The next free identifier is ORI-T-0195.
