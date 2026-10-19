@@ -2166,3 +2166,24 @@ All of them are decided in the revision, which is under a focused re-critique.
 Claims 115, 116 and 117 each add one line to `tools/mod.rs`, at a different place in alphabetical order. The lead resolves the adjacent lines when cherry-picking.
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115, 116 and 117. The next free identifier is ORI-T-0191 (ORI-T-0185 and ORI-T-0188 to ORI-T-0190 are allocated).
+
+## 2026-10-19, S9 dispatched on claim 118; S5 and S4 back
+
+**S5 (ORI-T-0186) is back:** commit 6822a80, scope `desk.rs` plus one `tools/mod.rs` line. The lead proved it in a clean `git archive` copy: fmt, clippy, doc, the ori-mcp tests (224 and 4 doctests) and the Windows compile check all exit 0. Its four-lens adversarial review is running.
+
+**S4 (ORI-T-0187) is back:** commits a1f545c and c509975, scope `report.rs` plus one `tools/mod.rs` line. The coder reported 15 tests, mutations m1 to m12 killed after a stale-build re-run it caught itself, and gates exit 0. The lead's clean-copy proof and its four-lens adversarial review are running.
+
+**S9 (ORI-T-0188):** the package was revised after its re-critique and is committed as `ops/tickets/ORI-T-0188-s9-plan-escalate.md`. Its scope is:
+- `tools/orchestration.rs` (new);
+- in `ports.rs`, `PortError::Denied` and the two desks with their value types;
+- in `server.rs`, one `Failure::of_error` arm and its failure-table row;
+- in `lib.rs`, doc lines;
+- in `tools/mod.rs`, one module line.
+
+No other open claim touches `ports.rs`, `server.rs` or `lib.rs`.
+
+| # | Ticket | Modules (declared scope) | Tier | Worktree, branch | Model | Recorded |
+|---|---|---|---|---|---|---|
+| 118 | ORI-T-0188, batch 10 slice S9 (`aicd_plan_submit`, `aicd_escalate`, `PlanDesk`, `EscalationDesk`, `PortError::Denied`) | `crates/ori-mcp/src/tools/orchestration.rs` (new); in `ports.rs` the `Denied` variant, the two desks, their value types, `use` lines, docs and new tests; in `server.rs` the `Denied` arm and its failure-table row; in `lib.rs` the `pub mod ports` doc lines; in `tools/mod.rs` one module line | 2 | `/home/user/wt/ORI-T-0188`, `feat/ORI-T-0188-plan-escalate` | Sonnet 5.5 | 2026-10-19 |
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115, 116, 117 and 118. The next free identifier is ORI-T-0191.
