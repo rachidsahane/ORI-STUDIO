@@ -2518,3 +2518,59 @@ The held claims are 20 (`.github/workflows/ci.yml`, `scripts/gates.sh`, `fixture
   The migrations' comments are compared byte for byte and stay as they are.
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator), 119 and 120. The next free identifier is ORI-T-0194.
+
+---
+
+## 2026-10-19, ORI-T-0189 integrated after a review and three lead-written repairs; claim 119 released; ORI-T-0193 widened
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**The review** (five lenses, 14 agents, two skeptics per finding; `review-0189-summary.txt`) found nothing blocking and confirmed four should-fix findings:
+- **F1.** Test 2 meant to pin JSON's `\u` escapes, but its payload held the two characters as raw UTF-8. A tool layer decodes a typed backslash-u sequence before it reaches the file, and the lead's own proof carried the same raw characters. Nothing in the suite tested a `\u` escape or a surrogate pair.
+- **F2.** Five of the thirteen field reads had no test where the old first-key reader would give another answer: both `escalation_id` reads, `trigger`, `answered_by` and `kind`.
+- **F3.** A fault in the lead's review rules, not in the code. The rules had every review copy build into the worktree's own `target/`. Cargo keys a workspace member's unit by its path relative to the workspace root, and a copy inside the target directory makes the dep-info record that copy's sources. So a worktree's `cargo test`, or a copy's mutation run, could run a binary built from another copy. No default-target number from that review counts as evidence. The lead's integration runs on its own target, which no copy used. From now on, every copy builds with a `CARGO_TARGET_DIR` inside itself, and a coder runs `cargo clean -p <crate>` in a worktree that reviewers used before its final checks. ORI-T-0185's review had the same fault (its F8).
+- **F4.** The doc said the depth bound bounds the work one payload can cause. It bounds only how deep the parser recurses; a flat payload of any size is parsed whole.
+
+There were twenty notes. Most were the lead's own wording, among them:
+- the `Projection::apply` sentence on the lock projection;
+- the claim that "every planned writer" serializes a derived struct;
+- a commit-message clause saying ori-runtime pins serde std-only.
+
+**Repair 1** (lead-written and proved in a clean copy; Haiku 5.5 reproduced it with the edit tool, byte-equal; `330f9ac`):
+- the escapes are now spelled with `\x5c`, so test 2 holds real escapes;
+- two tests pin the five reads;
+- test 4 refuses a form feed, a no-break space and a byte order mark around the object;
+- the docs say what the depth bound bounds, which refusals are serde_json's and which the visitor's, that no writer exists yet, that ORI-T-0193 is the operator's decision, and that both payload refusals are AICD §8.
+
+**The focused re-review of repair 1** (three lenses, 5 agents) confirmed one more fault of the lead's. The rewritten sentence called S9's contract "the only" writer contract and said the ticket events had none, yet S5's desk names `ticket.category_set` and S9's names `ticket.escalated`. It also recorded notes:
+- the mod.rs paragraph cited a heading that ORI-T-0025's report (pull request 55) does not have;
+- no test accepted tab, carriage return or line feed around the object;
+- an assertion in a new test fired with a message that named the wrong cause.
+
+**Repair 2** (same route, `6b0c077`) took all of them. A narrow truth check of repair 2 found nothing blocking or should-fix, and three sentences of the lead's that were not quite true:
+- serde_json refuses a top-level array on its `[` alone;
+- the JSON-object rule holds for a kind that reads a field;
+- the `session_id` half of a claim was cited to a passage on `module` only.
+
+**Repair 3** (same route, `3f09d8b`) corrected the three.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 119 | ORI-T-0189, the escalation and ticket projections read their payloads as JSON (Sonnet 5.5), with repairs 1 to 3 (Haiku 5.5, all three written by the lead) | Package fact-checked before dispatch (three blocking lead errors fixed). Review: 5 lenses, 14 agents, nothing blocking, 4 should-fix and 20 notes. Re-review of repair 1: 1 should-fix of the lead's and notes. Truth check of repair 2: 3 notes. Each repair proved by the lead in a clean copy with a private target, and reproduced byte for byte | Cherry-picked as `f5772ef`, `f9afe7d`, `c0cbd45`, `9651289` and `eaab143`; the first and fourth messages corrected (below). The diff of `crates/ori-store` and `Cargo.lock` equals the branch's `c2634d7..3f09d8b` byte for byte. fmt 0, clippy `-D warnings` 0, Windows clippy 0, strict doc 0, `cargo test --workspace --locked --no-fail-fast` 0 (**1794 passed**, 0 failed, 9 ignored), gate 13 over the five commits 0 |
+
+Claim 119 is released. Tier 1: the lead merges under ADR-0002 when the session's pull request does.
+
+**Two commit messages were corrected at integration**, before anything was pushed:
+- `744a6cf`'s body claimed ori-runtime pins serde std-only, but it pins `std` and `derive`;
+- `6b0c077` changes a test, so its type is `fix`, not `docs`.
+
+**ORI-T-0193 gains, from the review:**
+- **E-0008's scope.** Its recommendation names JSON-RPC crates only, while its answer says "workspace-wide". ori-store is the second crate, after ori-memory, to rely on the answer. A short ruling from the operator would close the friction ori-memory's manifest records.
+- **ori-broker's `keychain.rs:162-176`**, all of the paragraph, not only its first sentence. It also says that adding serde to ori-broker would be a new `new_dependency` escalation, which the reading applied here contradicts.
+- **ori-gates' `gate.rs:15-16`.** It says ori-gates "depends on nothing but `std`", which was already false (ori-core, ori-store) and is more so now.
+
+**Recorded for ORI-T-0070:**
+- Every event payload a desk writes must give each top-level key once. The ticket and escalation projections refuse a payload that repeats a key (`UnreadablePayload`), and such an event blocks every rebuild of its product. S5's `ticket.category_set` and S9's `ticket.escalated` leave their payloads open; S9's `escalation.raised` fixes serde.
+- A payload nested 128 levels deep or more, counting the top object, is refused too.
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 120 (ORI-T-0185, repair 1 under re-review). The next free identifier is ORI-T-0194.
