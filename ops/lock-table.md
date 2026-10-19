@@ -2733,3 +2733,27 @@ Written by the lead (continuation session) from `ops/handoff/README.md` step 3, 
 Package: `ops/tickets/ORI-T-0197-flows-registry.md` (**22** acceptance tests named). Fact-checked against `f3d624b` before finish (see plan fact-check table).
 
 **State after this section:** claims held unchanged (20, 112, 117, 121). ORI-T-0197 claim 122 is **designed, not dispatched**. Next free identifier: **ORI-T-0199**.
+
+---
+
+## R47 recorded; ORI-T-0194 review closed; ORI-T-0191 dispatched on claim 123
+
+Written by the lead on 2026-10-19 under [[R31]], [[R44]] and [[R47]].
+
+The operator answered three PR 78 escalations after reading decision briefs ([[R47]]):
+
+| Escalation | Answer |
+|---|---|
+| ORI-T-0190 | Known limit for merge; follow-up ticket after merge |
+| ORI-T-0191 | **Fix before PR 78 merges**; coder on `fix/ORI-T-0191-scrub-format-chars` |
+| ORI-T-0165 | Deferred until after PR 78 merge |
+
+**ORI-T-0194 (claim 121).** Independent review posted: [pullrequestreview-5574873291](https://github.com/rachidsahane/ORI-STUDIO/pull/78#pullrequestreview-5574873291). Nothing blocking. Registry lockout accepted; RISK_MAP host tier 1 pending PD-1. **Claim 121 is released** so ORI-T-0191 may edit `crates/ori-mcp/src/host/registry.rs`.
+
+| # | Ticket | Modules (declared scope) | Tier | Model | Branch | Recorded |
+|---|---|---|---|---|---|---|
+| 123 | ORI-T-0191, scrub Unicode format characters (S7 F17, S4 F8) | `crates/ori-memory/src/retrieval.rs`; every copy of the scrub predicate including `crates/ori-mcp/src/host/registry.rs`; the S4 blank check in `crates/ori-mcp/src/tools/report.rs` | per RISK_MAP for `retrieval.rs`; registry/report touch tier 2 paths | Sonnet 5.5 (coder designs repair — operator deviation from [[R44]]) | `fix/ORI-T-0191-scrub-format-chars` | 2026-10-19, at dispatch |
+
+**Lead review owed** on ORI-T-0191 before merge (operator directed the coder to design from lock-table ticket text, not from a lead package).
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and **123** (ORI-T-0191). Claim **121 released**. ORI-T-0197 claim 122 remains designed, not dispatched. Next free identifier: **ORI-T-0199**.
