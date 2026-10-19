@@ -66,6 +66,9 @@ pub mod evidence;
 /// The memory tools `aicd_context` and `aicd_search` (AICD §25). Tier 2.
 pub mod memory;
 
+/// The tools `aicd_plan_submit` and `aicd_escalate` (AICD §12). Tier 2.
+pub mod orchestration;
+
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
