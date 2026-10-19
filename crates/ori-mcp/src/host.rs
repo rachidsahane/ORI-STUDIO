@@ -16,7 +16,8 @@
 //! tier 2, on facts this module supplies. A defect in the registry's fold would
 //! widen what [`crate::scopes::ToolScopes::authorize_user_tool`] grants, so
 //! ORI-T-0194 was raised to tier 2 for that reason, as the backlog lets an agent
-//! raise a tier. The file's own row in `spec/RISK_MAP.md` is unchanged.
+//! raise a tier. This ticket changes neither that row of `spec/RISK_MAP.md` nor
+//! gate 12's list of tier 2 paths.
 //!
 //! # Where the registry sits
 //!
