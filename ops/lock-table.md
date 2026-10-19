@@ -2408,3 +2408,41 @@ The operator decides between three courses:
 Claim 117 stays held.
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 117 (repair 2 with the operator) and 118 (S9 under review). The next free identifier is ORI-T-0193.
+
+---
+
+## 2026-10-19, S9 reviewed; repair 1 dispatched on Sonnet after a fact-check of the lead's package; ORI-T-0192 widened; S7 and S5 green in CI
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**CI is green on `9db5490`**: all 17 checks, Windows tests included. Slices S7 and S5 are confirmed on every platform.
+
+**S9 (ORI-T-0188) review.** Five lenses, a fifth on whether ORI-T-0070 can implement the desk contracts. Two skeptics per finding, 20 agents (`review-0188-full.json`); resumed from cache after a container restart. Nothing is blocking. Seven findings are confirmed should-fix:
+- **F1.** The escalation desk's session-row clause reads as "whenever a session exists", and names no kind or target state.
+- **F2.** No test holds that a `Denied` whose reference does not resolve is answered `invalid`. A mutation that writes it anyway survives.
+- **F3.** No test passes an escalation desk's error, or a desk's `Invalid` on either tool, through a handler.
+- **F4.** `PlanDesk` "never assumes the server core's checks ran", yet never checks the role or the bound ticket.
+- **F5.** The plan row has no event kind, and the pointer to PD-2 names delivered work.
+- **F6.** The module doc misdescribes which controls the barrier replaces.
+- **F7.** It also implies the human queue shows evidence; its projection holds none.
+
+There are 24 notes. F15, F16, F22 and F23 are recorded; the rest are taken.
+
+**Repair 1 goes to a Sonnet coder working with the edit tool**, not to a Haiku coder running the lead's script. The repair adds several tests and touches two files' contracts, and the S4 classifier refusal showed the script route can be blocked.
+
+**The lead's package was fact-checked before dispatch** (two agents). It carried four errors that would have put falsehoods into the code:
+- the wrong S2 code for a coder naming a ticket other than its bound one (`claim_contradicts_session`, AICD §25, not `ticket_not_assigned`);
+- a five-field quote of DATA_MODEL's seven-field Plan row;
+- a false comparison with `escalation.raised`'s key order;
+- a fixed `why` that would be false for the new scope bounds.
+
+It also had ten smaller faults. All were corrected before dispatch.
+
+**ORI-T-0192 is widened** to own, besides its five items:
+- the plan row's payload key order;
+- how a submitted plan's row carries DATA_MODEL's `approved_by` and `approved_at`;
+- the escalation desk's session row: its event kind and the session's target state, since `AgentSession` has no suspended state.
+
+**Recorded for ORI-T-0070:** nothing checks that a declared path names a directory of the product. The lock table does path arithmetic only, so a path that does not exist is claimed as written, and that can block a later ticket that creates it. The engine's `PlanDesk` decides whether to check.
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 117 (repair 2 with the operator) and 118 (S9 repair 1). The next free identifier is ORI-T-0193.
