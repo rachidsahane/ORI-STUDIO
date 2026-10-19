@@ -13,6 +13,7 @@ R30–R44: one file each under `ops/rulings/` (see directory listing).
 | R47 | Three operator answers before PR 78 merge | `ops/rulings/R47-operator-answers-of-2026-10-19.md` |
 | R48 | PD-1 MCP host registry tier 2 | `ops/rulings/R48-operator-answers-of-2026-10-19-pd1-mcp-registry.md` |
 | R49 | ORI-T-0197 interim deviation; batch 12 Q7 yes | `ops/rulings/R49-operator-answers-of-2026-10-19-r1-deviation-q7.md` |
+| R50 | ORI-T-0199 `test_modified`; two ORI-T-0197 tests | `ops/rulings/R50-test-modifications-for-0199.md` |
 
 Decisions the lead made under the operator's standing rule 5: anything the specification already decides, the lead decides. Each names the document that decides it. A ruling that authorizes a deviation from a specification document is recorded here **and** the document is corrected in a specification PR in the same batch, under standing rule 6. A ruling is not a specification change; it is the record of how an existing specification was read.
 
