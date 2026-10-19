@@ -96,8 +96,14 @@
 //! it named for a hook it replaces, before that is there is refused, whatever
 //! it would reach (the installer is not modelled, and `follow_chain_to_managed_hook`
 //! says why); any other directory that does not exist yet, except the spool's
-//! future path (bullet (c) of that doc), means the link reaches nothing,
-//! though its text is still read and refused if that reading reaches a hook. A
+//! future path (bullet (c) of that doc), is read as git's process will find it
+//! if it is later made as a real one: the way is read physically, with the
+//! links before the missing directory followed where they stand and a `..` that
+//! climbs back to a directory that is there going on physically, and its text
+//! is read as a second look and refused if that reading reaches a hook
+//! (`hooks/L -> ../refs` with `L/remotes/../../hooks/post-merge` reaches
+//! `post-merge` before the first fetch makes `refs/remotes`, and every checkout
+//! after it would record a false `post-merge` event). A
 //! link to a same-named hook in some other directory (a team's
 //! shared hooks) is not this. A link that cannot be read, or an entry that
 //! cannot be looked at for a reason other than not being there, refuses the
@@ -113,13 +119,18 @@
 //! something different for each process, is refused
 //! ([`HooksError::HookLinkDependsOnProcess`]) whatever it reaches, because the
 //! installer's process cannot judge what git's will run: git runs a hook with
-//! its working directory at the worktree's root. Git also makes directories
-//! after the install and before it runs a hook (`logs/` at the first commit,
-//! `rebase-merge/` during a rebase, a worktree directory a checkout creates),
-//! so past a component that is not there the way is followed by its text, until
-//! a `..` climbs back to a directory that is there, and then physically again.
-//! It assumes that a directory made later is a real directory. That installation
-//! fails and writes nothing.
+//! its working directory at the worktree's root. Git also makes directories in
+//! `.git` after the install and before it runs a hook (`logs/` at the first
+//! commit, `rebase-merge/` during a rebase), so past a component that is not
+//! there the way is followed by its text, until a `..` climbs back to a
+//! directory that is there, and then physically again. It assumes that a
+//! directory made later is a real directory. The working tree is judged as it
+//! stands at the install, and a later checkout can make a link or a file where
+//! a way passes, so that it reaches a hook it did not reach then: the script's
+//! own check of the name it was run under keeps such a way from recording (the
+//! section on a script not run by git for its own event, below), and the next
+//! `install` or `status` refuses it. That installation fails and writes
+//! nothing.
 //!
 //! The installation is built so that a hook of someone else's is not lost
 //! to a failure or to a second installer running at the same time:
@@ -1113,25 +1124,27 @@ impl GitHooks {
     /// The entries of `ori-original/` that the installed scripts run, which are
     /// those named for a hook this installer replaces, are looked at too when
     /// `ori-original/` is a real directory (`install` and `status` refused it
-    /// otherwise):
-    /// each that is a link goes through the same two checks, the per-process
-    /// walk and then the chain, and a refusal names that entry. A link a first
-    /// install kept there was judged where it stood in the hooks directory, so it
-    /// passes again.
+    /// otherwise): each that is a link goes through the same two checks, the
+    /// per-process walk and then the chain, and a refusal names that entry. A
+    /// link a first install kept there was judged where it stood in the hooks
+    /// directory, so it passes again.
     ///
     /// A way that first fails at `ori-original/`, which the installer creates,
     /// or at an entry of it named for a hook it replaces, is refused whatever
     /// it would reach (`ori-original/../post-merge`; `M/post-merge` where `M`
     /// links to `ori-original/..`): what the install will make there is not
     /// modelled, and refusing fails closed. A way that first fails at any other
-    /// missing directory reaches nothing, but its text is still read and the
-    /// link is refused if that reading reaches a hook, an over-refusal kept as
-    /// a second look (`follow_chain_to_managed_hook` gives both rules, and the
-    /// spool's future path, which is not modelled). A failure to look at
-    /// anything that is there, other than a missing entry, refuses the
-    /// installation as an IO error ([`HooksError::Io`]) and does not pass it: a
-    /// check that could not be made is not a check that found nothing
-    /// (AICD §14).
+    /// missing directory is read physically, as git's process will find it if
+    /// that directory is later made as a real one, and its text is read as a
+    /// second look that refuses the link only if that reading reaches a hook,
+    /// an over-refusal kept because it fails closed
+    /// (`follow_chain_to_managed_hook` gives both readings, and the spool's
+    /// future path, which is not modelled). A physical reading that meets more
+    /// than `LINK_HOPS_CAP` links refuses the installation as an IO error. A
+    /// failure to look at anything that is there, other than a missing entry,
+    /// refuses the installation as an IO error ([`HooksError::Io`]) and does
+    /// not pass it: a check that could not be made is not a check that found
+    /// nothing (AICD §14).
     fn refuse_if_a_link_reaches_a_managed_hook(&self, hooks_dir: &Path) -> Result<(), HooksError> {
         let listing = match fs::read_dir(hooks_dir) {
             Ok(listing) => listing,
@@ -1747,19 +1760,33 @@ fn way_enters_what_the_install_creates(
 ///   repository with no foreign hook never gets one); a link through a missing
 ///   hook-named entry of it is refused on later installs too. No one writes
 ///   such a link, since the directory is Ori's and is not there yet.
-/// - (b) Any other way that fails first at a directory that is not there
-///   reaches nothing on that way, except the spool's future path, bullet (c).
-///   It is still read by its text
-///   (`lexically_normal`) and refused if that reading reaches a hook
-///   (`nowhere/../post-merge`). That is an over-refusal, kept as defense in
-///   depth because it fails closed. What the text lands on is looked at: if it
-///   is the hooks directory, the link reaches a hook as before; if it is a
-///   directory that is there, the walk goes on from it and a link in it is
-///   followed (`nowhere/../../shared/relay`, where `shared/relay` links to a
-///   hook), though that directory is where the text puts the way and not
-///   necessarily where the way goes; if it is not there, the chain ends, as
-///   does a chain that ends at an entry that is not there (a dangling link
-///   reaches nothing).
+/// - (b) A way that fails first at a directory that is not there, and not at
+///   what the install creates, is read as git's process will find it if that
+///   directory is later made as a real one (`walk_the_way`): links before the
+///   missing component followed where they stand, names after it taken by
+///   their text, and a `..` back to a directory that is there going on
+///   physically. Its text (`lexically_normal`) is still read as a second look
+///   at that hop, and refused only if it lands on a hook's place: an
+///   over-refusal kept because it fails closed. The spool's future path is
+///   the exception, bullet (c). Three ways show what each reading does:
+///   - `nowhere/../post-merge`: both readings land on the hooks directory;
+///   - `hooks/L -> ../refs` with `L/remotes/../../hooks/post-merge`: only the
+///     physical reading does, since the text lands on `hooks/hooks`. Git makes
+///     `refs/remotes` at the first fetch, and from then on every checkout
+///     would run the engine's script under the name `post-checkout`;
+///   - `hooks/L -> ../refs` with `L/../nowhere/../post-merge`: only the text's
+///     second look does, since the physical landing is `.git`.
+///
+///   What the readings land on is looked at: the walk goes on from the
+///   physical landing when it is a directory that is there, and a link in it
+///   is followed, since that is the way's real directory; else from the text's
+///   landing, when that is a directory that is there (`nowhere/../../shared/relay`,
+///   where `shared/relay` links to a hook), though that directory is where the
+///   text puts the way and not necessarily where the way goes. Where neither
+///   is there, the chain ends, as does a chain that ends at an entry that is
+///   not there (a dangling link reaches nothing). A physical reading that
+///   reads more than `LINK_HOPS_CAP` links is an error and not a no, and
+///   refuses the install.
 /// - (c) The spool directory is not modelled. `install` creates it, with any
 ///   missing ancestors, after this check. A link whose way runs through the
 ///   spool's future path before the first install is read by its text only,
@@ -1771,17 +1798,24 @@ fn way_enters_what_the_install_creates(
 ///   as the installer's own process sees it, which is not what git's process
 ///   sees when it runs the hook. Such a link is refused before this walk, by
 ///   `way_enters_a_per_process_directory`
-///   ([`HooksError::HookLinkDependsOnProcess`]). Git makes directories after the
-///   install and before it runs a hook (`logs/` at the first commit,
-///   `rebase-merge/` during a rebase, a worktree directory a checkout creates),
-///   so a way that does not exist now may reach `/proc` then: past a missing
-///   component that walk follows the text of the way until a `..` climbs back to
-///   a directory that is there, and walks on physically from it. It assumes a
-///   directory made later is a real directory. The spool's future path is one
-///   such directory, and bullet (c)'s limit does not apply to this rule. The
+///   ([`HooksError::HookLinkDependsOnProcess`]). Git makes directories in `.git`
+///   after the install and before it runs a hook (`logs/` at the first commit,
+///   `rebase-merge/` during a rebase), so a way that does not exist now may
+///   reach `/proc` then: past a missing component that walk follows the text of
+///   the way until a `..` climbs back to a directory that is there, and walks on
+///   physically from it. It assumes a directory made later is a real directory.
+///   The working tree is judged as it stands at the install, and a later
+///   checkout can make a link or a file where a way passes, so that it reaches
+///   a hook it did not reach then. The script's own check of the name it was
+///   run under keeps such a way from recording (the module doc's section on a
+///   script not run by git for its own event), and the next `install` or
+///   `status` refuses it. The spool's future path is one such directory, and
+///   bullet (c)'s limit does not apply to this rule. The
 ///   text reading of bullet (b) still resolves a `/proc/self` as the
 ///   installer's own process does, which is not git's; it does not decide a way
-///   of this kind, because the per-process walk has refused it first.
+///   of this kind, because the per-process walk has refused it first. The
+///   physical reading of bullet (b) does not resolve such a directory either: it
+///   stops before it, and the way falls back to its text.
 ///
 /// A link whose target cannot exist, because it goes through a regular file or
 /// carries a name too long for the file system, is not a missing entry: it
@@ -1789,9 +1823,10 @@ fn way_enters_what_the_install_creates(
 /// accepted. It holds where the operating system's own resolution meets the
 /// regular file. Behind a missing directory, a way through a regular file is
 /// read as reaching nothing, and the link passes, unless that way first fails
-/// at what the install creates, rule (a), or its text reaches a hook, rule (b).
-/// On Windows, opening a path through a regular file reports it as not found,
-/// so such a way is always read this way there.
+/// at what the install creates, rule (a), or either reading of rule (b) reaches
+/// a hook. The physical reading treats a file with steps after it as a
+/// directory that is not there. On Windows, opening a path through a regular
+/// file reports it as not found, so such a way is always read this way there.
 ///
 /// # Errors
 ///
@@ -1827,12 +1862,11 @@ fn follow_chain_to_managed_hook(
             Ok(directory) => (directory, true),
             // A directory of the way is not there. If the way first fails at
             // what this install creates, the link is refused, whatever it
-            // would reach: what the install makes there is not modelled.
-            // Otherwise the way reaches nothing, but its text is read as a
-            // second look that fails closed, and if that reading is a
-            // directory that is there, the walk goes on from it. That
-            // directory is where the text puts the way, which is not always
-            // where the way goes (a `..` after a link).
+            // would reach. Otherwise the way is read physically
+            // (`walk_the_way`), and its text is read as a second look that
+            // refuses only at a hook's place. The walk goes on from the
+            // physical landing when it is a directory that is there, else
+            // from the text's.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if way_enters_what_the_install_creates(
                     parent,
@@ -1842,10 +1876,37 @@ fn follow_chain_to_managed_hook(
                 )? {
                     return Ok(Some(written));
                 }
+                // The way as git's process will find it, if every directory made
+                // after the install is a real one: links before the missing
+                // component followed where they stand, names past it taken by
+                // their text, and a `..` that climbs back to a directory that is
+                // there going on physically.
+                let physical = match walk_the_way(parent, fold_case)? {
+                    WayEnd::Directory(directory) => Some(directory),
+                    WayEnd::TooManyLinks => {
+                        return Err(io::Error::other(format!(
+                            "more than {LINK_HOPS_CAP} links in the way {}",
+                            parent.display()
+                        )));
+                    }
+                    WayEnd::PerProcess(_) | WayEnd::Elsewhere => None,
+                };
+                // The text's reading, kept as a second look that fails closed:
+                // its landing is still refused if it is a hook's place.
                 let lexical = lexically_normal(parent);
-                match existing_directory(&lexical)? {
-                    Some(directory) => (directory, true),
-                    None => (lexical, false),
+                let text = existing_directory(&lexical)?;
+                if names_a_managed_hook(&name, fold_case)
+                    && is_same_directory(
+                        text.as_deref().unwrap_or(&lexical),
+                        hooks_dir,
+                        canonical_hooks,
+                    )
+                {
+                    return Ok(Some(written));
+                }
+                match (physical, text) {
+                    (Some(directory), _) | (None, Some(directory)) => (directory, true),
+                    (None, None) => (lexical, false),
                 }
             }
             Err(error) => return Err(error),
@@ -1917,15 +1978,27 @@ fn is_per_process_directory(directory: &Path, fold_case: bool) -> bool {
     }
 }
 
-/// The per-process directory the way `path` enters, if it enters one,
-/// followed one component at a time, physically while every directory is
-/// there and by its text past the first that is not: AICD §13.
+/// Where `walk_the_way` stopped.
+enum WayEnd {
+    /// It entered this per-process directory.
+    PerProcess(PathBuf),
+    /// Its steps ran out in this directory, which is there; the path is canonical.
+    Directory(PathBuf),
+    /// Its steps ran out past a component that is not there, or at a file.
+    Elsewhere,
+    /// It read more than `LINK_HOPS_CAP` links.
+    TooManyLinks,
+}
+
+/// Walks the way `path` one component at a time, physically while every
+/// directory is there and by its text past the first that is not, and says
+/// where it stopped (`WayEnd`): AICD §13.
 ///
 /// It walks as `way_enters_what_the_install_creates` does, with the same
 /// steps, and starts at the canonical root `path` begins with, or at the
 /// canonical current directory. After every change of the directory the walk
 /// stands in (the start, a root, a `..`, a name entered, whether it is there
-/// or not) it asks `is_per_process_directory`, and on a yes returns that
+/// or not) it asks `is_per_process_directory`, and on a yes stops with that
 /// directory. So the walk stops on entering such a directory, before it reads
 /// any link inside it: `/proc/self` and `/proc/self/cwd` are never read or
 /// followed, because what they lead to is what this process is, and not what
@@ -1942,62 +2015,57 @@ fn is_per_process_directory(directory: &Path, fold_case: bool) -> bool {
 /// - a directory becomes the directory the walk stands in;
 /// - a name that is not there, and a file that has more steps after it, are
 ///   where the walk leaves the file system (below); a file at the last step ends
-///   the way: `Ok(None)`.
+///   the way, at `WayEnd::Elsewhere`.
 ///
 /// **Past a component that is not there.** Git makes directories after the
-/// install and before it runs a hook: `logs/` at the first commit,
-/// `rebase-merge/` during every rebase, a worktree directory that a checkout
-/// creates. A way that does not exist now can therefore reach `/proc` then
-/// (`../logs/` followed by enough `../` and `proc/self/cwd/...`), and the walk
-/// does not stop at it. It keeps the directory it stands in as a path, with a
-/// count of the trailing names of it that are not there. A name met while that
-/// count is above 0 is added to the path, and the count grows; nothing is looked
-/// at, because its parent is not there, and so no link is read. A `..` with the
-/// count above 0 removes the last name by its text and lowers the count, since a
-/// directory git makes is a real directory and `..` from it returns where it was;
-/// at 0 it is the physical parent. A root restarts physically. A file that has
-/// steps after it is treated like a missing directory: it could be replaced by
-/// one. The walk assumes that a directory made later is a real directory: that
-/// is the limit of this rule. The spool's future path is one such directory.
+/// install and before it runs a hook: `logs/` at the first commit, and
+/// `rebase-merge/` during every rebase, both in `.git`. A way that does not
+/// exist now can therefore reach `/proc` then (`../logs/` followed by enough
+/// `../` and `proc/self/cwd/...`), and the walk does not stop at it. It keeps
+/// the directory it stands in as a path, with a count of the trailing names of
+/// it that are not there. A name met while that count is above 0 is added to
+/// the path, and the count grows; nothing is looked at, because its parent is
+/// not there, and so no link is read. A `..` with the count above 0 removes
+/// the last name by its text and lowers the count, since a directory git makes
+/// is a real directory and `..` from it returns where it was; at 0 it is the
+/// physical parent. A root restarts physically. A file that has steps after it
+/// is treated like a missing directory: it could be replaced by one. The walk
+/// assumes that a directory made later is a real directory: that is the limit
+/// of this rule. The spool's future path is one such directory. The working
+/// tree is judged as it stands at the install, and a later checkout can put a
+/// link or a file where a way passes, and make it reach a hook it did not
+/// reach then. The script's own check of the name it was run under keeps such
+/// a way from recording (the module doc's section on a script not run by git
+/// for its own event), and the next `install` or `status` refuses it.
 ///
-/// The walk ends with `Ok(None)` when the steps run out, and when more than
-/// `LINK_HOPS_CAP` links have been read. That is not an error: no process can
-/// follow such a way. `follow_chain_to_managed_hook` reads a chain of more than
-/// `LINK_HOPS_CAP` final hops as no, and a loop it meets while resolving a
-/// directory as an IO error, which refuses the install. The walk reads both as
-/// no, because the chain check that follows refuses the second. The cap counts
-/// every link read and none is read past a missing component, so the walk always
-/// ends (`L -> missing/../L` reaches the cap).
-///
-/// What it does not recognise:
-///
-/// - a procfs or fdescfs mounted anywhere else, or bind-mounted, is not
-///   recognised. An ordinary user can make one: FUSE (`fusermount` is setuid)
-///   and unprivileged user namespaces let a user mount a per-process file
-///   system, or bind-mount `/proc`, in directories of their own;
-/// - Windows has no such directory, and a drive letter that differs for each
-///   logon session (`subst`, a mapped drive) in an absolute target is not
-///   judged;
-/// - the variant links of DragonFly BSD are not judged;
-/// - git run in another mount namespace is outside the model.
+/// The walk ends in one of four ways. It stops at `WayEnd::PerProcess` on
+/// entering a per-process directory. Its steps run out at `WayEnd::Directory`
+/// in a directory that is there: every directory it entered was there, so the
+/// path is canonical. They run out at `WayEnd::Elsewhere` past a component that
+/// is not there (the count above is not 0), or at a file at the last step.
+/// More than `LINK_HOPS_CAP` links read end it at `WayEnd::TooManyLinks`. That
+/// is not an error here, because no process can follow such a way, and each
+/// caller says what it makes of it. The cap counts every link read and none is
+/// read past a missing component, so the walk always ends (`L ->
+/// missing/../L` reaches the cap).
 ///
 /// # Errors
 ///
 /// Anything other than a missing entry or a name under a file is returned, and
 /// the caller refuses the installation (AICD §14): a way that could not be
 /// looked at is not a way that was found to enter nothing.
-fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Result<Option<PathBuf>> {
+fn walk_the_way(path: &Path, fold_case: bool) -> io::Result<WayEnd> {
     let mut pending: VecDeque<Step> = VecDeque::new();
     put_steps_in_front(&mut pending, path);
     let mut current = match pending.front() {
         Some(Step::Root(_)) => match pending.pop_front() {
             Some(Step::Root(root)) => fs::canonicalize(root)?,
-            _ => return Ok(None),
+            _ => return Ok(WayEnd::Elsewhere),
         },
         _ => fs::canonicalize(std::env::current_dir()?)?,
     };
     if is_per_process_directory(&current, fold_case) {
-        return Ok(Some(current));
+        return Ok(WayEnd::PerProcess(current));
     }
     // The trailing names of `current` that are not there. It is 0 while the
     // walk is physical, and `current` is then canonical.
@@ -2027,7 +2095,7 @@ fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Resul
                     Ok(metadata) if metadata.file_type().is_symlink() => {
                         hops += 1;
                         if hops > LINK_HOPS_CAP {
-                            return Ok(None);
+                            return Ok(WayEnd::TooManyLinks);
                         }
                         let target = fs::read_link(&candidate)?;
                         put_steps_in_front(&mut pending, &target);
@@ -2041,13 +2109,13 @@ fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Resul
                         // already the path, up to case, which the question
                         // folds.
                         if is_per_process_directory(&candidate, fold_case) {
-                            return Ok(Some(candidate));
+                            return Ok(WayEnd::PerProcess(candidate));
                         }
                         current = fs::canonicalize(&candidate)?;
                     }
                     // A file at the last step ends the way; with steps after
                     // it, it is read like a directory that is not there.
-                    Ok(_) if pending.is_empty() => return Ok(None),
+                    Ok(_) if pending.is_empty() => return Ok(WayEnd::Elsewhere),
                     Ok(_) => {
                         current = candidate;
                         missing_depth = 1;
@@ -2066,10 +2134,51 @@ fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Resul
             }
         }
         if is_per_process_directory(&current, fold_case) {
-            return Ok(Some(current));
+            return Ok(WayEnd::PerProcess(current));
         }
     }
-    Ok(None)
+    if missing_depth == 0 {
+        Ok(WayEnd::Directory(current))
+    } else {
+        Ok(WayEnd::Elsewhere)
+    }
+}
+
+/// The per-process directory the way `path` enters, if it enters one: AICD §13.
+///
+/// The walk is `walk_the_way`, which the chain check's physical reading shares;
+/// its doc says how the way is followed, and why the walk stops on entering
+/// such a directory before it reads any link inside it. The answer is `Some`
+/// only where the walk stopped in one. A way whose steps run out, or that
+/// meets a file at its last step, enters none, and neither does a way that
+/// reads more than `LINK_HOPS_CAP` links. That is not an error: no process can
+/// follow such a way. `follow_chain_to_managed_hook` reads a chain of more than
+/// `LINK_HOPS_CAP` final hops as no, and a loop it meets while resolving a
+/// directory as an IO error, which refuses the install. This question reads
+/// both as no, because the chain check that follows refuses the second.
+///
+/// What it does not recognise:
+///
+/// - a procfs or fdescfs mounted anywhere else, or bind-mounted, is not
+///   recognised. An ordinary user can make one: FUSE (`fusermount` is setuid)
+///   and unprivileged user namespaces let a user mount a per-process file
+///   system, or bind-mount `/proc`, in directories of their own;
+/// - Windows has no such directory, and a drive letter that differs for each
+///   logon session (`subst`, a mapped drive) in an absolute target is not
+///   judged;
+/// - the variant links of DragonFly BSD are not judged;
+/// - git run in another mount namespace is outside the model.
+///
+/// # Errors
+///
+/// Anything other than a missing entry or a name under a file is returned, and
+/// the caller refuses the installation (AICD §14): a way that could not be
+/// looked at is not a way that was found to enter nothing.
+fn way_enters_a_per_process_directory(path: &Path, fold_case: bool) -> io::Result<Option<PathBuf>> {
+    Ok(match walk_the_way(path, fold_case)? {
+        WayEnd::PerProcess(directory) => Some(directory),
+        WayEnd::Directory(_) | WayEnd::Elsewhere | WayEnd::TooManyLinks => None,
+    })
 }
 
 enum Plan {
@@ -5312,6 +5421,187 @@ mod tests {
                 .filter(|status| status.hook != GitHook::PrePush)
                 .all(|status| !status.chains_to_original)
         );
+    }
+
+    // ---- ORI-T-0185: a way past a missing directory is read physically ----
+
+    /// A repository skeleton with the directories these tests link through:
+    /// `.git/hooks` and `.git/refs`.
+    #[cfg(unix)]
+    fn repository_with_hooks_and_refs(scratch: &Scratch) -> (PathBuf, PathBuf, PathBuf) {
+        let (repo, spool) = skeleton(scratch);
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::create_dir_all(repo.join(".git").join("refs")).unwrap();
+        (repo, spool, hooks_dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_a_way_past_a_directory_git_makes_later_is_read_physically() {
+        // Layout (ii). `L -> ../refs`, and `refs/remotes` is not there until
+        // the first `git fetch`. Read by its text, `L/remotes/../../hooks`
+        // lands on `hooks/hooks`; read as git's process will find it once
+        // `refs/remotes` exists, `L` is `.git/refs`, the first `..` is
+        // `.git/refs` again and the second is `.git`: the hooks directory.
+        let scratch = Scratch::new("physical-ii");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        let written = "L/remotes/../../hooks/post-merge";
+        std::os::unix::fs::symlink(written, hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new(written),
+            &["L", "post-checkout"],
+        );
+
+        // Layout (i). `.git/y -> objects/info`, and `.git/logs` is not there
+        // until the first commit. The text of the way leaves `.git` for the
+        // working tree; the physical reading climbs out of `objects/info` to
+        // `.git`, and then into the hooks directory.
+        let scratch = Scratch::new("physical-i");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        fs::create_dir_all(repo.join(".git").join("objects").join("info")).unwrap();
+        std::os::unix::fs::symlink("objects/info", repo.join(".git").join("y")).unwrap();
+        let written = "../logs/../y/../../hooks/post-merge";
+        std::os::unix::fs::symlink(written, hooks_dir.join("post-checkout")).unwrap();
+        assert!(!repo.join(".git").join("logs").exists());
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new(written),
+            &["post-checkout"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_a_way_past_a_missing_directory_goes_on_from_its_physical_landing() {
+        // The text of `L/remotes/../../relay` lands on `hooks/relay`, which is
+        // not there; the physical landing is `.git`, which holds the relay.
+        let scratch = Scratch::new("physical-landing");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        std::os::unix::fs::symlink("hooks/post-merge", repo.join(".git").join("relay")).unwrap();
+        assert!(!hooks_dir.join("relay").exists());
+        let written = "L/remotes/../../relay";
+        std::os::unix::fs::symlink(written, hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new(written),
+            &["L", "post-checkout"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_a_physical_reading_that_meets_a_loop_refuses_as_an_io_error() {
+        // The text of the way lands on `hooks/refs/loop`, which is not there,
+        // so only the physical reading meets the loop at `.git/refs/loop`.
+        let scratch = Scratch::new("physical-loop");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        std::os::unix::fs::symlink("loop", repo.join(".git").join("refs").join("loop")).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        std::os::unix::fs::symlink("L/remotes/../../refs/loop/post-merge", &link).unwrap();
+        assert!(!hooks_dir.join("refs").exists());
+
+        let error = GitHooks::new(&repo, &spool).unwrap().install().unwrap_err();
+        match &error {
+            HooksError::Io { path, source } => {
+                assert_eq!(path, &link);
+                assert!(
+                    source.to_string().contains("links in the way"),
+                    "the error does not name the cap: {source}"
+                );
+            }
+            other => panic!("expected an IO error naming the link, got {other}"),
+        }
+        assert_nothing_written(&repo, &spool, &["L", "post-checkout"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_the_chain_check_reads_layout_ii_physically() {
+        let scratch = Scratch::new("physical-unit");
+        let (_, _, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        let written = "L/remotes/../../hooks/post-merge";
+        let link = hooks_dir.join("post-checkout");
+        std::os::unix::fs::symlink(written, &link).unwrap();
+        let canonical = fs::canonicalize(&hooks_dir).unwrap();
+        let reached = follow_chain_to_managed_hook(&hooks_dir, &canonical, &link, false).unwrap();
+        assert_eq!(reached, Some(PathBuf::from(written)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_the_text_reading_still_refuses_a_landing_on_the_hooks_directory() {
+        // The physical landing of `L/../nowhere/..` is `.git`, which holds no
+        // hook; its text lands on `.git/hooks`.
+        let scratch = Scratch::new("text-second-look");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        let written = "L/../nowhere/../post-merge";
+        std::os::unix::fs::symlink(written, hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new(written),
+            &["L", "post-checkout"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_a_way_whose_physical_reading_ends_past_a_missing_name_goes_on_from_its_text() {
+        // The physical reading of `L/../sub` ends at `.git/sub`, which is not
+        // there; the text lands on `.git/hooks/sub`, which holds the relay.
+        let scratch = Scratch::new("text-landing");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        fs::create_dir_all(hooks_dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        std::os::unix::fs::symlink("../post-merge", hooks_dir.join("sub").join("relay")).unwrap();
+        assert!(!repo.join(".git").join("sub").exists());
+        let written = "L/../sub/relay";
+        std::os::unix::fs::symlink(written, hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new(written),
+            &["L", "post-checkout", "sub"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_a_text_landing_on_a_loop_refuses_as_an_io_error() {
+        // The physical reading of `L/../nowhere/../loopdir` climbs back from
+        // the missing `.git/nowhere` and ends at `.git/loopdir`, which is not
+        // there. The text lands on `hooks/loopdir`, a loop: the text reading's
+        // own error path. The link `loopdir` itself passes the scan, like the
+        // other kept loop links.
+        let scratch = Scratch::new("text-loop");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        std::os::unix::fs::symlink("loopdir", hooks_dir.join("loopdir")).unwrap();
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        let link = hooks_dir.join("post-checkout");
+        std::os::unix::fs::symlink("L/../nowhere/../loopdir/x", &link).unwrap();
+        assert!(!repo.join(".git").join("loopdir").exists());
+
+        let error = GitHooks::new(&repo, &spool).unwrap().install().unwrap_err();
+        match &error {
+            HooksError::Io { path, .. } => assert_eq!(path, &link),
+            other => panic!("expected an IO error naming the link, got {other}"),
+        }
+        assert_nothing_written(&repo, &spool, &["L", "loopdir", "post-checkout"]);
     }
 
     // ---- the scripts, run by a real shell and by real git ----
