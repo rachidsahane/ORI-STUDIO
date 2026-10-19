@@ -40,7 +40,7 @@
 //!   S->>H: call(db, BoundCall, arguments)
 //!   H->>B: every text, and the declared scope
 //!   alt an argument the handler rejects
-//!     B-->>H: a blank text, a path that is not a module path, a quote, or a scope out of bounds
+//!     B-->>H: a blank text, a path that is not a module path, or a quote
 //!     H-->>S: Port Invalid, with the field
 //!   else typed values
 //!     B-->>H: SanitizedField and ModulePath
@@ -114,10 +114,12 @@
 //! A text over its bound is `Unavailable` and a scope outside its bounds is
 //! `Invalid`, for a reason each. A text is cut by the barrier, and storing less
 //! than was sent must fail closed. A path is never cut, and an out-of-bounds list
-//! follows the evidence count, which is `Invalid`. The handler counts the scope's
+//! follows the evidence count, which is `Invalid`. S2's check 6 refuses all three
+//! first (the catalogue's schema, `mcp.tool_refused`, `invalid_arguments`), so
+//! they are reachable only by a direct call. There the handler counts the scope's
 //! entries and their characters itself, with the catalogue's own bounds
-//! (`WHY_SCOPE_BOUNDS` is the fixed sentence), so none of the three cases is
-//! reachable through S2.
+//! (`WHY_SCOPE_BOUNDS` is the fixed sentence), and that count is what holds the
+//! bound.
 //!
 //! **The declared scope is read strictly, and a quote is refused (D4).** Each
 //! entry goes through `ori_memory::scope::ModulePath::parse`, which refuses an
@@ -128,20 +130,22 @@
 //! scope and would refuse every memory call of that coder. Any such entry is
 //! `Invalid { field: "declared_scope" }`, with no index and none of the entry's
 //! text. The entries keep their order and their duplicates: the handler passes
-//! them through unchanged. `LockTable::claim` takes an `ori_core::types::Scope`,
-//! and `Scope::new` trims each path, strips trailing `/` characters, collapses
-//! duplicates and sorts, so the agent's order and duplicates never reach the
-//! table. Nothing checks that a declared path names a directory of the product,
-//! because the lock table does path arithmetic only. A path that does not exist
-//! is claimed as written, and that can block a later ticket that creates it. This
-//! is recorded for ORI-T-0070 in `ops/lock-table.md`.
+//! them through in order, duplicates kept, each as `ModulePath::parse` gives it
+//! (one trailing `/` dropped). `LockTable::claim` takes an
+//! `ori_core::types::Scope`, and `Scope::new` trims each path, strips trailing
+//! `/` characters, collapses duplicates and sorts, so the agent's order and
+//! duplicates never reach the table. Nothing checks that a declared path names a
+//! directory of the product, because the lock table does path arithmetic only. A
+//! path that does not exist is claimed as written, and that can block a later
+//! ticket that creates it. This is recorded for ORI-T-0070 in `ops/lock-table.md`.
 //!
 //! **The trigger is the catalogue's own constant.** It is matched against
 //! [`crate::tools::ESCALATION_TRIGGERS`] and handed to the desk as that array's
 //! `&'static str`, never the agent's string. Anything else is `Invalid`, which
 //! S2's schema makes unreachable. [`crate::tools::ESCALATION_TRIGGERS`] and
 //! `ori-orchestrator`'s `Trigger` are not pinned to each other here:
-//! `ori-engine` is the one crate that sees both, and ORI-T-0070 is to pin them.
+//! `ori-engine` is to be the one crate that sees both, and ORI-T-0070 is to pin
+//! them.
 //!
 //! **A refusal of the desk passes through unchanged.** The handler maps no
 //! `PortError`: `?` hands it to S2, which records and answers it by its failure
@@ -469,7 +473,7 @@ fn evidence(value: Option<Value>) -> Result<Vec<EscalationEvidence>, HandlerErro
 ///
 /// # Examples
 ///
-/// The engine registers it with its own desk.
+/// The engine is to register it with its own desk.
 ///
 /// ```no_run
 /// use ori_mcp::ports::PlanDesk;
@@ -558,7 +562,7 @@ impl ToolHandler for PlanSubmitHandler {
 ///
 /// # Examples
 ///
-/// The engine registers it with its own desk.
+/// The engine is to register it with its own desk.
 ///
 /// ```no_run
 /// use ori_mcp::ports::EscalationDesk;
@@ -1477,6 +1481,38 @@ mod tests {
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].question, "\u{fffd}\u{fffd}");
         assert_eq!(kinds(&world.rows_since(tip)), ["mcp.tool_called"]);
+
+        // The evidence entries are judged the same way: a `what` of VT and FF is
+        // white space raw, and not blank once sanitized, so the entry reaches
+        // the desk with both replaced.
+        let (mut world, seen) = world_ok("blank-sanitized-evidence", Role::Lead, None);
+        let tip = world.tip();
+
+        let reply = world.call(
+            "aicd_escalate",
+            escalate_arguments(
+                "security",
+                "what now",
+                "do this",
+                &json!([finding(raw, "crates/a")]),
+            ),
+        );
+        let text = assert_success(&reply);
+        assert_eq!(
+            text,
+            format!(
+                "escalation {} opened for ticket {}; session suspended: false\n",
+                id("ESCALATIONONE"),
+                ticket_t()
+            )
+        );
+        let received = seen.escalations();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            received[0].evidence,
+            [("\u{fffd}\u{fffd}".to_owned(), "crates/a".to_owned())]
+        );
+        assert_eq!(kinds(&world.rows_since(tip)), ["mcp.tool_called"]);
     }
 
     // -------------------------------------------------------------------
@@ -1783,11 +1819,14 @@ mod tests {
         // The catalogue's bounds on the scope, checked again by the handler: no
         // entry, more than 64 entries, an entry of more than 256 characters. S2's
         // schema refuses all three first, so only a direct call reaches them.
+        // The entry bound counts characters, not bytes: the entry is built from a
+        // two-byte character, so it is 257 characters and 507 bytes.
         let sixty_five: Vec<Value> = (0..65)
             .map(|index| json!(format!("crates/m{index}")))
             .collect();
-        let over_long = format!("crates/{}", "a".repeat(250));
+        let over_long = format!("crates/{}", "\u{e9}".repeat(250));
         assert_eq!(over_long.chars().count(), 257);
+        assert_eq!(over_long.len(), 507);
         for bad in [
             json!({"plan": "p", "declared_scope": []}),
             json!({"plan": "p", "declared_scope": sixty_five}),
@@ -2005,12 +2044,15 @@ mod tests {
         assert_eq!(received[0].evidence, [(what, found_at)]);
 
         // The scope's bounds are inclusive: 64 entries, and an entry of 256
-        // characters, reach the desk whole.
+        // characters, reach the desk whole. The entry bound counts characters,
+        // not bytes: the entry is built from a two-byte character, so it is 256
+        // characters and 505 bytes, and a byte count would refuse it.
         let (mut world, seen) = world_ok("at-bound-scope", Role::Coder, Some(ticket_t()));
         let tip = world.tip();
         let sixty_four: Vec<String> = (0..64).map(|index| format!("crates/m{index}")).collect();
-        let longest = format!("crates/{}", "a".repeat(249));
+        let longest = format!("crates/{}", "\u{e9}".repeat(249));
         assert_eq!(longest.chars().count(), 256);
+        assert_eq!(longest.len(), 505);
         for scope in [json!(sixty_four), json!([longest])] {
             let reply = world.call("aicd_plan_submit", plan_arguments("a plan", &scope));
             assert_success(&reply);
