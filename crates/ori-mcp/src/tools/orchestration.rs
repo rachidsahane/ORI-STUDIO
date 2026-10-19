@@ -2,10 +2,10 @@
 //! AICD §17, `spec/API_SPEC.md` section 3.
 //!
 //! Two handlers, [`crate::tools::orchestration::PlanSubmitHandler`] and
-//! [`crate::tools::orchestration::EscalateHandler`], that the engine registers
-//! with [`crate::tools::Handlers::register`]. The effects live in
-//! `ori-orchestrator`, which this crate never depends on, so each handler reaches
-//! them through a port the engine implements (ORI-T-0070):
+//! [`crate::tools::orchestration::EscalateHandler`], that the engine is to
+//! register with [`crate::tools::Handlers::register`] (ORI-T-0070). The effects
+//! live in `ori-orchestrator`, which this crate never depends on, so each handler
+//! reaches them through a port the engine is to implement (ORI-T-0070):
 //! [`crate::ports::PlanDesk`] and [`crate::ports::EscalationDesk`]. A handler is
 //! the thin layer between S2's pipeline and its desk: it reads the arguments,
 //! passes every agent text through the sanitization barrier, reads the declared
@@ -40,11 +40,8 @@
 //!   S->>H: call(db, BoundCall, arguments)
 //!   H->>B: every text, and the declared scope
 //!   alt an argument the handler rejects
-//!     B-->>H: a blank text, a path that is not a module path, or a quote
+//!     B-->>H: a blank text, a path that is not a module path, a quote, or a scope out of bounds
 //!     H-->>S: Port Invalid, with the field
-//!   else a text over the schema's bound
-//!     B-->>H: truncated
-//!     H-->>S: Port Unavailable, fail closed
 //!   else typed values
 //!     B-->>H: SanitizedField and ModulePath
 //!     H->>D: submit or open(db, binding, ticket, the values)
@@ -64,19 +61,26 @@
 //! # The decisions this module carries
 //!
 //! **The ticket is the call's `ticket_id` argument.** For a coder, S2's check 7
-//! makes it the bound ticket. For a lead nobody has checked it, and the desk does:
-//! a ticket the product does not hold is `Invalid { field: "ticket_id" }`
-//! ([`crate::ports::PlanDesk`]'s and [`crate::ports::EscalationDesk`]'s
-//! contracts). A call that reaches a handler with no ticket is `Invalid` too, and
-//! S2's checks make that unreachable.
+//! makes it the bound ticket, and both desks check the binding themselves all the
+//! same ([`crate::ports::PlanDesk`]'s and [`crate::ports::EscalationDesk`]'s
+//! contracts). Only [`crate::ports::EscalationDesk`] serves a lead, because
+//! `aicd_plan_submit` is coder-only, and it checks the lead's ticket against the
+//! product: a ticket the product does not hold is `Invalid { field: "ticket_id" }`.
+//! A call that reaches a handler with no ticket is `Invalid` too, and S2's checks
+//! make that unreachable.
 //!
 //! **Every agent text passes the barrier before a desk sees it, and a desk takes
 //! nothing else.** The plan, the question, the recommendation and every evidence
-//! text go through `ori_memory::barrier::sanitize_text` at the schema's own bound,
-//! and the desks take `ori_memory::barrier::SanitizedField`, which only that
-//! function makes, so the compiler checks that no raw `String` reaches them. The
-//! text is **not trimmed**: a control character becomes U+FFFD, and nothing else
-//! changes. Three things follow:
+//! text go through `ori_memory::barrier::sanitize_text` at the schema's own bound.
+//! Both desks take agent prose as `ori_memory::barrier::SanitizedField`, the
+//! barrier's sealed type, made by `sanitize_text` for text outside a record, by
+//! `submit_report`, or by reading a stored record back, and `PlanDesk` also takes
+//! the declared paths as `ori_memory::scope::ModulePath`. So the compiler checks
+//! that no raw `String` reaches them. The handler does **not trim**, and
+//! `ori-orchestrator`'s component trims what it keeps. `sanitize_text` turns a C0
+//! control character other than tab, newline and carriage return, and DEL, into
+//! U+FFFD. Tab, newline, carriage return and the C1 controls are kept. Three
+//! things follow:
 //!
 //! - *A text over the bound is `Unavailable`, and nothing is stored.* S2's schema
 //!   counts characters as `sanitize_text` does, so a schema-valid call is never
@@ -86,22 +90,34 @@
 //!   an event.
 //! - *A text that is blank once sanitized is `Invalid`, with its field.*
 //!   `Escalation::raise` and `Finding::new` refuse blanks, so the handler says so
-//!   first, and says which argument. Judged on the sanitized text, because that is
-//!   what the desk's component judges. An empty string never passes S2's schema,
-//!   so this is spaces only, in practice.
+//!   first, and says which argument. A blank text is one whose sanitized text
+//!   trims to empty: spaces, tabs, line breaks and the other Unicode white space.
+//!   VT and FF do not count, because the barrier has already replaced them with
+//!   U+FFFD (`tests::ori_t_0188_blankness_is_judged_on_the_sanitized_text` pins
+//!   this). The judgment is on the sanitized text, because that is what the
+//!   desk's component judges. An empty string never passes S2's schema.
 //! - *The `field` of every `Invalid` is the argument's bare name* (`ticket_id`,
 //!   `plan`, `declared_scope`, `trigger`, `question`, `recommendation`,
 //!   `evidence`), never an index and never the agent's text, and the `why` is a
 //!   fixed sentence, a named constant. S2's reply carries the field and never the
 //!   `why`.
 //!
-//! | Argument | Bound (characters) | Over the bound | Blank | Not the right shape |
+//! | Argument | Bound | Over the bound | Blank | Not the right shape |
 //! |---|---|---|---|---|
-//! | `plan` | 65 536 | `Unavailable` | `Invalid` | `Invalid` |
-//! | `question` | 8 192 | `Unavailable` | `Invalid` | `Invalid` |
-//! | `recommendation` | 8 192 | `Unavailable` | `Invalid` | `Invalid` |
-//! | `evidence[].what` | 2 048 | `Unavailable` | `Invalid` (`evidence`) | `Invalid` (`evidence`) |
-//! | `evidence[].found_at` | 1 024 | `Unavailable` | `Invalid` (`evidence`) | `Invalid` (`evidence`) |
+//! | `plan` | 65 536 characters | `Unavailable` | `Invalid` | `Invalid` |
+//! | `question` | 8 192 characters | `Unavailable` | `Invalid` | `Invalid` |
+//! | `recommendation` | 8 192 characters | `Unavailable` | `Invalid` | `Invalid` |
+//! | `evidence[].what` | 2 048 characters | `Unavailable` | `Invalid` (`evidence`) | `Invalid` (`evidence`) |
+//! | `evidence[].found_at` | 1 024 characters | `Unavailable` | `Invalid` (`evidence`) | `Invalid` (`evidence`) |
+//! | `declared_scope` | 1 to 64 entries, each of at most 256 characters | `Invalid` | an entry that is blank is not a module path: `Invalid` | `Invalid` |
+//!
+//! A text over its bound is `Unavailable` and a scope outside its bounds is
+//! `Invalid`, for a reason each. A text is cut by the barrier, and storing less
+//! than was sent must fail closed. A path is never cut, and an out-of-bounds list
+//! follows the evidence count, which is `Invalid`. The handler counts the scope's
+//! entries and their characters itself, with the catalogue's own bounds
+//! (`WHY_SCOPE_BOUNDS` is the fixed sentence), so none of the three cases is
+//! reachable through S2.
 //!
 //! **The declared scope is read strictly, and a quote is refused (D4).** Each
 //! entry goes through `ori_memory::scope::ModulePath::parse`, which refuses an
@@ -111,16 +127,21 @@
 //! value at its first `"`, so a quoted path would be read two ways by the memory
 //! scope and would refuse every memory call of that coder. Any such entry is
 //! `Invalid { field: "declared_scope" }`, with no index and none of the entry's
-//! text. The entries keep their order, and a duplicate goes through: the lock
-//! table decides what it means. Whether the path names a directory of the
-//! product is the desk's component's job, not the handler's.
+//! text. The entries keep their order and their duplicates: the handler passes
+//! them through unchanged. `LockTable::claim` takes an `ori_core::types::Scope`,
+//! and `Scope::new` trims each path, strips trailing `/` characters, collapses
+//! duplicates and sorts, so the agent's order and duplicates never reach the
+//! table. Nothing checks that a declared path names a directory of the product,
+//! because the lock table does path arithmetic only. A path that does not exist
+//! is claimed as written, and that can block a later ticket that creates it. This
+//! is recorded for ORI-T-0070 in `ops/lock-table.md`.
 //!
 //! **The trigger is the catalogue's own constant.** It is matched against
 //! [`crate::tools::ESCALATION_TRIGGERS`] and handed to the desk as that array's
 //! `&'static str`, never the agent's string. Anything else is `Invalid`, which
 //! S2's schema makes unreachable. [`crate::tools::ESCALATION_TRIGGERS`] and
 //! `ori-orchestrator`'s `Trigger` are not pinned to each other here:
-//! `ori-engine` is the one crate that sees both, and pins them (ORI-T-0070).
+//! `ori-engine` is the one crate that sees both, and ORI-T-0070 is to pin them.
 //!
 //! **A refusal of the desk passes through unchanged.** The handler maps no
 //! `PortError`: `?` hands it to S2, which records and answers it by its failure
@@ -128,8 +149,11 @@
 //! `E_SCOPE_LOCKED` under AICD §12, and the module it names stays inside the
 //! error: S2 replies with the code and the section only, so another ticket's
 //! claim is not disclosed. A refusal that `ori-core` has no refusal kind for
-//! (`ticket_not_in_progress`, `escalation_refused`, `product_database_mismatch`) is
+//! (`ticket_not_in_progress`, `escalation_refused`, `product_database_mismatch`, or
+//! one of the binding's, such as `claim_contradicts_session`) is
 //! [`crate::ports::PortError::Denied`], with its own lower case code and section.
+//! A desk's codes are its own fixed constants, never built from agent text. A
+//! desk's `Invalid` reaches the agent the same way, as the field and nothing else.
 //!
 //! **The reply is identifiers and counts, as one text block, and nothing else.**
 //! Neither the plan, nor a path, nor the question, nor a piece of evidence is
@@ -140,32 +164,48 @@
 //! | `aicd_plan_submit` | `plan <plan_id> stored for ticket <ticket_id>; <n> module(s) newly claimed` and a newline |
 //! | `aicd_escalate` | `escalation <escalation_id> opened for ticket <ticket_id>; session suspended: <true or false>` and a newline |
 //!
-//! After a suspension, S2 refuses the connection's next call `session_not_active`
-//! and closes the connection (S2's check 2): the agent that is told
-//! `session suspended: true` is told its last answer.
+//! After a suspension, if the engine's `SessionDesk` then reports the session
+//! inactive, S2 refuses the session's next `tools/call` `session_not_active` and
+//! closes the connection (S2's check 2). A call that S2's check 0 or check 1
+//! refuses first is answered `product_database_mismatch` or `rate_limited`, and
+//! `ping` and `tools/list` do not consult `SessionDesk`.
 //!
 //! # What is recorded
 //!
 //! **A handler's own code appends nothing**, and holds no state across calls.
-//! Every row besides S2's is the desk's, under the desk's contract: it makes every
-//! refusal and every `Invalid` before its first append, so **a refused call stores
-//! nothing**, and only an `Unavailable`, which is an append that failed, can leave
-//! rows behind it. Each row of the desk carries the ticket in its ticket column.
+//! Every row besides S2's is the desk's, under the desk's contract: it must make
+//! every refusal and every `Invalid` before its first append, so **a refused call
+//! stores nothing**, and only an `Unavailable` can leave rows behind it.
+//! `Unavailable` also answers a read that failed before any append. A `Malformed`
+//! error is `Unavailable`, whether it comes from `LockTable::claim`, `Scope::new`,
+//! a stored identifier or, for the escalation desk, `ori-orchestrator`. Each
+//! `EventLog::append` commits on its own, so an `Unavailable` after a first append
+//! leaves the rows before it. For the plan desk, a retry appends a second plan
+//! row; the claims already recorded are held for this ticket, so they are not
+//! newly claimed and are not appended again, which holds if the desk builds its
+//! lock table from the log, ORI-T-0070's choice. For the escalation desk, a retry
+//! opens a second escalation, a second `escalation.raised`. Each row of the desk
+//! carries the ticket in its ticket column.
 //!
 //! | Outcome | Rows, in order |
 //! |---|---|
 //! | a plan stored | `mcp.tool_called` (ticket column: the argument), then the desk's plan row, then one `lock.claimed` per new claim |
-//! | an escalation opened | `mcp.tool_called`, then `escalation.raised`, then `ticket.escalated` when the desk's rule applies (a coder's escalation on its own bound ticket, while it is in progress), then a session row when the session is suspended |
-//! | `E_SCOPE_LOCKED`, or any desk refusal (`Refused`, `Denied`) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: refused`, the code, the section). Nothing is stored: both desks refuse before their first append |
+//! | an escalation opened | `mcp.tool_called`, then `escalation.raised`, then `ticket.escalated` when the desk's rule applies (a coder's escalation on its own bound ticket, while it is in progress), then a session row only when the desk suspends the session, which it never does in phase 1 |
+//! | `E_SCOPE_LOCKED`, or any desk refusal (`Refused`, `Denied`) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: refused`, the code, the section). Nothing is stored: both desks must refuse before their first append |
 //! | a ticket not in the product, or an argument the handler rejects | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
-//! | a text over the schema's bound (a direct call only) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: unavailable`) |
 //! | a desk that could not answer | `mcp.tool_called`, then whatever rows the desk appended before it failed, then `mcp.tool_failed` (`failure: unavailable`) |
+//!
+//! A text over the schema's bound has no row of its own here: S2's check 6
+//! refuses such a text (`mcp.tool_refused`, `invalid_arguments`), so it never
+//! reaches a handler, and the handler's own `Unavailable` for it is reachable only
+//! by a direct call, which leaves no S2 row.
 //!
 //! **Bounds.** With the desks' contracts, `aicd_plan_submit` leaves at most 67
 //! rows a call: S2's two (`mcp.tool_called`, and `mcp.tool_failed` on a failure),
 //! plus the desk's plan row and up to 64 claims, which is the schema's own bound
-//! on the declared scope (the handler does not count the entries again). So calls
-//! to it leave **at most 67 times the window's limit plus one row per
+//! on the declared scope and the handler's too, because the handler counts the
+//! entries itself. The 67-row bound rests on the handler as well as on S2. So
+//! calls to it leave **at most 67 times the window's limit plus one row per
 //! connection**. `aicd_escalate` leaves at most five rows a call (S2's two and the
 //! desk's three), so **five times the limit plus one row per connection**. Both
 //! are safe upper bounds, counted the same way as S2's and S3's. Under the desks'
@@ -175,34 +215,37 @@
 //!
 //! # Limits
 //!
+//! - **No desk exists yet.** Until the engine implements both, nothing registers
+//!   these handlers, and the tests drive them against fake desks.
 //! - **D5, the event's name.** `spec/API_SPEC.md` section 2 names
 //!   `escalation.opened`, while `ori-store` projects `escalation.raised`. The desk
-//!   writes `escalation.raised`, and PD-2 corrects API_SPEC: renaming in
+//!   is to write `escalation.raised`, and ORI-T-0192 corrects API_SPEC: renaming in
 //!   `ori-store` would change its tests.
 //! - **`ori-store`'s projection reader is not a JSON parser.** With the payload
 //!   order the desk's contract fixes (`escalation_id`, `trigger`, `question`,
 //!   `recommendation`, then `evidence`), no value can be read as another column.
-//!   But the reader undoes no JSON escape, so in the human queue a `"` in a
-//!   question, a recommendation or an evidence text cuts the text, after a
-//!   trailing `\`, and every `\` shows doubled. The lead records the `ori-store`
-//!   follow-up ORI-T-0189 to make the reader parse JSON. The handlers do not
-//!   refuse quotes in prose: only a path, where a quote changes what is claimed
-//!   (D4).
+//!   But the reader undoes no JSON escape, and the human queue's projection
+//!   (`proj_escalations`) shows the trigger, the question and the recommendation,
+//!   and **no evidence at all**: the evidence reaches only the event's payload. A
+//!   `"` cuts a question or a recommendation in the queue, after a trailing `\`,
+//!   and every `\` shows doubled. ORI-T-0189 is the reader's fix. The handlers do
+//!   not refuse quotes in prose: only a path, where a quote changes what is
+//!   claimed (D4).
 //! - **The tool does not carry the template's "Options rejected" and "What is
 //!   blocked" fields**, nor the Escalation row's `context_package_ref`
-//!   (`spec/DATA_MODEL.md` section 2). PD-2 decides.
+//!   (`spec/DATA_MODEL.md` section 2). ORI-T-0192 decides.
 //! - **Suspension is not configurable in phase 1 (D6).** The port reports whether
-//!   the session was suspended, and the desk answers `false` until a configuration
-//!   key exists, and always `false` for a lead's session. S2's `SessionDesk`
-//!   fixture always answers active, so no test here shows the effect of a
-//!   suspension on the next call.
+//!   the session was suspended, and the desk is to answer `false` until a
+//!   configuration key exists, and always `false` for a lead's session. S2's
+//!   `SessionDesk` fixture always answers active, so no test here shows the effect
+//!   of a suspension on the next call.
 //! - **What the engine needs to implement the desks (ORI-T-0070).** In its
-//!   manifest, `ori-memory` (`SanitizedField`, `ModulePath`), `ori-orchestrator`,
-//!   and `serde` with `serde_json` (E-0008, on the same pins) for the escalation
-//!   payload's struct. The contracts are written on the traits
+//!   manifest, the engine must add `ori-memory` (`SanitizedField`, `ModulePath`),
+//!   `ori-orchestrator`, and `serde` with `serde_json` (E-0008, on the same pins)
+//!   for the escalation payload's struct. The contracts are written on the traits
 //!   ([`crate::ports::PlanDesk`], [`crate::ports::EscalationDesk`]); this module's
 //!   tests run against fake desks, so the real ones, including the payload order of
-//!   `escalation.raised`, are tested there.
+//!   `escalation.raised`, are to be tested there.
 //!
 //! # Tier
 //!
@@ -235,6 +278,13 @@ const FOUND_AT_MAX_CHARS: usize = 1_024;
 const EVIDENCE_MIN: usize = 1;
 /// The most entries `evidence` may hold: the catalogue's own bound.
 const EVIDENCE_MAX: usize = 16;
+/// The fewest entries `declared_scope` may hold: the catalogue's own bound.
+const SCOPE_MIN: usize = 1;
+/// The most entries `declared_scope` may hold: the catalogue's own bound.
+const SCOPE_MAX: usize = 64;
+/// The most characters one entry of `declared_scope` may hold: the catalogue's
+/// own bound.
+const SCOPE_ENTRY_MAX_CHARS: usize = 256;
 
 /// The fixed sentence of a call that reaches a handler with no ticket.
 const WHY_TICKET: &str = "the call carries no ticket";
@@ -243,6 +293,9 @@ const WHY_PLAN: &str = "the plan is missing, is not a string or is blank";
 /// The fixed sentence of a declared scope that is not a list of module paths.
 const WHY_SCOPE: &str = "the declared scope is missing, is not a list of strings or holds a \
                          path that is not a module path";
+/// The fixed sentence of a declared scope outside the catalogue's bounds.
+const WHY_SCOPE_BOUNDS: &str = "the declared scope holds no entry, more than 64 entries or an \
+                                entry over 256 characters";
 /// The fixed sentence of a trigger that is not one of the escalation triggers.
 const WHY_TRIGGER: &str = "the trigger is missing or is not one of the escalation triggers";
 /// The fixed sentence of a question that is missing, is not a string or is blank.
@@ -326,17 +379,27 @@ fn required_text(
     Ok(text)
 }
 
-/// The declared scope: a list of strings, each a module path, none with a quote
-/// (D4). Order and duplicates are kept.
+/// The declared scope: 1 to 64 strings of at most 256 characters, each a module
+/// path, none with a quote (D4). Order and duplicates are kept.
+///
+/// The bounds are the catalogue's own, checked again here as the evidence's
+/// count is: a list or an entry outside them is `Invalid`, because a path is
+/// never cut.
 fn declared_scope(value: Option<Value>) -> Result<Vec<ModulePath>, HandlerError> {
     let Some(Value::Array(entries)) = value else {
         return Err(invalid("declared_scope", WHY_SCOPE));
     };
+    if !(SCOPE_MIN..=SCOPE_MAX).contains(&entries.len()) {
+        return Err(invalid("declared_scope", WHY_SCOPE_BOUNDS));
+    }
     let mut paths = Vec::with_capacity(entries.len());
     for entry in &entries {
         let Value::String(text) = entry else {
             return Err(invalid("declared_scope", WHY_SCOPE));
         };
+        if text.chars().count() > SCOPE_ENTRY_MAX_CHARS {
+            return Err(invalid("declared_scope", WHY_SCOPE_BOUNDS));
+        }
         // `ModulePath::parse` allows a quote, which `ori-store`'s projection
         // reader cannot read back: it cuts a value at its first one.
         if text.contains('"') {
@@ -451,7 +514,8 @@ impl ToolHandler for PlanSubmitHandler {
     /// hold, `Unavailable` when it could not answer. The handler's own:
     /// `Port(Invalid)` for a call with no ticket, a plan that is missing, not a
     /// string or blank, or a declared scope that is not a list of module paths
-    /// without a quote (all unreachable through S2's schema and checks except the
+    /// without a quote, or holds no entry, more than 64 or an entry over 256
+    /// characters (all unreachable through S2's schema and checks except the
     /// blank plan and the paths the schema cannot judge), and `Port(Unavailable)`
     /// for a plan over the schema's bound, which only a direct call can reach.
     fn call(
@@ -478,14 +542,19 @@ impl ToolHandler for PlanSubmitHandler {
 /// configured, through the engine's [`crate::ports::EscalationDesk`] (AICD §12).
 ///
 /// The ticket is the call's `ticket_id` argument: for a coder S2's check 7 makes
-/// it the bound ticket, and for a lead the desk checks it. The trigger is the
+/// it the bound ticket, and the desk checks the binding all the same, and for a
+/// lead the desk checks the ticket against the product. The trigger is the
 /// catalogue's own constant, the question, the recommendation and every evidence
 /// text are sanitized at the schema's bounds, and the desk raises the escalation
 /// only if a finding stands behind the trigger. The reply is `escalation <id>
 /// opened for ticket <ticket>; session suspended: <true or false>`. **After a
-/// suspension S2 refuses the connection's next call `session_not_active` and
-/// closes it.** Appends no event of its own and holds no state across calls. See
-/// the module documentation for the rows a call leaves and the limits.
+/// suspension, if the engine's `SessionDesk` then reports the session inactive,
+/// S2 refuses the session's next `tools/call` `session_not_active` and closes the
+/// connection.** A call that S2's check 0 or check 1 refuses first is answered
+/// `product_database_mismatch` or `rate_limited`, and `ping` and `tools/list` do
+/// not consult `SessionDesk`. Appends no event of its own and holds no state
+/// across calls. See the module documentation for the rows a call leaves and the
+/// limits.
 ///
 /// # Examples
 ///
@@ -1092,6 +1161,172 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // 3b. A refusal whose section does not resolve
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0188_a_denied_reference_that_does_not_resolve_is_invalid() {
+        // `MethodologyRef`'s fields are public, so a desk can build a section the
+        // methodology does not carry. S2 never writes or answers one.
+        let unresolvable = MethodologyRef {
+            section: 99,
+            subsection: None,
+        };
+        assert!(!unresolvable.resolves());
+        let script: PlanScript = Box::new(move |_, _, _| {
+            Err(PortError::Denied {
+                code: "ticket_not_in_progress",
+                methodology_ref: unresolvable.clone(),
+            })
+        });
+        let (mut world, seen) = world_with(
+            "plan-denied-unresolvable",
+            Role::Coder,
+            Some(ticket_t()),
+            script,
+            escalation_answer(false),
+        );
+        let tip = world.tip();
+
+        let reply = world.call(
+            "aicd_plan_submit",
+            plan_arguments("a plan", &json!(["crates/a"])),
+        );
+        assert!(!reply.close && reply.unrecorded.is_none());
+        assert_failure(&reply, &json!({"failure": "invalid"}));
+        assert_eq!(seen.plans().len(), 1, "the desk was asked, and refused");
+
+        // The same keys as S2's own test of an unresolvable reference: the
+        // session, the tool, the call's sequence number and the failure, and no
+        // reason and no reference.
+        let rows = world.rows_since(tip);
+        assert_eq!(kinds(&rows), ["mcp.tool_called", "mcp.tool_failed"]);
+        let failed = payload(&rows[1]);
+        assert_eq!(
+            failed,
+            json!({
+                "session_id": session().as_str(),
+                "tool": "aicd_plan_submit",
+                "called_seq": rows[0].seq(),
+                "failure": "invalid",
+            })
+        );
+        assert!(failed.get("reason").is_none());
+        assert!(failed.get("methodology_ref").is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // 3c. A desk's refusal or Invalid reaches the agent as the desk said it
+    // -------------------------------------------------------------------
+
+    /// A text only a desk's `why` holds: it is in neither the wire nor a row.
+    const WHY_TOKEN: &str = "WHYQUARTZ0188";
+
+    /// Calls `tool` and asserts that the desk's error reached the agent exactly as
+    /// `expected` says, with S2's two rows, and that `WHY_TOKEN` is in neither the
+    /// reply nor a row.
+    fn assert_desk_error_reaches_the_agent(
+        world: &mut World,
+        tool: &str,
+        arguments: Value,
+        expected: &Value,
+    ) {
+        let tip = world.tip();
+        let reply = world.call(tool, arguments);
+        assert!(!reply.close && reply.unrecorded.is_none());
+        assert_failure(&reply, expected);
+        assert!(
+            !wire(&reply).to_string().contains(WHY_TOKEN),
+            "the reply holds the desk's why"
+        );
+        let rows = world.rows_since(tip);
+        assert_eq!(kinds(&rows), ["mcp.tool_called", "mcp.tool_failed"]);
+        assert_no_row_holds(&rows, WHY_TOKEN);
+    }
+
+    #[test]
+    fn ori_t_0188_a_desks_refusal_or_invalid_reaches_the_agent_as_it_said() {
+        let one_finding = json!([finding("what", "where")]);
+
+        // The escalation desk's refusal, for a lead: the code and the section.
+        let denied: EscalationScript = Box::new(|_, _, _| {
+            Err(PortError::Denied {
+                code: "escalation_refused",
+                methodology_ref: MethodologyRef::at(12).expect("a section the methodology has"),
+            })
+        });
+        let (mut world, seen) = world_with(
+            "desk-escalation-denied",
+            Role::Lead,
+            None,
+            plan_answer(0),
+            denied,
+        );
+        assert_desk_error_reaches_the_agent(
+            &mut world,
+            "aicd_escalate",
+            escalate_arguments("security", "a question", "a recommendation", &one_finding),
+            &refused_object("escalation_refused", 12),
+        );
+        assert_eq!(
+            seen.escalations().len(),
+            1,
+            "the desk was asked, and refused"
+        );
+        assert!(seen.plans().is_empty());
+
+        // The escalation desk's `Invalid`, for a lead: the field, never the why.
+        let invalid: EscalationScript = Box::new(|_, _, _| {
+            Err(PortError::Invalid {
+                field: "ticket_id",
+                why: format!("the product holds no such ticket {WHY_TOKEN}"),
+            })
+        });
+        let (mut world, seen) = world_with(
+            "desk-escalation-invalid",
+            Role::Lead,
+            None,
+            plan_answer(0),
+            invalid,
+        );
+        assert_desk_error_reaches_the_agent(
+            &mut world,
+            "aicd_escalate",
+            escalate_arguments("security", "a question", "a recommendation", &one_finding),
+            &invalid_object("ticket_id"),
+        );
+        assert_eq!(
+            seen.escalations().len(),
+            1,
+            "the desk was asked, and refused"
+        );
+        assert!(seen.plans().is_empty());
+
+        // The plan desk's `Invalid`, for a coder.
+        let invalid: PlanScript = Box::new(|_, _, _| {
+            Err(PortError::Invalid {
+                field: "ticket_id",
+                why: format!("the product holds no such ticket {WHY_TOKEN}"),
+            })
+        });
+        let (mut world, seen) = world_with(
+            "desk-plan-invalid",
+            Role::Coder,
+            Some(ticket_t()),
+            invalid,
+            escalation_answer(false),
+        );
+        assert_desk_error_reaches_the_agent(
+            &mut world,
+            "aicd_plan_submit",
+            plan_arguments("a plan", &json!(["crates/a"])),
+            &invalid_object("ticket_id"),
+        );
+        assert_eq!(seen.plans().len(), 1, "the desk was asked, and refused");
+        assert!(seen.escalations().is_empty());
+    }
+
+    // -------------------------------------------------------------------
     // 4. The declared scope
     // -------------------------------------------------------------------
 
@@ -1141,7 +1376,7 @@ mod tests {
         let one_finding = json!([finding("what", "where")]);
         // The coder submits plans and the lead escalates: each case runs as the
         // role that holds its tool.
-        let cases: [(Role, Option<Id>, &str, &str, Value); 4] = [
+        let cases: [(Role, Option<Id>, &str, &str, Value); 5] = [
             (
                 Role::Coder,
                 Some(ticket_t()),
@@ -1175,6 +1410,20 @@ mod tests {
                     &json!([finding("what", "where"), finding("what", blank)]),
                 ),
             ),
+            // A `what` of spaces beside a `found_at` that is not blank: only a
+            // check on `what` itself refuses it.
+            (
+                Role::Lead,
+                None,
+                "aicd_escalate",
+                "evidence",
+                escalate_arguments(
+                    "security",
+                    "what now",
+                    "do this",
+                    &json!([finding("what", "where"), finding(blank, "where")]),
+                ),
+            ),
         ];
         for (index, (role, bound, tool, field, arguments)) in cases.iter().enumerate() {
             let (mut world, seen) = world_ok(&format!("blank-{index}"), *role, bound.clone());
@@ -1190,6 +1439,44 @@ mod tests {
             );
             assert!(seen.untouched(), "the desk was reached for a blank {field}");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // 5b. Blankness is judged on the sanitized text
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ori_t_0188_blankness_is_judged_on_the_sanitized_text() {
+        // VT and FF are white space to `str::trim`, so the raw text is blank. The
+        // barrier replaces both with U+FFFD, which is not white space, so the
+        // sanitized text is not blank, and the desk's component judges that one.
+        let raw = "\u{0B}\u{0C}";
+        assert!(raw.trim().is_empty(), "the raw text is white space");
+        let (mut world, seen) = world_ok("blank-sanitized", Role::Lead, None);
+        let tip = world.tip();
+
+        let reply = world.call(
+            "aicd_escalate",
+            escalate_arguments(
+                "security",
+                raw,
+                "do this",
+                &json!([finding("what", "where")]),
+            ),
+        );
+        let text = assert_success(&reply);
+        assert_eq!(
+            text,
+            format!(
+                "escalation {} opened for ticket {}; session suspended: false\n",
+                id("ESCALATIONONE"),
+                ticket_t()
+            )
+        );
+        let received = seen.escalations();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].question, "\u{fffd}\u{fffd}");
+        assert_eq!(kinds(&world.rows_since(tip)), ["mcp.tool_called"]);
     }
 
     // -------------------------------------------------------------------
@@ -1237,8 +1524,8 @@ mod tests {
             )
         );
 
-        // By value: two uses of a `const` share no address, so a pointer
-        // comparison would fail a correct handler.
+        // By value: Rust promises neither shared nor distinct addresses for uses
+        // of a `const`, so the trigger is compared by value.
         let received = seen.escalations();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].trigger, "scope_conflict");
@@ -1493,6 +1780,24 @@ mod tests {
             assert_invalid(&result, "declared_scope", WHY_SCOPE);
         }
 
+        // The catalogue's bounds on the scope, checked again by the handler: no
+        // entry, more than 64 entries, an entry of more than 256 characters. S2's
+        // schema refuses all three first, so only a direct call reaches them.
+        let sixty_five: Vec<Value> = (0..65)
+            .map(|index| json!(format!("crates/m{index}")))
+            .collect();
+        let over_long = format!("crates/{}", "a".repeat(250));
+        assert_eq!(over_long.chars().count(), 257);
+        for bad in [
+            json!({"plan": "p", "declared_scope": []}),
+            json!({"plan": "p", "declared_scope": sixty_five}),
+            json!({"plan": "p", "declared_scope": [over_long]}),
+            json!({"plan": "p", "declared_scope": ["crates/a", over_long]}),
+        ] {
+            let result = direct(&mut plan, &mut world, Tool::PlanSubmit, Some(&ticket), &bad);
+            assert_invalid(&result, "declared_scope", WHY_SCOPE_BOUNDS);
+        }
+
         // The escalation handler.
         let finding_list = json!([finding("what", "where")]);
         let valid = escalate_arguments("security", "q", "r", &finding_list);
@@ -1698,5 +2003,25 @@ mod tests {
         assert_eq!(received[0].question, question);
         assert_eq!(received[0].recommendation, recommendation);
         assert_eq!(received[0].evidence, [(what, found_at)]);
+
+        // The scope's bounds are inclusive: 64 entries, and an entry of 256
+        // characters, reach the desk whole.
+        let (mut world, seen) = world_ok("at-bound-scope", Role::Coder, Some(ticket_t()));
+        let tip = world.tip();
+        let sixty_four: Vec<String> = (0..64).map(|index| format!("crates/m{index}")).collect();
+        let longest = format!("crates/{}", "a".repeat(249));
+        assert_eq!(longest.chars().count(), 256);
+        for scope in [json!(sixty_four), json!([longest])] {
+            let reply = world.call("aicd_plan_submit", plan_arguments("a plan", &scope));
+            assert_success(&reply);
+        }
+        let received = seen.plans();
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].paths, sixty_four);
+        assert_eq!(received[1].paths, [longest]);
+        assert_eq!(
+            kinds(&world.rows_since(tip)),
+            ["mcp.tool_called", "mcp.tool_called"]
+        );
     }
 }
