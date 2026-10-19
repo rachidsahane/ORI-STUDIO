@@ -260,12 +260,13 @@ impl Transport {
 /// A command is not empty and at most [`CONFIG_TEXT_MAX`] bytes; there are at
 /// most [`ARGS_MAX`] arguments, each at most [`CONFIG_TEXT_MAX`] bytes (an empty
 /// argument is accepted); and no command or argument holds an unsafe character:
-/// any character for which `char::is_control` is true, and the characters that
-/// set text direction or end a line. A NUL cannot be passed to a process, since
-/// it ends a C string. The configuration is printed by later surfaces
-/// (`events.subscribe` clients, `project.mcp.list`, a CLI), where a control or a
-/// reordering character would let it display as something other than what is
-/// launched.
+/// the same rule as [`ori_memory::retrieval::is_unsafe_char`] (control
+/// characters, every Unicode 16.0.0 `Cf` code point in the retrieval table,
+/// and `U+2028`/`U+2029`). A NUL cannot be passed to a process, since it ends
+/// a C string. The configuration is printed by later surfaces
+/// (`events.subscribe` clients, `project.mcp.list`, a CLI), where a control, a
+/// format or a reordering character would let it display as something other
+/// than what is launched.
 ///
 /// # Debug
 ///
@@ -657,7 +658,7 @@ pub enum ServerError {
         /// The length of the command in bytes.
         length: usize,
     },
-    /// The command holds an unsafe character (AICD §27).
+    /// The command holds an [`ori_memory::retrieval::is_unsafe_char`] (AICD §27).
     CommandHasControl,
     /// There are more than [`ARGS_MAX`] arguments (AICD §27).
     TooManyArgs {
@@ -671,7 +672,7 @@ pub enum ServerError {
         /// Its length in bytes.
         length: usize,
     },
-    /// An argument holds an unsafe character (AICD §27).
+    /// An argument holds an [`ori_memory::retrieval::is_unsafe_char`] (AICD §27).
     ArgHasControl {
         /// The position of the first such argument, from zero.
         index: usize,
