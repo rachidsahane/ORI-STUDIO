@@ -2574,3 +2574,50 @@ Claim 119 is released. Tier 1: the lead merges under ADR-0002 when the session's
 - A payload nested 128 levels deep or more, counting the top object, is refused too.
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 120 (ORI-T-0185, repair 1 under re-review). The next free identifier is ORI-T-0194.
+
+---
+
+## 2026-10-19, ORI-T-0185 integrated after a review and three repairs; claim 120 released
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**What landed** (Sonnet 5.5, then repair 1 on Sonnet, repairs 2 and 3 lead-written on Haiku):
+- **The hook script's own-name guard.** Run under another name, or from `ori-original/`, the script prints one line (the name it was run as and the directory of its path, each through `ori_clean`), drains its input unless that is a terminal, records nothing, runs nothing and exits 0. This closes, at run time, the false records of the three case 1 layouts, case 3 and case 2's chains. With real git, the coder and the reviewers reproduced it on layout B and on the `ori-original` chain.
+- **`status()`** refuses what `install()` refuses: a linked or non-directory hooks directory, an `ori-original` that is not ours, and a link that reaches a managed hook or depends on the process.
+- **A way past a missing directory is read physically** (`walk_the_way`, shared with the per-process check). The text reading stays as a one-hop look at a hook's place and as the fallback.
+
+**The review** (five lenses, 22 agents) found nothing blocking. It confirmed seven should-fix findings, one of them the shared-target fault in the lead's review rules (F8, as ORI-T-0189's F3), and nineteen notes. **Repair 1** (Sonnet) took them:
+- the guard's limits completed: another repository, `git hook run`, configured hooks, and a hooks directory named `ori-original`;
+- the name printed apart from the directory;
+- new pins for "runs nothing", "no git before the guard", the clean name, status's order, the physical landing, a file at the landing, and a hooks directory replaced by a file (that last also on Windows);
+- sixteen doc passages corrected.
+
+The coder also found that a test spawning a script it had just written could fail with "Text file busy" (ETXTBSY): 2 failures in 60 for test 3 at `981cff5`. It added a test-only retry, `spawn_when_not_busy`, that retries that error alone, up to 100 times 20 ms apart. The ORI-T-0054 running tests have the same exposure and may not change under rule 3; none failed in 160 stress runs. Recorded, not acted on.
+
+**The focused re-review of repair 1** (three lenses, 11 agents) confirmed four should-fix findings, two of them in the lead's own decision text:
+- the fifth limit said the hooks kept here never run for another repository. Through a linked hooks directory or a `core.hooksPath` they do, a kept veto included; the reviewers reproduced it with the real installer;
+- copies of the scripts (`git init --template`, `init.templateDir`, a copied repository) record as links do;
+- the regular-file passage omitted a case the code refuses;
+- this ticket's own-name test spawned without the retry.
+
+**Repair 2** (lead-written, proved in a clean copy, Haiku reproduced it byte for byte) took them, with seven notes. **A narrow truth check of repair 2** found the regular-file passage wrong a third time: a `..` that climbs back past the file can bring the physical reading to a directory that is there. **Repair 3** stops listing cases: such a way is judged by rules (a) and (b), like any other way.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 120 | ORI-T-0185, hook links: the script's own-name guard, `status()` aligned with `install()`, a missing directory read physically (Sonnet 5.5), with repair 1 (Sonnet 5.5) and repairs 2 and 3 (Haiku 5.5, written by the lead) | Package fact-checked before dispatch. Review: 5 lenses, 22 agents, nothing blocking, 7 should-fix and 19 notes. Re-review of repair 1: 4 should-fix (2 of the lead's) and notes. Truth check of repair 2: 1 should-fix of the lead's. Repairs 2 and 3 proved by the lead in clean copies with private targets and reproduced byte for byte | Cherry-picked as `f784879`, `8b6689c`, `2d8a03a`, `de2a542`, `b930f25`, `804d2cf` (the reworded rewrap), `0c4643e` and `0501848`. The diff of `crates/ori-watch` equals the branch's `c2634d7..23d4bb5` byte for byte. fmt 0, clippy `-D warnings` 0, Windows clippy 0, strict doc 0, `cargo test --workspace --locked --no-fail-fast` 0 (**1814 passed**, 0 failed, 9 ignored), gate 13 over the eight commits 0. Repair 3 (doc comments only) was not re-reviewed: it replaces a list the truth check found incomplete with a reference to the rules, and its two other sentences restate what that check verified |
+
+Claim 120 is released. Tier 1: the lead merges under ADR-0002 when the session's pull request does. The rewrap commit's message was corrected at integration: it counted three paragraphs where it rewrapped four.
+
+**Stale comments in existing tests, left under rule 3:**
+- `ori_t_0159_a_hook_that_is_not_ours_linked_to_one_the_installer_replaces_is_refused` ("would record a post-merge event that never happened");
+- `ori_t_0174_a_way_that_fails_at_a_directory_the_install_does_not_create_is_still_read_by_its_text` ("the way reaches nothing", "over-refusals, kept");
+- `ori_t_0174_a_loop_where_a_missing_directory_is_read_by_its_text_refuses_the_install` (the IO error now comes from the physical reading's cap);
+- `ori_t_0174_a_missing_entry_of_ori_original_that_is_not_a_hook_name_is_not_refused` and `ori_t_0174_what_the_install_creates_is_named_without_regard_to_case_where_names_fold_case` ("reaches nothing").
+
+**Recorded for ORI-T-0055 (installs the hooks):**
+- drop a spool record whose object ids this repository does not hold: another repository can write into this spool through linked hooks, a `core.hooksPath` or copies of the scripts;
+- decide when `install()` and `status()` are re-run, and what the engine does when either refuses.
+
+**Outside this ticket's scope, for a later documentation pass:** `crates/ori-watch/src/watcher.rs:413-414` presents a commit made with `--no-verify` as what the ref poller catches. `git commit --no-verify` skips only `pre-commit` and `commit-msg`, so `post-commit` still runs; the case that holds is `git push --no-verify`. The same sentence in `hooks.rs` is corrected.
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator) and 117 (ORI-T-0187, repair 2 with the operator). The next free identifier is ORI-T-0194.
