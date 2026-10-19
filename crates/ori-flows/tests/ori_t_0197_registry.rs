@@ -466,7 +466,7 @@ fn ori_t_0197_migrated_origin_refuses_as_built_approval_without_seats() {
         Actor::Human(human()),
         DOCUMENT_REGISTERED_KIND,
         &format!(
-            r#"{{"document_id":"{doc}","kind":"as_built_architecture","path":"spec/x.md","set":"migration"}}"#
+            r#"{{"document_id":"{doc}","kind":"as_built_architecture","path":"spec/DATA_MODEL.md","set":"migration"}}"#
         ),
     )
     .expect("registered");
