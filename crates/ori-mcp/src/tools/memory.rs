@@ -114,8 +114,9 @@
 //! the accessors, never by matching the variants, for both a refusal the
 //! enforcer logged and one it could not. **The handler** copies no `Display`, no
 //! `detail` and no store error's text into a reply or an event. The enforcer's
-//! own `memory.access_refused` row carries the refusal's `Display` as its
-//! `detail`, a store error's text included.
+//! own `memory.access_refused` row carries the refusal reason's `Display` (the
+//! `RefusalReason`'s, not the `ScopeError`'s) as its `detail`, a store error's
+//! text included.
 //!
 //! **A retrieval error maps by who can cause it.**
 //!
@@ -123,7 +124,7 @@
 //! |---|---|---|
 //! | `InvalidSearchQuery` | `Refused`, `invalid_search_query` | the one an agent can cause: a NUL passes S2's schema and the retrieval refuses it after the grant ("fix the call") |
 //! | `NotAContextAuthorization`, `NotASearchAuthorization`, `NotAnEvidenceAuthorization` | `Refused`, `not_a_context_authorization`, `not_a_search_authorization`, `not_an_evidence_authorization` | refusals of the retrieval itself (AICD §25); unreachable, because the handler builds the query |
-//! | `ProductMismatch`, `SeamBroken` | `Refused`, `product_mismatch`, `seam_broken` | unreachable: the handler builds the authorization and the retrieval from the same database in one call, so `check_product_links` compares one product with itself; `SeamBroken` is an internal invariant of ori-memory's admit step. Neither backs up the inputs' product check above, which ori-memory cannot make (see that bullet) |
+//! | `ProductMismatch`, `SeamBroken` | `Refused`, `product_mismatch`, `seam_broken` | unreachable: the handler builds the authorization and the retrieval from the same database in one call, so `check_product_links` compares one product with itself; `SeamBroken` is an internal invariant of ori-memory's admit step. `Retrieval::new`'s own parse of the database's identifier comes after `authorize`'s, which refuses `log_unreadable` first. Neither backs up the inputs' product check above, which ori-memory cannot make (see that bullet) |
 //! | `InvalidConfig`, `CapTooSmall` | `Unavailable` | the engine's configuration, not the agent's call: "retry later", for the operator to fix |
 //! | `Oplog` | `Unavailable` | infrastructure, or a persistent malformed record: a persistent one reads the same as a transient one |
 //! | `Index` | `Unavailable` | infrastructure |
@@ -158,7 +159,7 @@
 //! | unavailable inputs, a configuration fault, a fault the retrieval meets (`Oplog`, `Index`) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: unavailable`) |
 //! | a store fault the enforcer meets (a log that fails `EventLog::verify`, an I/O or busy error while reading it): a scope refusal, `log_unreadable` (AICD §25) | `mcp.tool_called`, then `memory.access_refused` when the log still accepts it, then `mcp.tool_failed` (refused, `log_unreadable`) |
 //! | a `Refused` retrieval error after a grant (`invalid_search_query`) | `mcp.tool_called`, then `mcp.tool_failed` (refused, the code) |
-//! | a missing ticket argument, or a query that is not a string (unreachable through S2's schema and checks 6 and 7; test 13 calls the handler directly) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
+//! | a missing ticket argument, or a query that is missing or not a string (unreachable through S2's schema and checks 6 and 7; test 13 calls the handler directly) | `mcp.tool_called`, then `mcp.tool_failed` (`failure: invalid`, the field) |
 //!
 //! **How the rows link.** `memory.access_refused` directly follows
 //! `mcp.tool_called` and carries the same time (`call.at`), but no `session_id`
@@ -181,9 +182,11 @@
 //!   tickets yet (D8).** Nothing writes `ticket.filed` or `lock.claimed`. Once the
 //!   engine (ORI-T-0070) registers identities, and until it writes `ticket.filed`,
 //!   every `aicd_context` and every coder memory call under a bound ticket is
-//!   refused `ticket_not_in_product`. Only `ticket.filed` ends those refusals:
-//!   `lock.claimed` only widens a coder's declared scope, which is empty until
-//!   then. The tests seed all three directly.
+//!   refused `ticket_not_in_product`. Only `ticket.filed` ends those refusals;
+//!   `lock.claimed` does not. It widens a coder's declared scope, which is empty
+//!   until then, and it settles the coder's assignment, which brings refusals of
+//!   its own (`assignment_contradicted`, `assignment_held_elsewhere`,
+//!   `lock_record_malformed`). The tests seed all three directly.
 //! - **`product_signal` is offered `aicd_context` and never served (D5).** It is
 //!   listed to every role because `spec/API_SPEC.md` section 3's roles column
 //!   says "all", and it never succeeds: it is refused `ticket_not_in_product`
@@ -197,9 +200,10 @@
 //!   tools serve qa and operations their full section 5 rows. That is an
 //!   `ori-memory` scope ticket's.
 //! - **Several passes over the log per call (D12).** Each call verifies and reads
-//!   the whole log up to twice: in `authorize`, and again in the retrieval when
-//!   the grant allows a record source. That is at up to the window's limit a
-//!   minute. Accepted for phase 1.
+//!   the whole log up to three times: once in `authorize`, and twice more in the
+//!   retrieval's `OperationalLog::read` (`barrier::read_records`, then the events
+//!   behind the records) when the grant allows a record source. That is at up to
+//!   the window's limit a minute. Accepted for phase 1.
 //! - **A grant can create `index/fts.sqlite` on disk.** `Indexer::open` creates
 //!   the product's index file when none exists, although both tools are
 //!   published as read-only.
@@ -470,8 +474,9 @@ pub(crate) fn retrieval_error(error: RetrievalError) -> HandlerError {
 /// poisoned, and the inputs were built for the binding's product (AICD §25).
 ///
 /// A handler that reads only the stage and builds no package takes this lock and
-/// makes no cap check. A handler that builds a package calls `read_inputs`, which
-/// adds the cap check.
+/// makes no cap check. The two handlers of this module build a package and call
+/// the private `read_inputs`, which adds the cap check; a handler elsewhere that
+/// builds a package makes that check itself.
 pub(crate) fn lock_inputs<'a>(
     shared: &'a SharedMemoryInputs,
     binding: &Binding,
@@ -626,7 +631,7 @@ impl ToolHandler for SearchHandler {
     /// character; `Port(Unavailable)` for inputs that are poisoned, built for
     /// another product or over the reply cap, a configuration fault or a fault
     /// the retrieval meets (`Oplog`, `Index`); `Port(Invalid)` for a call whose
-    /// query is not a string, which S2's schema makes unreachable.
+    /// query is missing or not a string, which S2's schema makes unreachable.
     fn call(
         &mut self,
         db: &mut ProductDb,
