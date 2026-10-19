@@ -2302,3 +2302,35 @@ Committed as `c0c0e87`, byte-equal to the proved file, with six checks at 0.
 A focused re-review of both repairs (two lenses each, one skeptic per finding) is running.
 
 **State after this section:** the claims held are 20, 112 (repair 2 with the operator), 115, 116, 117 and 118. The next free identifier is ORI-T-0192.
+
+---
+
+## 2026-10-19, ORI-T-0184 (slice S7) integrated after two repairs; claim 115 released
+
+Written by the lead under [[R31]], [[R39]] and [[R44]].
+
+**The focused re-review of repair 1** examined the lead's own words and tests: two lenses, one skeptic per finding, 5 agents (`rereview-0184-r1.json`). It confirmed three faults of the lead's:
+- **The replacement `record_created` row overstated `aicd_search`.** A blank query reads no source and succeeds. A query with a NUL is refused `invalid_search_query` first. Only a query that reads the operational log fails as `unavailable`. Reproduced at tool level. Its skeptic rated it a note; it is taken as should-fix.
+- **"Elsewhere such a link is followed" was too wide.** On the unix targets outside the verified set, a link already in place when the read looks is refused `evidence_file_not_regular`, exactly as on the verified platforms. Only a link renamed in between the read's look and its open is followed.
+- **The forged-label test's comment claimed every line end, but the test left out U+001C to U+001E.** Python's `str.splitlines` and the bidirectional algorithm's paragraph class both take them as line ends. A scrub that let them through passed the suite. Reproduced by mutation.
+
+Notes taken:
+- the budget constant's wording, now with the header inside the budget;
+- the stale "does not exist yet" sentences in `scope.rs` and `retrieval.rs`;
+- four ragged doc lines;
+- backspaces and the 8-bit CSI, now planted in the test, with no control character but the line feed allowed to survive.
+
+**Repair 2** (Haiku 5.5, lead-written, `edits-0184-r2/apply.py`, 16 edits). The lead proved it in a clean copy:
+- fmt, clippy, strict doc and the Windows compile check exit 0;
+- `ori-mcp` passed 231, `ori-memory` 544 and `ori-gates` 194;
+- barrier scrub mutations that let through U+001C to U+001E, backspace or U+009B each fail the strengthened test.
+
+The coder's commit `0432aec` equals the proved files byte for byte. **Claim 115 was widened** for this repair to one module-doc sentence in `scope.rs` and two in `retrieval.rs`.
+
+| # | Ticket | Verification | Verified by the lead on the session branch |
+|---|---|---|---|
+| 115 | ORI-T-0184, batch 10 slice S7 (`aicd_evidence`), with repair 1 and repair 2 (Haiku 5.5, both written by the lead) | Review: 4 lenses, 11 agents; nothing blocking; 3 should-fix and 15 notes, taken or recorded. Re-review of repair 1: 3 faults of the lead's, fixed in repair 2 | Cherry-picked as `a800ea0`, `83023e4`, `02f0bb9`, `6ab2958` and `f8d20a0`; their diff equals the branch's `fc1e1cf..0432aec` byte for byte. fmt 0, clippy `-D warnings` 0, Windows clippy 0, strict doc 0, `cargo test --workspace --locked --no-fail-fast` 0 (**1749 passed**, 0 failed), gate 13 over the five commits 0 |
+
+Claim 115 is released. Slices S3, S7 and S8, the three memory tools, are complete on this branch. Tier 2: the operator merges.
+
+**State after this section:** the claims held are 20, 112 (repair 2 with the operator), 116, 117 and 118. The next free identifier is ORI-T-0192.
