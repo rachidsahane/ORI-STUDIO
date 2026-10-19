@@ -294,8 +294,10 @@ pub const PER_BLOB_CAP_BYTES: u64 = 32_768;
 /// - So 10 sections and the header stay under 330 000 bytes, inside this budget.
 ///
 /// **JSON escaping at most doubles the text.** The quoted content leaves no control
-/// character but its own `\n` line ends, and the labels are ASCII with no quote or
-/// backslash. So the text block's JSON stays under 690 KB, inside
+/// character but its own `\n` line ends, so JSON writes each byte of the text as at
+/// most two: a `\n`, a quote or a backslash is two (the content may hold quotes and
+/// backslashes, and the labels hold none), and nothing needs the six bytes of a
+/// control character's escape. So the text block's JSON stays under 690 KB, inside
 /// `crate::protocol::MAX_LINE_BYTES` (1 MiB) for any ordinary request id.
 ///
 /// **An assumption this rests on.** `aicd_report` (slice S4, not yet built) files
