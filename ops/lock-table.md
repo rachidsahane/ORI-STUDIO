@@ -2686,3 +2686,25 @@ Written by the lead under [[R31]] and [[R44]]. Nothing is running. Two backgroun
 The lead's calls on the review are recorded in the stopped synthesis prompt, and will be restated when the plan is written to `ops/batch-12-plan.md`. Slice R1 (the document registry and the shared ports) is the only batch 12 slice that needs no operator answer.
 
 **State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 121 (ORI-T-0194, awaiting review). The next free identifier is ORI-T-0195.
+
+---
+
+## 2026-10-19, at the operator's request: ORI-T-0194 integrated ahead of its review; the batch 12 draft and its review saved
+
+Written by the lead under [[R31]] and [[R44]]. The operator asked for every change of the session to be committed and pushed.
+
+**ORI-T-0194 is integrated without its independent review.** The coder's three commits were cherry-picked as `50bc715`, `74c0ec7` and `6010677`. The diff of `crates/ori-mcp` equals `ecdcfab..b8aef1c` on its branch. Checks on the session branch:
+- fmt: exit 0;
+- workspace clippy `-D warnings`: exit 0;
+- `cargo test -p ori-mcp --locked`: exit 0, **292 passed**, plus 6 and 4 doc tests;
+- gate 13 over the three commits: exit 0.
+
+**The five-lens review (R39) is still owed.** It was stopped at the pause before it reported, and it runs on resume, before the operator merges PR 78. **Claim 121 stays held until then**, and whatever the review confirms is repaired on this branch. The lead read the core logic against the package and re-ran the tests, which is all the verification so far.
+
+**Saved, not adopted:**
+- `ops/batch-12-plan-draft.md`, the planner's draft for batch 12 (`ori-flows`);
+- `ops/batch-12-plan-review.md`, the four reviewers' findings on it.
+
+Both carry a status line saying so. The lead's calls on the review, and the adopted plan, will be `ops/batch-12-plan.md`. The advisory secret scan (`scripts/secret-scan.sh`) found nothing in the tree or the history after both were staged.
+
+**State after this section:** the claims held are 20, 112 (ORI-T-0163, repair 2 with the operator), 117 (ORI-T-0187, repair 2 with the operator) and 121 (ORI-T-0194, integrated, review owed). The next free identifier is ORI-T-0195.
