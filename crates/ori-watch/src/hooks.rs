@@ -88,24 +88,27 @@
 //! own script, so the hook it stood for, a `pre-push` veto included, would
 //! stop running without a word. The same holds through a chain
 //! (`pre-push -> relay -> post-commit`), and it holds for a link that is not a
-//! managed hook at all: `post-checkout -> post-merge` would make every
-//! checkout record a false `post-merge` event into the spool the engine
-//! reads. Each hop is resolved against its own directory with the operating
-//! system's own reading of `..` and of links to directories. A way that runs
-//! through `ori-original/`, which the installer creates, or through an entry of
-//! it named for a hook it replaces, before that is there is refused, whatever
-//! it would reach (the installer is not modelled, and `follow_chain_to_managed_hook`
-//! says why); any other directory that does not exist yet, except the spool's
-//! future path (bullet (c) of that doc), is read as git's process will find it
-//! if it is later made as a real one: the way is read physically, with the
-//! links before the missing directory followed where they stand and a `..` that
-//! climbs back to a directory that is there going on physically, and its text
-//! is read as a second look and refused if that reading reaches a hook
+//! managed hook at all: `post-checkout -> post-merge` would run the engine's
+//! `post-merge` script at every checkout in place of the hook the link stood
+//! for: the script's own check of the name it was run under keeps it from
+//! recording (the section on a script not run by git for its own event,
+//! below), but the hook the link stood for no longer runs. Each hop is
+//! resolved against its own directory with the operating system's own reading
+//! of `..` and of links to directories. A way that runs through
+//! `ori-original/`, which the installer creates, or through an entry of it
+//! named for a hook it replaces, before that is there is refused, whatever it
+//! would reach (the installer is not modelled, and
+//! `follow_chain_to_managed_hook` says why); any other directory that does not
+//! exist yet is read as git's process will find it if it is later made as a
+//! real one: the way is read physically, with the links before the missing
+//! directory followed where they stand and a `..` that climbs back to a
+//! directory that is there going on physically, and its text is read as a
+//! second look, refused if that reading lands on a hook's place at that hop
 //! (`hooks/L -> ../refs` with `L/remotes/../../hooks/post-merge` reaches
-//! `post-merge` before the first fetch makes `refs/remotes`, and every checkout
-//! after it would record a false `post-merge` event). A
-//! link to a same-named hook in some other directory (a team's
-//! shared hooks) is not this. A link that cannot be read, or an entry that
+//! nothing until the first fetch makes `refs/remotes`, and the engine's
+//! `post-merge` from then on). A link to a same-named hook in some other
+//! directory (a team's shared hooks) is not this. A link that cannot be read,
+//! or an entry that
 //! cannot be looked at for a reason other than not being there, refuses the
 //! installation as an IO error rather than passing it ([`HooksError::Io`]).
 //! On macOS and Windows, whose file systems are case-insensitive by
@@ -119,7 +122,8 @@
 //! something different for each process, is refused
 //! ([`HooksError::HookLinkDependsOnProcess`]) whatever it reaches, because the
 //! installer's process cannot judge what git's will run: git runs a hook with
-//! its working directory at the worktree's root. Git also makes directories in
+//! its working directory at the worktree's root. That installation fails and
+//! writes nothing. Git also makes directories in
 //! `.git` after the install and before it runs a hook (`logs/` at the first
 //! commit, `rebase-merge/` during a rebase), so past a component that is not
 //! there the way is followed by its text, until a `..` climbs back to a
@@ -129,8 +133,7 @@
 //! a way passes, so that it reaches a hook it did not reach then: the script's
 //! own check of the name it was run under keeps such a way from recording (the
 //! section on a script not run by git for its own event, below), and the next
-//! `install` or `status` refuses it. That installation fails and writes
-//! nothing.
+//! `install` or `status` refuses it.
 //!
 //! The installation is built so that a hook of someone else's is not lost
 //! to a failure or to a second installer running at the same time:
@@ -190,8 +193,10 @@
 //! Git runs a hook as `<hooks directory>/<its event's name>`. A script that
 //! finds it was run under another name, or from `ori-original/`, was reached
 //! through a link or run by another script: git did not run it for its own
-//! event. It prints one line on standard error, reads its standard input
-//! unless that is a terminal, records nothing, runs nothing and exits 0. It
+//! event. It prints one line on standard error, which gives the name it was
+//! run as and then the directory it was run in, each through `ori_clean` (so
+//! that a long path cannot hide the name), reads its standard input unless that
+//! is a terminal, records nothing, runs nothing and exits 0. It
 //! reads its input first so that a writer that feeds this event is never cut
 //! off by a closed pipe, and it exits 0 because git takes a non-zero status
 //! from `post-checkout` as the checkout's own status, and from a vetoing event
@@ -211,11 +216,15 @@
 //! replaced, which a run-time check cannot restore.
 //!
 //! What the check does not stop, each of which needs code that already runs
-//! as the user, or a change to the hooks directory itself, which
-//! [`GitHooks::status`] and the next [`GitHooks::install`] judge:
+//! as the user, a change to the hooks directory itself (which
+//! [`GitHooks::status`] and the next [`GitHooks::install`] judge), or, for the
+//! last item, an arrangement made in another repository:
 //!
-//! - a script that runs the engine's hook by its own path
-//!   (`"$(dirname "$0")/post-merge"`) passes the check and records;
+//! - a script that runs the engine's hook under its own name passes the check
+//!   and records. That covers running it by its path
+//!   (`"$(dirname "$0")/post-merge"`), through `git hook run post-merge`, or
+//!   through a hook set in git's configuration (`hook.<name>.command`, in the
+//!   versions of git that have it);
 //! - a preserved hook that runs `"$(dirname "$0")/../post-commit"` passes it
 //!   too, and records again for each round it makes: this is the `$0`-relative
 //!   change the section "What is installed" already names;
@@ -223,11 +232,24 @@
 //!   whatever it likes;
 //! - a later checkout that changes what a kept link's working-tree script does:
 //!   that script runs under the hook's own name and does what the branch now
-//!   says, and it records falsely only by running the engine's script by its
-//!   path, the first limit. Likewise a checkout can turn a file that another
-//!   script runs, by a path whose last name is a hook's (`tools/post-merge`),
-//!   into a link to the engine's script, and that run passes the check and
-//!   records.
+//!   says, and it records falsely only by running the engine's script under
+//!   its own name, the first limit. Likewise a checkout can turn a file that
+//!   another script runs, by a path whose last name is a hook's
+//!   (`tools/post-merge`), into a link to the engine's script, and that run
+//!   passes the check and records;
+//! - another repository whose hooks are links into this hooks directory, or
+//!   whose `core.hooksPath` (its own or the user's global one) names it, runs
+//!   the engine's scripts under their own names. Each of its events passes the
+//!   check and is recorded in this spool, with that repository's object ids.
+//!   The hooks kept in `ori-original/` do not run for it, and neither does any
+//!   hook of its own that its link stood for, a veto included. Nothing in this
+//!   repository shows it, and `status` reports the hooks installed. ORI-T-0055
+//!   is to drop a record whose object ids this repository does not hold.
+//!
+//! One false negative is known. A hooks directory that is itself named
+//! `ori-original` makes every run skip. Only a `core.hooksPath` can make git
+//! run hooks from such a directory, and `install` refuses one set in the
+//! repository's own configuration.
 //!
 //! # Nothing from the repository is interpolated unquoted
 //!
@@ -421,8 +443,9 @@ pub enum HooksError {
     /// `post-merge` once the directory exists). Kept as a link, or left in
     /// place, it would, or could once the install has run, resolve to the
     /// engine's own script: the hook it stood for, a `pre-push` veto included,
-    /// would never run again, or an unrelated hook would record events that
-    /// never happened. Nothing was written.
+    /// would never run again, or the engine's script would run in an unrelated
+    /// hook's place, which then no longer runs (the script's own check of the
+    /// name it was run under keeps it from recording). Nothing was written.
     HookLinksToManagedHook {
         /// The entry that is a link.
         path: PathBuf,
@@ -849,8 +872,8 @@ impl GitHooks {
     /// order. A link made after an install that reaches a hook this installer
     /// replaces, or whose way depends on the process that follows it, makes it
     /// refuse and not report the hooks healthy: the next `install` would
-    /// refuse that link, and a report that every hook is installed beside it
-    /// would be false. It does not look at `core.hooksPath`.
+    /// refuse that link, and the hook such a link stood for no longer runs. It
+    /// does not look at `core.hooksPath`.
     ///
     /// # Errors
     ///
@@ -863,8 +886,9 @@ impl GitHooks {
     /// [`HooksError::HookLinkDependsOnProcess`] when a link in the hooks
     /// directory, or one in `ori-original/` named for a hook this installer
     /// replaces, is one that `install` refuses, [`HooksError::HookNotAFile`]
-    /// when a directory sits where a hook belongs, [`HooksError::Io`] when the
-    /// scan of the links cannot be made or a hook file cannot be examined.
+    /// when a directory sits where a hook belongs, [`HooksError::Io`] when
+    /// `.git`, the hooks directory, `ori-original/`, a link or a hook file
+    /// cannot be looked at.
     pub fn status(&self) -> Result<Vec<HookStatus>, HooksError> {
         check_git_dir(&self.git_dir)?;
         let hooks_dir = self.hooks_dir();
@@ -1115,11 +1139,12 @@ impl GitHooks {
     /// `post-commit`, which is now the engine's script, so the veto it stood
     /// for stops running. `post-checkout -> post-merge`: the link is not ours
     /// to move, and `post-merge` becomes the engine's script, so every checkout
-    /// records a `post-merge` event into the spool the engine reads. Entries
-    /// are looked at in name order, so the refusal names the same one each
-    /// time. A hooks directory that does not exist yet has nothing to refuse.
-    /// A link made after this look is not seen by it, as with every decision
-    /// made before the writes.
+    /// runs the engine's script in place of the hook the link stood for, which
+    /// then no longer runs (the script's own check keeps it from recording).
+    /// Entries are looked at in name order, so the refusal names the same one
+    /// each time. A hooks directory that does not exist yet has nothing to
+    /// refuse. A link made after this look is not seen by it, as with every
+    /// decision `install` makes before its writes.
     ///
     /// The entries of `ori-original/` that the installed scripts run, which are
     /// those named for a hook this installer replaces, are looked at too when
@@ -1136,15 +1161,15 @@ impl GitHooks {
     /// modelled, and refusing fails closed. A way that first fails at any other
     /// missing directory is read physically, as git's process will find it if
     /// that directory is later made as a real one, and its text is read as a
-    /// second look that refuses the link only if that reading reaches a hook,
-    /// an over-refusal kept because it fails closed
-    /// (`follow_chain_to_managed_hook` gives both readings, and the spool's
-    /// future path, which is not modelled). A physical reading that meets more
-    /// than `LINK_HOPS_CAP` links refuses the installation as an IO error. A
-    /// failure to look at anything that is there, other than a missing entry,
-    /// refuses the installation as an IO error ([`HooksError::Io`]) and does
-    /// not pass it: a check that could not be made is not a check that found
-    /// nothing (AICD §14).
+    /// second look that refuses the link if that reading lands on a hook's
+    /// place at that hop, an over-refusal kept because it fails closed
+    /// (`follow_chain_to_managed_hook` gives both readings). A physical reading
+    /// that meets more than `LINK_HOPS_CAP` links refuses the installation, or
+    /// the status report, as an IO error. A failure to look at anything that is
+    /// there, other than a missing entry, refuses the installation, or the
+    /// status report, as an IO error ([`HooksError::Io`]) and does not pass it:
+    /// a check that could not be made is not a check that found nothing
+    /// (AICD §14).
     fn refuse_if_a_link_reaches_a_managed_hook(&self, hooks_dir: &Path) -> Result<(), HooksError> {
         let listing = match fs::read_dir(hooks_dir) {
             Ok(listing) => listing,
@@ -1615,7 +1640,8 @@ fn is_named(name: &std::ffi::OsStr, expected: &str, fold_case: bool) -> bool {
 /// tree changed between the caller's look, which found a component missing, and
 /// this one (a race). Refusing the install in that case fails closed, and
 /// running it again decides afresh. `false` means the way first fails
-/// somewhere else, and reaches nothing, or it meets a file.
+/// somewhere else, or it meets a file; the caller then reads the way
+/// physically and by its text (`follow_chain_to_managed_hook`, bullet (b)).
 ///
 /// What the install creates, and which a link can run through before it exists,
 /// is `ori-original/` under the hooks directory (`PRESERVED_DIR`) and an entry
@@ -1720,7 +1746,7 @@ fn way_enters_what_the_install_creates(
     }
     // Every component resolved, though the caller's `canonicalize` failed with
     // "not found" a moment ago: the tree changed between the two looks. The
-    // text reading that follows could misread such a way, so it is refused.
+    // readings that follow could misread such a way, so it is refused.
     Ok(true)
 }
 
@@ -1766,9 +1792,10 @@ fn way_enters_what_the_install_creates(
 ///   missing component followed where they stand, names after it taken by
 ///   their text, and a `..` back to a directory that is there going on
 ///   physically. Its text (`lexically_normal`) is still read as a second look
-///   at that hop, and refused only if it lands on a hook's place: an
-///   over-refusal kept because it fails closed. The spool's future path is
-///   the exception, bullet (c). Three ways show what each reading does:
+///   at that hop, and refused if it lands on a hook's place (like any look, it
+///   also refuses the install as an IO error when its landing cannot be looked
+///   at): an over-refusal kept because it fails closed. Three ways show what
+///   each reading does:
 ///   - `nowhere/../post-merge`: both readings land on the hooks directory;
 ///   - `hooks/L -> ../refs` with `L/remotes/../../hooks/post-merge`: only the
 ///     physical reading does, since the text lands on `hooks/hooks`. Git makes
@@ -1780,19 +1807,20 @@ fn way_enters_what_the_install_creates(
 ///   What the readings land on is looked at: the walk goes on from the
 ///   physical landing when it is a directory that is there, and a link in it
 ///   is followed, since that is the way's real directory; else from the text's
-///   landing, when that is a directory that is there (`nowhere/../../shared/relay`,
-///   where `shared/relay` links to a hook), though that directory is where the
+///   landing, when that is a directory that is there (`hooks/L -> ../refs` with
+///   `L/../sub/relay`, where `hooks/sub/relay` links to a hook: the physical
+///   reading ends at `.git/sub`, which is not there, and the text lands on
+///   `hooks/sub`), though that directory is where the
 ///   text puts the way and not necessarily where the way goes. Where neither
 ///   is there, the chain ends, as does a chain that ends at an entry that is
 ///   not there (a dangling link reaches nothing). A physical reading that
 ///   reads more than `LINK_HOPS_CAP` links is an error and not a no, and
 ///   refuses the install.
-/// - (c) The spool directory is not modelled. `install` creates it, with any
-///   missing ancestors, after this check. A link whose way runs through the
-///   spool's future path before the first install is read by its text only,
-///   and a link inside that way is not followed. The spool is outside the
-///   repository ([`HooksError::SpoolInsideTree`]) and its path is the engine's
-///   choice.
+/// - (c) The spool's future path is read like any other missing directory, by
+///   bullet (b)'s physical reading: `install` creates the spool, with any
+///   missing ancestors, after this check, as real directories, which is what
+///   that reading assumes. The spool is outside the repository
+///   ([`HooksError::SpoolInsideTree`]) and its path is the engine's choice.
 /// - (d) A link whose meaning depends on the process that follows it, on Linux
 ///   one through `/proc/self`, `/proc/thread-self` or `/dev/fd`, is resolved
 ///   as the installer's own process sees it, which is not what git's process
@@ -1804,13 +1832,12 @@ fn way_enters_what_the_install_creates(
 ///   reach `/proc` then: past a missing component that walk follows the text of
 ///   the way until a `..` climbs back to a directory that is there, and walks on
 ///   physically from it. It assumes a directory made later is a real directory.
-///   The working tree is judged as it stands at the install, and a later
-///   checkout can make a link or a file where a way passes, so that it reaches
-///   a hook it did not reach then. The script's own check of the name it was
-///   run under keeps such a way from recording (the module doc's section on a
-///   script not run by git for its own event), and the next `install` or
-///   `status` refuses it. The spool's future path is one such directory, and
-///   bullet (c)'s limit does not apply to this rule. The
+///   The spool's future path is one such directory. The working tree is judged
+///   as it stands at the install, and a later checkout can make a link or a
+///   file where a way passes, so that it reaches a hook it did not reach then.
+///   The script's own check of the name it was run under keeps such a way from
+///   recording (the module doc's section on a script not run by git for its own
+///   event), and the next `install` or `status` refuses it. The
 ///   text reading of bullet (b) still resolves a `/proc/self` as the
 ///   installer's own process does, which is not git's; it does not decide a way
 ///   of this kind, because the per-process walk has refused it first. The
@@ -1823,8 +1850,8 @@ fn way_enters_what_the_install_creates(
 /// accepted. It holds where the operating system's own resolution meets the
 /// regular file. Behind a missing directory, a way through a regular file is
 /// read as reaching nothing, and the link passes, unless that way first fails
-/// at what the install creates, rule (a), or either reading of rule (b) reaches
-/// a hook. The physical reading treats a file with steps after it as a
+/// at what the install creates, rule (a), or the physical reading of rule (b)
+/// reaches a hook, or its text lands on a hook's place. The physical reading treats a file with steps after it as a
 /// directory that is not there. On Windows, opening a path through a regular
 /// file reports it as not found, so such a way is always read this way there.
 ///
@@ -1832,8 +1859,9 @@ fn way_enters_what_the_install_creates(
 ///
 /// Anything other than a missing entry or directory is an error and not an
 /// answer of "no": a link that cannot be read or an entry or directory that
-/// cannot be looked at means the chain could not be followed, and the caller
-/// refuses the installation (AICD §14).
+/// cannot be looked at means the chain could not be followed, and so is more
+/// than `LINK_HOPS_CAP` links in a way's physical reading (bullet (b)); the
+/// caller refuses the installation (AICD §14).
 fn follow_chain_to_managed_hook(
     hooks_dir: &Path,
     canonical_hooks: &Path,
@@ -1864,9 +1892,10 @@ fn follow_chain_to_managed_hook(
             // what this install creates, the link is refused, whatever it
             // would reach. Otherwise the way is read physically
             // (`walk_the_way`), and its text is read as a second look that
-            // refuses only at a hook's place. The walk goes on from the
-            // physical landing when it is a directory that is there, else
-            // from the text's.
+            // refuses at a hook's place, or as an IO error when its landing
+            // cannot be looked at. The walk goes on from the physical
+            // landing when it is a directory that is there, else from the
+            // text's.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if way_enters_what_the_install_creates(
                     parent,
@@ -1892,7 +1921,8 @@ fn follow_chain_to_managed_hook(
                     WayEnd::PerProcess(_) | WayEnd::Elsewhere => None,
                 };
                 // The text's reading, kept as a second look that fails closed:
-                // its landing is still refused if it is a hook's place.
+                // its landing is refused if it is a hook's place, or as an IO
+                // error when its landing cannot be looked at.
                 let lexical = lexically_normal(parent);
                 let text = existing_directory(&lexical)?;
                 if names_a_managed_hook(&name, fold_case)
@@ -2040,8 +2070,10 @@ enum WayEnd {
 ///
 /// The walk ends in one of four ways. It stops at `WayEnd::PerProcess` on
 /// entering a per-process directory. Its steps run out at `WayEnd::Directory`
-/// in a directory that is there: every directory it entered was there, so the
-/// path is canonical. They run out at `WayEnd::Elsewhere` past a component that
+/// in a directory that is there, and the path is canonical. That holds after a
+/// climb back out of a missing component too: a `..` taken while the count is
+/// above 0 removes a name taken by its text, and when the count is back to 0
+/// the walk stands in the canonical directory it left. They run out at `WayEnd::Elsewhere` past a component that
 /// is not there (the count above is not 0), or at a file at the last step.
 /// More than `LINK_HOPS_CAP` links read end it at `WayEnd::TooManyLinks`. That
 /// is not an error here, because no process can follow such a way, and each
@@ -2359,7 +2391,7 @@ ori_emit() {
 ori_run_as=$(basename -- \"$0\")
 ori_run_from=$(basename -- \"$(dirname -- \"$0\")\")
 if [ \"$ori_run_as\" != \"$ori_hook\" ] || [ \"$ori_run_from\" = 'ori-original' ]; then
-    printf 'ori-studio: the %s hook was run as %s, not by git for its own event; it recorded nothing and ran nothing.\\n' \"$ori_hook\" \"$(ori_clean \"$0\")\" >&2
+    printf 'ori-studio: the %s hook was run as %s in %s, not by git for its own event; it recorded nothing and ran nothing.\\n' \"$ori_hook\" \"$(ori_clean \"$ori_run_as\")\" \"$(ori_clean \"$(dirname -- \"$0\")\")\" >&2
     [ -t 0 ] || cat >/dev/null 2>&1
     exit 0
 fi
@@ -5295,7 +5327,8 @@ mod tests {
                 .all(|status| status.state == HookState::Installed)
         );
         // A link in the hooks directory, made after the install: every
-        // checkout would record a false `post-merge`.
+        // checkout would run the engine's `post-merge` script in place of the
+        // hook the link stood for.
         let link = repo.join(".git").join("hooks").join("post-checkout");
         std::os::unix::fs::symlink("post-merge", &link).unwrap();
         let error = hooks.status().unwrap_err();
@@ -5443,7 +5476,8 @@ mod tests {
         // the first `git fetch`. Read by its text, `L/remotes/../../hooks`
         // lands on `hooks/hooks`; read as git's process will find it once
         // `refs/remotes` exists, `L` is `.git/refs`, the first `..` is
-        // `.git/refs` again and the second is `.git`: the hooks directory.
+        // `.git/refs` again, the second is `.git`, and `hooks` from there is
+        // the hooks directory.
         let scratch = Scratch::new("physical-ii");
         let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
         std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
@@ -5602,6 +5636,99 @@ mod tests {
             other => panic!("expected an IO error naming the link, got {other}"),
         }
         assert_nothing_written(&repo, &spool, &["L", "loopdir", "post-checkout"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_status_checks_ori_original_before_the_link_scan() {
+        // `ori-original` is a link named for a hook. The scan of the links would
+        // meet it first and refuse it as a link to a managed hook; `status`
+        // judges in the order `install` does, `ori-original` first, so what it
+        // says is that `ori-original` is not a directory.
+        let scratch = Scratch::new("status-order");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        let preserved_dir = repo.join(".git").join("hooks").join(PRESERVED_DIR);
+        assert!(
+            fs::symlink_metadata(&preserved_dir).is_err(),
+            "a clean install with no hook of the user's makes no `ori-original`"
+        );
+        std::os::unix::fs::symlink("post-merge", &preserved_dir).unwrap();
+
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HooksDirNotADirectory { path } => assert_eq!(path, &preserved_dir),
+            other => panic!("expected HooksDirNotADirectory, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_the_physical_landing_is_checked_for_a_hook_when_the_text_lands_on_a_directory_too()
+     {
+        // `L/remotes/../../hooks`, as git's process will find it once
+        // `refs/remotes` exists, lands on `.git/hooks`. Its text lands on
+        // `hooks/hooks`, which is there and holds no hook, so the second look
+        // finds nothing and only the physical landing can refuse the link.
+        let scratch = Scratch::new("physical-text-directory");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        fs::create_dir_all(hooks_dir.join("hooks")).unwrap();
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        let written = "L/remotes/../../hooks/post-merge";
+        std::os::unix::fs::symlink(written, hooks_dir.join("post-checkout")).unwrap();
+        assert!(!repo.join(".git").join("refs").join("remotes").exists());
+        assert!(!hooks_dir.join("post-merge").exists());
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new(written),
+            &["L", "hooks", "post-checkout"],
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ori_t_0185_a_file_at_the_physical_landing_falls_back_to_the_text() {
+        // The physical reading of `L/../nowhere/../sub` ends at `.git/sub`,
+        // which is a regular file at the last step, so it reaches no directory.
+        // The text lands on `hooks/sub`, which holds the relay to a hook.
+        let scratch = Scratch::new("physical-file-landing");
+        let (repo, spool, hooks_dir) = repository_with_hooks_and_refs(&scratch);
+        fs::write(repo.join(".git").join("sub"), "a file\n").unwrap();
+        fs::create_dir_all(hooks_dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink("../refs", hooks_dir.join("L")).unwrap();
+        std::os::unix::fs::symlink("../post-merge", hooks_dir.join("sub").join("relay")).unwrap();
+        let written = "L/../nowhere/../sub/relay";
+        std::os::unix::fs::symlink(written, hooks_dir.join("post-checkout")).unwrap();
+        expect_refused_link(
+            &repo,
+            &spool,
+            &hooks_dir.join("post-checkout"),
+            Path::new(written),
+            &["L", "post-checkout", "sub"],
+        );
+    }
+
+    #[test]
+    fn ori_t_0185_status_refuses_a_hooks_directory_that_is_a_file() {
+        // No link is made, so this runs where links cannot be made too.
+        let scratch = Scratch::new("status-hooks-dir-is-a-file");
+        let (repo, spool) = skeleton(&scratch);
+        let hooks = GitHooks::new(&repo, &spool).unwrap();
+        hooks.install().unwrap();
+        let hooks_dir = repo.join(".git").join("hooks");
+        fs::rename(&hooks_dir, repo.join(".git").join("hooks-aside")).unwrap();
+        fs::write(&hooks_dir, "not a directory\n").unwrap();
+
+        let error = hooks.status().unwrap_err();
+        match &error {
+            HooksError::HooksDirNotADirectory { path } => assert_eq!(path, &hooks_dir),
+            other => panic!("expected HooksDirNotADirectory, got {other}"),
+        }
+        assert_eq!(error.methodology_ref().unwrap().section, 13);
     }
 
     // ---- the scripts, run by a real shell and by real git ----
@@ -6201,10 +6328,127 @@ esac
                     stderr.contains("not by git for its own event"),
                     "{hook}: {stderr:?}"
                 );
+                // The name and the directory are printed apart, so a long
+                // temporary path cannot hide the name the script was run as.
                 assert!(
-                    stderr.contains("not-a-hook") && stderr.contains(&format!("the {hook} hook")),
+                    stderr.contains("was run as not-a-hook in ")
+                        && stderr.contains(&format!("the {hook} hook")),
                     "{hook}: {stderr:?}"
                 );
+            }
+        }
+
+        #[test]
+        fn ori_t_0185_a_guarded_run_runs_no_kept_hook_and_no_git_and_prints_a_clean_name() {
+            // The guard promises that a script run under another name records
+            // nothing and runs nothing: not the hook kept in `ori-original/`,
+            // which would run with another event's arguments, and not `git`,
+            // since the guard comes before any git call. Each is a marker file
+            // that only a run writes. A control first runs each script under
+            // its own name with the same `PATH`, so a marker that never shows
+            // up is not one the test could not have seen.
+            let scratch = Scratch::new("guarded-run");
+            let repo = real_repo(&scratch);
+            let spool = scratch.path.join("spool");
+            GitHooks::new(&repo, &spool).unwrap().install().unwrap();
+            let hooks_dir = repo.join(".git").join("hooks");
+            let kept_dir = hooks_dir.join(PRESERVED_DIR);
+            fs::create_dir_all(&kept_dir).unwrap();
+
+            let marker_dir = scratch.dir("markers");
+            let marker = |name: &str| marker_dir.join(name);
+            for hook in ["pre-push", "post-rewrite"] {
+                let kept = kept_dir.join(hook);
+                fs::write(
+                    &kept,
+                    format!("#!/bin/sh\n: > '{}'\n", marker(hook).display()),
+                )
+                .unwrap();
+                make_executable(&kept).unwrap();
+            }
+            // A `git` that only says it was run, found before the real one.
+            let shim_dir = scratch.dir("shim");
+            let shim = shim_dir.join("git");
+            fs::write(
+                &shim,
+                format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker("git").display()),
+            )
+            .unwrap();
+            make_executable(&shim).unwrap();
+            let path = std::env::join_paths(std::iter::once(shim_dir.clone()).chain(
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+            ))
+            .unwrap();
+
+            let run = |script: &Path| -> Output {
+                let mut child = Command::new(script)
+                    .arg("origin")
+                    .current_dir(&repo)
+                    .env("PATH", &path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let mut input = child.stdin.take().unwrap();
+                // A few lines. A writer that is cut off is the business of the
+                // test that sends more than a pipe holds, so a failure to write
+                // is not this test's.
+                for _ in 0..3 {
+                    let _ = input.write_all(b"refs/heads/main aaaa refs/heads/main bbbb\n");
+                }
+                drop(input);
+                child.wait_with_output().unwrap()
+            };
+
+            // The control: each script under its own name runs the kept hook and
+            // `git`, and records.
+            for hook in ["pre-push", "post-rewrite"] {
+                let output = run(&hooks_dir.join(hook));
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                assert!(
+                    marker(hook).exists(),
+                    "control: the kept {hook} did not run under its own name: {stderr:?}"
+                );
+                assert!(
+                    marker("git").exists(),
+                    "control: no git ran under {hook}'s own name: {stderr:?}"
+                );
+                fs::remove_file(marker(hook)).unwrap();
+                fs::remove_file(marker("git")).unwrap();
+            }
+            let before = log_of(&spool);
+            assert!(!before.is_empty(), "control: nothing was recorded");
+
+            // A link to `pre-push` whose name holds a space and an ESC byte, and
+            // a link to `post-rewrite` under a plain name.
+            let cases = [
+                ("pre-push", "not a hook\x1b", "was run as not?a?hook? in "),
+                ("post-rewrite", "not-a-hook", "was run as not-a-hook in "),
+            ];
+            for (hook, name, shown) in cases {
+                let link = hooks_dir.join(name);
+                std::os::unix::fs::symlink(hook, &link).unwrap();
+                let output = run(&link);
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                assert_eq!(output.status.code(), Some(0), "{hook}: {stderr:?}");
+                for ran in ["pre-push", "post-rewrite", "git"] {
+                    assert!(
+                        !marker(ran).exists(),
+                        "{hook} as {name:?}: {ran} was run: {stderr:?}"
+                    );
+                }
+                assert!(stderr.contains(shown), "{hook} as {name:?}: {stderr:?}");
+                assert!(
+                    !output.stderr.contains(&0x1b),
+                    "{hook} as {name:?}: an ESC byte reached standard error: {stderr:?}"
+                );
+                assert_eq!(
+                    log_of(&spool),
+                    before,
+                    "{hook} as {name:?}: a record was written"
+                );
+                fs::remove_file(&link).unwrap();
             }
         }
 
