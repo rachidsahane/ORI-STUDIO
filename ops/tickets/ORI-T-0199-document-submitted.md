@@ -11,7 +11,7 @@
 | Ticket trailer | `Ticket: ORI-T-0199` |
 | Commit types | `feat`, `fix`, `docs`, `chore` only |
 | Model | Sonnet 5.5 |
-| Precondition | **ORI-T-0197** merged ([PR 85](https://github.com/rachidsahane/ORI-STUDIO/pull/85)) or branch from `feat/ORI-T-0197-flows-registry` |
+| Precondition | **Dispatch** only after [PR 85](https://github.com/rachidsahane/ORI-STUDIO/pull/85) (ORI-T-0197 / R1) **merges into `claude/sweet-maxwell-jkaiie`** ([[R50]]). Until then: designed, not dispatched. **Test edits:** exactly the two ORI-T-0197 tests listed under [[R50]]; no other existing test may change. |
 
 ## Why
 
@@ -20,6 +20,7 @@
 ## Read first
 
 - `ops/rulings/R49-operator-answers-of-2026-10-19-r1-deviation-q7.md`;
+- `ops/rulings/R50-test-modifications-for-0199.md`;
 - `ops/batch-12-plan.md` D1, D2, D9;
 - PR 85 `crates/ori-flows/src/registry.rs` (`apply_document_approved` bridge at Draft, `DOCUMENT_SUBMITTED_KIND` refused in `fold_event`);
 - `crates/ori-core/src/document.rs` (`DocumentEvent::Submitted`, `fires_from`);
@@ -48,9 +49,9 @@ Delete the block in `apply_document_approved` that, when `working.state == Docum
 
 **Phase 1 has no production event logs.** All `ProductDb` data is local dev, tests, and fixtures. Logs that contain only `document.created` → `document.approved` (possible under [[R49]] bridge) **will fail fold** after this change. **No migration code:** rebuild or discard databases; state that in the closing report "not tested" if no long-lived fixture relies on the bridge (none expected).
 
-## Escalation (operator, `test_modified`)
+## Escalation (operator, `test_modified`) — answered: approved, [[R50]]
 
-Per `templates/escalation.md`. **Raise before modifying tests** (`aicd_escalate(trigger="test_modified")` or operator ruling). Text for the operator queue:
+Per `templates/escalation.md`. Raised on package design for [[R49]]; operator answered 2026-10-19.
 
 | Field | Value |
 |---|---|
@@ -59,7 +60,8 @@ Per `templates/escalation.md`. **Raise before modifying tests** (`aicd_escalate(
 | Raised by | Lead, 2026-10-19, on package design for [[R49]] |
 | Question | May ORI-T-0199 change the two ORI-T-0197 integration tests below so approval paths include a logged `document.submitted`, matching DATA_MODEL §3 after the R1 bridge is removed? |
 | Recommendation | **Yes.** Replace the tests as described; add new `ori_t_0199_*` tests for submit refusal/success rather than weakening assertions. |
-| What is blocked | ORI-T-0199 dispatch until answered (coder must not edit listed tests without approval). |
+| Answer | **Approved**, [[R50]] — exactly the two tests in the replacement table; no weakening; no other existing test may change |
+| Dispatch | **After** [PR 85](https://github.com/rachidsahane/ORI-STUDIO/pull/85) merges into `claude/sweet-maxwell-jkaiie` ([[R50]]) |
 
 ### Context
 

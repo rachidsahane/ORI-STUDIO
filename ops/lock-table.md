@@ -2797,3 +2797,19 @@ Written by the lead on 2026-10-19 under [[R31]] and [[R49]].
 | 124 | ORI-T-0199, Q7 `document.submitted` | `registry.rs`, new `documents.rs`, `tests/ori_t_0199_document_submitted.rs`; **modify** two tests in `ori_t_0197_registry.rs` per escalation; queue `lib.rs` | 1 | 2026-10-19, designed not dispatched |
 
 **State after this section:** claims held: 20, 112, 117, 123, **122** (ORI-T-0197 until PR 85 merge). **124** designed for ORI-T-0199. Next free identifier: **ORI-T-0200**.
+
+---
+
+## R50 recorded; ORI-T-0199 `test_modified` approved; dispatch after PR 85 merge
+
+Written by the lead on 2026-10-19 under [[R31]] and [[R50]].
+
+**Operator ([[R50]]).** Approved the ORI-T-0199 package escalation: ORI-T-0199 may modify **exactly** `ori_t_0197_record_approver_holding_seat_succeeds` and `ori_t_0197_fold_refuses_document_submitted_kind` in `crates/ori-flows/tests/ori_t_0197_registry.rs` per the package replacement table, **without weakening any assertion**; malformed submitted payloads move to new `ori_t_0199_*` tests; rename of the second test allowed. **No other existing test may change.**
+
+**Dispatch ([[R50]]).** ORI-T-0199 is **not dispatched** until [PR 85](https://github.com/rachidsahane/ORI-STUDIO/pull/85) (ORI-T-0197 / R1) **merges into `claude/sweet-maxwell-jkaiie`**.
+
+| # | Ticket | Modules (declared scope) | Tier | Recorded |
+|---|---|---|---|---|
+| 124 | ORI-T-0199, Q7 `document.submitted` | `registry.rs`, new `documents.rs`, `tests/ori_t_0199_document_submitted.rs`; **modify** two tests in `ori_t_0197_registry.rs` per [[R50]]; queue `lib.rs` | 1 | 2026-10-19, **designed**; [[R50]] test edits approved; **dispatch after PR 85 merge** |
+
+**State after this section:** claims held unchanged (20, 112, 117, 123, **122**). Claim **124** updated for [[R50]]. Next free identifier: **ORI-T-0200**.
