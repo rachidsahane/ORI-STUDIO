@@ -299,9 +299,10 @@ const WHY_NO_QUERY: &str = "the query argument is missing or is not a string";
 /// **Lock order.** `aicd_context` and `aicd_search` take the read lock for the
 /// whole call, because `Retrieval` borrows the map and the tracker, and they hold
 /// the database writer while they do. `aicd_evidence` holds it only to copy the
-/// stage, while it also holds the writer. The engine therefore never holds the write lock while it waits
-/// for the database writer: that is a deadlock with a handler that holds the
-/// writer and waits for the read lock. A poisoned lock fails closed.
+/// stage, while it also holds the writer. The engine therefore never holds the
+/// write lock while it waits for the database writer: that is a deadlock with a
+/// handler that holds the writer and waits for the read lock. A poisoned lock
+/// fails closed.
 ///
 /// `product_id` is checked against the binding's on every call, because neither
 /// `CodeMap` nor `FreshnessTracker` carries a product.

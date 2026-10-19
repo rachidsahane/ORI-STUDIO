@@ -17,8 +17,7 @@
 //! M, and the code map of M; no evidence blobs; every item carries
 //! provenance and verification date"; its size half, ORI-P1-030, is "package
 //! size under the configured cap". `aicd_context` (`spec/API_SPEC.md`
-//! section 3) does not exist yet (escalation E-0005); [`Retrieval::assemble`]
-//! is what it will call.
+//! section 3; slice S3's handler in `ori-mcp`) calls [`Retrieval::assemble`].
 //!
 //! # The seam this module stands on
 //!
@@ -276,8 +275,8 @@
 //! [`Retrieval::search`] turns an `Authorization` granted for a search into a
 //! [`SearchPackage`]: AICD §25, "Every item returned carries its source, its
 //! commit and its verification date" and "Context packages are bounded".
-//! `aicd_search` (`spec/API_SPEC.md` section 3) does not exist yet; this is
-//! what it will call. It stands on the same seam as [`Retrieval::assemble`],
+//! `aicd_search` (`spec/API_SPEC.md` section 3; slice S8's handler in
+//! `ori-mcp`) calls it. It stands on the same seam as [`Retrieval::assemble`],
 //! with the same three product links checked, and the same two functions
 //! decide what a reader holds: `admit` (the filter, the only gate; a search
 //! never decides admission itself) and `build_item` (provenance, verification

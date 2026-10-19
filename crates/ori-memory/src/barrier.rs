@@ -405,9 +405,8 @@
 //! names. [`read_evidence_content`] is that read, and the only read of
 //! evidence content in the workspace. `aicd_evidence`'s handler in `ori-mcp`
 //! (slice S7, ORI-T-0184) calls this function, and never opens a path by hand.
-//! The read
-//! belongs here, next to the type whose content it reads. The decisions, each
-//! with its reason:
+//! The read belongs here, next to the type whose content it reads. The
+//! decisions, each with its reason:
 //!
 //! 1. **The result is not [`Indexable`], and that is all the type holds.**
 //!    [`EvidenceContent`] holds raw bytes and does not implement

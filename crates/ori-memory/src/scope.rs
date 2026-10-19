@@ -18,9 +18,9 @@
 //! ones that enforce it. `spec/API_SPEC.md` section 3 names the three agent
 //! tools that will call it: `aicd_context` (all roles), `aicd_search` (all
 //! roles, "Scoped search over allowed layers") and `aicd_evidence` (lead, qa,
-//! operations, "Raw evidence, returned labeled untrusted, logged"). None of
-//! the three exists yet (escalation E-0005); [`ScopeEnforcer::authorize`] is
-//! what they will call. `spec/SECURITY_NOTES.md` "Authorization model" puts
+//! operations, "Raw evidence, returned labeled untrusted, logged"). Their
+//! handlers are in `ori-mcp` (slices S3, S8 and S7), and each calls
+//! [`ScopeEnforcer::authorize`]. `spec/SECURITY_NOTES.md` "Authorization model" puts
 //! the enforcement here: permissions are "enforced by the component that owns
 //! the resource (... memory for retrieval ...)".
 //!
