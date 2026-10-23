@@ -57,12 +57,6 @@ impl<'r> Documents<'r> {
         actor: Actor,
         document_id: &Id,
     ) -> Result<u64, RegistryError> {
-        if let Some((seq, defect)) = self.registry.blocked() {
-            return Err(RegistryError::Event {
-                seq,
-                defect: defect.clone(),
-            });
-        }
         let payload = serde_json::to_string(&DocumentSubmittedWire {
             document_id: document_id.as_str().to_owned(),
         })

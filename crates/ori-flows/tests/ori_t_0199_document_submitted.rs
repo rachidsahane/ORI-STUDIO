@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use ori_core::types::{Actor, DocumentState, Id, Seat, Timestamp};
 use ori_flows::documents::Documents;
 use ori_flows::registry::{
-    DOCUMENT_APPROVED_KIND, DOCUMENT_CREATED_KIND, DOCUMENT_SUBMITTED_KIND, DocumentRegistry,
-    DocumentWire, EventDefect, FOUNDATION, PRODUCT_CREATED_KIND, ProductCreatedWire, RegistryError,
-    SeatWire,
+    DOCUMENT_APPROVED_KIND, DOCUMENT_CHANGES_REQUESTED_KIND, DOCUMENT_CREATED_KIND,
+    DOCUMENT_SUBMITTED_KIND, DocumentRegistry, DocumentWire, EventDefect, FOUNDATION,
+    PRODUCT_CREATED_KIND, ProductCreatedWire, RegistryError, SeatWire,
 };
 use ori_store::db::ProductDb;
 use ori_store::event_log::EventLog;
@@ -339,6 +339,43 @@ fn ori_t_0199_record_refuses_approved_from_draft_without_submit() {
     );
     assert_eq!(tip(&mut home), Some(2));
     assert!(reg.blocked().is_none());
+    assert_eq!(state_of(&reg, &brief()), DocumentState::Draft);
+}
+
+#[test]
+fn ori_t_0199_record_refuses_changes_requested_from_draft() {
+    let mut home = Home::new("cr-draft");
+    let mut reg = setup(&mut home);
+    draft(&mut home, &mut reg);
+    let payload = format!(
+        r#"{{"document_id":"{}","instructions":"fix"}}"#,
+        brief().as_str()
+    );
+    assert_eq!(
+        reg.record(
+            &mut home.db,
+            ts(AT + 1),
+            Actor::Human(product_owner()),
+            DOCUMENT_CHANGES_REQUESTED_KIND,
+            &payload,
+        ),
+        Err(RegistryError::Refused {
+            defect: EventDefect::Transition,
+        })
+    );
+    assert_eq!(tip(&mut home), Some(2));
+    assert!(reg.blocked().is_none());
+    Documents::new(&mut reg)
+        .submit(&mut home.db, ts(AT + 2), Actor::Human(human()), &brief())
+        .expect("submit");
+    reg.record(
+        &mut home.db,
+        ts(AT + 3),
+        Actor::Human(product_owner()),
+        DOCUMENT_CHANGES_REQUESTED_KIND,
+        &payload,
+    )
+    .expect("changes requested");
     assert_eq!(state_of(&reg, &brief()), DocumentState::Draft);
 }
 
