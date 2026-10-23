@@ -355,6 +355,14 @@ fn ori_t_0197_record_approver_holding_seat_succeeds() {
         &created_payload(&doc, "1"),
     )
     .expect("created");
+    reg.record(
+        &mut home.db,
+        ts(AT),
+        Actor::Human(human()),
+        DOCUMENT_SUBMITTED_KIND,
+        &format!(r#"{{"document_id":"{doc}"}}"#),
+    )
+    .expect("submitted");
     // product_owner owns brief
     reg.record(
         &mut home.db,
@@ -364,6 +372,8 @@ fn ori_t_0197_record_approver_holding_seat_succeeds() {
         &approved_payload(&doc, "product_owner"),
     )
     .expect("approved");
+    let doc = reg.documents().find(|d| d.id.as_str() == doc).expect("doc");
+    assert_eq!(doc.state, DocumentState::Approved);
 }
 
 #[test]
@@ -549,16 +559,25 @@ fn ori_t_0197_payload_refuses_trailing_text() {
 }
 
 #[test]
-fn ori_t_0197_fold_refuses_document_submitted_kind() {
+fn ori_t_0197_fold_accepts_document_submitted_after_created() {
     let mut home = Home::new("sub");
     setup_new_product(&mut home);
+    let doc = brief_id();
+    plant(
+        &mut home,
+        Actor::Human(human()),
+        DOCUMENT_CREATED_KIND,
+        &created_payload(&doc, "1"),
+    );
     plant(
         &mut home,
         Actor::Human(human()),
         DOCUMENT_SUBMITTED_KIND,
-        &format!(r#"{{"document_id":"{}"}}"#, brief_id()),
+        &format!(r#"{{"document_id":"{doc}"}}"#),
     );
-    assert!(DocumentRegistry::read(&mut home.db).is_err());
+    let reg = DocumentRegistry::read(&mut home.db).expect("fold");
+    let doc = reg.documents().find(|d| d.id.as_str() == doc).expect("doc");
+    assert_eq!(doc.state, DocumentState::UnderReview);
 }
 
 #[test]
