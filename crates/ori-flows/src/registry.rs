@@ -28,7 +28,7 @@ pub const DOCUMENT_REVISED_KIND: &str = "document.revised";
 pub const DOCUMENT_CHANGES_REQUESTED_KIND: &str = "document.changes_requested";
 /// Kind when the owning seat signs: AICD §9.
 pub const DOCUMENT_APPROVED_KIND: &str = "document.approved";
-/// Reserved; the fold refuses until batch 12 Q7 fixes the payload.
+/// Kind when a document goes to its owning seat for review: AICD §9.
 pub const DOCUMENT_SUBMITTED_KIND: &str = "document.submitted";
 /// Reserved; the fold refuses until phase F fixes the payload.
 pub const DOCUMENT_DRIFTED_KIND: &str = "document.drifted";
@@ -306,6 +306,13 @@ struct DocumentPrWire {
 struct DocumentChangesWire {
     document_id: String,
     instructions: String,
+}
+
+/// Wire shape of `document.submitted`: AICD §9.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DocumentSubmittedWire {
+    pub(crate) document_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -637,6 +644,23 @@ fn apply_document_changes_requested(state: &mut State, event: &Event) -> Result<
     apply_with_document_event(state, event, |_, _| Ok(DocumentEvent::ChangesRequested))
 }
 
+fn apply_document_submitted(state: &mut State, event: &Event) -> Result<(), EventDefect> {
+    let _: DocumentSubmittedWire = read_object_payload(event.payload())?;
+    apply_with_document_event(state, event, |_, _| Ok(DocumentEvent::Submitted))
+}
+
+fn check_fires(state: &State, document_id: &str, event: &DocumentEvent) -> Result<(), EventDefect> {
+    let doc = state
+        .documents
+        .get(document_id)
+        .ok_or(EventDefect::UnknownDocument)?;
+    if event.fires_from(doc.state) {
+        Ok(())
+    } else {
+        Err(EventDefect::Transition)
+    }
+}
+
 fn apply_document_approved(state: &mut State, event: &Event) -> Result<(), EventDefect> {
     let Actor::Human(holder) = event.actor() else {
         return Err(EventDefect::NotHuman);
@@ -659,21 +683,11 @@ fn apply_document_approved(state: &mut State, event: &Event) -> Result<(), Event
     if seat != owner {
         return Err(EventDefect::Transition);
     }
-    let approved_event = DocumentEvent::Approved {
-        signature: signature.clone(),
-    };
-    let mut working = doc.clone();
-    if working.state == DocumentState::Draft {
-        // Interim until `document.submitted` exists (batch 12 Q7): approval from
-        // Draft applies the submit edge in memory only.
-        working = working
-            .apply(&DocumentEvent::Submitted, owner)
-            .map_err(|_| EventDefect::Transition)?;
-    }
-    if !approved_event.fires_from(working.state) {
+    let approved_event = DocumentEvent::Approved { signature };
+    if !approved_event.fires_from(doc.state) {
         return Err(EventDefect::Transition);
     }
-    let next = working
+    let next = doc
         .apply(&approved_event, owner)
         .map_err(|_| EventDefect::Transition)?;
     state.documents.insert(document_id, next);
@@ -698,7 +712,8 @@ fn fold_event(state: &mut State, product_id: &Id, event: &Event) -> Result<(), E
         DOCUMENT_REVISED_KIND => apply_document_revised(state, event),
         DOCUMENT_CHANGES_REQUESTED_KIND => apply_document_changes_requested(state, event),
         DOCUMENT_APPROVED_KIND => apply_document_approved(state, event),
-        DOCUMENT_SUBMITTED_KIND | DOCUMENT_DRIFTED_KIND => Err(EventDefect::KindReserved),
+        DOCUMENT_SUBMITTED_KIND => apply_document_submitted(state, event),
+        DOCUMENT_DRIFTED_KIND => Err(EventDefect::KindReserved),
         _ => {
             advance_tip(state, event);
             Ok(())
@@ -897,6 +912,18 @@ impl DocumentRegistry {
                 read_object_payload(payload).map_err(|defect| RegistryError::Refused { defect })?;
             validate_instructions(&wire.instructions)
                 .map_err(|defect| RegistryError::Refused { defect })?;
+            check_fires(
+                &self.state,
+                &wire.document_id,
+                &DocumentEvent::ChangesRequested,
+            )
+            .map_err(|defect| RegistryError::Refused { defect })?;
+        }
+        if kind == DOCUMENT_SUBMITTED_KIND {
+            let wire: DocumentSubmittedWire =
+                read_object_payload(payload).map_err(|defect| RegistryError::Refused { defect })?;
+            check_fires(&self.state, &wire.document_id, &DocumentEvent::Submitted)
+                .map_err(|defect| RegistryError::Refused { defect })?;
         }
         if kind == DOCUMENT_CREATED_KIND || kind == DOCUMENT_REVISED_KIND {
             let wire: DocumentPrWire =
@@ -931,6 +958,15 @@ impl DocumentRegistry {
                     defect: EventDefect::SeatHolder,
                 });
             }
+            let signature = Signature::of(seat, &actor, at).ok_or(RegistryError::Refused {
+                defect: EventDefect::NotHuman,
+            })?;
+            check_fires(
+                &self.state,
+                &wire.document_id,
+                &DocumentEvent::Approved { signature },
+            )
+            .map_err(|defect| RegistryError::Refused { defect })?;
         }
         read_object_payload::<serde_json::Value>(payload)
             .map_err(|defect| RegistryError::Refused { defect })?;
